@@ -1,23 +1,26 @@
-memory.db
-solhunter_zero/__pycache__/
-keypair.json
-depth_service/target/
-
-# Local investor demo reports
-reports/
-
-# Ignore build artifacts
-depth_service/Cargo.lock
-depth_service/src/solhunter_zero.rs
-*/__pycache__/
+.DS_Store
 __pycache__/
-
-# Rust build output
-target/
-
-route_ffi/target/
-route_ffi/Cargo.lock
-solhunter_zero/libroute_ffi.so
-solhunter_zero.egg-info/
+*.py[cod]
+.venv/
 .env
-.cache/
+.env.*
+logs/
+*.log
+*.pid
+dump.rdb
+*.db
+replay.db
+offline_data.db
+datasets/
+lightning_logs/
+*.pt
+*.ptc
+*.ckpt
+*.onnx
+weights.json
+health/
+ui_*/
+ui_checks/
+ui_*_checks/
+keypairs/
+*.dylib

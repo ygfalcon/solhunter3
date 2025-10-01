@@ -1,0 +1,7 @@
+[console_scripts]
+solhunter-backtest = solhunter_zero.backtest_cli:main
+solhunter-demo = scripts.investor_demo:main
+solhunter-one-click = scripts.setup_one_click:main
+solhunter-start = solhunter_zero.launcher:main
+solhunter-train = solhunter_zero.train_cli:main
+solhunter-wallet = solhunter_zero.wallet_cli:main
