@@ -1,0 +1,61 @@
+{
+  "successes": [
+    {
+      "name": "Python",
+      "message": "Python 3.13 detected"
+    },
+    {
+      "name": "Dependencies",
+      "message": "All dependencies available"
+    },
+    {
+      "name": "Homebrew",
+      "message": "Homebrew available"
+    },
+    {
+      "name": "Rustup",
+      "message": "rustup available"
+    },
+    {
+      "name": "Rust",
+      "message": "Rust toolchain available"
+    },
+    {
+      "name": "Route FFI",
+      "message": "Found solhunter_zero/libroute_ffi.dylib"
+    },
+    {
+      "name": "Depth Service",
+      "message": "Found target/release/depth_service"
+    },
+    {
+      "name": "Xcode CLT",
+      "message": "Xcode Command Line Tools available"
+    },
+    {
+      "name": "Config",
+      "message": "Found /Users/sfredx/Documents/Python/Solsniper-zero-main/config.toml"
+    },
+    {
+      "name": "Keypair",
+      "message": "Active keypair default present"
+    },
+    {
+      "name": "Environment",
+      "message": "Required environment variables set"
+    },
+    {
+      "name": "Internet",
+      "message": "Reached https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+    },
+    {
+      "name": "Network",
+      "message": "Network connectivity OK"
+    },
+    {
+      "name": "GPU",
+      "message": "Using GPU device: mps"
+    }
+  ],
+  "failures": []
+}

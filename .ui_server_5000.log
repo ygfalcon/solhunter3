@@ -1,0 +1,80 @@
+BIRDEYE_API_KEY not set. Falling back to on-chain scanning by default
+MPS support detected but PYTORCH_ENABLE_MPS_FALLBACK is not set to '1'. Export PYTORCH_ENABLE_MPS_FALLBACK=1 to enable CPU fallback for unsupported ops.
+WARNING:root:Invalid websocket URL configuration; falling back to ws://127.0.0.1:8769
+ERROR:root:Failed to reload event bus settings
+Traceback (most recent call last):
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/client.py", line 647, in __await_impl_timeout__
+    return await self.__await_impl__()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    await protocol.handshake(
+    ...<5 lines>...
+    )
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/client.py", line 319, in handshake
+    status_code, response_headers = await self.read_http_response()
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/client.py", line 139, in read_http_response
+    status_code, reason, headers = await read_response(self.reader)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/http.py", line 120, in read_response
+    status_line = await read_line(stream)
+                  ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/http.py", line 194, in read_line
+    line = await stream.readline()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.6/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/streams.py", line 562, in readline
+    line = await self.readuntil(sep)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.6/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/streams.py", line 677, in readuntil
+    await self._wait_for_data('readuntil')
+  File "/opt/homebrew/Cellar/python@3.13/3.13.6/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/streams.py", line 539, in _wait_for_data
+    await self._waiter
+asyncio.exceptions.CancelledError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/event_bus.py", line 1813, in initialize_event_bus
+    _reload_bus(None)
+    ~~~~~~~~~~~^^^^^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/event_bus.py", line 1666, in _reload_bus
+    asyncio.run(_reconnect())
+    ~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.6/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.6/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.6/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/event_bus.py", line 1651, in _reconnect
+    await connect_ws(u)
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/event_bus.py", line 1417, in connect_ws
+    ws = await websockets.connect(
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/client.py", line 646, in __await_impl_timeout__
+    async with asyncio_timeout(self.open_timeout):
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.6/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/timeouts.py", line 116, in __aexit__
+    raise TimeoutError from exc_val
+TimeoutError
+╭─────────────────────────── Solhunter Zero Startup ───────────────────────────╮
+│  Config      default.toml                                                    │
+│  Keypair     default                                                         │
+│  Solana RPC  https://api.mainnet-beta.solana.com                             │
+│  Jito RPC    https://mainnet.block-engine.jito.wtf                           │
+│  Event Bus   ws://127.0.0.1:8769                                             │
+│  Depth WS    127.0.0.1:8766                                                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+WARNING:root:Autostart triggered: started
+WARNING:__main__:Local UI websockets disabled via UI_DISABLE_LOCAL_WS
+ * Serving Flask app 'ui'
+ * Debug mode: off
+Address already in use
+Port 5000 is in use by another program. Either identify and stop that program, or start the server with a different port.
+On macOS, try disabling the 'AirPlay Receiver' service from System Preferences -> General -> AirDrop & Handoff.

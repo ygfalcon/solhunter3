@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/ui.py", line 27, in <module>
+    from .event_bus import subscription, publish
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/event_bus.py", line 1358
+    global _ws_server, _flush_task, _outgoing_queue
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: name '_outgoing_queue' is used prior to global declaration

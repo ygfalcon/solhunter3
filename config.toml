@@ -1,0 +1,143 @@
+solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+dex_base_url = "https://quote-api.jup.ag/"
+agents = [
+    "simulation",
+    "conviction",
+    "arbitrage",
+    "exit",
+    "smart_discovery",
+    "trend",
+    "momentum",
+    "vanta",
+    "inferna",
+    "portfolio_optimizer",
+    "crossdex_rebalancer",
+    "mev_sandwich",
+    "flashloan_sandwich",
+    "sac",
+    "artifact_math",
+]
+solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+jupiter_ws_url = "wss://stats.jup.ag/ws"
+priority_rpc = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+dex_testnet_url = "https://quote-api.jup.ag"
+orca_api_url = "https://api.orca.so"
+raydium_api_url = "https://api.raydium.io"
+phoenix_api_url = "https://app.phoenix.trade"
+meteora_api_url = "https://app.meteora.ag"
+orca_dex_url = "https://www.orca.so"
+raydium_dex_url = "https://raydium.io"
+phoenix_dex_url = "https://app.phoenix.trade"
+meteora_dex_url = "https://app.meteora.ag"
+metrics_base_url = "https://api.coingecko.com/api/v3"
+news_feeds = "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml,https://www.coindesk.com/arc/outboundfeeds/rss/"
+twitter_feeds = "https://nitter.net/solana/rss"
+discord_feeds = "https://discord.com/api/guilds/613425648685547541/widget.json"
+birdeye_api_key = "b1e60d72780940d1bd929b9b2e9225e6"
+strategy_selection = true
+vote_threshold = 0.05
+use_rl_weights = true
+rl_weights_path = "rl_weights.json"
+weights_path = "weights.json"
+discovery_method = "websocket"
+token_suffix = "bonk"
+token_exclude_keywords = "scam,rug"
+discovery_min_volume_usd = "50000.0"
+discovery_min_liquidity_usd = "75000.0"
+discovery_max_tokens = "50"
+discovery_overfetch_factor = "1.6"
+discovery_cache_ttl = "0"
+discovery_mempool_limit = "12"
+discovery_volume_weight = "0.45"
+discovery_liquidity_weight = "0.55"
+discovery_mempool_bonus = "5.0"
+live_discovery = "0"
+risk_tolerance = "0.1"
+max_allocation = "0.2"
+risk_multiplier = "1.0"
+trailing_stop = "0.1"
+max_drawdown = "0.5"
+volatility_factor = "1.0"
+arbitrage_threshold = "0.0"
+arbitrage_amount = "0.0"
+portfolio_value = 100.0
+min_portfolio_value = "20.0"
+max_risk_per_token = "0.05"
+min_delay = "10"
+max_delay = "300"
+offline_data_limit_gb = "50"
+offline_data_interval = "3600"
+volume_threshold = "0"
+dex_latency_refresh_interval = "60"
+priority_fees = "0,1,2"
+dex_priorities = "phoenix,meteora,orca,raydium,jupiter"
+event_bus_url = "ws://127.0.0.1:8779"
+event_bus_peers = []
+broker_urls = "redis://localhost:6379"
+broker_url = "redis://127.0.0.1:6379"
+broker_heartbeat_interval = "30"
+broker_retry_limit = "3"
+compress_events = "True"
+event_batch_ms = "10"
+event_mmap_batch_ms = "5"
+event_mmap_batch_size = "16"
+depth_service = "True"
+depth_max_restarts = "1"
+use_depth_stream = "True"
+use_depth_feed = "False"
+use_rust_exec = "True"
+use_service_exec = "True"
+use_service_route = "True"
+use_flash_loans = "True"
+max_flash_amount = "0.02"
+flash_loan_ratio = "0.1"
+use_mev_bundles = "True"
+mempool_score_threshold = "0.0"
+mempool_stats_window = "5"
+mempool_threshold = "0.0"
+bundle_size = "1"
+depth_threshold = "0.0"
+cpu_low_threshold = "30.0"
+cpu_high_threshold = "70.0"
+max_concurrency = "0"
+cpu_usage_threshold = "0"
+concurrency_smoothing = "0.5"
+concurrency_kp = "0.5"
+concurrency_ki = "0.0"
+min_rate = "0.01"
+max_rate = "1.0"
+depth_freq_low = "1.0"
+depth_freq_high = "10.0"
+max_hops = "3"
+path_algorithm = "graph"
+use_gnn_routing = "False"
+gnn_model_path = "route_gnn.pt"
+gpu_memory_index = "False"
+memory_sync_interval = "5.0"
+rl_build_mmap_dataset = "True"
+rl_prefetch_buffer = "0"
+solana_keypair = "/Users/sfredx/Documents/Python/Solsniper-zero-main/keypairs/default.json"
+jito_rpc_url = "https://mainnet.block-engine.jito.wtf"
+
+[agent_weights]
+simulation = 1.0
+conviction = 1.0
+arbitrage = 1.0
+exit = 1.0
+smart_discovery = 1.0
+trend = 1.0
+momentum = 1.0
+vanta = 1.0
+inferna = 1.0
+portfolio_optimizer = 1.0
+crossdex_rebalancer = 1.0
+flashloan_sandwich = 1.0
+sac = 1.0
+mev_sandwich = 1.0
+artifact_math = 1.0
+
+[dex_fees]
+
+[dex_gas]
+
+[dex_latency]

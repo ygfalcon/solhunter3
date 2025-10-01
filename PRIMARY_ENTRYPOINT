@@ -1,0 +1,10 @@
+PRIMARY ENTRY POINT — New Runtime Orchestrator
+
+Run:
+  python -m solhunter_zero.primary_entry_point --config path/to/config.toml
+
+Notes:
+  - NEW_RUNTIME and EVENT_DRIVEN are enabled by default here
+  - The orchestrator starts: UI → Event Bus → Agents → Executor
+  - See README.md (Primary Entry Point) for details
+

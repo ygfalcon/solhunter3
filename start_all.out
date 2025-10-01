@@ -1,0 +1,1009 @@
+BIRDEYE_API_KEY not set. Falling back to on-chain scanning by default
+INFO:solhunter_zero.bootstrap:Using keypair 'default'.
+INFO:solhunter_zero.bootstrap:Using keypair 'default'.
+INFO:websockets.server:server listening on 127.0.0.1:8769
+INFO:solhunter_zero.scanner_common:No BirdEye API key set, scanning on-chain
+WARNING:solhunter_zero.data_sync:periodic sync failed: unhandled errors in a TaskGroup (2 sub-exceptions)
+INFO:websockets.server:connection open
+INFO:websockets.server:connection closed
+WARNING:root:Invalid websocket URL configuration; falling back to ws://127.0.0.1:8769
+INFO:websockets.server:connection rejected (400 Bad Request)
+INFO:websockets.server:connection closed
+INFO:websockets.server:connection open
+INFO:websockets.server:connection closed
+INFO:websockets.server:connection open
+ERROR:websockets.server:connection handler failed
+Traceback (most recent call last):
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/protocol.py", line 963, in transfer_data
+    message = await self.read_message()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/protocol.py", line 1033, in read_message
+    frame = await self.read_data_frame(max_size=self.max_size)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/protocol.py", line 1108, in read_data_frame
+    frame = await self.read_frame(max_size)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/protocol.py", line 1165, in read_frame
+    frame = await Frame.read(
+            ^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/framing.py", line 68, in read
+    data = await reader(2)
+           ^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.6/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/streams.py", line 767, in readexactly
+    raise exceptions.IncompleteReadError(incomplete, n)
+asyncio.exceptions.IncompleteReadError: 0 bytes read on a total of 2 expected bytes
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/server.py", line 236, in handler
+    await self.ws_handler(self)
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/event_bus.py", line 1354, in handler
+    async for msg in ws:
+    ...<12 lines>...
+            continue
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/protocol.py", line 498, in __aiter__
+    yield await self.recv()
+          ^^^^^^^^^^^^^^^^^
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/protocol.py", line 568, in recv
+    await self.ensure_open()
+  File "/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/websockets/legacy/protocol.py", line 939, in ensure_open
+    raise self.connection_closed_exc()
+websockets.exceptions.ConnectionClosedError: no close frame received or sent
+INFO:websockets.server:connection closed
+INFO:websockets.server:connection open
+/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:433: RuntimeWarning: coroutine 'fetch_sentiment_async' was never awaited
+  sentiment = 0.0
+/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:471: RuntimeWarning: coroutine 'run_simulations_async' was never awaited
+  pred_vals[i] = 0.0
+💡 Tip: For seamless cloud uploads and versioning, try installing [litmodels](https://pypi.org/project/litmodels/) to enable LitModelCheckpoint, which syncs automatically with the Lightning model registry.
+GPU available: True (mps), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/pytorch_lightning/trainer/connectors/logger_connector/logger_connector.py:76: Starting from v1.9.0, `tensorboardX` has been removed as a dependency of the `pytorch_lightning` package, due to potential conflicts with other packages in the ML ecosystem. For this reason, `logger=True` will use `CSVLogger` as the default logger, unless the `tensorboard` or `tensorboardX` packages are found. Please `pip install lightning[extra]` or one of them to enable TensorBoard support by default
+
+  | Name    | Type       | Params | Mode 
+-----------------------------------------------
+0 | model   | Sequential | 386    | train
+1 | loss_fn | MSELoss    | 0      | train
+-----------------------------------------------
+386       Trainable params
+0         Non-trainable params
+386       Total params
+0.002     Total estimated model params size (MB)
+5         Modules in train mode
+0         Modules in eval mode
+/Users/sfredx/Documents/Python/Solsniper-zero-main/.venv/lib/python3.13/site-packages/torch/utils/data/dataloader.py:684: UserWarning: 'pin_memory' argument is set as true but not supported on MPS now, then device pinned memory won't be used.
+  warnings.warn(warn_msg)
+INFO:websockets.server:server closing
+[rank: 0] Received SIGTERM: 15
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1] Backend compiler exception
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]   Explanation: Backend compiler `inductor` failed with aten._local_scalar_dense.default
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1] 
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]     While executing %setitem : [num_users=0] = call_function[target=operator.setitem](args = (%target, (0, %a), %r), kwargs = {})
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]     GraphModule: class GraphModule(torch.nn.Module):
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         def forward(self, L_batch_0_: "f32[64, 9][9, 1]", L_batch_1_: "i64[64][1]", L_batch_2_: "f32[64][1]", L_self_modules_model_modules_0_parameters_weight_: "f32[32, 9][9, 1]", L_self_modules_model_modules_0_parameters_bias_: "f32[32][1]", L_self_modules_model_modules_2_parameters_weight_: "f32[2, 32][32, 1]", L_self_modules_model_modules_2_parameters_bias_: "f32[2][1]"):
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_batch_0_ = L_batch_0_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_batch_1_ = L_batch_1_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_batch_2_ = L_batch_2_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_self_modules_model_modules_0_parameters_weight_ = L_self_modules_model_modules_0_parameters_weight_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_self_modules_model_modules_0_parameters_bias_ = L_self_modules_model_modules_0_parameters_bias_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_self_modules_model_modules_2_parameters_weight_ = L_self_modules_model_modules_2_parameters_weight_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_self_modules_model_modules_2_parameters_bias_ = L_self_modules_model_modules_2_parameters_bias_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:830 in training_step, code: q = self.model(states)
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             input_1: "f32[64, 32][32, 1]" = torch._C._nn.linear(l_batch_0_, l_self_modules_model_modules_0_parameters_weight_, l_self_modules_model_modules_0_parameters_bias_);  l_batch_0_ = l_self_modules_model_modules_0_parameters_weight_ = l_self_modules_model_modules_0_parameters_bias_ = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             input_2: "f32[64, 32][32, 1]" = torch.nn.functional.relu(input_1, inplace = False);  input_1 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             input_3: "f32[64, 2][2, 1]" = torch._C._nn.linear(input_2, l_self_modules_model_modules_2_parameters_weight_, l_self_modules_model_modules_2_parameters_bias_);  input_2 = l_self_modules_model_modules_2_parameters_weight_ = l_self_modules_model_modules_2_parameters_bias_ = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:831 in training_step, code: target = q.detach().clone()
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             detach: "f32[64, 2][2, 1]" = input_3.detach()
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target: "f32[64, 2][2, 1]" = detach.clone();  detach = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:832 in training_step, code: for i, a, r in zip(range(len(actions)), actions, rewards):
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a: "i64[][]" = l_batch_1_[0]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_1: "i64[][]" = l_batch_1_[1]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_2: "i64[][]" = l_batch_1_[2]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_3: "i64[][]" = l_batch_1_[3]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_4: "i64[][]" = l_batch_1_[4]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_5: "i64[][]" = l_batch_1_[5]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_6: "i64[][]" = l_batch_1_[6]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_7: "i64[][]" = l_batch_1_[7]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_8: "i64[][]" = l_batch_1_[8]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_9: "i64[][]" = l_batch_1_[9]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_10: "i64[][]" = l_batch_1_[10]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_11: "i64[][]" = l_batch_1_[11]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_12: "i64[][]" = l_batch_1_[12]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_13: "i64[][]" = l_batch_1_[13]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_14: "i64[][]" = l_batch_1_[14]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_15: "i64[][]" = l_batch_1_[15]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_16: "i64[][]" = l_batch_1_[16]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_17: "i64[][]" = l_batch_1_[17]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_18: "i64[][]" = l_batch_1_[18]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_19: "i64[][]" = l_batch_1_[19]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_20: "i64[][]" = l_batch_1_[20]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_21: "i64[][]" = l_batch_1_[21]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_22: "i64[][]" = l_batch_1_[22]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_23: "i64[][]" = l_batch_1_[23]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_24: "i64[][]" = l_batch_1_[24]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_25: "i64[][]" = l_batch_1_[25]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_26: "i64[][]" = l_batch_1_[26]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_27: "i64[][]" = l_batch_1_[27]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_28: "i64[][]" = l_batch_1_[28]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_29: "i64[][]" = l_batch_1_[29]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_30: "i64[][]" = l_batch_1_[30]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_31: "i64[][]" = l_batch_1_[31]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_32: "i64[][]" = l_batch_1_[32]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_33: "i64[][]" = l_batch_1_[33]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_34: "i64[][]" = l_batch_1_[34]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_35: "i64[][]" = l_batch_1_[35]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_36: "i64[][]" = l_batch_1_[36]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_37: "i64[][]" = l_batch_1_[37]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_38: "i64[][]" = l_batch_1_[38]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_39: "i64[][]" = l_batch_1_[39]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_40: "i64[][]" = l_batch_1_[40]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_41: "i64[][]" = l_batch_1_[41]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_42: "i64[][]" = l_batch_1_[42]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_43: "i64[][]" = l_batch_1_[43]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_44: "i64[][]" = l_batch_1_[44]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_45: "i64[][]" = l_batch_1_[45]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_46: "i64[][]" = l_batch_1_[46]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_47: "i64[][]" = l_batch_1_[47]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_48: "i64[][]" = l_batch_1_[48]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_49: "i64[][]" = l_batch_1_[49]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_50: "i64[][]" = l_batch_1_[50]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_51: "i64[][]" = l_batch_1_[51]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_52: "i64[][]" = l_batch_1_[52]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_53: "i64[][]" = l_batch_1_[53]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_54: "i64[][]" = l_batch_1_[54]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_55: "i64[][]" = l_batch_1_[55]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_56: "i64[][]" = l_batch_1_[56]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_57: "i64[][]" = l_batch_1_[57]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_58: "i64[][]" = l_batch_1_[58]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_59: "i64[][]" = l_batch_1_[59]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_60: "i64[][]" = l_batch_1_[60]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_61: "i64[][]" = l_batch_1_[61]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_62: "i64[][]" = l_batch_1_[62]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_63: "i64[][]" = l_batch_1_[63];  l_batch_1_ = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r: "f32[][]" = l_batch_2_[0]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_1: "f32[][]" = l_batch_2_[1]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_2: "f32[][]" = l_batch_2_[2]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_3: "f32[][]" = l_batch_2_[3]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_4: "f32[][]" = l_batch_2_[4]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_5: "f32[][]" = l_batch_2_[5]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_6: "f32[][]" = l_batch_2_[6]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_7: "f32[][]" = l_batch_2_[7]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_8: "f32[][]" = l_batch_2_[8]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_9: "f32[][]" = l_batch_2_[9]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_10: "f32[][]" = l_batch_2_[10]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_11: "f32[][]" = l_batch_2_[11]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_12: "f32[][]" = l_batch_2_[12]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_13: "f32[][]" = l_batch_2_[13]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_14: "f32[][]" = l_batch_2_[14]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_15: "f32[][]" = l_batch_2_[15]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_16: "f32[][]" = l_batch_2_[16]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_17: "f32[][]" = l_batch_2_[17]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_18: "f32[][]" = l_batch_2_[18]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_19: "f32[][]" = l_batch_2_[19]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_20: "f32[][]" = l_batch_2_[20]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_21: "f32[][]" = l_batch_2_[21]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_22: "f32[][]" = l_batch_2_[22]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_23: "f32[][]" = l_batch_2_[23]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_24: "f32[][]" = l_batch_2_[24]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_25: "f32[][]" = l_batch_2_[25]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_26: "f32[][]" = l_batch_2_[26]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_27: "f32[][]" = l_batch_2_[27]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_28: "f32[][]" = l_batch_2_[28]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_29: "f32[][]" = l_batch_2_[29]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_30: "f32[][]" = l_batch_2_[30]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_31: "f32[][]" = l_batch_2_[31]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_32: "f32[][]" = l_batch_2_[32]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_33: "f32[][]" = l_batch_2_[33]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_34: "f32[][]" = l_batch_2_[34]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_35: "f32[][]" = l_batch_2_[35]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_36: "f32[][]" = l_batch_2_[36]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_37: "f32[][]" = l_batch_2_[37]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_38: "f32[][]" = l_batch_2_[38]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_39: "f32[][]" = l_batch_2_[39]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_40: "f32[][]" = l_batch_2_[40]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_41: "f32[][]" = l_batch_2_[41]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_42: "f32[][]" = l_batch_2_[42]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_43: "f32[][]" = l_batch_2_[43]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_44: "f32[][]" = l_batch_2_[44]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_45: "f32[][]" = l_batch_2_[45]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_46: "f32[][]" = l_batch_2_[46]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_47: "f32[][]" = l_batch_2_[47]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_48: "f32[][]" = l_batch_2_[48]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_49: "f32[][]" = l_batch_2_[49]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_50: "f32[][]" = l_batch_2_[50]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_51: "f32[][]" = l_batch_2_[51]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_52: "f32[][]" = l_batch_2_[52]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_53: "f32[][]" = l_batch_2_[53]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_54: "f32[][]" = l_batch_2_[54]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_55: "f32[][]" = l_batch_2_[55]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_56: "f32[][]" = l_batch_2_[56]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_57: "f32[][]" = l_batch_2_[57]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_58: "f32[][]" = l_batch_2_[58]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_59: "f32[][]" = l_batch_2_[59]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_60: "f32[][]" = l_batch_2_[60]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_61: "f32[][]" = l_batch_2_[61]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_62: "f32[][]" = l_batch_2_[62]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_63: "f32[][]" = l_batch_2_[63];  l_batch_2_ = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:833 in training_step, code: target[i, a] = r
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(0, a)] = r;  setitem = target;  a = r = setitem = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(1, a_1)] = r_1;  setitem_1 = target;  a_1 = r_1 = setitem_1 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(2, a_2)] = r_2;  setitem_2 = target;  a_2 = r_2 = setitem_2 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(3, a_3)] = r_3;  setitem_3 = target;  a_3 = r_3 = setitem_3 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(4, a_4)] = r_4;  setitem_4 = target;  a_4 = r_4 = setitem_4 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(5, a_5)] = r_5;  setitem_5 = target;  a_5 = r_5 = setitem_5 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(6, a_6)] = r_6;  setitem_6 = target;  a_6 = r_6 = setitem_6 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(7, a_7)] = r_7;  setitem_7 = target;  a_7 = r_7 = setitem_7 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(8, a_8)] = r_8;  setitem_8 = target;  a_8 = r_8 = setitem_8 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(9, a_9)] = r_9;  setitem_9 = target;  a_9 = r_9 = setitem_9 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(10, a_10)] = r_10;  setitem_10 = target;  a_10 = r_10 = setitem_10 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(11, a_11)] = r_11;  setitem_11 = target;  a_11 = r_11 = setitem_11 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(12, a_12)] = r_12;  setitem_12 = target;  a_12 = r_12 = setitem_12 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(13, a_13)] = r_13;  setitem_13 = target;  a_13 = r_13 = setitem_13 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(14, a_14)] = r_14;  setitem_14 = target;  a_14 = r_14 = setitem_14 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(15, a_15)] = r_15;  setitem_15 = target;  a_15 = r_15 = setitem_15 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(16, a_16)] = r_16;  setitem_16 = target;  a_16 = r_16 = setitem_16 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(17, a_17)] = r_17;  setitem_17 = target;  a_17 = r_17 = setitem_17 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(18, a_18)] = r_18;  setitem_18 = target;  a_18 = r_18 = setitem_18 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(19, a_19)] = r_19;  setitem_19 = target;  a_19 = r_19 = setitem_19 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(20, a_20)] = r_20;  setitem_20 = target;  a_20 = r_20 = setitem_20 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(21, a_21)] = r_21;  setitem_21 = target;  a_21 = r_21 = setitem_21 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(22, a_22)] = r_22;  setitem_22 = target;  a_22 = r_22 = setitem_22 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(23, a_23)] = r_23;  setitem_23 = target;  a_23 = r_23 = setitem_23 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(24, a_24)] = r_24;  setitem_24 = target;  a_24 = r_24 = setitem_24 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(25, a_25)] = r_25;  setitem_25 = target;  a_25 = r_25 = setitem_25 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(26, a_26)] = r_26;  setitem_26 = target;  a_26 = r_26 = setitem_26 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(27, a_27)] = r_27;  setitem_27 = target;  a_27 = r_27 = setitem_27 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(28, a_28)] = r_28;  setitem_28 = target;  a_28 = r_28 = setitem_28 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(29, a_29)] = r_29;  setitem_29 = target;  a_29 = r_29 = setitem_29 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(30, a_30)] = r_30;  setitem_30 = target;  a_30 = r_30 = setitem_30 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(31, a_31)] = r_31;  setitem_31 = target;  a_31 = r_31 = setitem_31 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(32, a_32)] = r_32;  setitem_32 = target;  a_32 = r_32 = setitem_32 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(33, a_33)] = r_33;  setitem_33 = target;  a_33 = r_33 = setitem_33 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(34, a_34)] = r_34;  setitem_34 = target;  a_34 = r_34 = setitem_34 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(35, a_35)] = r_35;  setitem_35 = target;  a_35 = r_35 = setitem_35 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(36, a_36)] = r_36;  setitem_36 = target;  a_36 = r_36 = setitem_36 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(37, a_37)] = r_37;  setitem_37 = target;  a_37 = r_37 = setitem_37 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(38, a_38)] = r_38;  setitem_38 = target;  a_38 = r_38 = setitem_38 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(39, a_39)] = r_39;  setitem_39 = target;  a_39 = r_39 = setitem_39 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(40, a_40)] = r_40;  setitem_40 = target;  a_40 = r_40 = setitem_40 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(41, a_41)] = r_41;  setitem_41 = target;  a_41 = r_41 = setitem_41 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(42, a_42)] = r_42;  setitem_42 = target;  a_42 = r_42 = setitem_42 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(43, a_43)] = r_43;  setitem_43 = target;  a_43 = r_43 = setitem_43 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(44, a_44)] = r_44;  setitem_44 = target;  a_44 = r_44 = setitem_44 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(45, a_45)] = r_45;  setitem_45 = target;  a_45 = r_45 = setitem_45 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(46, a_46)] = r_46;  setitem_46 = target;  a_46 = r_46 = setitem_46 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(47, a_47)] = r_47;  setitem_47 = target;  a_47 = r_47 = setitem_47 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(48, a_48)] = r_48;  setitem_48 = target;  a_48 = r_48 = setitem_48 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(49, a_49)] = r_49;  setitem_49 = target;  a_49 = r_49 = setitem_49 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(50, a_50)] = r_50;  setitem_50 = target;  a_50 = r_50 = setitem_50 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(51, a_51)] = r_51;  setitem_51 = target;  a_51 = r_51 = setitem_51 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(52, a_52)] = r_52;  setitem_52 = target;  a_52 = r_52 = setitem_52 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(53, a_53)] = r_53;  setitem_53 = target;  a_53 = r_53 = setitem_53 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(54, a_54)] = r_54;  setitem_54 = target;  a_54 = r_54 = setitem_54 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(55, a_55)] = r_55;  setitem_55 = target;  a_55 = r_55 = setitem_55 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(56, a_56)] = r_56;  setitem_56 = target;  a_56 = r_56 = setitem_56 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(57, a_57)] = r_57;  setitem_57 = target;  a_57 = r_57 = setitem_57 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(58, a_58)] = r_58;  setitem_58 = target;  a_58 = r_58 = setitem_58 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(59, a_59)] = r_59;  setitem_59 = target;  a_59 = r_59 = setitem_59 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(60, a_60)] = r_60;  setitem_60 = target;  a_60 = r_60 = setitem_60 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(61, a_61)] = r_61;  setitem_61 = target;  a_61 = r_61 = setitem_61 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(62, a_62)] = r_62;  setitem_62 = target;  a_62 = r_62 = setitem_62 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(63, a_63)] = r_63;  setitem_63 = target;  a_63 = r_63 = setitem_63 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:834 in training_step, code: loss = self.loss_fn(q, target)
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             loss: "f32[][]" = torch.nn.functional.mse_loss(input_3, target, reduction = 'mean');  input_3 = target = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             return (loss,)
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1] 
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]     Original traceback:
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]       File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py", line 833, in training_step
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         target[i, a] = r
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]     . Adding a graph break.
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]   Hint: Report an issue to the backend compiler repo.
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1] 
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]   Developer debug context: Backend: inductor
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]     Exception:aten._local_scalar_dense.default
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1] 
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]     While executing %setitem : [num_users=0] = call_function[target=operator.setitem](args = (%target, (0, %a), %r), kwargs = {})
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]     GraphModule: class GraphModule(torch.nn.Module):
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         def forward(self, L_batch_0_: "f32[64, 9][9, 1]", L_batch_1_: "i64[64][1]", L_batch_2_: "f32[64][1]", L_self_modules_model_modules_0_parameters_weight_: "f32[32, 9][9, 1]", L_self_modules_model_modules_0_parameters_bias_: "f32[32][1]", L_self_modules_model_modules_2_parameters_weight_: "f32[2, 32][32, 1]", L_self_modules_model_modules_2_parameters_bias_: "f32[2][1]"):
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_batch_0_ = L_batch_0_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_batch_1_ = L_batch_1_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_batch_2_ = L_batch_2_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_self_modules_model_modules_0_parameters_weight_ = L_self_modules_model_modules_0_parameters_weight_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_self_modules_model_modules_0_parameters_bias_ = L_self_modules_model_modules_0_parameters_bias_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_self_modules_model_modules_2_parameters_weight_ = L_self_modules_model_modules_2_parameters_weight_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             l_self_modules_model_modules_2_parameters_bias_ = L_self_modules_model_modules_2_parameters_bias_
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:830 in training_step, code: q = self.model(states)
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             input_1: "f32[64, 32][32, 1]" = torch._C._nn.linear(l_batch_0_, l_self_modules_model_modules_0_parameters_weight_, l_self_modules_model_modules_0_parameters_bias_);  l_batch_0_ = l_self_modules_model_modules_0_parameters_weight_ = l_self_modules_model_modules_0_parameters_bias_ = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             input_2: "f32[64, 32][32, 1]" = torch.nn.functional.relu(input_1, inplace = False);  input_1 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             input_3: "f32[64, 2][2, 1]" = torch._C._nn.linear(input_2, l_self_modules_model_modules_2_parameters_weight_, l_self_modules_model_modules_2_parameters_bias_);  input_2 = l_self_modules_model_modules_2_parameters_weight_ = l_self_modules_model_modules_2_parameters_bias_ = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:831 in training_step, code: target = q.detach().clone()
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             detach: "f32[64, 2][2, 1]" = input_3.detach()
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target: "f32[64, 2][2, 1]" = detach.clone();  detach = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:832 in training_step, code: for i, a, r in zip(range(len(actions)), actions, rewards):
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a: "i64[][]" = l_batch_1_[0]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_1: "i64[][]" = l_batch_1_[1]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_2: "i64[][]" = l_batch_1_[2]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_3: "i64[][]" = l_batch_1_[3]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_4: "i64[][]" = l_batch_1_[4]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_5: "i64[][]" = l_batch_1_[5]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_6: "i64[][]" = l_batch_1_[6]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_7: "i64[][]" = l_batch_1_[7]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_8: "i64[][]" = l_batch_1_[8]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_9: "i64[][]" = l_batch_1_[9]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_10: "i64[][]" = l_batch_1_[10]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_11: "i64[][]" = l_batch_1_[11]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_12: "i64[][]" = l_batch_1_[12]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_13: "i64[][]" = l_batch_1_[13]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_14: "i64[][]" = l_batch_1_[14]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_15: "i64[][]" = l_batch_1_[15]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_16: "i64[][]" = l_batch_1_[16]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_17: "i64[][]" = l_batch_1_[17]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_18: "i64[][]" = l_batch_1_[18]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_19: "i64[][]" = l_batch_1_[19]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_20: "i64[][]" = l_batch_1_[20]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_21: "i64[][]" = l_batch_1_[21]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_22: "i64[][]" = l_batch_1_[22]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_23: "i64[][]" = l_batch_1_[23]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_24: "i64[][]" = l_batch_1_[24]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_25: "i64[][]" = l_batch_1_[25]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_26: "i64[][]" = l_batch_1_[26]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_27: "i64[][]" = l_batch_1_[27]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_28: "i64[][]" = l_batch_1_[28]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_29: "i64[][]" = l_batch_1_[29]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_30: "i64[][]" = l_batch_1_[30]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_31: "i64[][]" = l_batch_1_[31]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_32: "i64[][]" = l_batch_1_[32]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_33: "i64[][]" = l_batch_1_[33]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_34: "i64[][]" = l_batch_1_[34]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_35: "i64[][]" = l_batch_1_[35]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_36: "i64[][]" = l_batch_1_[36]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_37: "i64[][]" = l_batch_1_[37]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_38: "i64[][]" = l_batch_1_[38]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_39: "i64[][]" = l_batch_1_[39]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_40: "i64[][]" = l_batch_1_[40]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_41: "i64[][]" = l_batch_1_[41]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_42: "i64[][]" = l_batch_1_[42]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_43: "i64[][]" = l_batch_1_[43]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_44: "i64[][]" = l_batch_1_[44]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_45: "i64[][]" = l_batch_1_[45]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_46: "i64[][]" = l_batch_1_[46]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_47: "i64[][]" = l_batch_1_[47]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_48: "i64[][]" = l_batch_1_[48]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_49: "i64[][]" = l_batch_1_[49]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_50: "i64[][]" = l_batch_1_[50]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_51: "i64[][]" = l_batch_1_[51]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_52: "i64[][]" = l_batch_1_[52]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_53: "i64[][]" = l_batch_1_[53]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_54: "i64[][]" = l_batch_1_[54]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_55: "i64[][]" = l_batch_1_[55]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_56: "i64[][]" = l_batch_1_[56]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_57: "i64[][]" = l_batch_1_[57]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_58: "i64[][]" = l_batch_1_[58]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_59: "i64[][]" = l_batch_1_[59]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_60: "i64[][]" = l_batch_1_[60]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_61: "i64[][]" = l_batch_1_[61]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_62: "i64[][]" = l_batch_1_[62]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             a_63: "i64[][]" = l_batch_1_[63];  l_batch_1_ = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r: "f32[][]" = l_batch_2_[0]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_1: "f32[][]" = l_batch_2_[1]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_2: "f32[][]" = l_batch_2_[2]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_3: "f32[][]" = l_batch_2_[3]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_4: "f32[][]" = l_batch_2_[4]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_5: "f32[][]" = l_batch_2_[5]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_6: "f32[][]" = l_batch_2_[6]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_7: "f32[][]" = l_batch_2_[7]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_8: "f32[][]" = l_batch_2_[8]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_9: "f32[][]" = l_batch_2_[9]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_10: "f32[][]" = l_batch_2_[10]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_11: "f32[][]" = l_batch_2_[11]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_12: "f32[][]" = l_batch_2_[12]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_13: "f32[][]" = l_batch_2_[13]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_14: "f32[][]" = l_batch_2_[14]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_15: "f32[][]" = l_batch_2_[15]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_16: "f32[][]" = l_batch_2_[16]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_17: "f32[][]" = l_batch_2_[17]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_18: "f32[][]" = l_batch_2_[18]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_19: "f32[][]" = l_batch_2_[19]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_20: "f32[][]" = l_batch_2_[20]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_21: "f32[][]" = l_batch_2_[21]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_22: "f32[][]" = l_batch_2_[22]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_23: "f32[][]" = l_batch_2_[23]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_24: "f32[][]" = l_batch_2_[24]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_25: "f32[][]" = l_batch_2_[25]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_26: "f32[][]" = l_batch_2_[26]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_27: "f32[][]" = l_batch_2_[27]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_28: "f32[][]" = l_batch_2_[28]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_29: "f32[][]" = l_batch_2_[29]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_30: "f32[][]" = l_batch_2_[30]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_31: "f32[][]" = l_batch_2_[31]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_32: "f32[][]" = l_batch_2_[32]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_33: "f32[][]" = l_batch_2_[33]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_34: "f32[][]" = l_batch_2_[34]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_35: "f32[][]" = l_batch_2_[35]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_36: "f32[][]" = l_batch_2_[36]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_37: "f32[][]" = l_batch_2_[37]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_38: "f32[][]" = l_batch_2_[38]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_39: "f32[][]" = l_batch_2_[39]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_40: "f32[][]" = l_batch_2_[40]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_41: "f32[][]" = l_batch_2_[41]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_42: "f32[][]" = l_batch_2_[42]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_43: "f32[][]" = l_batch_2_[43]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_44: "f32[][]" = l_batch_2_[44]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_45: "f32[][]" = l_batch_2_[45]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_46: "f32[][]" = l_batch_2_[46]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_47: "f32[][]" = l_batch_2_[47]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_48: "f32[][]" = l_batch_2_[48]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_49: "f32[][]" = l_batch_2_[49]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_50: "f32[][]" = l_batch_2_[50]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_51: "f32[][]" = l_batch_2_[51]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_52: "f32[][]" = l_batch_2_[52]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_53: "f32[][]" = l_batch_2_[53]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_54: "f32[][]" = l_batch_2_[54]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_55: "f32[][]" = l_batch_2_[55]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_56: "f32[][]" = l_batch_2_[56]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_57: "f32[][]" = l_batch_2_[57]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_58: "f32[][]" = l_batch_2_[58]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_59: "f32[][]" = l_batch_2_[59]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_60: "f32[][]" = l_batch_2_[60]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_61: "f32[][]" = l_batch_2_[61]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_62: "f32[][]" = l_batch_2_[62]
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             r_63: "f32[][]" = l_batch_2_[63];  l_batch_2_ = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:833 in training_step, code: target[i, a] = r
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(0, a)] = r;  setitem = target;  a = r = setitem = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(1, a_1)] = r_1;  setitem_1 = target;  a_1 = r_1 = setitem_1 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(2, a_2)] = r_2;  setitem_2 = target;  a_2 = r_2 = setitem_2 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(3, a_3)] = r_3;  setitem_3 = target;  a_3 = r_3 = setitem_3 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(4, a_4)] = r_4;  setitem_4 = target;  a_4 = r_4 = setitem_4 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(5, a_5)] = r_5;  setitem_5 = target;  a_5 = r_5 = setitem_5 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(6, a_6)] = r_6;  setitem_6 = target;  a_6 = r_6 = setitem_6 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(7, a_7)] = r_7;  setitem_7 = target;  a_7 = r_7 = setitem_7 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(8, a_8)] = r_8;  setitem_8 = target;  a_8 = r_8 = setitem_8 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(9, a_9)] = r_9;  setitem_9 = target;  a_9 = r_9 = setitem_9 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(10, a_10)] = r_10;  setitem_10 = target;  a_10 = r_10 = setitem_10 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(11, a_11)] = r_11;  setitem_11 = target;  a_11 = r_11 = setitem_11 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(12, a_12)] = r_12;  setitem_12 = target;  a_12 = r_12 = setitem_12 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(13, a_13)] = r_13;  setitem_13 = target;  a_13 = r_13 = setitem_13 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(14, a_14)] = r_14;  setitem_14 = target;  a_14 = r_14 = setitem_14 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(15, a_15)] = r_15;  setitem_15 = target;  a_15 = r_15 = setitem_15 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(16, a_16)] = r_16;  setitem_16 = target;  a_16 = r_16 = setitem_16 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(17, a_17)] = r_17;  setitem_17 = target;  a_17 = r_17 = setitem_17 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(18, a_18)] = r_18;  setitem_18 = target;  a_18 = r_18 = setitem_18 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(19, a_19)] = r_19;  setitem_19 = target;  a_19 = r_19 = setitem_19 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(20, a_20)] = r_20;  setitem_20 = target;  a_20 = r_20 = setitem_20 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(21, a_21)] = r_21;  setitem_21 = target;  a_21 = r_21 = setitem_21 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(22, a_22)] = r_22;  setitem_22 = target;  a_22 = r_22 = setitem_22 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(23, a_23)] = r_23;  setitem_23 = target;  a_23 = r_23 = setitem_23 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(24, a_24)] = r_24;  setitem_24 = target;  a_24 = r_24 = setitem_24 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(25, a_25)] = r_25;  setitem_25 = target;  a_25 = r_25 = setitem_25 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(26, a_26)] = r_26;  setitem_26 = target;  a_26 = r_26 = setitem_26 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(27, a_27)] = r_27;  setitem_27 = target;  a_27 = r_27 = setitem_27 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(28, a_28)] = r_28;  setitem_28 = target;  a_28 = r_28 = setitem_28 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(29, a_29)] = r_29;  setitem_29 = target;  a_29 = r_29 = setitem_29 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(30, a_30)] = r_30;  setitem_30 = target;  a_30 = r_30 = setitem_30 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(31, a_31)] = r_31;  setitem_31 = target;  a_31 = r_31 = setitem_31 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(32, a_32)] = r_32;  setitem_32 = target;  a_32 = r_32 = setitem_32 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(33, a_33)] = r_33;  setitem_33 = target;  a_33 = r_33 = setitem_33 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(34, a_34)] = r_34;  setitem_34 = target;  a_34 = r_34 = setitem_34 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(35, a_35)] = r_35;  setitem_35 = target;  a_35 = r_35 = setitem_35 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(36, a_36)] = r_36;  setitem_36 = target;  a_36 = r_36 = setitem_36 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(37, a_37)] = r_37;  setitem_37 = target;  a_37 = r_37 = setitem_37 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(38, a_38)] = r_38;  setitem_38 = target;  a_38 = r_38 = setitem_38 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(39, a_39)] = r_39;  setitem_39 = target;  a_39 = r_39 = setitem_39 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(40, a_40)] = r_40;  setitem_40 = target;  a_40 = r_40 = setitem_40 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(41, a_41)] = r_41;  setitem_41 = target;  a_41 = r_41 = setitem_41 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(42, a_42)] = r_42;  setitem_42 = target;  a_42 = r_42 = setitem_42 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(43, a_43)] = r_43;  setitem_43 = target;  a_43 = r_43 = setitem_43 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(44, a_44)] = r_44;  setitem_44 = target;  a_44 = r_44 = setitem_44 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(45, a_45)] = r_45;  setitem_45 = target;  a_45 = r_45 = setitem_45 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(46, a_46)] = r_46;  setitem_46 = target;  a_46 = r_46 = setitem_46 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(47, a_47)] = r_47;  setitem_47 = target;  a_47 = r_47 = setitem_47 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(48, a_48)] = r_48;  setitem_48 = target;  a_48 = r_48 = setitem_48 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(49, a_49)] = r_49;  setitem_49 = target;  a_49 = r_49 = setitem_49 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(50, a_50)] = r_50;  setitem_50 = target;  a_50 = r_50 = setitem_50 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(51, a_51)] = r_51;  setitem_51 = target;  a_51 = r_51 = setitem_51 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(52, a_52)] = r_52;  setitem_52 = target;  a_52 = r_52 = setitem_52 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(53, a_53)] = r_53;  setitem_53 = target;  a_53 = r_53 = setitem_53 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(54, a_54)] = r_54;  setitem_54 = target;  a_54 = r_54 = setitem_54 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(55, a_55)] = r_55;  setitem_55 = target;  a_55 = r_55 = setitem_55 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(56, a_56)] = r_56;  setitem_56 = target;  a_56 = r_56 = setitem_56 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(57, a_57)] = r_57;  setitem_57 = target;  a_57 = r_57 = setitem_57 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(58, a_58)] = r_58;  setitem_58 = target;  a_58 = r_58 = setitem_58 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(59, a_59)] = r_59;  setitem_59 = target;  a_59 = r_59 = setitem_59 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(60, a_60)] = r_60;  setitem_60 = target;  a_60 = r_60 = setitem_60 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(61, a_61)] = r_61;  setitem_61 = target;  a_61 = r_61 = setitem_61 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(62, a_62)] = r_62;  setitem_62 = target;  a_62 = r_62 = setitem_62 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             target[(63, a_63)] = r_63;  setitem_63 = target;  a_63 = r_63 = setitem_63 = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:834 in training_step, code: loss = self.loss_fn(q, target)
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             loss: "f32[][]" = torch.nn.functional.mse_loss(input_3, target, reduction = 'mean');  input_3 = target = None
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]             return (loss,)
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1] 
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]     Original traceback:
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]       File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py", line 833, in training_step
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         target[i, a] = r
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1] 
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]     Traceback:
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]       File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py", line 835, in training_step
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1]         self.log("loss", loss)
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1] 
+W0905 16:42:37.135000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_1] 
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2] Backend compiler exception
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]   Explanation: Backend compiler `inductor` failed with aten._local_scalar_dense.default
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2] 
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]     While executing %setitem : [num_users=0] = call_function[target=operator.setitem](args = (%target, (0, %a), %r), kwargs = {})
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]     GraphModule: class GraphModule(torch.nn.Module):
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         def forward(self, L_batch_0_: "f32[64, 9][9, 1]", L_batch_1_: "i64[64][1]", L_batch_2_: "f32[64][1]", L_self_modules_model_modules_0_parameters_weight_: "f32[32, 9][9, 1]", L_self_modules_model_modules_0_parameters_bias_: "f32[32][1]", L_self_modules_model_modules_2_parameters_weight_: "f32[2, 32][32, 1]", L_self_modules_model_modules_2_parameters_bias_: "f32[2][1]"):
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_batch_0_ = L_batch_0_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_batch_1_ = L_batch_1_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_batch_2_ = L_batch_2_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_self_modules_model_modules_0_parameters_weight_ = L_self_modules_model_modules_0_parameters_weight_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_self_modules_model_modules_0_parameters_bias_ = L_self_modules_model_modules_0_parameters_bias_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_self_modules_model_modules_2_parameters_weight_ = L_self_modules_model_modules_2_parameters_weight_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_self_modules_model_modules_2_parameters_bias_ = L_self_modules_model_modules_2_parameters_bias_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:830 in training_step, code: q = self.model(states)
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             input_1: "f32[64, 32][32, 1]" = torch._C._nn.linear(l_batch_0_, l_self_modules_model_modules_0_parameters_weight_, l_self_modules_model_modules_0_parameters_bias_);  l_batch_0_ = l_self_modules_model_modules_0_parameters_weight_ = l_self_modules_model_modules_0_parameters_bias_ = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             input_2: "f32[64, 32][32, 1]" = torch.nn.functional.relu(input_1, inplace = False);  input_1 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             input_3: "f32[64, 2][2, 1]" = torch._C._nn.linear(input_2, l_self_modules_model_modules_2_parameters_weight_, l_self_modules_model_modules_2_parameters_bias_);  input_2 = l_self_modules_model_modules_2_parameters_weight_ = l_self_modules_model_modules_2_parameters_bias_ = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:831 in training_step, code: target = q.detach().clone()
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             detach: "f32[64, 2][2, 1]" = input_3.detach()
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target: "f32[64, 2][2, 1]" = detach.clone();  detach = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:832 in training_step, code: for i, a, r in zip(range(len(actions)), actions, rewards):
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a: "i64[][]" = l_batch_1_[0]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_1: "i64[][]" = l_batch_1_[1]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_2: "i64[][]" = l_batch_1_[2]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_3: "i64[][]" = l_batch_1_[3]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_4: "i64[][]" = l_batch_1_[4]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_5: "i64[][]" = l_batch_1_[5]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_6: "i64[][]" = l_batch_1_[6]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_7: "i64[][]" = l_batch_1_[7]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_8: "i64[][]" = l_batch_1_[8]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_9: "i64[][]" = l_batch_1_[9]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_10: "i64[][]" = l_batch_1_[10]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_11: "i64[][]" = l_batch_1_[11]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_12: "i64[][]" = l_batch_1_[12]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_13: "i64[][]" = l_batch_1_[13]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_14: "i64[][]" = l_batch_1_[14]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_15: "i64[][]" = l_batch_1_[15]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_16: "i64[][]" = l_batch_1_[16]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_17: "i64[][]" = l_batch_1_[17]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_18: "i64[][]" = l_batch_1_[18]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_19: "i64[][]" = l_batch_1_[19]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_20: "i64[][]" = l_batch_1_[20]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_21: "i64[][]" = l_batch_1_[21]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_22: "i64[][]" = l_batch_1_[22]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_23: "i64[][]" = l_batch_1_[23]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_24: "i64[][]" = l_batch_1_[24]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_25: "i64[][]" = l_batch_1_[25]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_26: "i64[][]" = l_batch_1_[26]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_27: "i64[][]" = l_batch_1_[27]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_28: "i64[][]" = l_batch_1_[28]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_29: "i64[][]" = l_batch_1_[29]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_30: "i64[][]" = l_batch_1_[30]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_31: "i64[][]" = l_batch_1_[31]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_32: "i64[][]" = l_batch_1_[32]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_33: "i64[][]" = l_batch_1_[33]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_34: "i64[][]" = l_batch_1_[34]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_35: "i64[][]" = l_batch_1_[35]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_36: "i64[][]" = l_batch_1_[36]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_37: "i64[][]" = l_batch_1_[37]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_38: "i64[][]" = l_batch_1_[38]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_39: "i64[][]" = l_batch_1_[39]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_40: "i64[][]" = l_batch_1_[40]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_41: "i64[][]" = l_batch_1_[41]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_42: "i64[][]" = l_batch_1_[42]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_43: "i64[][]" = l_batch_1_[43]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_44: "i64[][]" = l_batch_1_[44]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_45: "i64[][]" = l_batch_1_[45]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_46: "i64[][]" = l_batch_1_[46]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_47: "i64[][]" = l_batch_1_[47]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_48: "i64[][]" = l_batch_1_[48]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_49: "i64[][]" = l_batch_1_[49]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_50: "i64[][]" = l_batch_1_[50]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_51: "i64[][]" = l_batch_1_[51]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_52: "i64[][]" = l_batch_1_[52]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_53: "i64[][]" = l_batch_1_[53]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_54: "i64[][]" = l_batch_1_[54]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_55: "i64[][]" = l_batch_1_[55]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_56: "i64[][]" = l_batch_1_[56]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_57: "i64[][]" = l_batch_1_[57]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_58: "i64[][]" = l_batch_1_[58]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_59: "i64[][]" = l_batch_1_[59]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_60: "i64[][]" = l_batch_1_[60]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_61: "i64[][]" = l_batch_1_[61]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_62: "i64[][]" = l_batch_1_[62]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_63: "i64[][]" = l_batch_1_[63];  l_batch_1_ = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r: "f32[][]" = l_batch_2_[0]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_1: "f32[][]" = l_batch_2_[1]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_2: "f32[][]" = l_batch_2_[2]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_3: "f32[][]" = l_batch_2_[3]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_4: "f32[][]" = l_batch_2_[4]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_5: "f32[][]" = l_batch_2_[5]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_6: "f32[][]" = l_batch_2_[6]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_7: "f32[][]" = l_batch_2_[7]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_8: "f32[][]" = l_batch_2_[8]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_9: "f32[][]" = l_batch_2_[9]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_10: "f32[][]" = l_batch_2_[10]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_11: "f32[][]" = l_batch_2_[11]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_12: "f32[][]" = l_batch_2_[12]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_13: "f32[][]" = l_batch_2_[13]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_14: "f32[][]" = l_batch_2_[14]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_15: "f32[][]" = l_batch_2_[15]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_16: "f32[][]" = l_batch_2_[16]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_17: "f32[][]" = l_batch_2_[17]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_18: "f32[][]" = l_batch_2_[18]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_19: "f32[][]" = l_batch_2_[19]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_20: "f32[][]" = l_batch_2_[20]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_21: "f32[][]" = l_batch_2_[21]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_22: "f32[][]" = l_batch_2_[22]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_23: "f32[][]" = l_batch_2_[23]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_24: "f32[][]" = l_batch_2_[24]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_25: "f32[][]" = l_batch_2_[25]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_26: "f32[][]" = l_batch_2_[26]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_27: "f32[][]" = l_batch_2_[27]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_28: "f32[][]" = l_batch_2_[28]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_29: "f32[][]" = l_batch_2_[29]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_30: "f32[][]" = l_batch_2_[30]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_31: "f32[][]" = l_batch_2_[31]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_32: "f32[][]" = l_batch_2_[32]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_33: "f32[][]" = l_batch_2_[33]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_34: "f32[][]" = l_batch_2_[34]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_35: "f32[][]" = l_batch_2_[35]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_36: "f32[][]" = l_batch_2_[36]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_37: "f32[][]" = l_batch_2_[37]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_38: "f32[][]" = l_batch_2_[38]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_39: "f32[][]" = l_batch_2_[39]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_40: "f32[][]" = l_batch_2_[40]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_41: "f32[][]" = l_batch_2_[41]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_42: "f32[][]" = l_batch_2_[42]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_43: "f32[][]" = l_batch_2_[43]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_44: "f32[][]" = l_batch_2_[44]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_45: "f32[][]" = l_batch_2_[45]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_46: "f32[][]" = l_batch_2_[46]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_47: "f32[][]" = l_batch_2_[47]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_48: "f32[][]" = l_batch_2_[48]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_49: "f32[][]" = l_batch_2_[49]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_50: "f32[][]" = l_batch_2_[50]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_51: "f32[][]" = l_batch_2_[51]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_52: "f32[][]" = l_batch_2_[52]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_53: "f32[][]" = l_batch_2_[53]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_54: "f32[][]" = l_batch_2_[54]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_55: "f32[][]" = l_batch_2_[55]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_56: "f32[][]" = l_batch_2_[56]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_57: "f32[][]" = l_batch_2_[57]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_58: "f32[][]" = l_batch_2_[58]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_59: "f32[][]" = l_batch_2_[59]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_60: "f32[][]" = l_batch_2_[60]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_61: "f32[][]" = l_batch_2_[61]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_62: "f32[][]" = l_batch_2_[62]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_63: "f32[][]" = l_batch_2_[63];  l_batch_2_ = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:833 in training_step, code: target[i, a] = r
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(0, a)] = r;  setitem = target;  a = r = setitem = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(1, a_1)] = r_1;  setitem_1 = target;  a_1 = r_1 = setitem_1 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(2, a_2)] = r_2;  setitem_2 = target;  a_2 = r_2 = setitem_2 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(3, a_3)] = r_3;  setitem_3 = target;  a_3 = r_3 = setitem_3 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(4, a_4)] = r_4;  setitem_4 = target;  a_4 = r_4 = setitem_4 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(5, a_5)] = r_5;  setitem_5 = target;  a_5 = r_5 = setitem_5 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(6, a_6)] = r_6;  setitem_6 = target;  a_6 = r_6 = setitem_6 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(7, a_7)] = r_7;  setitem_7 = target;  a_7 = r_7 = setitem_7 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(8, a_8)] = r_8;  setitem_8 = target;  a_8 = r_8 = setitem_8 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(9, a_9)] = r_9;  setitem_9 = target;  a_9 = r_9 = setitem_9 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(10, a_10)] = r_10;  setitem_10 = target;  a_10 = r_10 = setitem_10 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(11, a_11)] = r_11;  setitem_11 = target;  a_11 = r_11 = setitem_11 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(12, a_12)] = r_12;  setitem_12 = target;  a_12 = r_12 = setitem_12 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(13, a_13)] = r_13;  setitem_13 = target;  a_13 = r_13 = setitem_13 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(14, a_14)] = r_14;  setitem_14 = target;  a_14 = r_14 = setitem_14 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(15, a_15)] = r_15;  setitem_15 = target;  a_15 = r_15 = setitem_15 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(16, a_16)] = r_16;  setitem_16 = target;  a_16 = r_16 = setitem_16 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(17, a_17)] = r_17;  setitem_17 = target;  a_17 = r_17 = setitem_17 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(18, a_18)] = r_18;  setitem_18 = target;  a_18 = r_18 = setitem_18 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(19, a_19)] = r_19;  setitem_19 = target;  a_19 = r_19 = setitem_19 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(20, a_20)] = r_20;  setitem_20 = target;  a_20 = r_20 = setitem_20 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(21, a_21)] = r_21;  setitem_21 = target;  a_21 = r_21 = setitem_21 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(22, a_22)] = r_22;  setitem_22 = target;  a_22 = r_22 = setitem_22 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(23, a_23)] = r_23;  setitem_23 = target;  a_23 = r_23 = setitem_23 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(24, a_24)] = r_24;  setitem_24 = target;  a_24 = r_24 = setitem_24 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(25, a_25)] = r_25;  setitem_25 = target;  a_25 = r_25 = setitem_25 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(26, a_26)] = r_26;  setitem_26 = target;  a_26 = r_26 = setitem_26 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(27, a_27)] = r_27;  setitem_27 = target;  a_27 = r_27 = setitem_27 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(28, a_28)] = r_28;  setitem_28 = target;  a_28 = r_28 = setitem_28 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(29, a_29)] = r_29;  setitem_29 = target;  a_29 = r_29 = setitem_29 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(30, a_30)] = r_30;  setitem_30 = target;  a_30 = r_30 = setitem_30 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(31, a_31)] = r_31;  setitem_31 = target;  a_31 = r_31 = setitem_31 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(32, a_32)] = r_32;  setitem_32 = target;  a_32 = r_32 = setitem_32 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(33, a_33)] = r_33;  setitem_33 = target;  a_33 = r_33 = setitem_33 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(34, a_34)] = r_34;  setitem_34 = target;  a_34 = r_34 = setitem_34 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(35, a_35)] = r_35;  setitem_35 = target;  a_35 = r_35 = setitem_35 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(36, a_36)] = r_36;  setitem_36 = target;  a_36 = r_36 = setitem_36 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(37, a_37)] = r_37;  setitem_37 = target;  a_37 = r_37 = setitem_37 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(38, a_38)] = r_38;  setitem_38 = target;  a_38 = r_38 = setitem_38 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(39, a_39)] = r_39;  setitem_39 = target;  a_39 = r_39 = setitem_39 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(40, a_40)] = r_40;  setitem_40 = target;  a_40 = r_40 = setitem_40 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(41, a_41)] = r_41;  setitem_41 = target;  a_41 = r_41 = setitem_41 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(42, a_42)] = r_42;  setitem_42 = target;  a_42 = r_42 = setitem_42 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(43, a_43)] = r_43;  setitem_43 = target;  a_43 = r_43 = setitem_43 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(44, a_44)] = r_44;  setitem_44 = target;  a_44 = r_44 = setitem_44 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(45, a_45)] = r_45;  setitem_45 = target;  a_45 = r_45 = setitem_45 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(46, a_46)] = r_46;  setitem_46 = target;  a_46 = r_46 = setitem_46 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(47, a_47)] = r_47;  setitem_47 = target;  a_47 = r_47 = setitem_47 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(48, a_48)] = r_48;  setitem_48 = target;  a_48 = r_48 = setitem_48 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(49, a_49)] = r_49;  setitem_49 = target;  a_49 = r_49 = setitem_49 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(50, a_50)] = r_50;  setitem_50 = target;  a_50 = r_50 = setitem_50 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(51, a_51)] = r_51;  setitem_51 = target;  a_51 = r_51 = setitem_51 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(52, a_52)] = r_52;  setitem_52 = target;  a_52 = r_52 = setitem_52 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(53, a_53)] = r_53;  setitem_53 = target;  a_53 = r_53 = setitem_53 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(54, a_54)] = r_54;  setitem_54 = target;  a_54 = r_54 = setitem_54 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(55, a_55)] = r_55;  setitem_55 = target;  a_55 = r_55 = setitem_55 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(56, a_56)] = r_56;  setitem_56 = target;  a_56 = r_56 = setitem_56 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(57, a_57)] = r_57;  setitem_57 = target;  a_57 = r_57 = setitem_57 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(58, a_58)] = r_58;  setitem_58 = target;  a_58 = r_58 = setitem_58 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(59, a_59)] = r_59;  setitem_59 = target;  a_59 = r_59 = setitem_59 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(60, a_60)] = r_60;  setitem_60 = target;  a_60 = r_60 = setitem_60 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(61, a_61)] = r_61;  setitem_61 = target;  a_61 = r_61 = setitem_61 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(62, a_62)] = r_62;  setitem_62 = target;  a_62 = r_62 = setitem_62 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(63, a_63)] = r_63;  setitem_63 = target;  a_63 = r_63 = setitem_63 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:834 in training_step, code: loss = self.loss_fn(q, target)
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             loss: "f32[][]" = torch.nn.functional.mse_loss(input_3, target, reduction = 'mean');  input_3 = target = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             return (loss,)
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2] 
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]     Original traceback:
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]       File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py", line 833, in training_step
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         target[i, a] = r
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]     . Adding a graph break.
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]   Hint: Report an issue to the backend compiler repo.
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2] 
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]   Developer debug context: Backend: inductor
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]     Exception:aten._local_scalar_dense.default
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2] 
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]     While executing %setitem : [num_users=0] = call_function[target=operator.setitem](args = (%target, (0, %a), %r), kwargs = {})
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]     GraphModule: class GraphModule(torch.nn.Module):
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         def forward(self, L_batch_0_: "f32[64, 9][9, 1]", L_batch_1_: "i64[64][1]", L_batch_2_: "f32[64][1]", L_self_modules_model_modules_0_parameters_weight_: "f32[32, 9][9, 1]", L_self_modules_model_modules_0_parameters_bias_: "f32[32][1]", L_self_modules_model_modules_2_parameters_weight_: "f32[2, 32][32, 1]", L_self_modules_model_modules_2_parameters_bias_: "f32[2][1]"):
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_batch_0_ = L_batch_0_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_batch_1_ = L_batch_1_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_batch_2_ = L_batch_2_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_self_modules_model_modules_0_parameters_weight_ = L_self_modules_model_modules_0_parameters_weight_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_self_modules_model_modules_0_parameters_bias_ = L_self_modules_model_modules_0_parameters_bias_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_self_modules_model_modules_2_parameters_weight_ = L_self_modules_model_modules_2_parameters_weight_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             l_self_modules_model_modules_2_parameters_bias_ = L_self_modules_model_modules_2_parameters_bias_
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:830 in training_step, code: q = self.model(states)
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             input_1: "f32[64, 32][32, 1]" = torch._C._nn.linear(l_batch_0_, l_self_modules_model_modules_0_parameters_weight_, l_self_modules_model_modules_0_parameters_bias_);  l_batch_0_ = l_self_modules_model_modules_0_parameters_weight_ = l_self_modules_model_modules_0_parameters_bias_ = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             input_2: "f32[64, 32][32, 1]" = torch.nn.functional.relu(input_1, inplace = False);  input_1 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             input_3: "f32[64, 2][2, 1]" = torch._C._nn.linear(input_2, l_self_modules_model_modules_2_parameters_weight_, l_self_modules_model_modules_2_parameters_bias_);  input_2 = l_self_modules_model_modules_2_parameters_weight_ = l_self_modules_model_modules_2_parameters_bias_ = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:831 in training_step, code: target = q.detach().clone()
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             detach: "f32[64, 2][2, 1]" = input_3.detach()
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target: "f32[64, 2][2, 1]" = detach.clone();  detach = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:832 in training_step, code: for i, a, r in zip(range(len(actions)), actions, rewards):
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a: "i64[][]" = l_batch_1_[0]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_1: "i64[][]" = l_batch_1_[1]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_2: "i64[][]" = l_batch_1_[2]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_3: "i64[][]" = l_batch_1_[3]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_4: "i64[][]" = l_batch_1_[4]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_5: "i64[][]" = l_batch_1_[5]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_6: "i64[][]" = l_batch_1_[6]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_7: "i64[][]" = l_batch_1_[7]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_8: "i64[][]" = l_batch_1_[8]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_9: "i64[][]" = l_batch_1_[9]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_10: "i64[][]" = l_batch_1_[10]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_11: "i64[][]" = l_batch_1_[11]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_12: "i64[][]" = l_batch_1_[12]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_13: "i64[][]" = l_batch_1_[13]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_14: "i64[][]" = l_batch_1_[14]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_15: "i64[][]" = l_batch_1_[15]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_16: "i64[][]" = l_batch_1_[16]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_17: "i64[][]" = l_batch_1_[17]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_18: "i64[][]" = l_batch_1_[18]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_19: "i64[][]" = l_batch_1_[19]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_20: "i64[][]" = l_batch_1_[20]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_21: "i64[][]" = l_batch_1_[21]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_22: "i64[][]" = l_batch_1_[22]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_23: "i64[][]" = l_batch_1_[23]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_24: "i64[][]" = l_batch_1_[24]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_25: "i64[][]" = l_batch_1_[25]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_26: "i64[][]" = l_batch_1_[26]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_27: "i64[][]" = l_batch_1_[27]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_28: "i64[][]" = l_batch_1_[28]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_29: "i64[][]" = l_batch_1_[29]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_30: "i64[][]" = l_batch_1_[30]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_31: "i64[][]" = l_batch_1_[31]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_32: "i64[][]" = l_batch_1_[32]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_33: "i64[][]" = l_batch_1_[33]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_34: "i64[][]" = l_batch_1_[34]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_35: "i64[][]" = l_batch_1_[35]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_36: "i64[][]" = l_batch_1_[36]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_37: "i64[][]" = l_batch_1_[37]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_38: "i64[][]" = l_batch_1_[38]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_39: "i64[][]" = l_batch_1_[39]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_40: "i64[][]" = l_batch_1_[40]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_41: "i64[][]" = l_batch_1_[41]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_42: "i64[][]" = l_batch_1_[42]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_43: "i64[][]" = l_batch_1_[43]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_44: "i64[][]" = l_batch_1_[44]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_45: "i64[][]" = l_batch_1_[45]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_46: "i64[][]" = l_batch_1_[46]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_47: "i64[][]" = l_batch_1_[47]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_48: "i64[][]" = l_batch_1_[48]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_49: "i64[][]" = l_batch_1_[49]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_50: "i64[][]" = l_batch_1_[50]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_51: "i64[][]" = l_batch_1_[51]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_52: "i64[][]" = l_batch_1_[52]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_53: "i64[][]" = l_batch_1_[53]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_54: "i64[][]" = l_batch_1_[54]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_55: "i64[][]" = l_batch_1_[55]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_56: "i64[][]" = l_batch_1_[56]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_57: "i64[][]" = l_batch_1_[57]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_58: "i64[][]" = l_batch_1_[58]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_59: "i64[][]" = l_batch_1_[59]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_60: "i64[][]" = l_batch_1_[60]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_61: "i64[][]" = l_batch_1_[61]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_62: "i64[][]" = l_batch_1_[62]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             a_63: "i64[][]" = l_batch_1_[63];  l_batch_1_ = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r: "f32[][]" = l_batch_2_[0]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_1: "f32[][]" = l_batch_2_[1]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_2: "f32[][]" = l_batch_2_[2]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_3: "f32[][]" = l_batch_2_[3]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_4: "f32[][]" = l_batch_2_[4]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_5: "f32[][]" = l_batch_2_[5]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_6: "f32[][]" = l_batch_2_[6]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_7: "f32[][]" = l_batch_2_[7]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_8: "f32[][]" = l_batch_2_[8]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_9: "f32[][]" = l_batch_2_[9]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_10: "f32[][]" = l_batch_2_[10]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_11: "f32[][]" = l_batch_2_[11]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_12: "f32[][]" = l_batch_2_[12]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_13: "f32[][]" = l_batch_2_[13]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_14: "f32[][]" = l_batch_2_[14]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_15: "f32[][]" = l_batch_2_[15]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_16: "f32[][]" = l_batch_2_[16]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_17: "f32[][]" = l_batch_2_[17]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_18: "f32[][]" = l_batch_2_[18]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_19: "f32[][]" = l_batch_2_[19]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_20: "f32[][]" = l_batch_2_[20]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_21: "f32[][]" = l_batch_2_[21]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_22: "f32[][]" = l_batch_2_[22]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_23: "f32[][]" = l_batch_2_[23]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_24: "f32[][]" = l_batch_2_[24]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_25: "f32[][]" = l_batch_2_[25]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_26: "f32[][]" = l_batch_2_[26]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_27: "f32[][]" = l_batch_2_[27]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_28: "f32[][]" = l_batch_2_[28]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_29: "f32[][]" = l_batch_2_[29]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_30: "f32[][]" = l_batch_2_[30]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_31: "f32[][]" = l_batch_2_[31]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_32: "f32[][]" = l_batch_2_[32]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_33: "f32[][]" = l_batch_2_[33]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_34: "f32[][]" = l_batch_2_[34]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_35: "f32[][]" = l_batch_2_[35]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_36: "f32[][]" = l_batch_2_[36]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_37: "f32[][]" = l_batch_2_[37]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_38: "f32[][]" = l_batch_2_[38]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_39: "f32[][]" = l_batch_2_[39]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_40: "f32[][]" = l_batch_2_[40]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_41: "f32[][]" = l_batch_2_[41]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_42: "f32[][]" = l_batch_2_[42]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_43: "f32[][]" = l_batch_2_[43]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_44: "f32[][]" = l_batch_2_[44]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_45: "f32[][]" = l_batch_2_[45]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_46: "f32[][]" = l_batch_2_[46]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_47: "f32[][]" = l_batch_2_[47]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_48: "f32[][]" = l_batch_2_[48]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_49: "f32[][]" = l_batch_2_[49]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_50: "f32[][]" = l_batch_2_[50]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_51: "f32[][]" = l_batch_2_[51]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_52: "f32[][]" = l_batch_2_[52]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_53: "f32[][]" = l_batch_2_[53]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_54: "f32[][]" = l_batch_2_[54]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_55: "f32[][]" = l_batch_2_[55]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_56: "f32[][]" = l_batch_2_[56]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_57: "f32[][]" = l_batch_2_[57]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_58: "f32[][]" = l_batch_2_[58]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_59: "f32[][]" = l_batch_2_[59]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_60: "f32[][]" = l_batch_2_[60]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_61: "f32[][]" = l_batch_2_[61]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_62: "f32[][]" = l_batch_2_[62]
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             r_63: "f32[][]" = l_batch_2_[63];  l_batch_2_ = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:833 in training_step, code: target[i, a] = r
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(0, a)] = r;  setitem = target;  a = r = setitem = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(1, a_1)] = r_1;  setitem_1 = target;  a_1 = r_1 = setitem_1 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(2, a_2)] = r_2;  setitem_2 = target;  a_2 = r_2 = setitem_2 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(3, a_3)] = r_3;  setitem_3 = target;  a_3 = r_3 = setitem_3 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(4, a_4)] = r_4;  setitem_4 = target;  a_4 = r_4 = setitem_4 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(5, a_5)] = r_5;  setitem_5 = target;  a_5 = r_5 = setitem_5 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(6, a_6)] = r_6;  setitem_6 = target;  a_6 = r_6 = setitem_6 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(7, a_7)] = r_7;  setitem_7 = target;  a_7 = r_7 = setitem_7 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(8, a_8)] = r_8;  setitem_8 = target;  a_8 = r_8 = setitem_8 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(9, a_9)] = r_9;  setitem_9 = target;  a_9 = r_9 = setitem_9 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(10, a_10)] = r_10;  setitem_10 = target;  a_10 = r_10 = setitem_10 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(11, a_11)] = r_11;  setitem_11 = target;  a_11 = r_11 = setitem_11 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(12, a_12)] = r_12;  setitem_12 = target;  a_12 = r_12 = setitem_12 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(13, a_13)] = r_13;  setitem_13 = target;  a_13 = r_13 = setitem_13 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(14, a_14)] = r_14;  setitem_14 = target;  a_14 = r_14 = setitem_14 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(15, a_15)] = r_15;  setitem_15 = target;  a_15 = r_15 = setitem_15 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(16, a_16)] = r_16;  setitem_16 = target;  a_16 = r_16 = setitem_16 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(17, a_17)] = r_17;  setitem_17 = target;  a_17 = r_17 = setitem_17 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(18, a_18)] = r_18;  setitem_18 = target;  a_18 = r_18 = setitem_18 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(19, a_19)] = r_19;  setitem_19 = target;  a_19 = r_19 = setitem_19 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(20, a_20)] = r_20;  setitem_20 = target;  a_20 = r_20 = setitem_20 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(21, a_21)] = r_21;  setitem_21 = target;  a_21 = r_21 = setitem_21 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(22, a_22)] = r_22;  setitem_22 = target;  a_22 = r_22 = setitem_22 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(23, a_23)] = r_23;  setitem_23 = target;  a_23 = r_23 = setitem_23 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(24, a_24)] = r_24;  setitem_24 = target;  a_24 = r_24 = setitem_24 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(25, a_25)] = r_25;  setitem_25 = target;  a_25 = r_25 = setitem_25 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(26, a_26)] = r_26;  setitem_26 = target;  a_26 = r_26 = setitem_26 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(27, a_27)] = r_27;  setitem_27 = target;  a_27 = r_27 = setitem_27 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(28, a_28)] = r_28;  setitem_28 = target;  a_28 = r_28 = setitem_28 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(29, a_29)] = r_29;  setitem_29 = target;  a_29 = r_29 = setitem_29 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(30, a_30)] = r_30;  setitem_30 = target;  a_30 = r_30 = setitem_30 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(31, a_31)] = r_31;  setitem_31 = target;  a_31 = r_31 = setitem_31 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(32, a_32)] = r_32;  setitem_32 = target;  a_32 = r_32 = setitem_32 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(33, a_33)] = r_33;  setitem_33 = target;  a_33 = r_33 = setitem_33 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(34, a_34)] = r_34;  setitem_34 = target;  a_34 = r_34 = setitem_34 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(35, a_35)] = r_35;  setitem_35 = target;  a_35 = r_35 = setitem_35 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(36, a_36)] = r_36;  setitem_36 = target;  a_36 = r_36 = setitem_36 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(37, a_37)] = r_37;  setitem_37 = target;  a_37 = r_37 = setitem_37 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(38, a_38)] = r_38;  setitem_38 = target;  a_38 = r_38 = setitem_38 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(39, a_39)] = r_39;  setitem_39 = target;  a_39 = r_39 = setitem_39 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(40, a_40)] = r_40;  setitem_40 = target;  a_40 = r_40 = setitem_40 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(41, a_41)] = r_41;  setitem_41 = target;  a_41 = r_41 = setitem_41 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(42, a_42)] = r_42;  setitem_42 = target;  a_42 = r_42 = setitem_42 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(43, a_43)] = r_43;  setitem_43 = target;  a_43 = r_43 = setitem_43 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(44, a_44)] = r_44;  setitem_44 = target;  a_44 = r_44 = setitem_44 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(45, a_45)] = r_45;  setitem_45 = target;  a_45 = r_45 = setitem_45 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(46, a_46)] = r_46;  setitem_46 = target;  a_46 = r_46 = setitem_46 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(47, a_47)] = r_47;  setitem_47 = target;  a_47 = r_47 = setitem_47 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(48, a_48)] = r_48;  setitem_48 = target;  a_48 = r_48 = setitem_48 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(49, a_49)] = r_49;  setitem_49 = target;  a_49 = r_49 = setitem_49 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(50, a_50)] = r_50;  setitem_50 = target;  a_50 = r_50 = setitem_50 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(51, a_51)] = r_51;  setitem_51 = target;  a_51 = r_51 = setitem_51 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(52, a_52)] = r_52;  setitem_52 = target;  a_52 = r_52 = setitem_52 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(53, a_53)] = r_53;  setitem_53 = target;  a_53 = r_53 = setitem_53 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(54, a_54)] = r_54;  setitem_54 = target;  a_54 = r_54 = setitem_54 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(55, a_55)] = r_55;  setitem_55 = target;  a_55 = r_55 = setitem_55 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(56, a_56)] = r_56;  setitem_56 = target;  a_56 = r_56 = setitem_56 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(57, a_57)] = r_57;  setitem_57 = target;  a_57 = r_57 = setitem_57 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(58, a_58)] = r_58;  setitem_58 = target;  a_58 = r_58 = setitem_58 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(59, a_59)] = r_59;  setitem_59 = target;  a_59 = r_59 = setitem_59 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(60, a_60)] = r_60;  setitem_60 = target;  a_60 = r_60 = setitem_60 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(61, a_61)] = r_61;  setitem_61 = target;  a_61 = r_61 = setitem_61 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(62, a_62)] = r_62;  setitem_62 = target;  a_62 = r_62 = setitem_62 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             target[(63, a_63)] = r_63;  setitem_63 = target;  a_63 = r_63 = setitem_63 = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]              # File: /Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py:834 in training_step, code: loss = self.loss_fn(q, target)
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             loss: "f32[][]" = torch.nn.functional.mse_loss(input_3, target, reduction = 'mean');  input_3 = target = None
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]             return (loss,)
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2] 
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]     Original traceback:
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]       File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py", line 833, in training_step
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         target[i, a] = r
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2] 
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]     Traceback:
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]       File "/Users/sfredx/Documents/Python/Solsniper-zero-main/solhunter_zero/rl_training.py", line 835, in training_step
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2]         self.log("loss", loss)
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2] 
+W0905 16:42:37.235000 3175 .venv/lib/python3.13/site-packages/torch/_dynamo/exc.py:525] [0/0_2] 
+{"ok": true, "phase": "UI_PREFLIGHT", "config_ok": true, "artifacts_ok": true, "keypair_ok": true, "rpc_ok": true, "logic_ok": true}

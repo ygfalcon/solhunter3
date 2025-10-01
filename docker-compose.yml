@@ -1,0 +1,10 @@
+version: '3.9'
+services:
+  solsniper:
+    build: .
+    command: ["--auto"]
+    volumes:
+      - ./config.toml:/app/config.toml
+      - ./keypairs:/app/keypairs
+    env_file:
+      - .env

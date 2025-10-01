@@ -1,0 +1,24 @@
+name: Data freshness
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  price-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v3
+        with:
+          python-version: "3.11"
+      - name: Ensure price data is recent
+        env:
+          PRICES_MAX_AGE_MONTHS: 6
+        run: |
+          python scripts/check_prices_data_freshness.py

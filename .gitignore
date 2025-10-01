@@ -1,0 +1,23 @@
+memory.db
+solhunter_zero/__pycache__/
+keypair.json
+depth_service/target/
+
+# Local investor demo reports
+reports/
+
+# Ignore build artifacts
+depth_service/Cargo.lock
+depth_service/src/solhunter_zero.rs
+*/__pycache__/
+__pycache__/
+
+# Rust build output
+target/
+
+route_ffi/target/
+route_ffi/Cargo.lock
+solhunter_zero/libroute_ffi.so
+solhunter_zero.egg-info/
+.env
+.cache/

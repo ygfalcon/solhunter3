@@ -1,0 +1,175 @@
+syntax = "proto3";
+package solhunter_zero;
+
+message ActionExecuted {
+  string action_json = 1;
+  string result_json = 2;
+}
+
+message WeightsUpdated {
+  map<string, double> weights = 1;
+}
+
+message RLWeights {
+  map<string, double> weights = 1;
+  map<string, double> risk = 2;
+}
+
+message RLCheckpoint {
+  double time = 1;
+  string path = 2;
+}
+
+message PortfolioUpdated {
+  map<string, double> balances = 1;
+}
+
+message TokenInfo {
+  double bids = 1;
+  double asks = 2;
+  double tx_rate = 3;
+}
+
+message TokenAgg {
+  map<string, TokenInfo> dex = 1;
+  double bids = 2;
+  double asks = 3;
+  double tx_rate = 4;
+  int64 ts = 5;
+}
+
+message DepthUpdate {
+  map<string, TokenAgg> entries = 1;
+}
+
+message DepthDiff {
+  map<string, TokenAgg> entries = 1;
+}
+
+message DepthServiceStatus {
+  string status = 1;
+}
+
+message Heartbeat {
+  string service = 1;
+}
+
+message TradeLogged {
+  string token = 1;
+  string direction = 2;
+  double amount = 3;
+  double price = 4;
+  string reason = 5;
+  string context = 6;
+  string emotion = 7;
+  int64 simulation_id = 8;
+  string uuid = 9;
+  int64 trade_id = 10;
+}
+
+message RLMetrics {
+  double loss = 1;
+  double reward = 2;
+}
+
+message SystemMetrics {
+  double cpu = 1;
+  double memory = 2;
+}
+
+message PriceUpdate {
+  string venue = 1;
+  string token = 2;
+  double price = 3;
+}
+
+message RouteRequest {
+  string token = 1;
+  double amount = 2;
+  uint32 max_hops = 3;
+}
+
+message RouteResponse {
+  repeated string path = 1;
+  double profit = 2;
+  double slippage = 3;
+}
+
+message ConfigUpdated {
+  string config_json = 1;
+}
+
+message PendingSwap {
+  string token = 1;
+  string address = 2;
+  double size = 3;
+  double slippage = 4;
+}
+
+message RemoteSystemMetrics {
+  double cpu = 1;
+  double memory = 2;
+}
+
+message DoubleList {
+  repeated double values = 1;
+}
+
+message RiskMetrics {
+  double covariance = 1;
+  double portfolio_cvar = 2;
+  double portfolio_evar = 3;
+  double correlation = 4;
+  repeated DoubleList cov_matrix = 5;
+  repeated DoubleList corr_matrix = 6;
+}
+
+message RiskUpdated {
+  double multiplier = 1;
+}
+
+message SystemMetricsCombined {
+  double cpu = 1;
+  double memory = 2;
+}
+
+message TokenDiscovered {
+  repeated string tokens = 1;
+}
+
+message MemorySyncRequest {
+  int64 last_id = 1;
+}
+
+message MemorySyncResponse {
+  repeated TradeLogged trades = 1;
+  bytes index = 2;
+}
+
+message Event {
+  string topic = 1;
+  oneof kind {
+    ActionExecuted action_executed = 2;
+    WeightsUpdated weights_updated = 3;
+    RLWeights rl_weights = 4;
+    RLCheckpoint rl_checkpoint = 5;
+    PortfolioUpdated portfolio_updated = 6;
+    DepthUpdate depth_update = 7;
+    DepthServiceStatus depth_service_status = 8;
+    Heartbeat heartbeat = 9;
+    TradeLogged trade_logged = 10;
+    RLMetrics rl_metrics = 11;
+    SystemMetrics system_metrics = 12;
+    PriceUpdate price_update = 13;
+    ConfigUpdated config_updated = 14;
+    PendingSwap pending_swap = 15;
+    RemoteSystemMetrics remote_system_metrics = 16;
+    RiskMetrics risk_metrics = 17;
+    RiskUpdated risk_updated = 18;
+    SystemMetricsCombined system_metrics_combined = 19;
+    TokenDiscovered token_discovered = 20;
+    MemorySyncRequest memory_sync_request = 21;
+    MemorySyncResponse memory_sync_response = 22;
+    DepthDiff depth_diff = 23;
+  }
+}
