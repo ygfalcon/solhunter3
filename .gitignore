@@ -24,3 +24,12 @@ ui_checks/
 ui_*_checks/
 keypairs/
 *.dylib
+# Rust build artifacts
+route_ffi/target/
+target/
+**/*.dylib
+**/*.so
+**/*.a
+
+# Python packaging
+*.egg-info/
