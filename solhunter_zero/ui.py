@@ -191,7 +191,8 @@ def create_app(state: UIState) -> Flask:
         activity = state.snapshot_activity()
         trades = state.snapshot_trades()
         logs = state.snapshot_logs()
-        weights = state.snapshot_weights()
+        weights_raw = state.snapshot_weights()
+        weights = weights_raw if isinstance(weights_raw, dict) else {}
         actions = state.snapshot_actions()
         config_summary = state.snapshot_config()
         history = state.snapshot_history()
@@ -289,9 +290,23 @@ def create_app(state: UIState) -> Flask:
                 "css_class": "trades",
             },
         ]
-        weights_sample = (
-            dict(list(weights.items())[:10]) if isinstance(weights, dict) else {}
-        )
+        weights_sample = dict(list(weights.items())[:10]) if weights else {}
+        weight_items = []
+        for name, value in weights.items():
+            try:
+                weight_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            weight_items.append((str(name), weight_value))
+        weights_sorted = sorted(weight_items, key=lambda item: item[1], reverse=True)
+        weights_labels = [name for name, _ in weights_sorted]
+        weights_values = [value for _, value in weights_sorted]
+        if weights_sorted:
+            weights_aria_label = "Agent weights distribution: " + ", ".join(
+                f"{name} weight {value}" for name, value in weights_sorted
+            )
+        else:
+            weights_aria_label = "Agent weights unavailable"
         samples = {
             "activity": activity[-5:],
             "trades": trades[-5:],
@@ -522,6 +537,54 @@ def create_app(state: UIState) -> Flask:
                     align-items: center;
                     gap: 16px;
                     user-select: none;
+                }
+                .weights-chart-container {
+                    position: relative;
+                    min-height: 220px;
+                }
+                .weights-chart-container canvas {
+                    display: block;
+                    max-width: 420px;
+                    margin: 0 auto;
+                }
+                .weights-legend {
+                    margin-top: 18px;
+                    display: flex;
+                    flex-wrap: wrap;
+                    justify-content: center;
+                    gap: 10px;
+                }
+                .weights-legend span {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 6px 12px;
+                    border-radius: 999px;
+                    background: rgba(88, 166, 255, 0.12);
+                    border: 1px solid rgba(88, 166, 255, 0.25);
+                    color: var(--text);
+                    font-size: 0.85rem;
+                }
+                .weights-legend .legend-dot {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 50%;
+                    background: var(--accent);
+                }
+                .weights-legend .legend-value {
+                    color: var(--muted);
+                    font-variant-numeric: tabular-nums;
+                }
+                .sr-only {
+                    position: absolute;
+                    width: 1px;
+                    height: 1px;
+                    padding: 0;
+                    margin: -1px;
+                    overflow: hidden;
+                    clip: rect(0, 0, 0, 0);
+                    white-space: nowrap;
+                    border: 0;
                 }
                 details.collapsible summary::-webkit-details-marker { display: none; }
                 details.collapsible summary:focus-visible {
@@ -916,15 +979,22 @@ def create_app(state: UIState) -> Flask:
 
                 <div class="panel">
                     <h2>Weights</h2>
-                    {% if weights %}
-                        <table>
-                            <tr><th>Agent</th><th>Weight</th></tr>
-                            {% for name, weight in weights.items()|list|sort %}
-                                <tr><td>{{ name }}</td><td>{{ weight }}</td></tr>
+                    {% if weights_labels %}
+                        <div class="weights-chart-container">
+                            <canvas id="weightsChart" role="img" aria-label="{{ weights_aria_label }}" data-summary="{{ weights_aria_label }}"></canvas>
+                        </div>
+                        <div class="weights-legend" id="weightsLegend" role="list">
+                            {% for name, value in weights_sorted %}
+                                <span role="listitem" aria-label="{{ name }} weight {{ '%.6f'|format(value) }}" data-index="{{ loop.index0 }}">
+                                    <span class="legend-dot" aria-hidden="true"></span>
+                                    <span class="legend-label">{{ name }}</span>
+                                    <span class="legend-value" aria-hidden="true">{{ '%.4f'|format(value) }}</span>
+                                </span>
                             {% endfor %}
-                        </table>
+                        </div>
+                        <div class="sr-only" id="weightsTextSummary">{{ weights_aria_label }}</div>
                     {% else %}
-                        <div class="muted">Weights unavailable.</div>
+                        <div class="muted">Weights unavailable. The coordinator has not provided agent weights yet.</div>
                     {% endif %}
                 </div>
 
@@ -964,107 +1034,158 @@ def create_app(state: UIState) -> Flask:
             <script>
             (function() {
                 const history = {{ history | tojson | safe }};
-                if (!history || !history.length) {
-                    return;
+                const weightLabels = {{ weights_labels | tojson | safe }};
+                const weightValues = {{ weights_values | tojson | safe }};
+                if (history && history.length) {
+                    const labels = history.map(h => (h.timestamp || '').slice(11, 19));
+                    const actionsData = history.map(h => h.actions_count || 0);
+                    const discoveredData = history.map(h => h.discovered_count || 0);
+                    const committedData = history.map(h => (h.committed ? 1 : 0));
+                    const latencyData = history.map(h => (h.elapsed_s || 0));
+                    let budgetData = history.map(h => {
+                        const telemetry = h.telemetry || {};
+                        const pipeline = telemetry.pipeline || {};
+                        return pipeline.budget || null;
+                    });
+                    const wantsBudget = budgetData.some(v => typeof v === 'number');
+                    const ctxA = document.getElementById('actionsChart');
+                    if (ctxA && window.Chart) {
+                        new Chart(ctxA.getContext('2d'), {
+                            type: 'line',
+                            data: {
+                                labels,
+                                datasets: [
+                                    {
+                                        label: 'Actions',
+                                        data: actionsData,
+                                        borderColor: '#58a6ff',
+                                        backgroundColor: 'rgba(88,166,255,0.2)',
+                                        tension: 0.3,
+                                    },
+                                    {
+                                        label: 'Discovered',
+                                        data: discoveredData,
+                                        borderColor: '#3fb950',
+                                        backgroundColor: 'rgba(63,185,80,0.2)',
+                                        tension: 0.3,
+                                    },
+                                    {
+                                        label: 'Committed',
+                                        data: committedData,
+                                        borderColor: '#ffdf5d',
+                                        backgroundColor: 'rgba(255,223,93,0.2)',
+                                        tension: 0.1,
+                                        yAxisID: 'y2',
+                                        stepped: true,
+                                    },
+                                ],
+                            },
+                            options: {
+                                plugins: {
+                                    legend: { labels: { color: '#e6edf3' } },
+                                },
+                                scales: {
+                                    x: {
+                                        ticks: { color: '#8b949e' },
+                                        grid: { color: 'rgba(48,54,61,0.4)' },
+                                    },
+                                    y: {
+                                        ticks: { color: '#8b949e' },
+                                        grid: { color: 'rgba(48,54,61,0.4)' },
+                                    },
+                                    y2: {
+                                        position: 'right',
+                                        ticks: { color: '#8b949e', callback: value => (value ? 'Yes' : 'No') },
+                                        grid: { display: false },
+                                        suggestedMax: 1,
+                                        suggestedMin: 0,
+                                    },
+                                },
+                            },
+                        });
+                    }
+                    const ctxL = document.getElementById('latencyChart');
+                    if (ctxL && window.Chart) {
+                        const datasets = [
+                            {
+                                label: 'Iteration Seconds',
+                                data: latencyData,
+                                borderColor: '#ff7b72',
+                                backgroundColor: 'rgba(255,123,114,0.25)',
+                                tension: 0.2,
+                            },
+                        ];
+                        if (wantsBudget) {
+                            datasets.push({
+                                label: 'Budget',
+                                data: budgetData,
+                                borderColor: '#8b949e',
+                                borderDash: [6, 6],
+                                fill: false,
+                            });
+                        }
+                        new Chart(ctxL.getContext('2d'), {
+                            type: 'line',
+                            data: { labels, datasets },
+                            options: {
+                                plugins: { legend: { labels: { color: '#e6edf3' } } },
+                                scales: {
+                                    x: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
+                                    y: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
+                                },
+                            },
+                        });
+                    }
                 }
-                const labels = history.map(h => (h.timestamp || '').slice(11, 19));
-                const actionsData = history.map(h => h.actions_count || 0);
-                const discoveredData = history.map(h => h.discovered_count || 0);
-                const committedData = history.map(h => (h.committed ? 1 : 0));
-                const latencyData = history.map(h => (h.elapsed_s || 0));
-                let budgetData = history.map(h => {
-                    const telemetry = h.telemetry || {};
-                    const pipeline = telemetry.pipeline || {};
-                    return pipeline.budget || null;
-                });
-                const wantsBudget = budgetData.some(v => typeof v === 'number');
-                const ctxA = document.getElementById('actionsChart');
-                if (ctxA && window.Chart) {
-                    new Chart(ctxA.getContext('2d'), {
-                        type: 'line',
+                const weightsCanvas = document.getElementById('weightsChart');
+                if (weightsCanvas && window.Chart && weightLabels.length) {
+                    const palette = ['#7afcff', '#f6a6ff', '#9effa9', '#ffe29a', '#b5b0ff', '#ffb8a5', '#aff8db', '#f3c4fb'];
+                    const backgroundColors = weightLabels.map((_, index) => palette[index % palette.length]);
+                    const totalWeight = weightValues.reduce((acc, value) => acc + value, 0);
+                    new Chart(weightsCanvas.getContext('2d'), {
+                        type: 'doughnut',
                         data: {
-                            labels,
+                            labels: weightLabels,
                             datasets: [
                                 {
-                                    label: 'Actions',
-                                    data: actionsData,
-                                    borderColor: '#58a6ff',
-                                    backgroundColor: 'rgba(88,166,255,0.2)',
-                                    tension: 0.3,
-                                },
-                                {
-                                    label: 'Discovered',
-                                    data: discoveredData,
-                                    borderColor: '#3fb950',
-                                    backgroundColor: 'rgba(63,185,80,0.2)',
-                                    tension: 0.3,
-                                },
-                                {
-                                    label: 'Committed',
-                                    data: committedData,
-                                    borderColor: '#ffdf5d',
-                                    backgroundColor: 'rgba(255,223,93,0.2)',
-                                    tension: 0.1,
-                                    yAxisID: 'y2',
-                                    stepped: true,
+                                    data: weightValues,
+                                    backgroundColor: backgroundColors,
+                                    borderColor: '#0d1117',
+                                    borderWidth: 2,
                                 },
                             ],
                         },
                         options: {
+                            cutout: '55%',
                             plugins: {
-                                legend: { labels: { color: '#e6edf3' } },
-                            },
-                            scales: {
-                                x: {
-                                    ticks: { color: '#8b949e' },
-                                    grid: { color: 'rgba(48,54,61,0.4)' },
-                                },
-                                y: {
-                                    ticks: { color: '#8b949e' },
-                                    grid: { color: 'rgba(48,54,61,0.4)' },
-                                },
-                                y2: {
-                                    position: 'right',
-                                    ticks: { color: '#8b949e', callback: value => (value ? 'Yes' : 'No') },
-                                    grid: { display: false },
-                                    suggestedMax: 1,
-                                    suggestedMin: 0,
+                                legend: { display: false },
+                                tooltip: {
+                                    callbacks: {
+                                        label(context) {
+                                            const value = context.parsed || 0;
+                                            const percent = totalWeight ? ((value / totalWeight) * 100).toFixed(1) : '0.0';
+                                            return `${context.label}: ${value} (${percent}%)`;
+                                        },
+                                    },
                                 },
                             },
                         },
                     });
-                }
-                const ctxL = document.getElementById('latencyChart');
-                if (ctxL && window.Chart) {
-                    const datasets = [
-                        {
-                            label: 'Iteration Seconds',
-                            data: latencyData,
-                            borderColor: '#ff7b72',
-                            backgroundColor: 'rgba(255,123,114,0.25)',
-                            tension: 0.2,
-                        },
-                    ];
-                    if (wantsBudget) {
-                        datasets.push({
-                            label: 'Budget',
-                            data: budgetData,
-                            borderColor: '#8b949e',
-                            borderDash: [6, 6],
-                            fill: false,
+                    const legendEl = document.getElementById('weightsLegend');
+                    if (legendEl) {
+                        legendEl.querySelectorAll('[data-index]').forEach((pill, index) => {
+                            const color = backgroundColors[index % backgroundColors.length];
+                            pill.style.borderColor = `${color}55`;
+                            const dot = pill.querySelector('.legend-dot');
+                            if (dot) {
+                                dot.style.background = color;
+                            }
                         });
                     }
-                    new Chart(ctxL.getContext('2d'), {
-                        type: 'line',
-                        data: { labels, datasets },
-                        options: {
-                            plugins: { legend: { labels: { color: '#e6edf3' } } },
-                            scales: {
-                                x: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
-                                y: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
-                            },
-                        },
-                    });
+                    const summary = weightsCanvas.getAttribute('data-summary');
+                    if (summary) {
+                        weightsCanvas.setAttribute('aria-label', summary);
+                    }
                 }
             })();
             </script>
@@ -1088,6 +1209,11 @@ def create_app(state: UIState) -> Flask:
             logs_summary=logs_summary,
             logs_total=logs_total,
             history=history,
+            weights=weights,
+            weights_sorted=weights_sorted,
+            weights_labels=weights_labels,
+            weights_values=weights_values,
+            weights_aria_label=weights_aria_label,
             stat_tiles=stat_tiles,
         )
 
