@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import signal
 import threading
 import time
+import urllib.request
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,12 +37,74 @@ from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory
 from ..portfolio import Portfolio
+from ..paths import ROOT
 from ..redis_util import ensure_local_redis_if_needed
 from ..ui import UIState, UIServer
 from ..util import parse_bool_env
 
 
 log = logging.getLogger(__name__)
+
+_RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
+
+
+def _probe_rl_daemon_health(timeout: float = 0.5) -> Dict[str, Any]:
+    """Return information about an externally managed RL daemon.
+
+    The probe inspects ``rl_daemon.health.json`` written by ``run_rl_daemon``
+    and, when available, performs a lightweight HTTP request against the
+    reported ``/health`` endpoint.  It returns a dictionary with the
+    following keys:
+
+    ``detected``
+        Whether the health file was found.
+    ``running``
+        ``True`` when the health endpoint responds successfully.
+    ``url``
+        The health endpoint URL if one was recorded.
+    ``error``
+        A short description of the most recent error, if any.
+    """
+
+    result: Dict[str, Any] = {
+        "detected": False,
+        "running": False,
+        "url": None,
+        "error": None,
+    }
+
+    path = _RL_HEALTH_PATH
+    if not path.exists():
+        return result
+
+    result["detected"] = True
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        result["error"] = f"invalid health file: {exc}"  # pragma: no cover - rare
+        return result
+
+    url = payload.get("url")
+    if url:
+        result["url"] = str(url)
+    else:
+        result["error"] = "missing url"
+        return result
+
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            status = getattr(response, "status", None)
+            if status is None and hasattr(response, "getcode"):
+                try:
+                    status = response.getcode()
+                except Exception:  # pragma: no cover - urllib variations
+                    status = None
+            if status is None or 200 <= int(status) < 400:
+                result["running"] = True
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result
 
 
 @dataclass
@@ -135,6 +199,15 @@ class TradingRuntime:
         )
         self.pipeline: Optional[PipelineCoordinator] = None
         self._pending_tokens: Dict[str, Dict[str, Any]] = {}
+        self._rl_status_info: Dict[str, Any] = {
+            "enabled": False,
+            "running": False,
+            "source": None,
+            "url": None,
+            "error": None,
+            "detected": False,
+            "configured": False,
+        }
 
     # ------------------------------------------------------------------
     # Public API
@@ -382,6 +455,18 @@ class TradingRuntime:
         rl_enabled = bool(self.cfg.get("rl_auto_train", False)) or parse_bool_env(
             "RL_DAEMON", False
         )
+        external_probe = _probe_rl_daemon_health()
+        self._rl_status_info.update(
+            {
+                "enabled": bool(rl_enabled or external_probe.get("detected")),
+                "configured": bool(rl_enabled),
+                "running": False,
+                "source": None,
+                "url": external_probe.get("url"),
+                "error": external_probe.get("error"),
+                "detected": external_probe.get("detected"),
+            }
+        )
         rl_interval = float(self.cfg.get("rl_interval", 3600.0) or 3600.0)
         if fast_mode and self.cfg.get("rl_interval") is None:
             fast_interval = float(os.getenv("FAST_RL_INTERVAL", "60") or 60.0)
@@ -391,9 +476,34 @@ class TradingRuntime:
         )
         if self.rl_task is not None:
             self._tasks.append(self.rl_task)
-            self.status.rl_daemon = True
+            running = not self.rl_task.done()
+            self._rl_status_info.update(
+                {
+                    "enabled": True,
+                    "running": running,
+                    "source": "internal",
+                    "url": None,
+                    "error": None,
+                }
+            )
+        elif external_probe.get("detected"):
+            running = bool(external_probe.get("running"))
+            self._rl_status_info.update(
+                {
+                    "running": running,
+                    "source": "external",
+                    "error": external_probe.get("error"),
+                }
+            )
         else:
-            self.status.rl_daemon = False
+            running = False
+            self._rl_status_info.update(
+                {
+                    "running": False,
+                    "source": None,
+                }
+            )
+        self.status.rl_daemon = bool(self._rl_status_info.get("running"))
 
     async def _start_loop(self) -> None:
         if self._use_new_pipeline and self.pipeline is not None:
@@ -488,11 +598,15 @@ class TradingRuntime:
 
     def _collect_status(self) -> Dict[str, Any]:
         depth_ok = bool(self.depth_proc and self.depth_proc.poll() is None)
+        rl_snapshot = self._collect_rl_status()
+        rl_running = bool(rl_snapshot.get("running")) if rl_snapshot else False
+        self.status.rl_daemon = rl_running
         status = {
             "event_bus": self.status.event_bus,
             "trading_loop": self.status.trading_loop,
             "depth_service": depth_ok,
-            "rl_daemon": self.status.rl_daemon,
+            "rl_daemon": rl_running,
+            "rl_daemon_status": rl_snapshot,
             "heartbeat": self.status.heartbeat_ts,
             "iterations_completed": self._iteration_count,
             "trade_count": len(self._trades),
@@ -522,9 +636,24 @@ class TradingRuntime:
         return dict(self.agent_manager.weights)
 
     def _collect_rl_status(self) -> Dict[str, Any]:
-        if self.rl_task is None:
-            return {"enabled": False}
-        return {"enabled": True, "running": not self.rl_task.done()}
+        if self.rl_task is not None:
+            running = not self.rl_task.done()
+            self._rl_status_info.update(
+                {
+                    "enabled": True,
+                    "running": running,
+                    "source": "internal",
+                    "configured": True,
+                    "error": None,
+                    "url": None,
+                }
+            )
+        snapshot = dict(self._rl_status_info)
+        snapshot.setdefault("enabled", False)
+        snapshot.setdefault("running", False)
+        snapshot.setdefault("configured", False)
+        snapshot.setdefault("detected", False)
+        return snapshot
 
     def _collect_iteration(self) -> Dict[str, Any]:
         with self._iteration_lock:

@@ -292,6 +292,7 @@ def create_app(state: UIState) -> Flask:
                 }
                 .badge.danger { color: var(--danger); background: rgba(255, 123, 114, 0.12); }
                 .badge.success { color: var(--success); background: rgba(63, 185, 80, 0.12); }
+                .badge.disabled { color: var(--muted); background: rgba(139, 148, 158, 0.18); }
                 ul { padding-left: 18px; margin: 0; }
                 li { margin-bottom: 6px; }
                 .muted { color: var(--muted); font-size: 0.88rem; }
@@ -355,16 +356,34 @@ def create_app(state: UIState) -> Flask:
                     <h2>Status</h2>
                     <div class="status-grid">
                         {% for key, value in status.items() %}
-                            {% if key not in ('recent_tokens', 'last_iteration', 'iterations_completed', 'trade_count', 'activity_count', 'heartbeat', 'pipeline_tokens', 'pipeline_size') %}
+                            {% if key not in ('recent_tokens', 'last_iteration', 'iterations_completed', 'trade_count', 'activity_count', 'heartbeat', 'pipeline_tokens', 'pipeline_size', 'rl_daemon_status') %}
                                 <div class="status-card">
                                     <div class="muted">{{ key }}</div>
                                     <div style="font-size:1.2rem; font-weight:600; margin-top:4px;">
-                                        {% if value in (True, False) %}
+                                        {% if key == 'rl_daemon' and status.get('rl_daemon_status') %}
+                                            {% set rl = status.get('rl_daemon_status') %}
+                                            {% if not rl.get('enabled', False) %}
+                                                <span class="badge disabled">DISABLED</span>
+                                            {% else %}
+                                                <span class="badge {{ 'success' if rl.get('running') else 'danger' }}">{{ 'ONLINE' if rl.get('running') else 'OFFLINE' }}</span>
+                                            {% endif %}
+                                        {% elif value in (True, False) %}
                                             <span class="badge {{ 'success' if value else 'danger' }}">{{ 'ONLINE' if value else 'OFFLINE' }}</span>
                                         {% else %}
                                             {{ value if value is not none else '—' }}
                                         {% endif %}
                                     </div>
+                                    {% if key == 'rl_daemon' and status.get('rl_daemon_status') %}
+                                        {% set rl = status.get('rl_daemon_status') %}
+                                        {% if rl.get('source') or rl.get('error') %}
+                                            <div class="muted" style="font-size:0.75rem; margin-top:4px;">
+                                                {% if rl.get('source') %}{{ rl.get('source').capitalize() }} daemon{% endif %}
+                                                {% if rl.get('error') %}
+                                                    {% if rl.get('source') %} · {% endif %}{{ rl.get('error') }}
+                                                {% endif %}
+                                            </div>
+                                        {% endif %}
+                                    {% endif %}
                                 </div>
                             {% endif %}
                         {% endfor %}
