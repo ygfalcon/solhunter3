@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 
 from . import BaseAgent
 from ..portfolio import Portfolio
-from ..prices import fetch_token_prices_async
+from .price_utils import resolve_price
 
 
 logger = logging.getLogger(__name__)
@@ -32,22 +32,12 @@ class ExitAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         if token not in portfolio.balances:
             return []
-        try:
-            quotes = await fetch_token_prices_async({token})
-        except Exception as exc:  # pragma: no cover - network/runtime failures
-            logger.warning("exit agent failed to fetch price for %s: %s", token, exc)
-            return []
-
-        price = 0.0
-        if isinstance(quotes, dict):
-            raw = quotes.get(token)
-            if isinstance(raw, (int, float)):
-                price = float(raw)
-
+        price, price_context = await resolve_price(token, portfolio)
         if price <= 0:
             logger.warning(
                 "exit agent could not obtain a valid price for %s; aborting proposal",
                 token,
+                extra={"price_context": price_context},
             )
             return []
         pos = portfolio.balances[token]
@@ -58,6 +48,8 @@ class ExitAgent(BaseAgent):
         if self.take_profit and roi >= self.take_profit:
             return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
 
-        if self.trailing and portfolio.trailing_stop_triggered(token, price, self.trailing):
+        if price > 0 and self.trailing and portfolio.trailing_stop_triggered(
+            token, price, self.trailing
+        ):
             return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
         return []

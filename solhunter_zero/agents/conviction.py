@@ -28,50 +28,10 @@ def predict_token_activity(token: str, *, model_path: str | None = None) -> floa
 
 from . import BaseAgent
 from ..portfolio import Portfolio
-from ..prices import fetch_token_prices_async, get_cached_price
+from .price_utils import resolve_price
 
 
 logger = logging.getLogger(__name__)
-
-
-async def _resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[str, Any]]:
-    """Return the best available USD price for ``token`` and context."""
-
-    context: Dict[str, Any] = {}
-    price = 0.0
-
-    history = portfolio.price_history.get(token, [])
-    if history:
-        try:
-            hist_price = float(history[-1])
-        except Exception:
-            hist_price = 0.0
-        else:
-            context["history_price"] = hist_price
-            if hist_price > 0:
-                price = hist_price
-
-    if price <= 0:
-        cached = get_cached_price(token)
-        if cached is not None:
-            cached_price = float(cached)
-            context["cached_price"] = cached_price
-            if cached_price > 0:
-                price = cached_price
-
-    if price <= 0:
-        fetched_price = 0.0
-        try:
-            prices = await fetch_token_prices_async({token})
-        except Exception as exc:
-            context["fetch_error"] = str(exc)
-        else:
-            fetched_price = float(prices.get(token, 0.0))
-            context["fetched_price"] = fetched_price
-        if fetched_price > 0:
-            price = fetched_price
-
-    return price, context
 
 
 class ConvictionAgent(BaseAgent):
@@ -135,7 +95,7 @@ class ConvictionAgent(BaseAgent):
         if imbalance is not None:
             avg_roi += imbalance * 0.05
 
-        price, price_context = await _resolve_price(token, portfolio)
+        price, price_context = await resolve_price(token, portfolio)
         context = {
             "avg_roi": avg_roi,
             "prediction": pred,
