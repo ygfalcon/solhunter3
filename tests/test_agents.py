@@ -63,6 +63,17 @@ def test_conviction_agent_threshold(monkeypatch):
         'solhunter_zero.agents.conviction.run_simulations',
         lambda t, count=1, **_: [types.SimpleNamespace(expected_roi=0.2)],
     )
+    async def price_lookup(tokens):
+        return {next(iter(tokens)): 1.0}
+
+    monkeypatch.setattr(
+        'solhunter_zero.agents.conviction.fetch_token_prices_async',
+        price_lookup,
+    )
+    monkeypatch.setattr(
+        'solhunter_zero.agents.conviction.get_cached_price',
+        lambda token: None,
+    )
 
     actions = asyncio.run(agent.propose_trade('tok', DummyPortfolio()))
     assert actions and actions[0]['side'] == 'buy'
@@ -78,6 +89,17 @@ def test_conviction_agent_uses_prediction(monkeypatch):
     monkeypatch.setattr(
         'solhunter_zero.agents.conviction.predict_price_movement',
         lambda t, *, sentiment=None, model_path=None: 0.04,
+    )
+    async def price_lookup(tokens):
+        return {next(iter(tokens)): 1.0}
+
+    monkeypatch.setattr(
+        'solhunter_zero.agents.conviction.fetch_token_prices_async',
+        price_lookup,
+    )
+    monkeypatch.setattr(
+        'solhunter_zero.agents.conviction.get_cached_price',
+        lambda token: None,
     )
 
     actions = asyncio.run(agent.propose_trade('tok', DummyPortfolio()))
