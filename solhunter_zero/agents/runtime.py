@@ -93,25 +93,43 @@ class AgentRuntime:
         for act in actions:
             # Map evaluated actions directly to decisions; includes price/amount
             price = act.get("price")
-            if price is None:
-                # try last seen price in portfolio history
+            try:
+                price = float(price)
+            except (TypeError, ValueError):
+                price = None
+
+            if price is None or price <= 0:
                 hist = self.portfolio.price_history.get(token, [])
                 if hist:
-                    price = hist[-1]
-                else:
                     try:
-                        prices = await fetch_token_prices_async([token])
-                        price = float(prices.get(token, 0.0))
+                        price = float(hist[-1])
                     except Exception:
-                        price = 0.0
+                        price = None
+
+            if (price is None or price <= 0) and token not in self._ewma:
+                try:
+                    prices = await fetch_token_prices_async([token])
+                    fetched = float(prices.get(token, 0.0) or 0.0)
+                    if fetched > 0:
+                        price = fetched
+                except Exception:
+                    price = None
+
             # Prefer EWMA if available (smoother decisions)
             if token in self._ewma:
-                price = float(self._ewma[token])
+                ewma_price = float(self._ewma[token])
+                if ewma_price > 0:
+                    price = ewma_price
+
+            if price is None or price <= 0:
+                log.warning("dropping action due to missing price", extra={"token": token})
+                continue
+
             decision = {
                 "token": act.get("token"),
                 "side": act.get("side"),
                 "size": float(act.get("amount", 0.0)),
-                "price": float(price or 0.0),
+                "price": float(price),
                 "rationale": {"agent": act.get("agent"), "conviction_delta": act.get("conviction_delta")},
             }
             try:
