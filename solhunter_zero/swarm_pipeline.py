@@ -519,6 +519,22 @@ def _score_token(token: str, portfolio: Portfolio) -> float:
     return score
 
 
+def _score_priority(score: float) -> float:
+    """Map the discovery score to a bounded priority multiplier."""
+
+    try:
+        value = float(score)
+    except Exception:
+        return 0.5
+    if not math.isfinite(value):
+        return 0.5
+    try:
+        logistic = 1.0 / (1.0 + math.exp(-value))
+    except OverflowError:
+        logistic = 1.0 if value > 0 else 0.0
+    return min(1.0, max(0.25, logistic))
+
+
 async def _ensure_depth_executor(agent_manager: AgentManager, token: str) -> None:
     if not getattr(agent_manager, "depth_service", False):
         return
@@ -768,6 +784,7 @@ class SwarmPipeline:
                 "token_results": [
                     {
                         "token": rec.token,
+                        "score": rec.score,
                         "actions": [
                             {
                                 "token": act.token,
@@ -778,6 +795,7 @@ class SwarmPipeline:
                                 "score": act.score,
                                 "expected_roi": act.expected_roi,
                                 "success_prob": act.success_prob,
+                                "evaluation_score": rec.score,
                             }
                             for act in rec.actions
                         ],
@@ -1037,6 +1055,7 @@ class SwarmPipeline:
                     act.success_prob = avg_prob
                 act.metadata.setdefault("simulation_avg_roi", avg_roi)
                 act.metadata.setdefault("simulation_avg_success", avg_prob)
+                act.metadata.setdefault("evaluation_score", record.score)
             filtered: List[SwarmAction] = []
             for act in actions:
                 if min_roi and act.expected_roi < min_roi:
@@ -1048,9 +1067,15 @@ class SwarmPipeline:
                 filtered.append(act)
             if max_actions and len(filtered) > max_actions:
                 filtered.sort(key=lambda a: a.score, reverse=True)
-                rejected = len(filtered) - max_actions
-                stage.rejected[record.token] = rejected
-                filtered = filtered[:max_actions]
+                priority = _score_priority(record.score)
+                allowed = int(math.ceil(max_actions * priority))
+                allowed = max(1, min(len(filtered), allowed))
+                rejected = len(filtered) - allowed
+                if rejected > 0:
+                    stage.rejected[record.token] = rejected
+                    filtered = filtered[:allowed]
+                else:
+                    stage.rejected.pop(record.token, None)
             record.actions = filtered
 
         await asyncio.gather(*(simulate(rec) for rec in evaluation.records))
@@ -1071,6 +1096,7 @@ class SwarmPipeline:
                 "token": record.token,
                 "actions": [],
                 "errors": record.errors,
+                "score": record.score,
             }
             raw_results_by_token[record.token] = []
             if not self.dry_run:
@@ -1121,6 +1147,7 @@ class SwarmPipeline:
                     "agent": act.agent,
                     "expected_roi": act.expected_roi,
                     "success_prob": act.success_prob,
+                    "evaluation_score": record.score,
                 }
                 if risk:
                     record_entry["risk"] = risk
