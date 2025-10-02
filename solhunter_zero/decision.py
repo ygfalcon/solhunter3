@@ -1,59 +1,121 @@
 from __future__ import annotations
-from typing import List
+from typing import List, Mapping
 import statistics
 
 from .simulation import SimulationResult
 
 
+_DEFAULT_THRESHOLDS = {
+    "min_success": 0.6,
+    "min_roi": 1.0,
+    "min_sharpe": 1.0,
+    "min_volume": 0.0,
+    "min_liquidity": 0.0,
+    "max_slippage": 1.0,
+    "min_volume_spike": 1.0,
+    "min_sentiment": 0.0,
+    "min_order_strength": 0.0,
+    "gas_cost": 0.0,
+}
+
+
+def _coerce_threshold_profile(
+    profile: Mapping[str, Mapping[str, float]] | None,
+) -> dict[str, dict[str, float]]:
+    if not profile:
+        return {}
+    coerced: dict[str, dict[str, float]] = {}
+    for regime, values in profile.items():
+        inner: dict[str, float] = {}
+        for key, value in dict(values).items():
+            try:
+                inner[str(key)] = float(value)
+            except Exception:
+                continue
+        coerced[str(regime)] = inner
+    return coerced
+
+
 def should_buy(
     sim_results: List[SimulationResult],
     *,
-    min_success: float = 0.6,
-    min_roi: float = 1.0,
-    min_sharpe: float = 1.0,
-    min_volume: float = 0.0,
-    min_liquidity: float = 0.0,
-    max_slippage: float = 1.0,
-    min_volume_spike: float = 1.0,
-    min_sentiment: float = 0.0,
-    min_order_strength: float = 0.0,
-    gas_cost: float = 0.0,
+    regime: str | None = None,
+    threshold_profile: Mapping[str, Mapping[str, float]] | None = None,
+    min_success: float | None = None,
+    min_roi: float | None = None,
+    min_sharpe: float | None = None,
+    min_volume: float | None = None,
+    min_liquidity: float | None = None,
+    max_slippage: float | None = None,
+    min_volume_spike: float | None = None,
+    min_sentiment: float | None = None,
+    min_order_strength: float | None = None,
+    gas_cost: float | None = None,
 ) -> bool:
     """Decide whether to buy a token based on simulation results.
 
     The decision now incorporates the Sharpe ratio to account for volatility.
     Thresholds for average success probability, ROI and Sharpe ratio are
-    configurable.
+    configurable either via direct keyword arguments or the optional
+    ``threshold_profile`` mapping keyed by market regime.
     """
 
     if not sim_results:
         return False
 
+    thresholds = dict(_DEFAULT_THRESHOLDS)
+    profile = _coerce_threshold_profile(threshold_profile)
+    for scope in ("default", regime or ""):
+        if not scope:
+            continue
+        scoped = profile.get(scope)
+        if not scoped:
+            continue
+        thresholds.update({k: scoped[k] for k in thresholds.keys() & scoped.keys()})
+
+    overrides = {
+        "min_success": min_success,
+        "min_roi": min_roi,
+        "min_sharpe": min_sharpe,
+        "min_volume": min_volume,
+        "min_liquidity": min_liquidity,
+        "max_slippage": max_slippage,
+        "min_volume_spike": min_volume_spike,
+        "min_sentiment": min_sentiment,
+        "min_order_strength": min_order_strength,
+        "gas_cost": gas_cost,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            thresholds[key] = float(value)
+
     first = sim_results[0]
 
-    if first.volume < min_volume:
+    if first.volume < thresholds["min_volume"]:
         return False
-    if first.liquidity < min_liquidity:
+    if first.liquidity < thresholds["min_liquidity"]:
         return False
-    if first.slippage > max_slippage:
+    if first.slippage > thresholds["max_slippage"]:
         return False
-    if getattr(first, "volume_spike", 1.0) < min_volume_spike:
+    if getattr(first, "volume_spike", 1.0) < thresholds["min_volume_spike"]:
         return False
-    if getattr(first, "sentiment", 0.0) < min_sentiment:
+    if getattr(first, "sentiment", 0.0) < thresholds["min_sentiment"]:
         return False
-    if getattr(first, "order_book_strength", 0.0) < min_order_strength:
+    if getattr(first, "order_book_strength", 0.0) < thresholds["min_order_strength"]:
         return False
 
     successes = [r.success_prob for r in sim_results]
     rois = [r.expected_roi for r in sim_results]
 
     avg_success = sum(successes) / len(successes)
-    avg_roi = sum(rois) / len(rois) - gas_cost
+    avg_roi = sum(rois) / len(rois) - thresholds["gas_cost"]
     roi_std = statistics.stdev(rois) if len(rois) > 1 else 0.0
     sharpe = avg_roi / roi_std if roi_std > 0 else 0.0
 
     return (
-        avg_success >= min_success and avg_roi >= min_roi and sharpe >= min_sharpe
+        avg_success >= thresholds["min_success"]
+        and avg_roi >= thresholds["min_roi"]
+        and sharpe >= thresholds["min_sharpe"]
     )
 
 

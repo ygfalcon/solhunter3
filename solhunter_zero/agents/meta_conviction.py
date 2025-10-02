@@ -74,9 +74,16 @@ class MetaConvictionAgent(BaseAgent):
         *,
         depth: float | None = None,
         imbalance: float | None = None,
+        regime: str | None = None,
     ) -> List[Dict[str, Any]]:
         results = await asyncio.gather(
-            self.sim_agent.propose_trade(token, portfolio, depth=depth, imbalance=imbalance),
+            self.sim_agent.propose_trade(
+                token,
+                portfolio,
+                depth=depth,
+                imbalance=imbalance,
+                regime=regime,
+            ),
             self.conv_agent.propose_trade(token, portfolio, depth=depth, imbalance=imbalance),
             self.ram_agent.propose_trade(token, portfolio, depth=depth, imbalance=imbalance),
         )
@@ -106,3 +113,8 @@ class MetaConvictionAgent(BaseAgent):
             if pos:
                 return [{"token": token, "side": "sell", "amount": pos.amount, "price": 0.0}]
         return []
+
+    def apply_threshold_profile(self, profile):
+        """Propagate the profile to the internal simulation agent."""
+
+        self.sim_agent.apply_threshold_profile(profile)

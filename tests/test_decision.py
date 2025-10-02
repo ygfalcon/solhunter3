@@ -101,6 +101,52 @@ def test_should_buy_sentiment_and_order_book():
     )
 
 
+def test_should_buy_regime_threshold_profile():
+    sims = [
+        SimulationResult(
+            success_prob=0.7,
+            expected_roi=1.2,
+            volume=200.0,
+            liquidity=220.0,
+        ),
+        SimulationResult(
+            success_prob=0.72,
+            expected_roi=1.25,
+            volume=180.0,
+            liquidity=210.0,
+        ),
+    ]
+    thresholds = {
+        "default": {
+            "min_success": 0.6,
+            "min_roi": 1.0,
+            "min_liquidity": 150.0,
+            "gas_cost": 0.05,
+        },
+        "bull": {"min_success": 0.55, "gas_cost": 0.0},
+        "bear": {"min_success": 0.78, "min_roi": 1.35, "gas_cost": 0.3},
+    }
+
+    assert (
+        should_buy(
+            sims,
+            regime="bull",
+            threshold_profile=thresholds,
+            min_sharpe=0.0,
+        )
+        is True
+    )
+    assert (
+        should_buy(
+            sims,
+            regime="bear",
+            threshold_profile=thresholds,
+            min_sharpe=0.0,
+        )
+        is False
+    )
+
+
 def test_should_sell_negative_roi():
     sims = [
         SimulationResult(success_prob=0.5, expected_roi=-0.1, volume=200.0, liquidity=500.0),

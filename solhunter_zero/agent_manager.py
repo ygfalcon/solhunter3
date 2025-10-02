@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from .jsonutil import loads, dumps
 from .util import run_coro
 import os
 import random
 import inspect
 import time
-from typing import Iterable, Dict, Any, List
+from typing import Iterable, Dict, Any, List, Mapping
 from dataclasses import dataclass, field
 from .paths import ROOT
 
@@ -84,6 +85,7 @@ class AgentManagerConfig:
     depth_service: bool = False
     priority_rpc: list[str] | None = None
     regime_weights: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    decision_thresholds: Dict[str, Dict[str, float]] = field(default_factory=dict)
     evolve_interval: int = 1
     mutation_threshold: float = 0.0
     weight_config_paths: list[str] = field(default_factory=list)
@@ -227,6 +229,7 @@ class AgentManager:
         init_weights = cfg.weights or {}
         self.weights = {**file_weights, **init_weights}
         self.regime_weights = cfg.regime_weights or {}
+        self.decision_thresholds = copy.deepcopy(cfg.decision_thresholds or {})
 
         self.memory_agent = cfg.memory_agent or next(
             (a for a in self.agents if isinstance(a, MemoryAgent)),
@@ -284,6 +287,9 @@ class AgentManager:
         self.coordinator = SwarmCoordinator(
             self.memory_agent, self.weights, self.regime_weights
         )
+
+        if self.decision_thresholds:
+            self._install_threshold_profile(self.decision_thresholds)
 
         self.mutation_path = (
             str(cfg.mutation_path)
@@ -516,7 +522,11 @@ class AgentManager:
         start = time.perf_counter()
         try:
             result = await swarm.propose(
-                token, portfolio, weights=weights, rl_action=rl_action
+                token,
+                portfolio,
+                weights=weights,
+                rl_action=rl_action,
+                regime=regime,
             )
         except asyncio.TimeoutError:
             logger.warning("Swarm evaluation timed out for %s", token)
@@ -529,7 +539,7 @@ class AgentManager:
             agents=agents,
             weights=weights,
         )
-        ctx.metadata = {"latency": latency}
+        ctx.metadata = {"latency": latency, "regime": regime}
         logger.info("AgentManager: swarm produced %s actions for %s", len(result), token)
         publish(
             "runtime.log",
@@ -552,6 +562,20 @@ class AgentManager:
         """Return and remove the cached swarm associated with ``token``."""
 
         return self._active_swarms.pop(token, default)
+
+    def _install_threshold_profile(
+        self, profile: Mapping[str, Mapping[str, float]]
+    ) -> None:
+        """Propagate decision thresholds to agents that can consume them."""
+
+        for agent in self.agents:
+            try:
+                if hasattr(agent, "apply_threshold_profile"):
+                    agent.apply_threshold_profile(copy.deepcopy(profile))
+                elif hasattr(agent, "threshold_profile"):
+                    setattr(agent, "threshold_profile", copy.deepcopy(profile))
+            except Exception:
+                continue
 
     def _select_agents(self) -> list[BaseAgent]:
         agents = list(self.agents)
@@ -1206,6 +1230,18 @@ class AgentManager:
                     regime_weights = {}
             except Exception:
                 regime_weights = {}
+        decision_thresholds = cfg.get("decision_thresholds") or {}
+        if isinstance(decision_thresholds, str):
+            try:
+                import ast
+
+                parsed_dt = ast.literal_eval(decision_thresholds)
+                if isinstance(parsed_dt, dict):
+                    decision_thresholds = parsed_dt
+                else:
+                    decision_thresholds = {}
+            except Exception:
+                decision_thresholds = {}
         evolve_interval = int(cfg.get("evolve_interval", 1))
         mutation_threshold = float(cfg.get("mutation_threshold", 0.0))
         weight_config_paths = cfg.get("weight_config_paths") or []
@@ -1262,6 +1298,7 @@ class AgentManager:
             depth_service=depth_service,
             priority_rpc=priority_rpc,
             regime_weights=regime_weights,
+            decision_thresholds=decision_thresholds,
             evolve_interval=evolve_interval,
             mutation_threshold=mutation_threshold,
             weight_config_paths=weight_config_paths,

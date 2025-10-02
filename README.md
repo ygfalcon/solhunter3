@@ -176,6 +176,8 @@ The bot reads its settings from `config.toml`. Ensure the following keys are def
 - `dex_base_url` – base URL of the DEX API
 - `agents` – list of agent names to enable
 - `agent_weights` – table mapping each agent to a weight
+- `decision_thresholds` – optional table keyed by regime that tunes buy
+  thresholds (success probability, ROI, Sharpe, liquidity floor, gas cost).
 
 A minimal example looks like:
 
@@ -187,6 +189,28 @@ agents = ["simulation"]
 [agent_weights]
 simulation = 1.0
 ```
+
+You can optionally tailor buy criteria for each detected market regime by
+defining a `decision_thresholds` table. Provide a `default` section for shared
+values and override individual fields such as `min_success`, `min_roi`,
+`min_liquidity`, or `gas_cost` per regime:
+
+```toml
+[decision_thresholds.default]
+min_success = 0.6
+min_roi = 1.0
+min_liquidity = 50000.0
+gas_cost = 0.05
+
+[decision_thresholds.bear]
+min_success = 0.75
+min_roi = 1.3
+gas_cost = 0.2
+min_liquidity = 150000.0
+```
+
+`AgentManager` forwards the detected regime to agents like the simulation
+module so their buy decisions automatically adapt to these profiles.
 
 The `scripts/setup_one_click.py` helper validates these fields after writing `config.toml` and exits with guidance if any are missing.
 
