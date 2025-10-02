@@ -573,6 +573,7 @@ class SwarmPipeline:
         self.max_drawdown = max_drawdown
         self.volatility_factor = volatility_factor
         self._skip_simulation = bool(getattr(agent_manager, "skip_simulation", False))
+        self._last_simulation_stats: Dict[str, tuple[float, float]] = {}
 
         self.fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
         self.time_budget = self._get_float_env("ITERATION_TIME_BUDGET", default=0.0)
@@ -981,11 +982,10 @@ class SwarmPipeline:
                 stage.rejected[record.token] = len(actions)
                 record.actions = []
                 return
-            if self._skip_simulation:
-                return
             need_sim = any(act.expected_roi <= 0 or act.success_prob <= 0 for act in actions)
+            should_run_sim = need_sim and not self._skip_simulation
             sims: List[SimulationResult] = []
-            if need_sim:
+            if should_run_sim:
                 publish(
                     "runtime.log",
                     RuntimeLog(stage="simulation", detail=f"start:{record.token} actions={len(actions)}"),
@@ -1028,6 +1028,14 @@ class SwarmPipeline:
                     log.exception("Simulation failed for %s", record.token)
             avg_roi = sum(sim.expected_roi for sim in sims) / len(sims) if sims else 0.0
             avg_prob = sum(sim.success_prob for sim in sims) / len(sims) if sims else 0.0
+            reused_simulation = False
+            if sims:
+                self._last_simulation_stats[record.token] = (avg_roi, avg_prob)
+            else:
+                cached_stats = self._last_simulation_stats.get(record.token)
+                if cached_stats:
+                    avg_roi, avg_prob = cached_stats
+                    reused_simulation = True
             for act in actions:
                 for sim in sims:
                     act.apply_simulation(sim)
@@ -1035,8 +1043,10 @@ class SwarmPipeline:
                     act.expected_roi = avg_roi
                 if act.success_prob <= 0 and avg_prob > 0:
                     act.success_prob = avg_prob
-                act.metadata.setdefault("simulation_avg_roi", avg_roi)
-                act.metadata.setdefault("simulation_avg_success", avg_prob)
+                act.metadata["simulation_avg_roi"] = avg_roi
+                act.metadata["simulation_avg_success"] = avg_prob
+                if reused_simulation:
+                    act.metadata["cache_derived"] = True
             filtered: List[SwarmAction] = []
             for act in actions:
                 if min_roi and act.expected_roi < min_roi:
