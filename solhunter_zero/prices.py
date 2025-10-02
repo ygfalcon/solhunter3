@@ -3,7 +3,7 @@ import logging
 import aiohttp
 import asyncio
 
-from typing import Iterable, Dict
+from typing import Iterable, Dict, Any
 
 from solhunter_zero.lru import TTLCache
 from .http import get_session
@@ -17,6 +17,16 @@ PRICE_API_PATH = "/v4/price"
 # module level price cache
 PRICE_CACHE_TTL = float(os.getenv("PRICE_CACHE_TTL", "30") or 30)
 PRICE_CACHE = TTLCache(maxsize=256, ttl=PRICE_CACHE_TTL)
+
+
+def _to_positive_float(value: Any) -> float | None:
+    """Return ``value`` coerced to ``float`` when it is positive."""
+
+    try:
+        candidate = float(value)
+    except Exception:
+        return None
+    return candidate if candidate > 0 else None
 
 
 def _tokens_key(tokens: Iterable[str]) -> tuple[str, ...]:
@@ -226,3 +236,44 @@ async def fetch_token_prices_async(tokens: Iterable[str]) -> Dict[str, float]:
             result[t] = v
 
     return result
+
+
+async def resolve_token_price(token: str) -> float | None:
+    """Return the best available positive price for ``token``.
+
+    The lookup prefers freshly fetched prices but falls back to cached values
+    when a live request fails or returns a non-positive quote.
+    """
+
+    cached_price = _to_positive_float(get_cached_price(token))
+
+    try:
+        prices = await fetch_token_prices_async({token})
+    except Exception:
+        if cached_price is not None:
+            logger.debug(
+                "resolve_token_price: using cached price for token %s after fetch error",
+                token,
+                exc_info=True,
+            )
+            return cached_price
+        logger.debug(
+            "resolve_token_price: fetch failed for token %s and no cache available",
+            token,
+            exc_info=True,
+        )
+        return None
+
+    fresh_price = _to_positive_float(prices.get(token))
+    if fresh_price is not None:
+        update_price_cache(token, fresh_price)
+        return fresh_price
+
+    if cached_price is not None:
+        logger.debug(
+            "resolve_token_price: falling back to cached price for token %s",
+            token,
+        )
+        return cached_price
+
+    return None

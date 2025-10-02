@@ -1,10 +1,13 @@
 from __future__ import annotations
-
-from typing import List, Dict, Any
+import logging
+from typing import Any, Dict, List
 
 from . import BaseAgent
 from ..portfolio import Portfolio
-from ..prices import fetch_token_prices_async
+from ..prices import resolve_token_price
+
+
+logger = logging.getLogger(__name__)
 
 
 class ExitAgent(BaseAgent):
@@ -27,8 +30,8 @@ class ExitAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         if token not in portfolio.balances:
             return []
-        prices = await fetch_token_prices_async({token})
-        price = prices.get(token, 0.0)
+        resolved = await resolve_token_price(token)
+        price = float(resolved) if resolved is not None else 0.0
         pos = portfolio.balances[token]
 
         if price:
@@ -38,6 +41,12 @@ class ExitAgent(BaseAgent):
             if self.take_profit and roi >= self.take_profit:
                 return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
 
-        if self.trailing and portfolio.trailing_stop_triggered(token, price, self.trailing):
-            return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
+        if self.trailing:
+            if price <= 0:
+                logger.info(
+                    "ExitAgent skipping trailing stop due to non-positive price",
+                    extra={"token": token},
+                )
+            elif portfolio.trailing_stop_triggered(token, price, self.trailing):
+                return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
         return []
