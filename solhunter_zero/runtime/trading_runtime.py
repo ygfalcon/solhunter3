@@ -252,12 +252,17 @@ class TradingRuntime:
         self.stop_event.set()
         self.activity.add("runtime", "stopping")
 
-        for task in list(self._tasks):
+        tasks_to_cancel = list(self._tasks)
+        if self.rl_task is not None and self.rl_task not in tasks_to_cancel:
+            tasks_to_cancel.append(self.rl_task)
+
+        for task in tasks_to_cancel:
             task.cancel()
-        for task in list(self._tasks):
+        for task in tasks_to_cancel:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        self._tasks.clear()
+
+        self._tasks = [t for t in self._tasks if t not in tasks_to_cancel]
 
         for topic, handler in list(self._subscriptions):
             with contextlib.suppress(Exception):
@@ -274,10 +279,13 @@ class TradingRuntime:
             self.ui_server = None
 
         if self.rl_task is not None:
-            self.rl_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.rl_task
-            self.rl_task = None
+            if self.rl_task in tasks_to_cancel:
+                self.rl_task = None
+            else:
+                self.rl_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.rl_task
+                self.rl_task = None
 
         if self.depth_proc is not None:
             with contextlib.suppress(Exception):

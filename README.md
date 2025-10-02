@@ -733,6 +733,8 @@ Set `USE_TORCH_COMPILE=0` to disable this optimization.
 
 Set `rl_auto_train = true` in `config.toml` to enable automatic hyperparameter
 tuning. When enabled the RL daemon starts automatically with the trading loop.
+You can also toggle the lightweight daemon ad-hoc by exporting
+`RL_DAEMON=true`, which is useful for testing without touching configuration.
 It spawns `scripts/auto_train_rl.py` which periodically retrains the PPO model
 from `offline_data.db`. Control how often tuning runs via `rl_tune_interval`
 (seconds).
