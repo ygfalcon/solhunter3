@@ -289,7 +289,9 @@ def create_app(state: UIState) -> Flask:
                 "css_class": "trades",
             },
         ]
-        weights_sample = dict(list(weights.items())[:10]) if isinstance(weights, dict) else {}
+        weights_sample = (
+            dict(list(weights.items())[:10]) if isinstance(weights, dict) else {}
+        )
         samples = {
             "activity": activity[-5:],
             "trades": trades[-5:],
@@ -297,7 +299,18 @@ def create_app(state: UIState) -> Flask:
             "weights": weights_sample,
             "actions": actions[-5:],
         }
-        discovery_recent = discovery.get("recent", [])
+        discovery_recent_all = list(discovery.get("recent", []))
+        discovery_recent_total = len(discovery_recent_all)
+        discovery_recent_summary = list(
+            reversed(discovery_recent_all[-3:])
+        )
+        discovery_recent_display = list(
+            reversed(discovery_recent_all[-120:])
+        )
+        logs_all = list(logs)
+        logs_total = len(logs_all)
+        logs_summary = list(reversed(logs_all[-3:]))
+        logs_display = list(reversed(logs_all[-200:]))
         config_overview = {
             "config_path": config_summary.get("config_path"),
             "agents": config_summary.get("agents"),
@@ -489,6 +502,120 @@ def create_app(state: UIState) -> Flask:
                     border-radius: 14px;
                     padding: 12px;
                 }
+                details.collapsible {
+                    border: 1px solid rgba(88, 166, 255, 0.18);
+                    border-radius: 14px;
+                    background: rgba(13, 17, 23, 0.6);
+                    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+                    position: relative;
+                }
+                details.collapsible:hover,
+                details.collapsible:focus-within {
+                    border-color: rgba(88, 166, 255, 0.45);
+                    box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.15), 0 12px 40px rgba(45, 104, 255, 0.18);
+                }
+                details.collapsible summary {
+                    list-style: none;
+                    cursor: pointer;
+                    padding: 14px 18px;
+                    display: flex;
+                    align-items: center;
+                    gap: 16px;
+                    user-select: none;
+                }
+                details.collapsible summary::-webkit-details-marker { display: none; }
+                details.collapsible summary:focus-visible {
+                    outline: 2px solid var(--accent);
+                    outline-offset: 4px;
+                }
+                .collapsible-summary {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 12px;
+                    flex: 1;
+                    align-items: center;
+                }
+                .summary-stack {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 4px;
+                    min-width: 160px;
+                }
+                .summary-title {
+                    font-size: 0.75rem;
+                    letter-spacing: 0.08em;
+                    text-transform: uppercase;
+                    color: var(--muted);
+                }
+                .summary-count {
+                    font-size: 0.95rem;
+                    color: var(--accent);
+                    font-weight: 600;
+                }
+                details.collapsible[open] .summary-count {
+                    color: #8dbbff;
+                }
+                .summary-peek {
+                    display: flex;
+                    align-items: center;
+                    flex-wrap: wrap;
+                    gap: 8px;
+                    font-size: 0.85rem;
+                    color: rgba(230, 237, 243, 0.8);
+                }
+                .peek-chip {
+                    padding: 4px 8px;
+                    border-radius: 999px;
+                    background: rgba(88, 166, 255, 0.12);
+                    border: 1px solid rgba(88, 166, 255, 0.2);
+                    box-shadow: 0 0 8px rgba(88, 166, 255, 0.2);
+                    white-space: nowrap;
+                }
+                .caret {
+                    margin-left: auto;
+                    width: 14px;
+                    height: 14px;
+                    position: relative;
+                }
+                .caret::before {
+                    content: "";
+                    position: absolute;
+                    inset: 0;
+                    border-right: 2px solid var(--accent);
+                    border-bottom: 2px solid var(--accent);
+                    transform: rotate(-45deg);
+                    transform-origin: center;
+                    transition: transform 0.35s ease, box-shadow 0.35s ease;
+                    box-shadow: 0 0 10px rgba(88, 166, 255, 0.6);
+                }
+                details.collapsible[open] .caret::before {
+                    transform: rotate(45deg);
+                    box-shadow: 0 0 14px rgba(88, 166, 255, 0.85);
+                }
+                .collapsible-body {
+                    max-height: 0;
+                    opacity: 0;
+                    overflow: hidden;
+                    transition: max-height 0.4s ease, opacity 0.4s ease, padding 0.4s ease;
+                    padding: 0 18px;
+                }
+                details.collapsible[open] .collapsible-body {
+                    max-height: 520px;
+                    opacity: 1;
+                    padding: 12px 18px 18px;
+                }
+                .collapsible-scroll {
+                    max-height: 320px;
+                    overflow-y: auto;
+                    padding-right: 6px;
+                    margin-top: 10px;
+                }
+                .chip-group {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 8px;
+                    margin-top: 10px;
+                }
             </style>
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         </head>
@@ -632,24 +759,48 @@ def create_app(state: UIState) -> Flask:
 
                 <div class="panel">
                     <h2>Discovery</h2>
-                    <div>Recent tokens ({{ discovery.get('recent_count', 0) }}):</div>
-                    {% if discovery_recent %}
-                        <ul>
-                            {% for token in discovery_recent[:20] %}
-                                <li>{{ token }}</li>
-                            {% endfor %}
-                        </ul>
-                    {% else %}
-                        <div class="muted">Waiting for discovery results…</div>
-                    {% endif %}
-                    {% if discovery.get('latest_iteration_tokens') %}
-                        <div style="margin-top:12px;" class="muted">Latest iteration tokens:</div>
-                        <ul>
-                            {% for token in discovery.get('latest_iteration_tokens')[:20] %}
-                                <li>{{ token }}</li>
-                            {% endfor %}
-                        </ul>
-                    {% endif %}
+                    <details class="collapsible">
+                        <summary>
+                            <div class="collapsible-summary">
+                                <div class="summary-stack">
+                                    <div class="summary-title">Recent Tokens</div>
+                                    <div class="summary-count">{{ discovery_recent_total }} tracked</div>
+                                </div>
+                                <div class="summary-peek" aria-hidden="true">
+                                    {% if discovery_recent_summary %}
+                                        {% for token in discovery_recent_summary %}
+                                            <span class="peek-chip">{{ token }}</span>
+                                        {% endfor %}
+                                    {% else %}
+                                        <span class="muted">Waiting for discovery results…</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <span class="caret" aria-hidden="true"></span>
+                        </summary>
+                        <div class="collapsible-body">
+                            {% if discovery_recent_display %}
+                                <div class="muted">Newest {{ discovery_recent_display|length }} tokens shown below.</div>
+                                <div class="collapsible-scroll">
+                                    <ul>
+                                        {% for token in discovery_recent_display %}
+                                            <li>{{ token }}</li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                            {% else %}
+                                <div class="muted">Waiting for discovery results…</div>
+                            {% endif %}
+                            {% if discovery.get('latest_iteration_tokens') %}
+                                <div class="muted" style="margin-top:14px;">Latest iteration tokens ({{ discovery.get('latest_iteration_tokens')|length }}):</div>
+                                <div class="chip-group" role="list">
+                                    {% for token in discovery.get('latest_iteration_tokens')[:20] %}
+                                        <span class="peek-chip" role="listitem">{{ token }}</span>
+                                    {% endfor %}
+                                </div>
+                            {% endif %}
+                        </div>
+                    </details>
                 </div>
 
                 <div class="panel">
@@ -724,15 +875,43 @@ def create_app(state: UIState) -> Flask:
 
                 <div class="panel">
                     <h2>Event Log</h2>
-                    {% if logs %}
-                        <ul>
-                            {% for entry in logs[-10:]|reverse %}
-                                <li><span class="muted">{{ entry.get('timestamp') }}</span> · <strong>{{ entry.get('payload', {}).get('stage', entry.get('topic')) }}</strong> — {{ entry.get('payload', {}).get('detail') or entry }}</li>
-                            {% endfor %}
-                        </ul>
-                    {% else %}
-                        <div class="muted">No log entries yet.</div>
-                    {% endif %}
+                    <details class="collapsible">
+                        <summary>
+                            <div class="collapsible-summary">
+                                <div class="summary-stack">
+                                    <div class="summary-title">Latest Events</div>
+                                    <div class="summary-count">{{ logs_total }} recorded</div>
+                                </div>
+                                <div class="summary-peek" aria-hidden="true">
+                                    {% if logs_summary %}
+                                        {% for entry in logs_summary %}
+                                            {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
+                                            <span class="peek-chip">{{ stage }}</span>
+                                        {% endfor %}
+                                    {% else %}
+                                        <span class="muted">No log entries yet.</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <span class="caret" aria-hidden="true"></span>
+                        </summary>
+                        <div class="collapsible-body">
+                            {% if logs_display %}
+                                <div class="muted">Showing the freshest {{ logs_display|length }} entries.</div>
+                                <div class="collapsible-scroll">
+                                    <ul>
+                                        {% for entry in logs_display %}
+                                            {% set detail = entry.get('payload', {}).get('detail') or entry %}
+                                            {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
+                                            <li><span class="muted">{{ entry.get('timestamp') }}</span> · <strong>{{ stage }}</strong> — {{ detail }}</li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                            {% else %}
+                                <div class="muted">No log entries yet.</div>
+                            {% endif %}
+                        </div>
+                    </details>
                 </div>
 
                 <div class="panel">
@@ -898,12 +1077,16 @@ def create_app(state: UIState) -> Flask:
             status=status,
             summary=summary,
             discovery=discovery,
-            discovery_recent=discovery_recent,
+            discovery_recent_display=discovery_recent_display,
+            discovery_recent_summary=discovery_recent_summary,
+            discovery_recent_total=discovery_recent_total,
             counts=counts,
             samples=samples,
             config_overview=config_overview,
             actions=actions,
-            logs=logs,
+            logs_display=logs_display,
+            logs_summary=logs_summary,
+            logs_total=logs_total,
             history=history,
             stat_tiles=stat_tiles,
         )
