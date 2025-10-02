@@ -233,6 +233,10 @@ class Portfolio:
             if len(hist) > limit:
                 del hist[0]
 
+        if prices:
+            self.update_highs(prices)
+            self.update_drawdown(prices)
+
     def correlations(self) -> Dict[tuple[str, str], float]:
         """Return pairwise correlations between tracked tokens."""
 
