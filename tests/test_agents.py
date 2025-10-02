@@ -443,19 +443,37 @@ def test_meta_conviction_majority_sell(monkeypatch):
     assert actions and actions[0]["side"] == "sell"
 
 
-def test_portfolio_agent_sell():
+def test_portfolio_agent_sell(monkeypatch):
+    async def _fake_prices(tokens):
+        return {tok: 4.0 for tok in tokens}
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.portfolio_agent.fetch_token_prices_async",
+        _fake_prices,
+    )
+
     pf = DummyPortfolio()
     pf.balances["tok"] = Position("tok", 10, 1.0, 1.0)
     agent = PortfolioAgent(max_allocation=0.5)
     actions = asyncio.run(agent.propose_trade("tok", pf))
     assert actions and actions[0]["side"] == "sell"
     assert actions[0]["amount"] < 10
+    assert actions[0]["price"] == 4.0
 
 
-def test_portfolio_agent_buy():
+def test_portfolio_agent_buy(monkeypatch):
+    async def _fake_prices(tokens):
+        return {tok: 1.0 for tok in tokens}
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.portfolio_agent.fetch_token_prices_async",
+        _fake_prices,
+    )
+
     pf = DummyPortfolio()
     agent = PortfolioAgent(max_allocation=0.5)
     actions = asyncio.run(agent.propose_trade("tok", pf))
     assert actions and actions[0]["side"] == "buy"
+    assert actions[0]["price"] == 1.0
 
 
