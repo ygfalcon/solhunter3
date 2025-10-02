@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import List, Dict, Any, Iterable
 
 import os
+import logging
 import numpy as np
 
 from .. import models
@@ -27,6 +28,50 @@ def predict_token_activity(token: str, *, model_path: str | None = None) -> floa
 
 from . import BaseAgent
 from ..portfolio import Portfolio
+from ..prices import fetch_token_prices_async, get_cached_price
+
+
+logger = logging.getLogger(__name__)
+
+
+async def _resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[str, Any]]:
+    """Return the best available USD price for ``token`` and context."""
+
+    context: Dict[str, Any] = {}
+    price = 0.0
+
+    history = portfolio.price_history.get(token, [])
+    if history:
+        try:
+            hist_price = float(history[-1])
+        except Exception:
+            hist_price = 0.0
+        else:
+            context["history_price"] = hist_price
+            if hist_price > 0:
+                price = hist_price
+
+    if price <= 0:
+        cached = get_cached_price(token)
+        if cached is not None:
+            cached_price = float(cached)
+            context["cached_price"] = cached_price
+            if cached_price > 0:
+                price = cached_price
+
+    if price <= 0:
+        fetched_price = 0.0
+        try:
+            prices = await fetch_token_prices_async({token})
+        except Exception as exc:
+            context["fetch_error"] = str(exc)
+        else:
+            fetched_price = float(prices.get(token, 0.0))
+            context["fetched_price"] = fetched_price
+        if fetched_price > 0:
+            price = fetched_price
+
+    return price, context
 
 
 class ConvictionAgent(BaseAgent):
@@ -89,10 +134,23 @@ class ConvictionAgent(BaseAgent):
             avg_roi += activity
         if imbalance is not None:
             avg_roi += imbalance * 0.05
+
+        price, price_context = await _resolve_price(token, portfolio)
+        context = {
+            "avg_roi": avg_roi,
+            "prediction": pred,
+            "activity": activity,
+            "imbalance": imbalance,
+        }
+        context.update(price_context)
+        if price <= 0:
+            logger.info("conviction: no price for token %s; context=%s", token, context)
+            return []
+
         if avg_roi > self.threshold:
-            return [{"token": token, "side": "buy", "amount": 1.0, "price": 0.0}]
+            return [{"token": token, "side": "buy", "amount": 1.0, "price": price}]
         if avg_roi < -self.threshold:
             pos = portfolio.balances.get(token)
             if pos:
-                return [{"token": token, "side": "sell", "amount": pos.amount, "price": 0.0}]
+                return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
         return []
