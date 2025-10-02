@@ -24,6 +24,7 @@ from .simulation import SimulationResult, run_simulations_async
 from .portfolio import Portfolio
 from .lru import TTLCache
 from .execution import EventExecutor
+from .prices import fetch_token_prices_async, get_cached_price, update_price_cache
 
 log = logging.getLogger(__name__)
 
@@ -493,6 +494,42 @@ class SwarmPipeline:
         remaining = self.time_budget - elapsed
         return remaining if remaining > 0 else 0.0
 
+    async def _ensure_action_price(self, action: SwarmAction) -> None:
+        """Ensure ``action`` carries a positive price using the shared cache."""
+
+        if action.price and action.price > 0 and math.isfinite(action.price):
+            return
+        token = action.token
+        if not token:
+            return
+
+        cached = get_cached_price(token)
+        if isinstance(cached, (int, float)):
+            cached_val = float(cached)
+            if cached_val > 0 and math.isfinite(cached_val):
+                action.price = cached_val
+                return
+
+        try:
+            prices = await fetch_token_prices_async([token])
+        except Exception as exc:  # pragma: no cover - network/IO failures
+            log.debug("price fetch failed for %s: %s", token, exc)
+            return
+
+        price = prices.get(token)
+        if not isinstance(price, (int, float)):
+            return
+
+        value = float(price)
+        if value <= 0 or not math.isfinite(value):
+            return
+
+        action.price = value
+        try:
+            update_price_cache(token, value)
+        except Exception:  # pragma: no cover - cache errors shouldn't break pipeline
+            pass
+
     async def run(self) -> Dict[str, Any]:
         start_ts = time.perf_counter()
         self._iteration_start = start_ts
@@ -751,6 +788,8 @@ class SwarmPipeline:
                         act = SwarmAction.from_raw(raw)
                         if act is not None:
                             actions.append(act)
+                    for act in actions:
+                        await self._ensure_action_price(act)
                     if not actions and self.no_action_ttl:
                         self._no_action_cache[token] = time.time() + self.no_action_ttl
                 except asyncio.TimeoutError:
