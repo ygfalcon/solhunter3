@@ -45,7 +45,7 @@ class _DummyAgentManager:
         return _DummyContext(actions=list(self._actions))
 
 
-def test_evaluation_hydrates_action_prices(monkeypatch):
+def _install_swarm_stubs(monkeypatch):
     class _StubModuleType(types.ModuleType):
         def __getattr__(self, name):  # pragma: no cover - defensive stub
             def _dummy(*args, **kwargs):
@@ -124,6 +124,10 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "solhunter_zero.datasets.sample_ticks", sample_ticks_module
     )
+
+
+def test_evaluation_hydrates_action_prices(monkeypatch):
+    _install_swarm_stubs(monkeypatch)
 
     from solhunter_zero.swarm_pipeline import DiscoveryStage, SwarmPipeline
 
@@ -298,3 +302,124 @@ def test_dispatcher_enriches_realized_metrics(monkeypatch):
     logged = manager.memory_agent.logged[0]
     assert logged["realized_price"] == pytest.approx(4.6 / 3.0)
     assert logged["realized_notional"] == pytest.approx(4.6)
+
+
+def test_simulation_reuses_cached_results(monkeypatch):
+    _install_swarm_stubs(monkeypatch)
+    from solhunter_zero.simulation import SimulationResult
+    from solhunter_zero.swarm_pipeline import (
+        EvaluationRecord,
+        EvaluationStage,
+        SwarmAction,
+        SwarmPipeline,
+    )
+
+    calls: dict[str, int] = {"count": 0}
+
+    async def fake_simulations(token: str, *, count: int) -> list[SimulationResult]:
+        calls["count"] += 1
+        return [SimulationResult(success_prob=0.4, expected_roi=0.5)]
+
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline.run_simulations_async",
+        fake_simulations,
+    )
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *_, **__: None)
+
+    portfolio = Portfolio(path=None)
+    agent_manager = types.SimpleNamespace(skip_simulation=False)
+    pipeline = SwarmPipeline(agent_manager, portfolio, dry_run=True)
+
+    async def _execute() -> None:
+        base_action = SwarmAction(
+            token="Tok",
+            side="buy",
+            amount=1.0,
+            price=1.0,
+            agent="stub",
+            expected_roi=0.0,
+            success_prob=0.0,
+        )
+        stage = await pipeline._run_simulation(
+            EvaluationStage(
+                records=[
+                    EvaluationRecord(
+                        token="Tok",
+                        score=1.0,
+                        latency=0.0,
+                        actions=[base_action],
+                        context=None,
+                    )
+                ]
+            )
+        )
+
+        assert calls["count"] == 1
+        first_action = stage.records[0].actions[0]
+        assert first_action.metadata["simulation_avg_roi"] == pytest.approx(0.5)
+        assert first_action.metadata["simulation_avg_success"] == pytest.approx(0.4)
+        assert "cache_derived" not in first_action.metadata
+
+        pipeline._skip_simulation = True
+        cached_action = SwarmAction(
+            token="Tok",
+            side="buy",
+            amount=1.0,
+            price=1.0,
+            agent="stub",
+            expected_roi=0.0,
+            success_prob=0.0,
+        )
+        cached_stage = await pipeline._run_simulation(
+            EvaluationStage(
+                records=[
+                    EvaluationRecord(
+                        token="Tok",
+                        score=1.0,
+                        latency=0.0,
+                        actions=[cached_action],
+                        context=None,
+                    )
+                ]
+            )
+        )
+
+        assert calls["count"] == 1
+        cached_result = cached_stage.records[0].actions[0]
+        assert cached_result.expected_roi == pytest.approx(0.5)
+        assert cached_result.success_prob == pytest.approx(0.4)
+        assert cached_result.metadata["simulation_avg_roi"] == pytest.approx(0.5)
+        assert cached_result.metadata["simulation_avg_success"] == pytest.approx(0.4)
+        assert cached_result.metadata["cache_derived"] is True
+
+        pipeline._skip_simulation = False
+        warmed_action = SwarmAction(
+            token="Tok",
+            side="buy",
+            amount=1.0,
+            price=1.0,
+            agent="stub",
+            expected_roi=0.5,
+            success_prob=0.4,
+        )
+        warmed_stage = await pipeline._run_simulation(
+            EvaluationStage(
+                records=[
+                    EvaluationRecord(
+                        token="Tok",
+                        score=1.0,
+                        latency=0.0,
+                        actions=[warmed_action],
+                        context=None,
+                    )
+                ]
+            )
+        )
+
+        assert calls["count"] == 1
+        warmed_result = warmed_stage.records[0].actions[0]
+        assert warmed_result.metadata["simulation_avg_roi"] == pytest.approx(0.5)
+        assert warmed_result.metadata["simulation_avg_success"] == pytest.approx(0.4)
+        assert warmed_result.metadata["cache_derived"] is True
+
+    asyncio.run(_execute())
