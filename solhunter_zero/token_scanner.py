@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Iterable, List, Sequence, Dict
+from typing import Any, Dict, Iterable, List, Sequence
+from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
@@ -12,16 +13,114 @@ DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12
 
 BIRDEYE_BASE = "https://public-api.birdeye.so"
 
+HELIUS_BASE = os.getenv("HELIUS_PRICE_BASE_URL", "https://api.helius.xyz")
+HELIUS_TREND_PATH = os.getenv("HELIUS_PRICE_PATH", "/v0/token-trending")
+
+
+def _extract_helius_key() -> str:
+    env_key = (os.getenv("HELIUS_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+    rpc_url = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
+    try:
+        parsed = urlparse(rpc_url)
+    except Exception:
+        return ""
+    query = parse_qs(parsed.query)
+    if not query:
+        return ""
+    api_key = query.get("api-key") or query.get("apiKey")
+    if api_key:
+        return api_key[0]
+    return ""
+
 logger = logging.getLogger(__name__)
 
 FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 _BIRDEYE_TIMEOUT = float(os.getenv("FAST_BIRDEYE_TIMEOUT", "6.0")) if FAST_MODE else 10.0
 _BIRDEYE_PAGE_DELAY = float(os.getenv("FAST_BIRDEYE_PAGE_DELAY", "0.35")) if FAST_MODE else 1.1
+_HELIUS_TIMEOUT = float(os.getenv("FAST_HELIUS_TIMEOUT", "4.0")) if FAST_MODE else 8.0
+
+TRENDING_METADATA: Dict[str, Dict[str, Any]] = {}
 
 __all__ = [
     "scan_tokens_async",
     "enrich_tokens_async",
+    "TRENDING_METADATA",
 ]
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+    except Exception:
+        return None
+
+
+def _normalize_helius_item(raw: Dict[str, Any], *, rank: int) -> Dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+
+    address = None
+    for key in ("mint", "address", "token", "mintAddress", "tokenAddress"):
+        val = raw.get(key)
+        if isinstance(val, str) and len(val) > 10:
+            address = val
+            break
+    if not address:
+        return None
+
+    entry: Dict[str, Any] = {
+        "address": address,
+        "source": "helius",
+        "rank": rank,
+    }
+
+    for key in ("symbol", "ticker"):
+        val = raw.get(key)
+        if isinstance(val, str) and val:
+            entry.setdefault("symbol", val)
+            break
+
+    name = raw.get("name") or raw.get("tokenName")
+    if isinstance(name, str) and name:
+        entry.setdefault("name", name)
+
+    float_fields = {
+        "score": ("score", "rankingScore", "momentumScore"),
+        "volume": ("volume", "volume24h", "volume_24h", "volumeUSD"),
+        "market_cap": ("marketCap", "market_cap", "marketCapUsd"),
+        "price_change": (
+            "priceChange", "priceChange24h", "priceChange24hPercent", "change24h"
+        ),
+    }
+
+    for dest, keys in float_fields.items():
+        for key in keys:
+            value = raw.get(key)
+            number = _coerce_float(value)
+            if number is not None:
+                entry[dest] = number
+                break
+
+    price = _coerce_float(raw.get("price") or raw.get("priceUsd"))
+    if price is not None:
+        entry["price"] = price
+
+    liquidity = _coerce_float(raw.get("liquidity") or raw.get("liquidityUsd"))
+    if liquidity is not None:
+        entry["liquidity"] = liquidity
+
+    entry["sources"] = ["helius"]
+    entry["raw"] = raw
+    return entry
 
 
 async def _birdeye_trending(
@@ -97,6 +196,105 @@ async def _birdeye_trending(
     return []
 
 
+async def _helius_trending(
+    session: aiohttp.ClientSession,
+    *,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Fetch trending tokens from Helius' price or cached webhook feed.
+
+    Returns dictionaries with an ``address`` key plus optional metadata such as
+    ``score`` or ``volume`` so callers can prioritise Helius candidates.
+    """
+
+    if limit <= 0:
+        return []
+
+    url = os.getenv("HELIUS_TRENDING_URL", "").strip()
+    params: Dict[str, Any] = {}
+    headers = {"accept": "application/json"}
+    method = os.getenv("HELIUS_TRENDING_METHOD", "GET").upper()
+    api_key = _extract_helius_key()
+
+    if api_key:
+        params.setdefault("api-key", api_key)
+        headers.setdefault("Authorization", f"Bearer {api_key}")
+
+    if not url:
+        base = HELIUS_BASE.rstrip("/")
+        path = HELIUS_TREND_PATH
+        if not path.startswith("/"):
+            path = "/" + path
+        url = f"{base}{path}"
+        params.setdefault("limit", int(limit))
+        sort = os.getenv("HELIUS_PRICE_SORT") or os.getenv("HELIUS_TREND_SORT")
+        if sort:
+            params["sortBy"] = sort
+        timeframe = os.getenv("HELIUS_PRICE_TIMEFRAME") or os.getenv("HELIUS_TREND_TIMEFRAME")
+        if timeframe:
+            params["timeframe"] = timeframe
+
+    if not url:
+        logger.debug("Helius trending URL missing; skipping fetch")
+        return []
+
+    try:
+        request_coro: Any
+        if method == "POST":
+            body = {k: v for k, v in params.items() if k not in {"api-key"}}
+            request_coro = session.post(
+                url,
+                json=body or None,
+                params={"api-key": params.get("api-key")} if params.get("api-key") else None,
+                headers=headers,
+                timeout=_HELIUS_TIMEOUT,
+            )
+        else:
+            request_coro = session.get(
+                url,
+                params=params or None,
+                headers=headers,
+                timeout=_HELIUS_TIMEOUT,
+            )
+
+        async with request_coro as resp:
+            resp.raise_for_status()
+            payload = await resp.json(content_type=None)
+    except Exception as exc:
+        logger.debug("Helius trending request failed: %s", exc)
+        return []
+
+    tokens: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _walk(obj: Any) -> None:
+        if len(tokens) >= limit:
+            return
+        if isinstance(obj, list):
+            for item in obj:
+                if len(tokens) >= limit:
+                    break
+                _walk(item)
+            return
+        if isinstance(obj, dict):
+            normalized = _normalize_helius_item(obj, rank=len(tokens))
+            if normalized:
+                addr = normalized["address"]
+                if addr not in seen:
+                    seen.add(addr)
+                    tokens.append(normalized)
+                    if len(tokens) >= limit:
+                        return
+            for value in obj.values():
+                if len(tokens) >= limit:
+                    break
+                _walk(value)
+
+    _walk(payload)
+
+    return tokens[:limit]
+
+
 async def scan_tokens_async(
     *,
     rpc_url: str = DEFAULT_SOLANA_RPC,
@@ -105,15 +303,42 @@ async def scan_tokens_async(
     api_key: str | None = None,
 ) -> List[str]:
     """
-    Pull trending mints from Birdeye (using api_key).
-    If empty, fall back to a small static set so the loop can proceed.
+    Pull trending mints preferring Helius price data, falling back to BirdEye.
+    If both sources fail, return a small static set so the loop can proceed.
     """
     _ = rpc_url  # reserved for future use; enrichment uses this parameter
     requested = max(1, int(limit))
     api_key = api_key or ""
     mints: List[str] = []
+    TRENDING_METADATA.clear()
 
     async with aiohttp.ClientSession() as session:
+        try:
+            helius_tokens = await _helius_trending(session, limit=requested)
+        except Exception as exc:
+            logger.debug("Helius trending threw: %s", exc)
+            helius_tokens = []
+
+        for item in helius_tokens:
+            if not isinstance(item, dict):
+                continue
+            mint = item.get("address")
+            if not isinstance(mint, str):
+                continue
+            if mint in mints:
+                existing = TRENDING_METADATA.setdefault(mint, dict(item))
+                if isinstance(existing, dict):
+                    sources = existing.setdefault("sources", [])
+                    if isinstance(sources, list) and "helius" not in sources:
+                        sources.append("helius")
+                continue
+            mints.append(mint)
+            meta = dict(item)
+            meta.setdefault("sources", ["helius"])
+            TRENDING_METADATA[mint] = meta
+            if len(mints) >= requested:
+                break
+
         offset = 0
         while len(mints) < requested:
             page_size = min(20, requested - len(mints))
@@ -126,8 +351,29 @@ async def scan_tokens_async(
             if not batch:
                 break
             for mint in batch:
-                if mint not in mints:
-                    mints.append(mint)
+                if not isinstance(mint, str):
+                    continue
+                if mint in mints:
+                    existing = TRENDING_METADATA.setdefault(
+                        mint,
+                        {
+                            "address": mint,
+                            "source": "birdeye",
+                            "sources": ["birdeye"],
+                        },
+                    )
+                    if isinstance(existing, dict):
+                        sources = existing.setdefault("sources", [])
+                        if isinstance(sources, list) and "birdeye" not in sources:
+                            sources.append("birdeye")
+                    continue
+                mints.append(mint)
+                TRENDING_METADATA[mint] = {
+                    "address": mint,
+                    "source": "birdeye",
+                    "sources": ["birdeye"],
+                    "rank": len(TRENDING_METADATA),
+                }
             offset += len(batch)
             if len(batch) < page_size or len(mints) >= requested:
                 break
@@ -142,6 +388,16 @@ async def scan_tokens_async(
             "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
             "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",  # JUP
         ]
+        for mint in mints:
+            TRENDING_METADATA.setdefault(
+                mint,
+                {
+                    "address": mint,
+                    "source": "static",
+                    "sources": ["static"],
+                    "rank": len(TRENDING_METADATA),
+                },
+            )
 
     return mints[:requested]
 
