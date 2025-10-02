@@ -155,7 +155,16 @@ class AgentSwarm:
                 amt = float(r.get("amount", 0.0)) * weight
                 price = float(r.get("price", 0.0))
                 key = (token, side)
-                m = merged.setdefault(key, {"token": token, "side": side, "amount": 0.0, "price": 0.0})
+                m = merged.setdefault(
+                    key,
+                    {
+                        "token": token,
+                        "side": side,
+                        "amount": 0.0,
+                        "price": 0.0,
+                        "metadata": {},
+                    },
+                )
                 for extra in ("conviction_delta", "regret", "misfires", "agent", "bias"):
                     if extra not in r:
                         continue
@@ -166,6 +175,11 @@ class AgentSwarm:
                             m["agent"] = r["agent"]
                     elif extra not in m:
                         m[extra] = r[extra]
+                metadata = m.setdefault("metadata", {})
+                if price <= 0:
+                    metadata["needs_price"] = True
+                    agents = metadata.setdefault("needs_price_agents", set())
+                    agents.add(agent.name)
                 old_amt = m["amount"]
                 if old_amt + amt > 0:
                     m["price"] = (m["price"] * old_amt + price * amt) / (old_amt + amt)
@@ -182,12 +196,24 @@ class AgentSwarm:
                 for extra in ("conviction_delta", "regret", "misfires", "agent", "bias"):
                     if extra in buy:
                         entry[extra] = buy[extra]
+                if "metadata" in buy and buy["metadata"]:
+                    meta = dict(buy["metadata"])
+                    agents = meta.get("needs_price_agents")
+                    if isinstance(agents, set):
+                        meta["needs_price_agents"] = sorted(agents)
+                    entry["metadata"] = meta
                 final.append(entry)
             elif net < 0:
                 entry = {"token": tok, "side": "sell", "amount": -net, "price": sell["price"]}
                 for extra in ("conviction_delta", "regret", "misfires", "agent", "bias"):
                     if extra in sell:
                         entry[extra] = sell[extra]
+                if "metadata" in sell and sell["metadata"]:
+                    meta = dict(sell["metadata"])
+                    agents = meta.get("needs_price_agents")
+                    if isinstance(agents, set):
+                        meta["needs_price_agents"] = sorted(agents)
+                    entry["metadata"] = meta
                 final.append(entry)
 
         self._last_actions = list(final)
