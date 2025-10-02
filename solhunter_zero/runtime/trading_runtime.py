@@ -46,6 +46,8 @@ from ..util import parse_bool_env
 log = logging.getLogger(__name__)
 
 _RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
+_RL_HEALTH_INITIAL_INTERVAL = 5.0
+_RL_HEALTH_MAX_INTERVAL = 60.0
 
 
 def _probe_rl_daemon_health(timeout: float = 0.5) -> Dict[str, Any]:
@@ -240,6 +242,7 @@ class TradingRuntime:
         await self._start_event_bus()
         await self._start_ui()
         await self._start_agents()
+        self._start_rl_status_watcher()
         await self._start_loop()
         self.activity.add("runtime", "started")
 
@@ -504,6 +507,67 @@ class TradingRuntime:
                 }
             )
         self.status.rl_daemon = bool(self._rl_status_info.get("running"))
+
+    def _start_rl_status_watcher(self) -> None:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._rl_status_watcher(), name="rl_status_watcher")
+        self._tasks.append(task)
+
+    async def _rl_status_watcher(self) -> None:
+        delay = float(_RL_HEALTH_INITIAL_INTERVAL)
+        failures = 0
+        while not self.stop_event.is_set():
+            info = _probe_rl_daemon_health()
+            detected = bool(info.get("detected"))
+            running = bool(info.get("running"))
+            configured = bool(self._rl_status_info.get("configured"))
+            internal_running = self.rl_task is not None and not self.rl_task.done()
+
+            updates = {
+                "detected": detected,
+                "url": info.get("url"),
+                "error": info.get("error"),
+                "enabled": bool(configured or detected),
+            }
+
+            if internal_running:
+                updates.update({
+                    "running": True,
+                    "source": "internal",
+                })
+                failures = 0
+                delay = float(_RL_HEALTH_INITIAL_INTERVAL)
+            elif detected:
+                updates.update({
+                    "running": running,
+                    "source": "external",
+                })
+                failures = 0
+                delay = float(_RL_HEALTH_INITIAL_INTERVAL)
+            else:
+                updates.update({
+                    "running": False,
+                    "source": None,
+                })
+                failures += 1
+                backoff_factor = max(failures - 1, 0)
+                delay = min(
+                    float(_RL_HEALTH_INITIAL_INTERVAL) * (2 ** backoff_factor),
+                    float(_RL_HEALTH_MAX_INTERVAL),
+                )
+
+            if not detected:
+                updates.setdefault("url", None)
+
+            self._rl_status_info.update(updates)
+            self.status.rl_daemon = bool(self._rl_status_info.get("running"))
+
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                continue
+            else:
+                break
 
     async def _start_loop(self) -> None:
         if self._use_new_pipeline and self.pipeline is not None:
