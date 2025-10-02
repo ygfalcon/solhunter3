@@ -310,6 +310,10 @@ class ExecutionDispatcher:
         try:
             result = await self.agent_manager.executor.execute(action)
             request.record["result"] = _stringify(result)
+            metrics = _extract_realized_metrics(action, result)
+            if metrics:
+                request.record.update(metrics)
+                action.update(metrics)
             if getattr(self.agent_manager, "emotion_agent", None):
                 try:
                     emotion = self.agent_manager.emotion_agent.evaluate(action, result)
@@ -356,6 +360,130 @@ def _stringify(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(k): _stringify(v) for k, v in value.items()}
     return str(value)
+
+
+def _extract_realized_metrics(action: Dict[str, Any], result: Any) -> Dict[str, float]:
+    """Return realized execution metrics derived from ``result``."""
+
+    def _as_float(val: Any) -> Optional[float]:
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    def _lookup(container: Dict[str, Any], keys: tuple[str, ...]) -> Optional[float]:
+        for key in keys:
+            if key in container:
+                value = _as_float(container[key])
+                if value is not None:
+                    return value
+        data = container.get("data")
+        if isinstance(data, dict):
+            return _lookup(data, keys)
+        return None
+
+    def _iter_fills(container: Dict[str, Any]) -> Iterable[tuple[float, float]]:
+        for key in ("fills", "orders", "executions", "trades"):
+            entries = container.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                price = _lookup(entry, (
+                    "price",
+                    "avg_price",
+                    "average_price",
+                    "execution_price",
+                    "executionPrice",
+                    "rate",
+                    "limit_price",
+                ))
+                amount = _lookup(entry, (
+                    "filled_amount",
+                    "filledAmount",
+                    "amount",
+                    "qty",
+                    "quantity",
+                    "size",
+                ))
+                if price is not None and amount is not None:
+                    yield price, amount
+        data = container.get("data")
+        if isinstance(data, dict):
+            yield from _iter_fills(data)
+
+    metrics: Dict[str, float] = {}
+    if not isinstance(result, dict):
+        return metrics
+
+    fills = list(_iter_fills(result))
+    if fills:
+        total_amount = sum(amount for _, amount in fills)
+        total_notional = sum(price * amount for price, amount in fills)
+        if total_amount > 0:
+            metrics["realized_amount"] = total_amount
+            metrics["realized_notional"] = total_notional
+            metrics["realized_price"] = total_notional / total_amount
+            return metrics
+
+    amount = _lookup(
+        result,
+        (
+            "filled_amount",
+            "filledAmount",
+            "executed_amount",
+            "executedAmount",
+            "amount",
+            "trade_amount",
+            "tradeAmount",
+            "qty",
+            "quantity",
+            "size",
+            "realized_amount",
+        ),
+    )
+    price = _lookup(
+        result,
+        (
+            "execution_price",
+            "executionPrice",
+            "avg_price",
+            "average_price",
+            "price",
+            "fill_price",
+            "realized_price",
+        ),
+    )
+    notional = _lookup(
+        result,
+        (
+            "notional",
+            "trade_value",
+            "tradeValue",
+            "value",
+            "gross_notional",
+            "realized_notional",
+        ),
+    )
+
+    if amount is not None and price is not None and notional is None:
+        notional = amount * price
+    elif notional is not None and amount is not None and price is None and amount:
+        price = notional / amount
+    elif notional is not None and price is not None and amount is None and price:
+        amount = notional / price
+
+    if amount is not None:
+        metrics["realized_amount"] = amount
+    if notional is not None:
+        metrics["realized_notional"] = notional
+    if price is not None:
+        metrics["realized_price"] = price
+
+    return metrics
 
 
 def _resolve_lane(action: Dict[str, Any]) -> str:

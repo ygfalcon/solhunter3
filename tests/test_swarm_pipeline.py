@@ -10,6 +10,24 @@ from solhunter_zero import prices
 from solhunter_zero.portfolio import Portfolio
 
 
+class _DummyExecutor:
+    async def execute(self, action):
+        return {
+            "fills": [
+                {"price": 1.5, "filled_amount": 2.0},
+                {"price": 1.6, "filled_amount": 1.0},
+            ]
+        }
+
+
+class _DummyMemoryAgent:
+    def __init__(self):
+        self.logged: list[dict] = []
+
+    async def log(self, action, *, skip_db: bool = False):
+        self.logged.append(dict(action))
+
+
 @dataclass
 class _DummyContext:
     actions: list[dict]
@@ -214,3 +232,69 @@ def test_execution_skips_missing_price(monkeypatch, caplog):
     assert record.errors == ["missing_price"]
     assert not call_flag["called"]
     assert "missing price" in caplog.text
+
+
+def test_dispatcher_enriches_realized_metrics(monkeypatch):
+    torch_mod = types.ModuleType("torch")
+    torch_mod.Tensor = type("_Tensor", (), {})
+    torch_mod.device = type("_Device", (), {"__init__": lambda self, *a, **k: None})
+    torch_mod.nn = types.SimpleNamespace(
+        Module=object,
+        ModuleList=list,
+        Sequential=lambda *args, **kwargs: list(args),
+        functional=types.SimpleNamespace(),
+    )
+    torch_mod.optim = types.SimpleNamespace(Adam=lambda *args, **kwargs: None)
+    torch_mod.utils = types.SimpleNamespace(
+        data=types.SimpleNamespace(Dataset=object, DataLoader=list)
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch_mod)
+    monkeypatch.setitem(sys.modules, "torch.nn", torch_mod.nn)
+    monkeypatch.setitem(sys.modules, "torch.nn.functional", torch_mod.nn.functional)
+    monkeypatch.setitem(sys.modules, "torch.optim", torch_mod.optim)
+    monkeypatch.setitem(sys.modules, "torch.utils", torch_mod.utils)
+    monkeypatch.setitem(sys.modules, "torch.utils.data", torch_mod.utils.data)
+
+    datasets_pkg = types.ModuleType("solhunter_zero.datasets")
+    datasets_pkg.__path__ = []  # type: ignore[attr-defined]
+    sample_ticks = types.ModuleType("solhunter_zero.datasets.sample_ticks")
+    sample_ticks.load_sample_ticks = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    sample_ticks.DEFAULT_PATH = ""  # type: ignore[attr-defined]
+    datasets_pkg.sample_ticks = sample_ticks  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "solhunter_zero.datasets", datasets_pkg)
+    monkeypatch.setitem(sys.modules, "solhunter_zero.datasets.sample_ticks", sample_ticks)
+
+    from solhunter_zero.swarm_pipeline import ExecutionDispatcher, ExecutionRequest
+
+    class _AgentManager:
+        def __init__(self):
+            self.executor = _DummyExecutor()
+            self.memory_agent = _DummyMemoryAgent()
+
+    manager = _AgentManager()
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *args, **kwargs: None)
+
+    dispatcher = ExecutionDispatcher(manager)
+    record = {"token": "Tok", "side": "buy", "amount": 3.0, "price": 1.4}
+    token_payload = {"token": "Tok", "actions": []}
+    request = ExecutionRequest(
+        "Tok",
+        {"token": "Tok", "side": "buy", "amount": 3.0, "price": 1.4},
+        record,
+        token_payload,
+        [],
+        [],
+    )
+
+    async def _run():
+        return await dispatcher._execute_request(request)
+
+    updated = asyncio.run(_run())
+    assert updated["realized_amount"] == pytest.approx(3.0)
+    assert updated["realized_notional"] == pytest.approx(4.6)
+    assert updated["realized_price"] == pytest.approx(4.6 / 3.0)
+    assert manager.memory_agent.logged
+    logged = manager.memory_agent.logged[0]
+    assert logged["realized_price"] == pytest.approx(4.6 / 3.0)
+    assert logged["realized_notional"] == pytest.approx(4.6)
