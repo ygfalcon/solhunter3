@@ -217,6 +217,26 @@ def _dumps(obj: Any) -> bytes:
     return json.dumps(obj).encode()
 
 
+def _dumps_text(obj: Any) -> str:
+    """Serialize ``obj`` to a UTF-8 string regardless of the bus encoding."""
+
+    # ``msgpack`` serialization returns binary data that cannot be fed into the
+    # protobuf ``string`` fields used for select events (e.g. ``action_executed``).
+    # Instead of relying on the global bus format, always fall back to JSON here
+    # so we provide a stable textual representation.
+    obj = to_dict(obj)
+    try:
+        data = json.dumps(obj)
+    except TypeError:
+        # ``orjson`` returns ``bytes`` whereas the stdlib returns ``str``.  If the
+        # object contains unserializable types, try to coerce nested dataclasses to
+        # dictionaries via ``to_dict`` recursively.
+        data = json.dumps(obj, default=to_dict)
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data
+
+
 def _loads(data: Any) -> Any:
     """Deserialize ``data`` using the configured serialization format."""
     if _USE_MSGPACK:
@@ -505,8 +525,8 @@ def _encode_event(topic: str, payload: Any) -> Any:
         event = pb.Event(
             topic=topic,
             action_executed=pb.ActionExecuted(
-                action_json=_dumps(payload.action).decode(),
-                result_json=_dumps(payload.result).decode(),
+                action_json=_dumps_text(payload.action),
+                result_json=_dumps_text(payload.result),
             ),
         )
     elif topic == "weights_updated":
