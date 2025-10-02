@@ -83,6 +83,7 @@ class AgentSwarm:
         *,
         weights: Dict[str, float] | None = None,
         rl_action: list[float] | None = None,
+        regime: str | None = None,
     ) -> List[Dict[str, Any]]:
         """Gather proposals from all agents and return aggregated actions.
 
@@ -91,6 +92,10 @@ class AgentSwarm:
         weights:
             Optional mapping of agent name to weighting factor applied to the
             amounts returned by that agent. Defaults to ``1.0`` for all agents.
+        regime:
+            Active market regime detected by :class:`AgentManager`. Agents that
+            accept a ``regime`` keyword receive this value so they can adjust
+            their decision thresholds accordingly.
         """
 
         depth, imbalance, _ = order_book_ws.snapshot(token)
@@ -111,6 +116,8 @@ class AgentSwarm:
                 kwargs["rl_action"] = rl_action
             if summary is not None and "summary" in params:
                 kwargs["summary"] = summary
+            if "regime" in params:
+                kwargs["regime"] = regime
             try:
                 coro = agent.propose_trade(token, portfolio, **kwargs)
                 if self._agent_timeout:
