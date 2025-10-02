@@ -220,6 +220,7 @@ class ExecutionStage:
     executed: List[ExecutionRecord] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     lane_metrics: Dict[str, int] = field(default_factory=dict)
+    skipped: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -608,6 +609,7 @@ class SwarmPipeline:
                     "submitted": len(execution.executed),
                     "lane_workers": self.lane_workers,
                     "errors": len(execution.errors),
+                    "skipped": execution.skipped,
                 },
                 "pipeline": {
                     "queued": len(discovery.tokens),
@@ -962,6 +964,25 @@ class SwarmPipeline:
                     order["risk"] = risk
                 else:
                     order.pop("risk", None)
+                price_value = order.get("price", 0.0)
+                try:
+                    price_value = float(price_value)
+                except Exception:
+                    price_value = 0.0
+
+                if price_value <= 0 or not math.isfinite(price_value):
+                    if "missing_price" not in token_payload["errors"]:
+                        token_payload["errors"].append("missing_price")
+                    if "execution:missing_price" not in stage.errors:
+                        stage.errors.append("execution:missing_price")
+                    stage.skipped["missing_price"] = stage.skipped.get("missing_price", 0) + 1
+                    log.warning(
+                        "Skipping execution for %s due to missing price (value=%s)",
+                        record.token,
+                        order.get("price"),
+                    )
+                    continue
+
                 token_payload["actions"].append(order)
                 lane = _resolve_lane(order)
                 record_entry = {

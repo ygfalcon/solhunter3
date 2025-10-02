@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sys
 import types
 from dataclasses import dataclass
@@ -154,3 +155,62 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
         assert cached == pytest.approx(1.23)
 
     asyncio.run(_run())
+
+
+def test_execution_skips_missing_price(monkeypatch, caplog):
+    from solhunter_zero.swarm_pipeline import (
+        EvaluationRecord,
+        SimulationStage,
+        SwarmAction,
+        SwarmPipeline,
+    )
+
+    class _StubAgentManager:
+        skip_simulation = False
+        depth_service = False
+
+        def __init__(self) -> None:
+            self.executor = types.SimpleNamespace()
+
+        def consume_swarm(self, token, swarm):  # pragma: no cover - interface stub
+            return None
+
+    call_flag = {"called": False}
+
+    class _StubDispatcher:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def submit(self, lane, request):  # pragma: no cover - defensive
+            call_flag["called"] = True
+            raise AssertionError("submit should not be called for missing prices")
+
+        def lane_snapshot(self):
+            return {}
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.ExecutionDispatcher", _StubDispatcher)
+
+    pipeline = SwarmPipeline(_StubAgentManager(), Portfolio(path=None), dry_run=True)
+    action = SwarmAction(token="Tok", side="buy", amount=1.0, price=0.0, agent="tester")
+    record = EvaluationRecord(
+        token="Tok",
+        score=1.0,
+        latency=0.0,
+        actions=[action],
+        context=None,
+    )
+    simulation = SimulationStage(records=[record])
+
+    caplog.set_level(logging.WARNING, logger="solhunter_zero.swarm_pipeline")
+
+    execution = asyncio.run(pipeline._run_execution(simulation))
+
+    assert execution.executed == []
+    assert execution.skipped == {"missing_price": 1}
+    assert "execution:missing_price" in execution.errors
+    assert record.errors == ["missing_price"]
+    assert not call_flag["called"]
+    assert "missing price" in caplog.text
