@@ -40,6 +40,7 @@ from .agents.memory import MemoryAgent
 from .agents.emotion_agent import EmotionAgent
 from .agents.discovery import DiscoveryAgent
 from .swarm_coordinator import SwarmCoordinator
+from . import wallet
 
 try:  # optional torch-based swarm
     from .agents.attention_swarm import AttentionSwarm, load_model
@@ -94,6 +95,8 @@ class AgentManagerConfig:
     hierarchical_rl: MultiAgentRL | None = None
     use_supervisor: bool = False
     supervisor_checkpoint: str | None = None
+    keypair: Any | None = None
+    keypair_path: str | os.PathLike | None = None
 
 
 class StrategySelector:
@@ -199,9 +202,20 @@ class AgentManager:
     ):
         cfg = config or AgentManagerConfig()
         self.agents = list(agents)
-        self.executor = executor or ExecutionAgent(
-            depth_service=cfg.depth_service,
-            priority_rpc=cfg.priority_rpc,
+        exec_kwargs: dict[str, Any] = {
+            "depth_service": cfg.depth_service,
+            "priority_rpc": cfg.priority_rpc,
+        }
+        if cfg.keypair is not None:
+            exec_kwargs["keypair"] = cfg.keypair
+        self.executor = executor or ExecutionAgent(**exec_kwargs)
+        if executor is not None and cfg.keypair is not None:
+            setattr(self.executor, "keypair", cfg.keypair)
+        self.keypair = cfg.keypair
+        self.keypair_path = (
+            str(cfg.keypair_path)
+            if cfg.keypair_path is not None
+            else None
         )
         self.weights_path = (
             str(cfg.weights_path) if cfg.weights_path is not None else "weights.json"
@@ -338,6 +352,50 @@ class AgentManager:
         # Track active swarms keyed by token so concurrent evaluations can
         # feed back execution results without clobbering one another.
         self._active_swarms: Dict[str, AgentSwarm] = {}
+
+    @staticmethod
+    def _resolve_keypair_from_config(
+        cfg: dict[str, Any] | None,
+    ) -> tuple[Any | None, str | None]:
+        """Resolve and load the active keypair from configuration/env."""
+
+        candidates: list[str] = []
+        if cfg is not None:
+            cfg_path = cfg.get("solana_keypair")
+            if cfg_path:
+                candidates.append(str(cfg_path))
+
+        env_path = os.getenv("SOLANA_KEYPAIR") or os.getenv("solana_keypair")
+        if env_path:
+            candidates.append(str(env_path))
+
+        keypair_env = os.getenv("KEYPAIR_PATH")
+        if keypair_env:
+            candidates.append(str(keypair_env))
+
+        if not candidates:
+            return None, None
+
+        last_path: str | None = None
+        for raw in candidates:
+            if not raw:
+                continue
+            path_obj = Path(str(raw)).expanduser()
+            if not path_obj.is_absolute():
+                path_obj = ROOT / path_obj
+            path_str = str(path_obj)
+            last_path = path_str
+            try:
+                keypair = wallet.load_keypair(path_str)
+            except FileNotFoundError:
+                logger.warning("Keypair file not found at %s", path_str)
+                continue
+            except Exception as exc:
+                logger.warning("Failed to load keypair from %s: %s", path_str, exc)
+                continue
+            return keypair, path_str
+
+        return None, last_path
 
     def _get_rl_policy_confidence(self) -> Dict[str, float]:
         """Return latest RL policy confidence scores if available."""
@@ -1190,6 +1248,8 @@ class AgentManager:
         if jito_ws_auth and os.getenv("JITO_WS_AUTH") is None:
             os.environ["JITO_WS_AUTH"] = str(jito_ws_auth)
 
+        keypair, keypair_path = cls._resolve_keypair_from_config(cfg)
+
         if not agents:
             return None
         cfg_obj = AgentManagerConfig(
@@ -1213,6 +1273,8 @@ class AgentManager:
             hierarchical_rl=hierarchical_rl,
             use_supervisor=use_supervisor,
             supervisor_checkpoint=supervisor_checkpoint,
+            keypair=keypair,
+            keypair_path=keypair_path,
         )
         return cls(agents, config=cfg_obj)
 

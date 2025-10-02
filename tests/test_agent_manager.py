@@ -1,6 +1,8 @@
 import json
 import asyncio
 import logging
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("torch.nn.utils.rnn")
@@ -138,4 +140,33 @@ def test_close_persists_mutation_state(tmp_path):
     cfg2 = AgentManagerConfig(memory_agent=mem_agent2, mutation_path=str(state_path))
     mgr2 = AgentManager([base, mem_agent2], config=cfg2)
     assert any(a.name == mut_name for a in mgr2.agents)
+
+
+def test_from_config_loads_keypair(monkeypatch):
+    import solhunter_zero.agent_manager as am
+
+    class Dummy(am.BaseAgent):
+        name = "dummy"
+
+        async def propose_trade(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(am, "load_agent", lambda name: Dummy())
+    sentinel = object()
+    captured: dict[str, str] = {}
+
+    def fake_load(path: str):
+        captured["path"] = path
+        return sentinel
+
+    monkeypatch.setattr(am.wallet, "load_keypair", fake_load)
+
+    cfg = {"agents": ["dummy"], "solana_keypair": "kp.json"}
+    mgr = am.AgentManager.from_config(cfg)
+
+    assert mgr is not None
+    assert mgr.executor.keypair is sentinel
+    assert mgr.keypair is sentinel
+    assert Path(captured["path"]).name == "kp.json"
+    assert mgr.keypair_path == captured["path"]
 
