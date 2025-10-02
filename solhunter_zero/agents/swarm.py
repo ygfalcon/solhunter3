@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from typing import Iterable, List, Dict, Any
+from typing import Iterable, List, Dict, Any, Mapping
+from collections.abc import Iterable as IterableABC, Mapping as MappingABC
 
 from .. import order_book_ws
 
@@ -101,6 +102,67 @@ class AgentSwarm:
             except Exception:
                 summary = None
 
+        metric_cache: Dict[str, Any] = {}
+
+        def _last_price(seq: Any) -> float | None:
+            if seq is None:
+                return None
+            if isinstance(seq, (list, tuple)):
+                if not seq:
+                    return None
+                candidate = seq[-1]
+            elif isinstance(seq, IterableABC) and not isinstance(seq, (str, bytes)):
+                try:
+                    candidate = list(seq)[-1]
+                except Exception:
+                    return None
+            else:
+                return None
+            try:
+                return float(candidate)
+            except Exception:
+                return None
+
+        def _metric(name: str) -> Any:
+            if name in metric_cache:
+                return metric_cache[name]
+            value: Any = None
+            try:
+                if name == "holding_duration":
+                    helper = getattr(portfolio, "holding_duration", None)
+                    if callable(helper):
+                        value = helper(token)
+                elif name == "realized_roi":
+                    helper = getattr(portfolio, "realized_roi", None)
+                    if callable(helper):
+                        try:
+                            value = helper(token)
+                        except TypeError:
+                            history = getattr(portfolio, "price_history", {})
+                            price_guess = None
+                            if isinstance(history, MappingABC):
+                                price_guess = _last_price(history.get(token))
+                            if price_guess is not None:
+                                try:
+                                    value = helper(token, price_guess)  # type: ignore[misc]
+                                except Exception:
+                                    value = None
+                elif name == "drawdown":
+                    helper = getattr(portfolio, "current_drawdown", None)
+                    if callable(helper):
+                        price_lookup: Dict[str, float] = {}
+                        history = getattr(portfolio, "price_history", {})
+                        if isinstance(history, MappingABC):
+                            for sym, hist in history.items():
+                                last = _last_price(hist)
+                                if last is not None and last > 0:
+                                    price_lookup[str(sym)] = last
+                        value = helper(price_lookup)
+            except Exception:
+                value = None
+            metric_cache[name] = value
+            return value
+
         async def run(agent: BaseAgent):
             logger.info("Swarm: invoking %s for %s", agent.name, token)
             if hasattr(agent, "last_outcome"):
@@ -111,6 +173,12 @@ class AgentSwarm:
                 kwargs["rl_action"] = rl_action
             if summary is not None and "summary" in params:
                 kwargs["summary"] = summary
+            if "holding_duration" in params:
+                kwargs["holding_duration"] = _metric("holding_duration")
+            if "realized_roi" in params:
+                kwargs["realized_roi"] = _metric("realized_roi")
+            if "drawdown" in params:
+                kwargs["drawdown"] = _metric("drawdown")
             try:
                 coro = agent.propose_trade(token, portfolio, **kwargs)
                 if self._agent_timeout:
