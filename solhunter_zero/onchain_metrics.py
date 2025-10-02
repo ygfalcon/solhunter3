@@ -5,6 +5,7 @@ import asyncio
 import os
 import time
 from typing import Any, Dict, Optional, Tuple, List
+from urllib.parse import urlparse, parse_qs
 
 import copy
 
@@ -60,6 +61,23 @@ JUPITER_QUOTE_V6 = "https://quote-api.jup.ag/v6/quote"
 
 # Canonical SOL mint for quotes
 SOL_MINT = "So11111111111111111111111111111111111111112"
+
+HELIUS_API_BASE = os.getenv("HELIUS_API_BASE", "https://api.helius.xyz")
+
+
+def _helius_api_key() -> str:
+    key = os.getenv("HELIUS_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        parsed = urlparse(SOLANA_RPC_URL)
+    except Exception:
+        return ""
+    qs = parse_qs(parsed.query or "")
+    vals = qs.get("api-key") or qs.get("apikey") or qs.get("apiKey")
+    if vals:
+        return vals[0]
+    return ""
 
 __all__ = [
     "fetch_dex_metrics_async",
@@ -206,6 +224,112 @@ async def _birdeye_ohlcv(session: aiohttp.ClientSession, mint: str, tf: str, lim
             })
     return out
 
+# -------------------- Helius REST --------------------
+
+def _helius_pick_entry(payload: Any, mint: str) -> Dict[str, Any] | None:
+    if isinstance(payload, dict):
+        for key in (mint, mint.lower(), mint.upper()):
+            val = payload.get(key)
+            if isinstance(val, dict):
+                return val
+        if len(payload) == 1:
+            sole = next(iter(payload.values()))
+            if isinstance(sole, dict):
+                return sole
+    if isinstance(payload, list):
+        mint_lower = mint.lower()
+        for item in payload:
+            if isinstance(item, dict):
+                ident = item.get("id") or item.get("mint") or item.get("address") or item.get("symbol")
+                if isinstance(ident, str) and ident.lower() == mint_lower:
+                    return item
+        if len(payload) == 1 and isinstance(payload[0], dict):
+            return payload[0]
+    return None
+
+
+async def _helius_price_overview(session: aiohttp.ClientSession, mint: str) -> Tuple[float, float, float, float, int, int, Optional[int]]:
+    cache_key = ("helius_price", mint)
+    cached = DEX_METRICS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    api_key = _helius_api_key()
+    if not api_key:
+        result = (0.0, 0.0, 0.0, 0.0, 0, 0, None)
+        DEX_METRICS_CACHE.set(cache_key, result)
+        return result
+
+    headers = {"accept": "application/json"}
+    price_params = {"ids": mint, "vs": "usd", "api-key": api_key}
+    market_params = {"mint": mint, "api-key": api_key}
+
+    async def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        url = f"{HELIUS_API_BASE.rstrip('/')}{path}"
+        try:
+            async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=6)) as r:
+                if r.status >= 400:
+                    return {}
+                return await _json(session, r)
+        except Exception:
+            return {}
+
+    price_json = await _request("/v0/price", price_params)
+    price_data = price_json.get("data") if isinstance(price_json, dict) else None
+    if price_data is None:
+        price_data = price_json
+    price_entry = _helius_pick_entry(price_data, mint)
+
+    market_json = await _request("/v0/market-stats", market_params)
+    market_data = market_json.get("data") if isinstance(market_json, dict) else None
+    if market_data is None:
+        market_data = market_json
+    market_entry = _helius_pick_entry(market_data, mint)
+
+    price = _numeric(price_entry.get("price") if price_entry else 0.0, 0.0)
+    change = 0.0
+    if isinstance(price_entry, dict):
+        for key in ("priceChange24h", "change24h", "percentChange24h", "price_change_24h"):
+            if key in price_entry:
+                change = _numeric(price_entry.get(key), change)
+                break
+        if "value" in price_entry and price == 0.0:
+            price = _numeric(price_entry.get("value"), price)
+
+    volume = 0.0
+    liquidity = 0.0
+    holders = 0
+    pool_count = 0
+    decimals: Optional[int] = None
+
+    if isinstance(market_entry, dict):
+        for key in ("volume24hUsd", "volume24h", "volumeUsd24h", "totalVolume24hUsd", "volume_24h_usd"):
+            if key in market_entry:
+                volume = _numeric(market_entry.get(key), volume)
+                break
+        for key in ("liquidityUsd", "liquidity", "liquidity_usd"):
+            if key in market_entry:
+                liquidity = _numeric(market_entry.get(key), liquidity)
+                break
+        for key in ("holders", "holderCount", "holder_count"):
+            if key in market_entry:
+                holders = _int_numeric(market_entry.get(key), holders)
+                break
+        for key in ("poolCount", "marketCount", "dexCount"):
+            if key in market_entry:
+                pool_count = _int_numeric(market_entry.get(key), pool_count)
+                break
+        for key in ("decimals", "tokenDecimals"):
+            if key in market_entry:
+                cand = _int_numeric(market_entry.get(key), 0)
+                if cand > 0:
+                    decimals = cand
+                break
+
+    result = (price, change, volume, liquidity, holders, pool_count, decimals)
+    DEX_METRICS_CACHE.set(cache_key, result)
+    return result
+
 # -------------------- Helius RPC --------------------
 
 async def _rpc_post(session: aiohttp.ClientSession, method: str, params: Any, rpc_url: Optional[str]) -> Dict[str, Any]:
@@ -350,14 +474,64 @@ async def fetch_dex_metrics_async(
     base = _build_default_metrics(mint)
     session = await get_session()
 
+    helius_price: Tuple[float, float, float, float, int, int, Optional[int]]
+    try:
+        helius_price = await _helius_price_overview(session, mint)
+    except Exception:
+        helius_price = (0.0, 0.0, 0.0, 0.0, 0, 0, None)
+
+    price_h, chg_h, vol_h, liq_h, holders_h, pools_h, decimals_h = helius_price
+    has_helius = any(
+        [
+            _numeric(price_h, 0.0) > 0.0,
+            _numeric(vol_h, 0.0) > 0.0,
+            _numeric(liq_h, 0.0) > 0.0,
+            _int_numeric(holders_h, 0) > 0,
+            _int_numeric(pools_h, 0) > 0,
+        ]
+    )
+
+    slot_task = asyncio.create_task(_helius_slot(session, rpc_url))
+    dec_task = asyncio.create_task(_helius_decimals(session, mint, rpc_url))
+
+    if has_helius:
+        try:
+            slot = await slot_task
+        except Exception:
+            slot = 0
+        try:
+            decimals_rpc = await dec_task
+        except Exception:
+            decimals_rpc = 0
+
+        decimals_final = decimals_rpc if decimals_rpc > 0 else (
+            decimals_h if decimals_h is not None and decimals_h > 0 else 9
+        )
+
+        base.update({
+            "price": _numeric(price_h, 0.0),
+            "price_24h_change": _numeric(chg_h, 0.0),
+            "volume_24h": _numeric(vol_h, 0.0),
+            "liquidity_usd": _numeric(liq_h, 0.0),
+            "holders": _int_numeric(holders_h, 0),
+            "pool_count": _int_numeric(pools_h, 0),
+            "decimals": _int_numeric(decimals_final, 9),
+            "slot": _int_numeric(slot, 0),
+            "ohlcv_5m": [],
+            "ohlcv_1h": [],
+            "ts": _now_ts(),
+        })
+
+        cached_entry = copy.deepcopy(base)
+        DEX_METRICS_CACHE.set(cache_key, cached_entry)
+        return copy.deepcopy(cached_entry)
+
     price_task = asyncio.create_task(_birdeye_price_overview(session, mint))
     ohlcv5_task: asyncio.Task | None = None
     ohlcv1h_task: asyncio.Task | None = None
     if not FAST_MODE:
         ohlcv5_task = asyncio.create_task(_birdeye_ohlcv(session, mint, "5m", limit=60))
         ohlcv1h_task = asyncio.create_task(_birdeye_ohlcv(session, mint, "1h", limit=48))
-    slot_task = asyncio.create_task(_helius_slot(session, rpc_url))
-    dec_task = asyncio.create_task(_helius_decimals(session, mint, rpc_url))
 
     try:
         price, chg, vol, liq, holders, pools, decimals_be = await price_task
