@@ -298,3 +298,154 @@ def test_dispatcher_enriches_realized_metrics(monkeypatch):
     logged = manager.memory_agent.logged[0]
     assert logged["realized_price"] == pytest.approx(4.6 / 3.0)
     assert logged["realized_notional"] == pytest.approx(4.6)
+
+
+def test_simulation_biases_action_limit_by_record_score(monkeypatch):
+    monkeypatch.setenv("SWARM_MAX_ACTIONS", "2")
+
+    from solhunter_zero.swarm_pipeline import (
+        EvaluationRecord,
+        EvaluationStage,
+        SimulationStage,
+        SwarmAction,
+        SwarmPipeline,
+    )
+
+    class _StubAgentManager:
+        skip_simulation = False
+
+        def __init__(self) -> None:
+            self.executor = types.SimpleNamespace(add_executor=lambda *a, **k: None)
+
+        def consume_swarm(self, token, swarm):  # pragma: no cover - interface stub
+            return None
+
+    pipeline = SwarmPipeline(_StubAgentManager(), Portfolio(path=None), dry_run=True)
+
+    low_actions = [
+        SwarmAction(
+            token="LOW",
+            side="buy",
+            amount=1.0,
+            price=1.0,
+            agent="stub",
+            expected_roi=0.5,
+            success_prob=0.9,
+        )
+        for _ in range(3)
+    ]
+    high_actions = [
+        SwarmAction(
+            token="HIGH",
+            side="buy",
+            amount=1.0,
+            price=1.0,
+            agent="stub",
+            expected_roi=0.5,
+            success_prob=0.9,
+        )
+        for _ in range(3)
+    ]
+
+    evaluation = EvaluationStage(
+        records=[
+            EvaluationRecord(
+                token="LOW",
+                score=0.0,
+                latency=0.0,
+                actions=low_actions,
+                context=None,
+            ),
+            EvaluationRecord(
+                token="HIGH",
+                score=3.0,
+                latency=0.0,
+                actions=high_actions,
+                context=None,
+            ),
+        ]
+    )
+
+    simulation = asyncio.run(pipeline._run_simulation(evaluation))
+
+    results = {rec.token: rec for rec in simulation.records}
+    assert len(results["HIGH"].actions) == 2
+    assert len(results["LOW"].actions) == 1
+    assert simulation.rejected["HIGH"] == 1
+    assert simulation.rejected["LOW"] == 2
+    for rec in simulation.records:
+        for act in rec.actions:
+            assert act.metadata["evaluation_score"] == rec.score
+
+
+def test_execution_carries_evaluation_score(monkeypatch):
+    from solhunter_zero.swarm_pipeline import (
+        EvaluationRecord,
+        SimulationStage,
+        SwarmAction,
+        SwarmPipeline,
+    )
+
+    class _StubAgentManager:
+        skip_simulation = False
+
+        def __init__(self) -> None:
+            self.executor = types.SimpleNamespace(add_executor=lambda *a, **k: None)
+
+        def consume_swarm(self, token, swarm):  # pragma: no cover - interface stub
+            return None
+
+    class _CapturingDispatcher:
+        last_instance = None
+
+        def __init__(self, *args, **kwargs):
+            self.submitted: list = []
+            _CapturingDispatcher.last_instance = self
+
+        async def submit(self, lane, request):
+            self.submitted.append(request)
+            fut = asyncio.get_running_loop().create_future()
+            fut.set_result({"status": "ok"})
+            return fut
+
+        def lane_snapshot(self):
+            return {}
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline.ExecutionDispatcher", _CapturingDispatcher
+    )
+
+    pipeline = SwarmPipeline(_StubAgentManager(), Portfolio(path=None), dry_run=True)
+
+    action = SwarmAction(
+        token="Tok",
+        side="buy",
+        amount=1.0,
+        price=1.0,
+        agent="stub",
+        expected_roi=0.5,
+        success_prob=0.9,
+    )
+    record = EvaluationRecord(
+        token="Tok",
+        score=2.5,
+        latency=0.0,
+        actions=[action],
+        context=None,
+    )
+
+    simulation = SimulationStage(records=[record])
+    execution = asyncio.run(pipeline._run_execution(simulation))
+
+    assert execution.executed
+    executed = execution.executed[0].result
+    assert executed["evaluation_score"] == pytest.approx(2.5)
+
+    dispatcher = _CapturingDispatcher.last_instance
+    assert dispatcher is not None
+    assert dispatcher.submitted
+    token_payload = dispatcher.submitted[0].token_result
+    assert token_payload["score"] == pytest.approx(2.5)
