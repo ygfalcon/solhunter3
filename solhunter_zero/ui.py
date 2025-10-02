@@ -203,6 +203,92 @@ def create_app(state: UIState) -> Flask:
             "weights": len(weights),
             "actions": len(actions),
         }
+        heartbeat_value = status.get("heartbeat") or "n/a"
+        iterations_completed_raw = (
+            status.get("iterations_completed")
+            or status.get("iterations")
+            or status.get("iterations_complete")
+        )
+        try:
+            iterations_completed = int(iterations_completed_raw)
+        except (TypeError, ValueError):
+            iterations_completed = 0
+        trade_count_raw = status.get("trade_count")
+        if trade_count_raw is None:
+            trade_count_raw = len(trades)
+        try:
+            trade_count = int(trade_count_raw)
+        except (TypeError, ValueError):
+            trade_count = len(trades)
+        last_elapsed = None
+        if summary:
+            elapsed_val = summary.get("elapsed_s")
+            try:
+                last_elapsed = float(elapsed_val) if elapsed_val is not None else None
+            except (TypeError, ValueError):
+                last_elapsed = None
+        trades_per_iteration = (
+            trade_count / iterations_completed if iterations_completed else 0.0
+        )
+        iteration_caption: str
+        if iterations_completed:
+            if last_elapsed is not None:
+                iteration_caption = f"Last run {last_elapsed:.1f}s"
+            else:
+                iteration_caption = "Tracking iterations"
+        else:
+            iteration_caption = "Awaiting first iteration"
+        trades_caption = (
+            f"{trades_per_iteration:.2f} per iteration"
+            if iterations_completed
+            else "No iterations yet"
+        )
+        heartbeat_caption = (
+            "Trading loop online"
+            if status.get("trading_loop") or status.get("event_bus")
+            else "Loop offline"
+        )
+        stat_tiles = [
+            {
+                "title": "Heartbeat",
+                "value": heartbeat_value,
+                "caption": heartbeat_caption,
+                "icon": """
+                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
+                        <path d=\"M4.318 6.318c-1.756 1.756-1.756 4.604 0 6.36L12 20.36l7.682-7.682c1.756-1.756 1.756-4.604 0-6.36-1.756-1.756-4.604-1.756-6.36 0L12 4.64l-1.322-1.322c-1.756-1.756-4.604-1.756-6.36 0z\" />
+                        <polyline points=\"9 11.5 11 14 13 10 15 12\" />
+                    </svg>
+                """,
+                "css_class": "heartbeat",
+            },
+            {
+                "title": "Iterations",
+                "value": f"{iterations_completed:,}",
+                "caption": iteration_caption,
+                "icon": """
+                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
+                        <path d=\"M3 12a9 9 0 1 1 9 9\" />
+                        <polyline points=\"3 3 3 9 9 9\" />
+                        <path d=\"M12 7v5l3 2\" />
+                    </svg>
+                """,
+                "css_class": "iterations",
+            },
+            {
+                "title": "Trades",
+                "value": f"{trade_count:,}",
+                "caption": trades_caption,
+                "icon": """
+                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
+                        <path d=\"M3 6h18\" />
+                        <path d=\"M5 6v14h14V6\" />
+                        <path d=\"M9 10h6\" />
+                        <path d=\"M9 14h4\" />
+                    </svg>
+                """,
+                "css_class": "trades",
+            },
+        ]
         weights_sample = dict(list(weights.items())[:10]) if isinstance(weights, dict) else {}
         samples = {
             "activity": activity[-5:],
@@ -316,14 +402,81 @@ def create_app(state: UIState) -> Flask:
                     overflow: auto;
                     max-height: 360px;
                 }
+                @keyframes pulseGlow {
+                    0% { text-shadow: 0 0 0 rgba(88, 166, 255, 0.0); }
+                    40% { text-shadow: 0 0 12px rgba(88, 166, 255, 0.7); }
+                    70% { text-shadow: 0 0 8px rgba(88, 166, 255, 0.4); }
+                    100% { text-shadow: 0 0 0 rgba(88, 166, 255, 0.0); }
+                }
                 header {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
+                    display: grid;
+                    grid-template-columns: 1fr auto;
+                    align-items: start;
+                    gap: 20px;
                     margin-bottom: 24px;
                 }
-                header h1 { font-size: 1.8rem; }
+                header h1 { font-size: 1.8rem; margin-bottom: 12px; }
                 header .meta { text-align: right; font-size: 0.9rem; color: var(--muted); }
+                header .headline { display: flex; flex-direction: column; gap: 12px; }
+                header .stat-tiles {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                    gap: 14px;
+                }
+                .stat-tile {
+                    position: relative;
+                    overflow: hidden;
+                    border-radius: 16px;
+                    padding: 14px 16px;
+                    border: 1px solid rgba(88, 166, 255, 0.15);
+                    background: linear-gradient(135deg, rgba(13, 17, 23, 0.9), rgba(23, 32, 45, 0.8));
+                    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+                    display: grid;
+                    grid-template-columns: auto 1fr;
+                    gap: 12px;
+                    align-items: center;
+                }
+                .stat-tile::before {
+                    content: "";
+                    position: absolute;
+                    inset: -40% -60% auto -60%;
+                    height: 140%;
+                    background: radial-gradient(circle at top, rgba(88, 166, 255, 0.45), transparent 65%);
+                    transform: rotate(12deg);
+                    pointer-events: none;
+                }
+                .stat-tile.heartbeat::before {
+                    background: radial-gradient(circle at top, rgba(255, 123, 114, 0.55), transparent 65%);
+                }
+                .stat-icon {
+                    width: 44px;
+                    height: 44px;
+                    border-radius: 12px;
+                    background: linear-gradient(160deg, rgba(88, 166, 255, 0.18), rgba(88, 166, 255, 0));
+                    display: grid;
+                    place-items: center;
+                    color: var(--accent);
+                    box-shadow: inset 0 0 12px rgba(88, 166, 255, 0.25);
+                }
+                .stat-icon svg { width: 26px; height: 26px; }
+                .stat-content { position: relative; z-index: 1; }
+                .stat-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+                .stat-value { font-size: 1.5rem; font-weight: 600; margin-top: 4px; }
+                .stat-caption { font-size: 0.85rem; color: rgba(230, 237, 243, 0.75); margin-top: 4px; }
+                .heartbeat-value { animation: pulseGlow 2.8s ease-in-out infinite; color: var(--accent); }
+                @media (max-width: 900px) {
+                    header { grid-template-columns: 1fr; }
+                    header .meta { text-align: left; }
+                }
+                @media (max-width: 540px) {
+                    body { padding: 18px 16px; }
+                    header .stat-tiles { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+                }
+                @media (max-width: 360px) {
+                    header .stat-tiles { grid-template-columns: 1fr; }
+                    .stat-tile { grid-template-columns: 1fr; }
+                    .stat-icon { width: 38px; height: 38px; }
+                }
                 .status-grid {
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -341,9 +494,20 @@ def create_app(state: UIState) -> Flask:
         </head>
         <body>
             <header>
-                <div>
+                <div class="headline">
                     <h1>SolHunter Zero Dashboard</h1>
-                    <div class="muted">Heartbeat: {{ status.get('heartbeat') or 'n/a' }} · Iterations: {{ status.get('iterations_completed', 0) }} · Trades: {{ status.get('trade_count', 0) }}</div>
+                    <div class="stat-tiles">
+                        {% for tile in stat_tiles %}
+                            <div class="stat-tile {{ tile.css_class }}">
+                                <div class="stat-icon" aria-hidden="true">{{ tile.icon | safe }}</div>
+                                <div class="stat-content">
+                                    <div class="stat-label">{{ tile.title }}</div>
+                                    <div class="stat-value {% if tile.css_class == 'heartbeat' %}heartbeat-value{% endif %}">{{ tile.value }}</div>
+                                    <div class="stat-caption">{{ tile.caption }}</div>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
                 </div>
                 <div class="meta">
                     <div>Auto-refreshing every 5s</div>
@@ -741,6 +905,7 @@ def create_app(state: UIState) -> Flask:
             actions=actions,
             logs=logs,
             history=history,
+            stat_tiles=stat_tiles,
         )
 
     @app.get("/health")
