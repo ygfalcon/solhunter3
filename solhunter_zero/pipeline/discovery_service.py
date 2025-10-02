@@ -20,6 +20,9 @@ class DiscoveryService:
         *,
         interval: float = 5.0,
         cache_ttl: float = 20.0,
+        empty_cache_ttl: Optional[float] = None,
+        backoff_factor: float = 2.0,
+        max_backoff: Optional[float] = None,
         limit: Optional[int] = None,
         offline: bool = False,
         token_file: Optional[str] = None,
@@ -27,12 +30,20 @@ class DiscoveryService:
         self.queue = queue
         self.interval = max(0.1, float(interval))
         self.cache_ttl = max(0.0, float(cache_ttl))
+        if empty_cache_ttl is None:
+            empty_cache_ttl = self.cache_ttl
+        self.empty_cache_ttl = max(0.0, float(empty_cache_ttl)) if empty_cache_ttl is not None else 0.0
+        self.backoff_factor = max(1.0, float(backoff_factor))
+        self.max_backoff = None if max_backoff is None else max(0.0, float(max_backoff))
         self.limit = limit
         self.offline = offline
         self.token_file = token_file
         self._agent = DiscoveryAgent()
         self._last_tokens: list[str] = []
-        self._last_ts: float = 0.0
+        self._last_fetch_ts: float = 0.0
+        self._cooldown_until: float = 0.0
+        self._consecutive_empty: int = 0
+        self._current_backoff: float = 0.0
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
 
@@ -66,7 +77,13 @@ class DiscoveryService:
 
     async def _fetch(self) -> list[str]:
         now = time.time()
-        if self.cache_ttl and self._last_tokens and (now - self._last_ts) < self.cache_ttl:
+        if now < self._cooldown_until:
+            remaining = self._cooldown_until - now
+            log.debug(
+                "DiscoveryService cooldown active for %.2fs (last fetch yielded %d tokens)",
+                remaining,
+                len(self._last_tokens),
+            )
             return list(self._last_tokens)
         tokens = await self._agent.discover_tokens(
             offline=self.offline,
@@ -74,10 +91,47 @@ class DiscoveryService:
         )
         if self.limit:
             tokens = tokens[: self.limit]
+        fetch_ts = time.time()
+        self._last_fetch_ts = fetch_ts
+        self._last_tokens = list(tokens)
+
+        cooldown = 0.0
         if tokens:
-            self._last_tokens = list(tokens)
-            self._last_ts = now
-        return tokens
+            self._consecutive_empty = 0
+            self._current_backoff = 0.0
+            if self.cache_ttl:
+                cooldown = self.cache_ttl
+        else:
+            self._consecutive_empty += 1
+            base_ttl = self.empty_cache_ttl
+            if base_ttl:
+                if self.backoff_factor > 1.0:
+                    cooldown = base_ttl * (self.backoff_factor ** (self._consecutive_empty - 1))
+                else:
+                    cooldown = base_ttl
+            self._current_backoff = cooldown
+
+        if self.max_backoff is not None and cooldown:
+            cooldown = min(cooldown, self.max_backoff)
+
+        if cooldown:
+            self._cooldown_until = fetch_ts + cooldown
+            if tokens:
+                log.info(
+                    "DiscoveryService applying cache cooldown of %.2fs after %d tokens",
+                    cooldown,
+                    len(tokens),
+                )
+            else:
+                log.info(
+                    "DiscoveryService empty fetch #%d; backoff for %.2fs",
+                    self._consecutive_empty,
+                    cooldown,
+                )
+        else:
+            self._cooldown_until = fetch_ts
+
+        return list(tokens)
 
     def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
         ts = time.time()
