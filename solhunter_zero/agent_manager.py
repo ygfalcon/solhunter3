@@ -491,7 +491,7 @@ class AgentManager:
             except Exception:
                 rl_action = None
         if self.use_attention_swarm and self.attention_swarm:
-            rois = await self.coordinator._roi_by_agent([a.name for a in agents])
+            rois, _ = await self.coordinator._roi_by_agent([a.name for a in agents])
             prices = portfolio.price_history.get(token, [])
             vol = (
                 float(np.std(prices) / (np.mean(prices) or 1.0))
