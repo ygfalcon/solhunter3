@@ -38,6 +38,21 @@ def _extract_helius_key() -> str:
 
 logger = logging.getLogger(__name__)
 
+
+class BirdeyeFatalError(RuntimeError):
+    """Exception raised when Birdeye returns a non-retryable client error."""
+
+    def __init__(self, status: int, message: str, *, body: str | None = None) -> None:
+        self.status = status
+        self.body = body
+        super().__init__(message)
+
+    def __str__(self) -> str:  # pragma: no cover - defensive formatting
+        base = super().__str__()
+        if self.body and self.body not in base:
+            return f"{base} ({self.body})"
+        return base
+
 FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 _BIRDEYE_TIMEOUT = float(os.getenv("FAST_BIRDEYE_TIMEOUT", "6.0")) if FAST_MODE else 10.0
 _BIRDEYE_PAGE_DELAY = float(os.getenv("FAST_BIRDEYE_PAGE_DELAY", "0.35")) if FAST_MODE else 1.1
@@ -194,10 +209,7 @@ async def _birdeye_trending(
     limit: int = 20,
     offset: int = 0,
 ) -> List[str]:
-    """
-    Fetch trending token mints from Birdeye. Returns a list of mint addresses.
-    Retries politely on 429; logs and returns [] on persistent failure.
-    """
+    """Fetch trending token mints from Birdeye's current trending endpoint."""
     api_key = api_key or ""
     if not api_key:
         logger.debug("Birdeye API key missing; skipping trending fetch")
@@ -208,8 +220,24 @@ async def _birdeye_trending(
         "X-API-KEY": api_key,
         "x-chain": os.getenv("BIRDEYE_CHAIN", "solana"),
     }
-    params = {"offset": int(offset), "limit": int(limit)}
-    url = f"{BIRDEYE_BASE}/defi/token_trending"
+    timeframe = (
+        os.getenv("BIRDEYE_TRENDING_TIMEFRAME")
+        or os.getenv("BIRDEYE_TIMEFRAME")
+        or "24h"
+    )
+    trend_type = (
+        os.getenv("BIRDEYE_TRENDING_TYPE")
+        or os.getenv("BIRDEYE_TYPE")
+        or "trending"
+    )
+
+    params = {
+        "offset": int(offset),
+        "limit": int(limit),
+        "timeframe": timeframe,
+        "type": trend_type,
+    }
+    url = f"{BIRDEYE_BASE}/defi/trending"
 
     backoffs = [0.1, 0.5, 1.0]
     last_exc: Exception | None = None
@@ -228,28 +256,73 @@ async def _birdeye_trending(
                         logger.info("BirdEye 429; backoff and retry (%d/3)", attempt + 1)
                         await asyncio.sleep(wait)
                         continue
+                if 400 <= resp.status < 500:
+                    if resp.status != 429:
+                        detail = ""
+                        try:
+                            detail = (await resp.text())[:200]
+                        except Exception:  # pragma: no cover - defensive guard
+                            detail = ""
+                        message = f"Birdeye client error {resp.status}"
+                        if resp.reason:
+                            message = f"{message}: {resp.reason}"
+                        if detail:
+                            detail_clean = " ".join(detail.split())
+                            message = f"{message} - {detail_clean}"
+                        raise BirdeyeFatalError(resp.status, message, body=detail)
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 if not isinstance(data, dict):
                     logger.warning("Unexpected Birdeye payload type %s", type(data).__name__)
                     return []
-                payload = data.get("data") or {}
-                # Newer API versions wrap results under data['tokens']
-                items = payload.get("tokens") or payload.get("items") or payload
+                payload = data.get("data") or data.get("result") or data
+                items: Any = []
+                if isinstance(payload, dict):
+                    for key in ("items", "tokens", "data", "results"):
+                        candidate = payload.get(key)
+                        if isinstance(candidate, (list, dict)):
+                            items = candidate
+                            break
+                    else:
+                        items = payload
+                else:
+                    items = payload
                 if isinstance(items, dict):
-                    items = items.get("tokens") or items.get("items") or []
+                    for key in ("items", "tokens", "data", "results"):
+                        candidate = items.get(key)
+                        if isinstance(candidate, list):
+                            items = candidate
+                            break
+                    else:
+                        items = list(items.values())
                 if not isinstance(items, list):
                     return []
                 mints: List[str] = []
                 for it in items:
                     addr = None
                     if isinstance(it, dict):
-                        addr = it.get("address") or it.get("mint")
+                        addr = (
+                            it.get("address")
+                            or it.get("mint")
+                            or it.get("mintAddress")
+                            or it.get("tokenAddress")
+                        )
+                        if not addr:
+                            token_info = it.get("token") or it.get("tokenInfo")
+                            if isinstance(token_info, dict):
+                                addr = (
+                                    token_info.get("address")
+                                    or token_info.get("mint")
+                                    or token_info.get("mintAddress")
+                                    or token_info.get("tokenAddress")
+                                )
                     elif isinstance(it, (list, tuple)) and it:
                         addr = it[0]
                     if isinstance(addr, str):
                         mints.append(addr)
                 return mints
+        except BirdeyeFatalError:
+            raise
         except Exception as exc:
             last_exc = exc
             logger.warning("Birdeye trending request failed (%d/3): %s", attempt, exc)
@@ -466,6 +539,8 @@ async def scan_tokens_async(
     TRENDING_METADATA.clear()
     success = False
 
+    forced_cooldown_reason: str | None = None
+
     async with aiohttp.ClientSession() as session:
         try:
             helius_tokens = await _helius_trending(session, limit=requested)
@@ -498,12 +573,21 @@ async def scan_tokens_async(
         offset = 0
         while len(mints) < requested:
             page_size = min(20, requested - len(mints))
-            batch = await _birdeye_trending(
-                session,
-                api_key,
-                limit=page_size,
-                offset=offset,
-            )
+            try:
+                batch = await _birdeye_trending(
+                    session,
+                    api_key,
+                    limit=page_size,
+                    offset=offset,
+                )
+            except BirdeyeFatalError as exc:
+                reason = str(exc)
+                logger.warning(
+                    "Birdeye trending fatal error; entering cooldown: %s",
+                    reason,
+                )
+                forced_cooldown_reason = reason or f"Birdeye status {exc.status}"
+                break
             if not batch:
                 break
             for mint in batch:
@@ -555,7 +639,10 @@ async def scan_tokens_async(
         _LAST_TRENDING_RESULT["metadata"] = copy.deepcopy(TRENDING_METADATA)
         _LAST_TRENDING_RESULT["timestamp"] = now
 
-    if failure or not success:
+    if forced_cooldown_reason:
+        _FAILURE_COUNT = _FAILURE_THRESHOLD
+        _COOLDOWN_UNTIL = now + _FAILURE_COOLDOWN
+    elif failure or not success:
         _FAILURE_COUNT += 1
         if _FAILURE_COUNT >= _FAILURE_THRESHOLD:
             _COOLDOWN_UNTIL = now + _FAILURE_COOLDOWN
