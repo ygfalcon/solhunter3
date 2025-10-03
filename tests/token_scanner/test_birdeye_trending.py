@@ -123,6 +123,30 @@ def test_birdeye_trending_uses_new_route(monkeypatch: pytest.MonkeyPatch) -> Non
     assert call["headers"]["X-API-KEY"] == "api-key"
 
 
+def test_birdeye_trending_detects_compute_units_throttle() -> None:
+    calls: List[Dict[str, Any]] = []
+    session = _DummySession(
+        [
+            _DummyErrorResponse(
+                status=400,
+                message="Compute units usage limit exceeded for plan Free",
+            )
+        ],
+        calls,
+    )
+
+    async def _run() -> List[str]:
+        return await token_scanner._birdeye_trending(session, "api-key", limit=5)
+
+    with pytest.raises(token_scanner.BirdeyeFatalError) as excinfo:
+        asyncio.run(_run())
+
+    assert len(calls) == 1
+    assert excinfo.value.status == 400
+    assert excinfo.value.throttle is True
+    assert "compute units usage limit exceeded" in (excinfo.value.body or "").lower()
+
+
 def test_scan_tokens_enters_cooldown_after_400(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     monkeypatch.setattr(token_scanner, "_LAST_TRENDING_RESULT", {"mints": [], "metadata": {}, "timestamp": 0.0})
     monkeypatch.setattr(token_scanner, "_FAILURE_COUNT", 0)
@@ -130,6 +154,7 @@ def test_scan_tokens_enters_cooldown_after_400(monkeypatch: pytest.MonkeyPatch, 
 
     monkeypatch.setattr(token_scanner, "_FAILURE_THRESHOLD", 2)
     monkeypatch.setattr(token_scanner, "_FAILURE_COOLDOWN", 120.0)
+    monkeypatch.setattr(token_scanner, "_FATAL_FAILURE_COOLDOWN", 120.0)
 
     async def _helius_empty(session: aiohttp.ClientSession, *, limit: int) -> List[Dict[str, Any]]:
         return []
@@ -158,3 +183,67 @@ def test_scan_tokens_enters_cooldown_after_400(monkeypatch: pytest.MonkeyPatch, 
 
     assert not calls, "Cooldown should prevent additional Birdeye calls"
     assert first[0] == second[0]
+
+
+def test_scan_tokens_uses_cache_after_compute_units_throttle(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cached_mint = "CachedMint00000000000000000000000000000001"
+    monkeypatch.setattr(
+        token_scanner,
+        "_LAST_TRENDING_RESULT",
+        {
+            "mints": [cached_mint],
+            "metadata": {
+                cached_mint: {
+                    "address": cached_mint,
+                    "source": "cache",
+                    "sources": ["cache"],
+                }
+            },
+            "timestamp": 0.0,
+        },
+    )
+    monkeypatch.setattr(token_scanner, "_FAILURE_COUNT", 0)
+    monkeypatch.setattr(token_scanner, "_COOLDOWN_UNTIL", 0.0)
+
+    monkeypatch.setattr(token_scanner, "_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(token_scanner, "_FAILURE_COOLDOWN", 30.0)
+    monkeypatch.setattr(token_scanner, "_FATAL_FAILURE_COOLDOWN", 300.0)
+
+    async def _helius_empty(session: aiohttp.ClientSession, *, limit: int) -> List[Dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(token_scanner, "_helius_trending", _helius_empty)
+
+    calls: List[Dict[str, Any]] = []
+
+    def _session_factory(*args: Any, **kwargs: Any) -> _DummySession:
+        response = _DummyErrorResponse(
+            status=400,
+            message="Compute units usage limit exceeded for plan Free",
+        )
+        return _DummySession([response], calls)
+
+    monkeypatch.setattr(token_scanner.aiohttp, "ClientSession", _session_factory)
+
+    with caplog.at_level("WARNING"):
+        first = asyncio.run(token_scanner.scan_tokens_async(limit=1, api_key="exhausted"))
+
+    assert len(calls) == 1, "Expected exactly one Birdeye request"
+    assert first == [cached_mint]
+    assert token_scanner._FAILURE_COUNT == token_scanner._FAILURE_THRESHOLD
+    assert token_scanner._COOLDOWN_UNTIL > time.time()
+    assert (
+        token_scanner._COOLDOWN_UNTIL - time.time()
+        >= token_scanner._FATAL_FAILURE_COOLDOWN - 1
+    )
+    assert any("Birdeye trending fatal error" in rec.message for rec in caplog.records)
+
+    calls.clear()
+
+    second = asyncio.run(token_scanner.scan_tokens_async(limit=1, api_key="exhausted"))
+
+    assert not calls, "Cooldown should prevent additional Birdeye calls"
+    assert second == first
