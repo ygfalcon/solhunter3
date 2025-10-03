@@ -28,3 +28,10 @@ def test_agent_modules_discoverable_and_importable() -> None:
 
     for module_name in sorted(LEGACY_SHIMS):
         importlib.import_module(module_name)
+
+
+def test_onchain_metrics_private_helper_available() -> None:
+    module = importlib.import_module("solhunter_zero.agents.onchain_metrics")
+    assert hasattr(module, "_helius_price_overview")
+    from solhunter_zero.agents.onchain_metrics import _helius_price_overview  # noqa: F401
+
