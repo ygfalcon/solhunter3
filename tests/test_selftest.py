@@ -126,7 +126,7 @@ def _write_minimal_config(tmp: Path):
     # use TOML to avoid requiring PyYAML
     (tmp / "config_selftest.toml").write_text(
         'solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"\n'
-        'dex_base_url   = "https://quote-api.jup.ag"\n'
+        'dex_base_url   = "https://swap.helius.dev"\n'
         'agents = ["simulation"]\n',
         encoding="utf-8",
     )

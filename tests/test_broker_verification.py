@@ -90,7 +90,7 @@ async def test_verify_broker_connection_failure(monkeypatch, caplog):
 def test_startup_abort_on_verify_failure(monkeypatch):
     cfg_text = (
         "solana_rpc_url='https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d'\n"
-        "dex_base_url='https://quote-api.jup.ag'\n"
+        "dex_base_url='https://swap.helius.dev'\n"
         "agents=['dummy']\n"
         "agent_weights={dummy=1.0}\n"
     )

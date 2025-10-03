@@ -30,7 +30,7 @@ from solhunter_zero.event_bus import DEFAULT_WS_URL
 
 REQUIRED_CFG_KEYS = {
     "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-    "dex_base_url": "https://quote-api.jup.ag",
+    "dex_base_url": "https://swap.helius.dev",
     "agents": ["simulation"],
     "agent_weights": {"simulation": 1.0},
 }
@@ -49,7 +49,7 @@ def _validate_config(path: os.PathLike[str]) -> None:
         )
         example = (
             "solana_rpc_url = \"https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\"\n"
-            "dex_base_url = \"https://quote-api.jup.ag\"\n"
+            "dex_base_url = \"https://swap.helius.dev\"\n"
             "agents = [\"simulation\"]\n\n"
             "[agent_weights]\n"
             "simulation = 1.0\n"

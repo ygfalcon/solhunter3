@@ -1,5 +1,5 @@
 solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
-dex_base_url = "https://quote-api.jup.ag/"
+dex_base_url = "https://swap.helius.dev"
 agents = [
     "simulation",
     "conviction",
@@ -21,6 +21,7 @@ solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c
 jupiter_ws_url = "wss://stats.jup.ag/ws"
 priority_rpc = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 dex_testnet_url = "https://quote-api.jup.ag"
+dex_partner_urls = { jupiter = "https://quote-api.jup.ag" }
 orca_api_url = "https://api.orca.so"
 raydium_api_url = "https://api.raydium.io"
 phoenix_api_url = "https://app.phoenix.trade"
@@ -70,7 +71,7 @@ offline_data_interval = "3600"
 volume_threshold = "0"
 dex_latency_refresh_interval = "60"
 priority_fees = "0,1,2"
-dex_priorities = "phoenix,meteora,orca,raydium,jupiter"
+dex_priorities = "helius,phoenix,meteora,orca,raydium,jupiter"
 event_bus_url = "ws://127.0.0.1:8779"
 event_bus_peers = []
 broker_urls = "redis://localhost:6379"

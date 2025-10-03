@@ -4,12 +4,12 @@ import types
 import sys
 
 os.environ.setdefault("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
-os.environ.setdefault("DEX_BASE_URL", "https://quote-api.jup.ag")
+os.environ.setdefault("DEX_BASE_URL", "https://swap.helius.dev")
 os.environ.pop("AGENTS", None)
 _cfg_path = os.path.join(os.path.dirname(__file__), "tmp_config.toml")
 with open(_cfg_path, "w", encoding="utf-8") as _f:
     _f.write("solana_rpc_url='https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d'\n")
-    _f.write("dex_base_url='https://quote-api.jup.ag'\n")
+    _f.write("dex_base_url='https://swap.helius.dev'\n")
     _f.write("agents=['dummy']\n")
     _f.write("agent_weights={dummy=1.0}\n")
 os.environ["SOLHUNTER_CONFIG"] = _cfg_path

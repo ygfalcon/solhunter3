@@ -185,12 +185,27 @@ A minimal example looks like:
 
 ```toml
 solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
-dex_base_url = "https://quote-api.jup.ag"
+dex_base_url = "https://swap.helius.dev"
 agents = ["simulation"]
 
 [agent_weights]
 simulation = 1.0
 ```
+
+The default configuration prefers the [Helius swap gateway](https://swap.helius.dev) and
+falls back through any partner URLs defined under `dex_partner_urls` before returning to
+Jupiter's public API. To add an additional partner without breaking this cascade, extend
+`dex_partner_urls` instead of overriding `dex_base_url`:
+
+```toml
+[dex_partner_urls]
+my_partner = "https://example.swap.partner"
+```
+
+The partner key (for example, `my_partner`) is used in `dex_priorities`. When you append a
+partner, keep the Helius entry first so that `load_dex_config()` can fall back to
+`jupiter` as the last resort automatically. If you supply `dex_priorities`, include the
+new partner alongside `helius` and `jupiter` to preserve the cascade.
 
 You can optionally tailor buy criteria for each detected market regime by
 defining a `decision_thresholds` table. Provide a `default` section for shared
