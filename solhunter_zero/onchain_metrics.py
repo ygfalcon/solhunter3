@@ -60,8 +60,10 @@ BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", DEFAULT_BIRDEYE_API_KEY)
 # Birdeye base (key goes in X-API-KEY header)
 BIRDEYE_BASE = "https://public-api.birdeye.so"  # requires ?chain=solana
 
-# Jupiter v6 quote API for price impact / slippage
-JUPITER_QUOTE_V6 = "https://quote-api.jup.ag/v6/quote"
+# Helius slippage / price impact endpoint
+HELIUS_PRICE_IMPACT_URL = os.getenv(
+    "HELIUS_PRICE_IMPACT_URL", "https://api.helius.xyz/v0/price-impact"
+)
 
 # Canonical SOL mint for quotes
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -505,6 +507,42 @@ async def _helius_decimals(session: aiohttp.ClientSession, mint: str, rpc_url: O
 
 # -------------------- Jupiter slippage / price impact --------------------
 
+def _extract_price_impact(data: Any) -> Optional[float]:
+    if data is None:
+        return None
+    if isinstance(data, (int, float)):
+        try:
+            return float(data)
+        except Exception:
+            return None
+    if isinstance(data, dict):
+        for key in (
+            "priceImpactPct",
+            "price_impact_pct",
+            "impactPct",
+            "impactPercentage",
+            "priceImpactPercent",
+        ):
+            if key in data:
+                val = _numeric(data.get(key), 0.0)
+                return float(val)
+        for key in ("data", "result", "routePlan", "routes", "route"):
+            sub = data.get(key)
+            cand = _extract_price_impact(sub)
+            if cand is not None:
+                return cand
+        if "swapInfo" in data:
+            cand = _extract_price_impact(data.get("swapInfo"))
+            if cand is not None:
+                return cand
+    if isinstance(data, list):
+        for item in data:
+            cand = _extract_price_impact(item)
+            if cand is not None:
+                return cand
+    return None
+
+
 async def _jupiter_quote_price_impact_pct(
     session: aiohttp.ClientSession,
     out_mint: str,
@@ -512,42 +550,40 @@ async def _jupiter_quote_price_impact_pct(
     in_mint: str = SOL_MINT,
     in_amount_sol: float = 0.1,
 ) -> float:
+    api_key = _helius_api_key()
+    url = HELIUS_PRICE_IMPACT_URL
+    if not api_key or not url:
+        return 0.0
+
     lamports = max(1, int(in_amount_sol * 1_000_000_000))
     params = {
         "inputMint": in_mint,
         "outputMint": out_mint,
         "amount": str(lamports),
-        "onlyDirectRoutes": "false",
-        "asLegacyTransaction": "false",
+        "api-key": api_key,
     }
+    headers = {"accept": "application/json", "x-api-key": api_key}
+    timeout = aiohttp.ClientTimeout(total=8)
+
     for attempt in range(3):
         try:
-            async with session.get(JUPITER_QUOTE_V6, params=params, timeout=aiohttp.ClientTimeout(total=8)) as r:
+            async with session.get(url, params=params, headers=headers, timeout=timeout) as r:
                 if r.status == 429:
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
-                if r.status >= 400:
+                if r.status in {401, 403}:
                     return 0.0
+                if r.status >= 400:
+                    break
                 data = await _json(session, r)
         except asyncio.TimeoutError:
             continue
         except Exception:
             return 0.0
 
-        if isinstance(data, dict):
-            if "priceImpactPct" in data:
-                return float(_numeric(data.get("priceImpactPct"), 0.0))
-            for key in ("data", "routes", "routePlan"):
-                rt = data.get(key)
-                if isinstance(rt, list) and rt:
-                    cand = rt[0]
-                    if isinstance(cand, dict):
-                        if "priceImpactPct" in cand:
-                            return float(_numeric(cand.get("priceImpactPct"), 0.0))
-                        swap = cand.get("swapInfo") or {}
-                        if "priceImpactPct" in swap:
-                            return float(_numeric(swap.get("priceImpactPct"), 0.0))
-        break
+        impact = _extract_price_impact(data)
+        if impact is not None:
+            return float(impact)
     return 0.0
 
 async def fetch_slippage_onchain_async(
