@@ -116,6 +116,7 @@ def _ensure_agents_loaded() -> None:
     from . import system as _system_shim  # noqa: F401  Ensure shim module is loaded
     from . import http as _http_shim  # noqa: F401  Ensure shim module is loaded
     from . import dynamic_limit as _dynamic_limit_shim  # noqa: F401  Ensure shim module is loaded
+    from . import resource_monitor as _resource_monitor_shim  # noqa: F401  Ensure shim module is loaded
 
     BUILT_IN_AGENTS.update({
         "simulation": SimulationAgent,
