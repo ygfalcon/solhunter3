@@ -14,6 +14,7 @@ LEGACY_AGENT_ALIASES = {
         "dynamic_limit",
         "exchange",
         "http",
+        "order_book_ws",
         "onchain_metrics",
         "prices",
         "resource_monitor",
