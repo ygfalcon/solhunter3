@@ -59,3 +59,11 @@ def test_agents_exchange_wrapper_matches_root_module() -> None:
     assert shim.resolve_swap_endpoint is root_exchange.resolve_swap_endpoint
     assert shim.place_order_async is root_exchange.place_order_async
     assert shim._sign_transaction is root_exchange._sign_transaction
+
+
+def test_agents_config_wrapper_matches_root_module() -> None:
+    import solhunter_zero.config as root_config
+    import solhunter_zero.agents.config as shim
+
+    assert shim.ENV_VARS is root_config.ENV_VARS
+    assert shim.load_config is root_config.load_config
