@@ -114,6 +114,7 @@ def _ensure_agents_loaded() -> None:
     from .rl_weight_agent import RLWeightAgent
     from .hierarchical_rl_agent import HierarchicalRLAgent
     from . import system as _system_shim  # noqa: F401  Ensure shim module is loaded
+    from . import http as _http_shim  # noqa: F401  Ensure shim module is loaded
 
     BUILT_IN_AGENTS.update({
         "simulation": SimulationAgent,
