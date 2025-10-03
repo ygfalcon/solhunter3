@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .types import ActionBundle, EvaluationResult, ScoredToken
 
@@ -37,6 +37,8 @@ class EvaluationService:
         self._worker_limit = default_workers or (os.cpu_count() or 4)
         self._on_result = on_result
         self._should_skip = should_skip
+        self._min_volume = self._parse_threshold("DISCOVERY_MIN_VOLUME_USD")
+        self._min_liquidity = self._parse_threshold("DISCOVERY_MIN_LIQUIDITY_USD")
 
     async def start(self) -> None:
         if self._task is None:
@@ -123,15 +125,115 @@ class EvaluationService:
             except Exception as exc:
                 errors.append(str(exc))
                 log.exception("Evaluation failed for %s", scored.token)
+            exploratory_action = None
+            if not actions:
+                exploratory_action = self._maybe_build_exploratory_action(scored)
+                if exploratory_action:
+                    actions.append(exploratory_action)
+                    log.info(
+                        "EvaluationService generated exploratory action for %s (score=%.4f)",
+                        scored.token,
+                        scored.score,
+                    )
             latency = time.perf_counter() - start
+            metadata = {"score": scored.score, "rank": scored.rank}
+            if exploratory_action:
+                metadata["exploratory"] = True
             result = EvaluationResult(
                 token=scored.token,
                 actions=actions,
                 latency=latency,
                 cached=False,
                 errors=errors,
-                metadata={"score": scored.score, "rank": scored.rank},
+                metadata=metadata,
             )
             if self.cache_ttl and not errors:
                 self._cache[scored.token] = (time.time(), result)
             return result
+
+    @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            text = str(value).strip()
+            if not text:
+                return None
+            return float(text)
+        except Exception:
+            return None
+
+    def _parse_threshold(self, env_key: str) -> float:
+        value = self._coerce_float(os.getenv(env_key, "0"))
+        return float(value) if value is not None and value > 0 else 0.0
+
+    def _maybe_build_exploratory_action(self, scored: ScoredToken) -> Optional[Dict[str, Any]]:
+        meta = scored.candidate.metadata or {}
+        price = self._coerce_float(
+            meta.get("price")
+            or meta.get("usd_price")
+            or meta.get("price_usd")
+            or meta.get("last_price")
+        )
+        if price is None or price <= 0:
+            return None
+
+        volume = self._coerce_float(meta.get("volume"))
+        if self._min_volume and (volume is None or volume < self._min_volume):
+            return None
+
+        liquidity = self._coerce_float(meta.get("liquidity"))
+        if self._min_liquidity and (liquidity is None or liquidity < self._min_liquidity):
+            return None
+
+        action_metadata: Dict[str, Any] = {
+            "predicted_score": float(scored.score),
+            "rank": int(scored.rank),
+            "discovered_at": scored.candidate.discovered_at,
+            "source": scored.candidate.source,
+            "exploratory": True,
+        }
+        if volume is not None:
+            action_metadata["volume"] = volume
+        if liquidity is not None:
+            action_metadata["liquidity"] = liquidity
+
+        for label in ("symbol", "name"):
+            value = meta.get(label)
+            if isinstance(value, str) and value:
+                action_metadata[label] = value
+
+        discovery_score = self._coerce_float(meta.get("discovery_score") or meta.get("score"))
+        if discovery_score is not None:
+            action_metadata["discovery_score"] = discovery_score
+
+        sources = meta.get("sources")
+        if isinstance(sources, list):
+            action_metadata["sources"] = [str(src) for src in sources if isinstance(src, str)]
+
+        trending_rank = meta.get("trending_rank") or meta.get("rank")
+        try:
+            if trending_rank is not None:
+                action_metadata["trending_rank"] = int(trending_rank)
+        except (TypeError, ValueError):
+            pass
+
+        action: Dict[str, Any] = {
+            "token": scored.token,
+            "side": "buy",
+            "type": "exploratory",
+            "price": float(price),
+            "metadata": action_metadata,
+        }
+
+        amount = self._coerce_float(meta.get("probe_amount") or meta.get("amount"))
+        if amount is not None and amount > 0:
+            action["amount"] = amount
+
+        notional = self._coerce_float(meta.get("notional_usd") or meta.get("budget"))
+        if notional is not None and notional > 0:
+            action["notional_usd"] = notional
+
+        return action

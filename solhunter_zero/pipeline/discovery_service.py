@@ -3,12 +3,29 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from ..agents.discovery import DiscoveryAgent
+from ..token_scanner import TRENDING_METADATA
 from .types import TokenCandidate
 
 log = logging.getLogger(__name__)
+
+
+def _coerce_float(value: Any) -> float | None:
+    """Best-effort conversion of ``value`` to ``float``."""
+
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+    except Exception:
+        return None
 
 
 class DiscoveryService:
@@ -135,4 +152,59 @@ class DiscoveryService:
 
     def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
         ts = time.time()
-        return [TokenCandidate(token=str(tok), source="discovery", discovered_at=ts) for tok in tokens]
+        result: list[TokenCandidate] = []
+        for tok in tokens:
+            token = str(tok)
+            metadata = self._candidate_metadata(token)
+            result.append(
+                TokenCandidate(
+                    token=token,
+                    source="discovery",
+                    discovered_at=ts,
+                    metadata=metadata,
+                )
+            )
+        return result
+
+    def _candidate_metadata(self, token: str) -> Dict[str, Any]:
+        """Return enriched metadata for ``token`` when available."""
+
+        raw = TRENDING_METADATA.get(token)
+        if not isinstance(raw, dict):
+            return {}
+
+        metadata: Dict[str, Any] = {}
+
+        for key in ("symbol", "name"):
+            value = raw.get(key)
+            if isinstance(value, str) and value:
+                metadata[key] = value
+
+        numeric_keys = {
+            "price": "price",
+            "volume": "volume",
+            "liquidity": "liquidity",
+            "market_cap": "market_cap",
+            "price_change": "price_change",
+        }
+        for source_key, dest_key in numeric_keys.items():
+            number = _coerce_float(raw.get(source_key))
+            if number is not None:
+                metadata[dest_key] = number
+
+        discovery_score = _coerce_float(raw.get("score"))
+        if discovery_score is not None:
+            metadata["discovery_score"] = discovery_score
+
+        sources = raw.get("sources")
+        if isinstance(sources, list):
+            metadata["sources"] = [str(src) for src in sources if isinstance(src, str)]
+
+        rank_value = raw.get("rank")
+        try:
+            if rank_value is not None:
+                metadata["trending_rank"] = int(rank_value)
+        except (TypeError, ValueError):
+            pass
+
+        return metadata
