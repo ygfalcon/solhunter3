@@ -297,6 +297,227 @@ def test_fetch_dex_metrics_error(monkeypatch):
     assert metrics == {"liquidity": 0.0, "depth": 0.0, "volume": 0.0}
 
 
+def test_fetch_dex_metrics_prefers_helius(monkeypatch):
+    calls = {"helius": 0}
+
+    class DummySession:
+        pass
+
+    dummy_session = DummySession()
+
+    async def fake_get_session():
+        return dummy_session
+
+    async def fake_helius_price(session, mint):
+        calls["helius"] += 1
+        return (1.2, 0.1, 5.0, 7.5, 12, 3, 6)
+
+    async def fake_slot(session, rpc_url):
+        return 54321
+
+    async def fake_decimals(session, mint, rpc_url):
+        return 6
+
+    async def fail_birdeye(*args, **kwargs):
+        raise AssertionError("birdeye should not be called")
+
+    async def fail_dex(*args, **kwargs):
+        raise AssertionError("dexscreener should not be called")
+
+    monkeypatch.setattr(onchain_metrics, "get_session", fake_get_session)
+    monkeypatch.setattr(onchain_metrics, "_helius_price_overview", fake_helius_price)
+    monkeypatch.setattr(onchain_metrics, "_helius_slot", fake_slot)
+    monkeypatch.setattr(onchain_metrics, "_helius_decimals", fake_decimals)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_birdeye", fail_birdeye)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_dexscreener", fail_dex)
+
+    metrics = asyncio.run(onchain_metrics.fetch_dex_metrics_async("mint-helius"))
+
+    assert metrics["price"] == pytest.approx(1.2)
+    assert metrics["liquidity_usd"] == pytest.approx(7.5)
+    assert metrics["slot"] == 54321
+    assert metrics["decimals"] == 6
+    assert calls["helius"] == 1
+
+
+def test_fetch_dex_metrics_falls_back_to_birdeye(monkeypatch):
+    calls = {"helius": 0, "birdeye": 0, "dex": 0}
+
+    class DummySession:
+        pass
+
+    dummy_session = DummySession()
+
+    async def fake_get_session():
+        return dummy_session
+
+    async def fake_helius_price(session, mint):
+        calls["helius"] += 1
+        return (0.0, 0.0, 0.0, 0.0, 0, 0, None)
+
+    async def fake_slot(session, rpc_url):
+        return 999
+
+    async def fake_decimals(session, mint, rpc_url):
+        return 0
+
+    async def fake_birdeye(session, mint):
+        calls["birdeye"] += 1
+        return {
+            "price": 2.5,
+            "price_24h_change": 1.1,
+            "volume_24h": 42.0,
+            "liquidity_usd": 13.37,
+            "holders": 21,
+            "pool_count": 4,
+            "decimals": 8,
+            "ohlcv_5m": [
+                {"ts": 1, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0}
+            ],
+            "ohlcv_1h": [],
+        }
+
+    async def fail_dex(*args, **kwargs):
+        calls["dex"] += 1
+        raise AssertionError("dexscreener should not be called when Birdeye succeeds")
+
+    monkeypatch.setattr(onchain_metrics, "get_session", fake_get_session)
+    monkeypatch.setattr(onchain_metrics, "_helius_price_overview", fake_helius_price)
+    monkeypatch.setattr(onchain_metrics, "_helius_slot", fake_slot)
+    monkeypatch.setattr(onchain_metrics, "_helius_decimals", fake_decimals)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_birdeye", fake_birdeye)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_dexscreener", fail_dex)
+
+    metrics = asyncio.run(onchain_metrics.fetch_dex_metrics_async("mint-birdeye"))
+
+    assert metrics["price"] == pytest.approx(2.5)
+    assert metrics["liquidity_usd"] == pytest.approx(13.37)
+    assert metrics["pool_count"] == 4
+    assert metrics["slot"] == 999
+    assert metrics["decimals"] == 8
+    assert calls == {"helius": 1, "birdeye": 1, "dex": 0}
+
+
+def test_fetch_dex_metrics_falls_back_to_tertiary(monkeypatch):
+    calls = {"helius": 0, "birdeye": 0, "dex": 0}
+
+    class DummySession:
+        pass
+
+    dummy_session = DummySession()
+
+    async def fake_get_session():
+        return dummy_session
+
+    async def fake_helius_price(session, mint):
+        calls["helius"] += 1
+        return (0.0, 0.0, 0.0, 0.0, 0, 0, None)
+
+    async def fake_birdeye(session, mint):
+        calls["birdeye"] += 1
+        return {
+            "price": 0.0,
+            "price_24h_change": 0.0,
+            "volume_24h": 0.0,
+            "liquidity_usd": 0.0,
+            "holders": 0,
+            "pool_count": 0,
+            "decimals": None,
+            "ohlcv_5m": [],
+            "ohlcv_1h": [],
+        }
+
+    async def fake_dex(session, mint):
+        calls["dex"] += 1
+        return {
+            "price": 0.42,
+            "price_24h_change": -0.2,
+            "volume_24h": 77.7,
+            "liquidity_usd": 55.5,
+            "holders": 0,
+            "pool_count": 2,
+            "decimals": 5,
+            "ohlcv_5m": [],
+            "ohlcv_1h": [],
+        }
+
+    async def fake_slot(session, rpc_url):
+        return 123
+
+    async def fake_decimals(session, mint, rpc_url):
+        return 0
+
+    monkeypatch.setattr(onchain_metrics, "get_session", fake_get_session)
+    monkeypatch.setattr(onchain_metrics, "_helius_price_overview", fake_helius_price)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_birdeye", fake_birdeye)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_dexscreener", fake_dex)
+    monkeypatch.setattr(onchain_metrics, "_helius_slot", fake_slot)
+    monkeypatch.setattr(onchain_metrics, "_helius_decimals", fake_decimals)
+
+    metrics = asyncio.run(onchain_metrics.fetch_dex_metrics_async("mint-tertiary"))
+
+    assert metrics["price"] == pytest.approx(0.42)
+    assert metrics["liquidity_usd"] == pytest.approx(55.5)
+    assert metrics["pool_count"] == 2
+    assert metrics["slot"] == 123
+    assert metrics["decimals"] == 5
+    assert calls == {"helius": 1, "birdeye": 1, "dex": 1}
+
+
+def test_fetch_liquidity_reuses_cached_metrics(monkeypatch):
+    calls = {"birdeye": 0}
+
+    class DummySession:
+        pass
+
+    dummy_session = DummySession()
+
+    async def fake_get_session():
+        return dummy_session
+
+    async def fake_helius_price(session, mint):
+        return (0.0, 0.0, 0.0, 0.0, 0, 0, None)
+
+    async def fake_birdeye(session, mint):
+        calls["birdeye"] += 1
+        return {
+            "price": 1.0,
+            "price_24h_change": 0.0,
+            "volume_24h": 10.0,
+            "liquidity_usd": 25.0,
+            "holders": 0,
+            "pool_count": 2,
+            "decimals": 9,
+            "ohlcv_5m": [],
+            "ohlcv_1h": [],
+        }
+
+    async def fake_dex(session, mint):
+        raise AssertionError("dexscreener should not be called for cached liquidity")
+
+    async def fake_slot(session, rpc_url):
+        return 321
+
+    async def fake_decimals(session, mint, rpc_url):
+        return 0
+
+    monkeypatch.setattr(onchain_metrics, "get_session", fake_get_session)
+    monkeypatch.setattr(onchain_metrics, "_helius_price_overview", fake_helius_price)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_birdeye", fake_birdeye)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_dexscreener", fake_dex)
+    monkeypatch.setattr(onchain_metrics, "_helius_slot", fake_slot)
+    monkeypatch.setattr(onchain_metrics, "_helius_decimals", fake_decimals)
+
+    metrics = asyncio.run(onchain_metrics.fetch_dex_metrics_async("mint-liq"))
+    assert metrics["liquidity_usd"] == 25.0
+    assert calls["birdeye"] == 1
+
+    liq_info = asyncio.run(onchain_metrics.fetch_liquidity_onchain_async("mint-liq"))
+    assert liq_info["liquidity_usd"] == pytest.approx(25.0)
+    assert liq_info["pool_count"] == 2
+    assert liq_info["slot"] == 321
+    assert calls["birdeye"] == 1
+
 class RPCClient:
     def __init__(self, url, accounts=None, sigs=None):
         self.url = url

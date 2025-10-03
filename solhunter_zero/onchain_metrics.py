@@ -38,6 +38,10 @@ TOP_VOLUME_TOKENS_CACHE: TTLCache = TTLCache(maxsize=64, ttl=TOP_VOLUME_TOKENS_C
 _BIRDEYE_MAX_CONCURRENCY = max(1, int(os.getenv("BIRDEYE_MAX_CONCURRENCY", "8") or 8))
 _BIRDEYE_SEMAPHORE: asyncio.Semaphore | None = None
 
+DEXSCREENER_BASE = os.getenv(
+    "DEXSCREENER_BASE", "https://api.dexscreener.com/latest/dex"
+)
+
 
 def _get_birdeye_semaphore() -> asyncio.Semaphore:
     global _BIRDEYE_SEMAPHORE
@@ -223,6 +227,135 @@ async def _birdeye_ohlcv(session: aiohttp.ClientSession, mint: str, tf: str, lim
                 "v": _numeric(it.get("v") or it.get("volume"), 0.0),
             })
     return out
+
+
+def _metrics_has_data(metrics: Dict[str, Any] | None) -> bool:
+    if not isinstance(metrics, dict):
+        return False
+    return any(
+        [
+            _numeric(metrics.get("price"), 0.0) > 0.0,
+            _numeric(metrics.get("volume_24h"), 0.0) > 0.0,
+            _numeric(metrics.get("liquidity_usd"), 0.0) > 0.0,
+            _int_numeric(metrics.get("holders"), 0) > 0,
+            _int_numeric(metrics.get("pool_count"), 0) > 0,
+        ]
+    )
+
+
+async def _fetch_metrics_birdeye(
+    session: aiohttp.ClientSession, mint: str
+) -> Dict[str, Any]:
+    cache_key = ("birdeye_metrics", FAST_MODE, mint)
+    cached = DEX_METRICS_CACHE.get(cache_key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+
+    price_task = asyncio.create_task(_birdeye_price_overview(session, mint))
+    ohlcv5_task: asyncio.Task | None = None
+    ohlcv1h_task: asyncio.Task | None = None
+    if not FAST_MODE:
+        ohlcv5_task = asyncio.create_task(_birdeye_ohlcv(session, mint, "5m", limit=60))
+        ohlcv1h_task = asyncio.create_task(_birdeye_ohlcv(session, mint, "1h", limit=48))
+
+    try:
+        price, chg, vol, liq, holders, pools, decimals_be = await price_task
+    except Exception:
+        price, chg, vol, liq, holders, pools, decimals_be = 0.0, 0.0, 0.0, 0.0, 0, 0, None
+
+    o5: List[Dict[str, Any]] = []
+    o1: List[Dict[str, Any]] = []
+    if ohlcv5_task is not None:
+        try:
+            o5 = await ohlcv5_task
+        except Exception:
+            o5 = []
+    if ohlcv1h_task is not None:
+        try:
+            o1 = await ohlcv1h_task
+        except Exception:
+            o1 = []
+
+    result = {
+        "price": _numeric(price, 0.0),
+        "price_24h_change": _numeric(chg, 0.0),
+        "volume_24h": _numeric(vol, 0.0),
+        "liquidity_usd": _numeric(liq, 0.0),
+        "holders": _int_numeric(holders, 0),
+        "pool_count": _int_numeric(pools, 0),
+        "decimals": _int_numeric(decimals_be, 0) if decimals_be is not None else None,
+        "ohlcv_5m": o5,
+        "ohlcv_1h": o1,
+    }
+
+    DEX_METRICS_CACHE.set(cache_key, copy.deepcopy(result))
+    return copy.deepcopy(result)
+
+
+async def _fetch_metrics_dexscreener(
+    session: aiohttp.ClientSession, mint: str
+) -> Dict[str, Any]:
+    cache_key = ("dexscreener_metrics", FAST_MODE, mint)
+    cached = DEX_METRICS_CACHE.get(cache_key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+
+    endpoint = f"{DEXSCREENER_BASE.rstrip('/')}/tokens/{mint}"
+    try:
+        async with session.get(endpoint, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status >= 400:
+                data: Dict[str, Any] | None = None
+            else:
+                data = await _json(session, resp)
+    except Exception:
+        data = None
+
+    pairs = []
+    if isinstance(data, dict):
+        raw_pairs = data.get("pairs")
+        if isinstance(raw_pairs, list):
+            pairs = [p for p in raw_pairs if isinstance(p, dict)]
+
+    best: Dict[str, Any] | None = None
+    if pairs:
+        best = max(
+            pairs,
+            key=lambda p: _numeric((p.get("liquidity") or {}).get("usd"), 0.0),
+        )
+
+    liquidity = 0.0
+    volume = 0.0
+    price = 0.0
+    change = 0.0
+    holders = 0
+    decimals: Optional[int] = None
+
+    if isinstance(best, dict):
+        liquidity = _numeric((best.get("liquidity") or {}).get("usd"), 0.0)
+        volume = _numeric((best.get("volume") or {}).get("h24"), 0.0)
+        change = _numeric((best.get("priceChange") or {}).get("h24"), 0.0)
+        price = _numeric(best.get("priceUsd") or best.get("priceUSD"), 0.0)
+        holders = _int_numeric((best.get("holders") or 0), 0)
+        base_token = best.get("baseToken")
+        if isinstance(base_token, dict) and "decimals" in base_token:
+            cand = _int_numeric(base_token.get("decimals"), 0)
+            if cand > 0:
+                decimals = cand
+
+    result = {
+        "price": price,
+        "price_24h_change": change,
+        "volume_24h": volume,
+        "liquidity_usd": liquidity,
+        "holders": holders,
+        "pool_count": len(pairs),
+        "decimals": decimals,
+        "ohlcv_5m": [],
+        "ohlcv_1h": [],
+    }
+
+    DEX_METRICS_CACHE.set(cache_key, copy.deepcopy(result))
+    return copy.deepcopy(result)
 
 # -------------------- Helius REST --------------------
 
@@ -473,6 +606,8 @@ async def fetch_dex_metrics_async(
 
     base = _build_default_metrics(mint)
     session = await get_session()
+    slot_task = asyncio.create_task(_helius_slot(session, rpc_url))
+    dec_task = asyncio.create_task(_helius_decimals(session, mint, rpc_url))
 
     helius_price: Tuple[float, float, float, float, int, int, Optional[int]]
     try:
@@ -481,75 +616,37 @@ async def fetch_dex_metrics_async(
         helius_price = (0.0, 0.0, 0.0, 0.0, 0, 0, None)
 
     price_h, chg_h, vol_h, liq_h, holders_h, pools_h, decimals_h = helius_price
-    has_helius = any(
-        [
-            _numeric(price_h, 0.0) > 0.0,
-            _numeric(vol_h, 0.0) > 0.0,
-            _numeric(liq_h, 0.0) > 0.0,
-            _int_numeric(holders_h, 0) > 0,
-            _int_numeric(pools_h, 0) > 0,
-        ]
-    )
+    helius_metrics = {
+        "price": _numeric(price_h, 0.0),
+        "price_24h_change": _numeric(chg_h, 0.0),
+        "volume_24h": _numeric(vol_h, 0.0),
+        "liquidity_usd": _numeric(liq_h, 0.0),
+        "holders": _int_numeric(holders_h, 0),
+        "pool_count": _int_numeric(pools_h, 0),
+        "decimals": _int_numeric(decimals_h, 0) if decimals_h is not None else None,
+        "ohlcv_5m": [],
+        "ohlcv_1h": [],
+    }
 
-    slot_task = asyncio.create_task(_helius_slot(session, rpc_url))
-    dec_task = asyncio.create_task(_helius_decimals(session, mint, rpc_url))
-
-    if has_helius:
+    selected_metrics: Dict[str, Any] | None
+    if _metrics_has_data(helius_metrics):
+        selected_metrics = helius_metrics
+    else:
         try:
-            slot = await slot_task
+            birdeye_metrics = await _fetch_metrics_birdeye(session, mint)
         except Exception:
-            slot = 0
-        try:
-            decimals_rpc = await dec_task
-        except Exception:
-            decimals_rpc = 0
-
-        decimals_final = decimals_rpc if decimals_rpc > 0 else (
-            decimals_h if decimals_h is not None and decimals_h > 0 else 9
-        )
-
-        base.update({
-            "price": _numeric(price_h, 0.0),
-            "price_24h_change": _numeric(chg_h, 0.0),
-            "volume_24h": _numeric(vol_h, 0.0),
-            "liquidity_usd": _numeric(liq_h, 0.0),
-            "holders": _int_numeric(holders_h, 0),
-            "pool_count": _int_numeric(pools_h, 0),
-            "decimals": _int_numeric(decimals_final, 9),
-            "slot": _int_numeric(slot, 0),
-            "ohlcv_5m": [],
-            "ohlcv_1h": [],
-            "ts": _now_ts(),
-        })
-
-        cached_entry = copy.deepcopy(base)
-        DEX_METRICS_CACHE.set(cache_key, cached_entry)
-        return copy.deepcopy(cached_entry)
-
-    price_task = asyncio.create_task(_birdeye_price_overview(session, mint))
-    ohlcv5_task: asyncio.Task | None = None
-    ohlcv1h_task: asyncio.Task | None = None
-    if not FAST_MODE:
-        ohlcv5_task = asyncio.create_task(_birdeye_ohlcv(session, mint, "5m", limit=60))
-        ohlcv1h_task = asyncio.create_task(_birdeye_ohlcv(session, mint, "1h", limit=48))
-
-    try:
-        price, chg, vol, liq, holders, pools, decimals_be = await price_task
-    except Exception:
-        price, chg, vol, liq, holders, pools, decimals_be = 0.0, 0.0, 0.0, 0.0, 0, 0, None
-
-    o5: list[Dict[str, Any]] = []
-    o1: list[Dict[str, Any]] = []
-    if ohlcv5_task:
-        try:
-            o5 = await ohlcv5_task
-        except Exception:
-            o5 = []
-    if ohlcv1h_task:
-        try:
-            o1 = await ohlcv1h_task
-        except Exception:
-            o1 = []
+            birdeye_metrics = {}
+        if _metrics_has_data(birdeye_metrics):
+            selected_metrics = birdeye_metrics
+        else:
+            try:
+                tertiary_metrics = await _fetch_metrics_dexscreener(session, mint)
+            except Exception:
+                tertiary_metrics = {}
+            if _metrics_has_data(tertiary_metrics):
+                selected_metrics = tertiary_metrics
+            else:
+                selected_metrics = None
 
     try:
         slot = await slot_task
@@ -560,19 +657,26 @@ async def fetch_dex_metrics_async(
     except Exception:
         decimals_rpc = 0
 
-    decimals_final = decimals_rpc if decimals_rpc > 0 else (decimals_be if decimals_be is not None else 9)
+    selected = selected_metrics or {}
+    decimals_hint = selected.get("decimals") if isinstance(selected, dict) else None
+    decimals_final = decimals_rpc if decimals_rpc > 0 else (
+        decimals_hint if isinstance(decimals_hint, (int, float)) and decimals_hint > 0 else 9
+    )
+
+    ohlcv5_val = selected.get("ohlcv_5m") if isinstance(selected, dict) else []
+    ohlcv1_val = selected.get("ohlcv_1h") if isinstance(selected, dict) else []
 
     base.update({
-        "price": _numeric(price, 0.0),
-        "price_24h_change": _numeric(chg, 0.0),
-        "volume_24h": _numeric(vol, 0.0),
-        "liquidity_usd": _numeric(liq, 0.0),
-        "holders": _int_numeric(holders, 0),
-        "pool_count": _int_numeric(pools, 0),
+        "price": _numeric(selected.get("price"), 0.0),
+        "price_24h_change": _numeric(selected.get("price_24h_change"), 0.0),
+        "volume_24h": _numeric(selected.get("volume_24h"), 0.0),
+        "liquidity_usd": _numeric(selected.get("liquidity_usd"), 0.0),
+        "holders": _int_numeric(selected.get("holders"), 0),
+        "pool_count": _int_numeric(selected.get("pool_count"), 0),
         "decimals": _int_numeric(decimals_final, 9),
         "slot": _int_numeric(slot, 0),
-        "ohlcv_5m": o5,
-        "ohlcv_1h": o1,
+        "ohlcv_5m": list(ohlcv5_val) if isinstance(ohlcv5_val, list) else [],
+        "ohlcv_1h": list(ohlcv1_val) if isinstance(ohlcv1_val, list) else [],
         "ts": _now_ts(),
     })
     cached_entry = copy.deepcopy(base)
@@ -608,26 +712,15 @@ async def fetch_liquidity_onchain_async(
         "ts": int
       }
     """
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        # Run BE overview + slot concurrently
-        ov_task = asyncio.create_task(_birdeye_price_overview(session, mint))
-        slot_task = asyncio.create_task(_helius_slot(session, rpc_url))
-        try:
-            _, _, _, liq, _, pools, _ = await ov_task
-        except Exception:
-            liq, pools = 0.0, 0
-        try:
-            slot = await slot_task
-        except Exception:
-            slot = 0
-
+    metrics = await fetch_dex_metrics_async(mint, rpc_url=rpc_url)
+    metrics_dict = metrics if isinstance(metrics, dict) else {}
+    ts_val = metrics_dict.get("ts")
     return {
         "mint": mint,
-        "liquidity_usd": _numeric(liq, 0.0),
-        "pool_count": _int_numeric(pools, 0),
-        "slot": _int_numeric(slot, 0),
-        "ts": _now_ts(),
+        "liquidity_usd": _numeric(metrics_dict.get("liquidity_usd"), 0.0),
+        "pool_count": _int_numeric(metrics_dict.get("pool_count"), 0),
+        "slot": _int_numeric(metrics_dict.get("slot"), 0),
+        "ts": _int_numeric(ts_val, _now_ts()),
     }
 
 def fetch_liquidity_onchain(
