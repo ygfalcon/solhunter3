@@ -7,7 +7,10 @@ from typing import Iterable
 from .. import onchain_metrics as _onchain_metrics
 
 
-_PRIVATE_EXPORTS = {"_helius_price_overview"}
+_PRIVATE_EXPORTS = {
+    "_helius_price_overview",
+    "_birdeye_price_overview",
+}
 
 
 def _collect_public_names(module: ModuleType) -> list[str]:
