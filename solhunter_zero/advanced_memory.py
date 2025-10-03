@@ -88,6 +88,8 @@ class SimulationSummary(Base):
     agent = Column(String)
     expected_roi = Column(Float, nullable=False)
     success_prob = Column(Float, nullable=False)
+    realized_roi = Column(Float)
+    realized_price = Column(Float)
     timestamp = Column(DateTime, default=utcnow)
 
 
@@ -217,6 +219,8 @@ class AdvancedMemory(BaseMemory):
         expected_roi: float,
         success_prob: float,
         agent: str | None = None,
+        realized_roi: float | None = None,
+        realized_price: float | None = None,
     ) -> int:
         """Insert a simulation summary and return its id."""
         with self.Session() as session:
@@ -225,6 +229,8 @@ class AdvancedMemory(BaseMemory):
                 agent=agent,
                 expected_roi=expected_roi,
                 success_prob=success_prob,
+                realized_roi=realized_roi,
+                realized_price=realized_price,
             )
             session.add(sim)
             session.commit()
