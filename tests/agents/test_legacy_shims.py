@@ -30,3 +30,22 @@ def test_agents_resource_monitor_wrapper_exports_expected_helpers() -> None:
     assert shim.start_monitor is root_resource_monitor.start_monitor
     assert shim.stop_monitor is root_resource_monitor.stop_monitor
     assert shim.get_cpu_usage is root_resource_monitor.get_cpu_usage
+
+
+def test_agents_system_wrapper_exports_expected_helpers() -> None:
+    import solhunter_zero.system as root_system
+    import solhunter_zero.agents.system as shim
+
+    assert shim.detect_cpu_count is root_system.detect_cpu_count
+    assert shim.set_rayon_threads is root_system.set_rayon_threads
+    if hasattr(root_system, "main"):
+        assert shim.main is root_system.main
+
+
+def test_agents_util_wrapper_exports_expected_helpers() -> None:
+    import solhunter_zero.util as root_util
+    import solhunter_zero.agents.util as shim
+
+    assert shim.parse_bool_env is root_util.parse_bool_env
+    assert shim.install_uvloop is root_util.install_uvloop
+    assert shim.run_coro is root_util.run_coro
