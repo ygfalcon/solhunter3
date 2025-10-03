@@ -124,6 +124,7 @@ def _ensure_agents_loaded() -> None:
         "system",
         "onchain_metrics",
         "scanner_common",
+        "exchange",
     ):
         importlib.import_module(f"{__name__}.{_shim_name}")
 

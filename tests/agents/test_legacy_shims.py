@@ -49,3 +49,13 @@ def test_agents_util_wrapper_exports_expected_helpers() -> None:
     assert shim.parse_bool_env is root_util.parse_bool_env
     assert shim.install_uvloop is root_util.install_uvloop
     assert shim.run_coro is root_util.run_coro
+
+
+def test_agents_exchange_wrapper_matches_root_module() -> None:
+    import solhunter_zero.exchange as root_exchange
+    import solhunter_zero.agents.exchange as shim
+
+    assert shim.DEX_BASE_URL == root_exchange.DEX_BASE_URL
+    assert shim.resolve_swap_endpoint is root_exchange.resolve_swap_endpoint
+    assert shim.place_order_async is root_exchange.place_order_async
+    assert shim._sign_transaction is root_exchange._sign_transaction
