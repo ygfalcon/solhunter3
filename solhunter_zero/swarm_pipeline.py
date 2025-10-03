@@ -1191,12 +1191,12 @@ class SwarmPipeline:
             for act in actions:
                 order = act.to_order()
                 side = str(order.get("side") or "").strip().lower()
+                balances = getattr(self.portfolio, "balances", {}) or {}
                 entry_price: float | None = None
                 if (
                     self.portfolio
                     and side in {"buy", "sell"}
                 ):
-                    balances = getattr(self.portfolio, "balances", {}) or {}
                     position = None
                     token_key = str(order.get("token") or act.token or "")
                     if token_key and isinstance(balances, dict):
@@ -1225,6 +1225,32 @@ class SwarmPipeline:
                     risk.setdefault("max_drawdown", float(self.max_drawdown))
                 if self.volatility_factor is not None:
                     risk.setdefault("volatility_factor", float(self.volatility_factor))
+                current_drawdown_metric: float | None = None
+                if (
+                    self.portfolio is not None
+                    and price_value > 0
+                    and isinstance(balances, dict)
+                ):
+                    try:
+                        snapshot: Dict[str, float] = {}
+                        for tok, pos in balances.items():
+                            base_price = getattr(pos, "entry_price", None)
+                            if base_price is None and isinstance(pos, dict):
+                                base_price = pos.get("entry_price")
+                            try:
+                                snapshot[tok] = float(base_price) if base_price is not None else 0.0
+                            except (TypeError, ValueError):
+                                snapshot[tok] = 0.0
+                        snapshot[record.token] = price_value
+                        self.portfolio.update_drawdown(snapshot)
+                        current_drawdown_metric = self.portfolio.current_drawdown(snapshot)
+                    except Exception:
+                        current_drawdown_metric = None
+                if current_drawdown_metric is not None:
+                    try:
+                        risk.setdefault("current_drawdown", float(current_drawdown_metric))
+                    except (TypeError, ValueError):
+                        pass
                 if risk:
                     order["risk"] = risk
                 else:

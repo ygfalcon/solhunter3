@@ -130,6 +130,13 @@ def should_sell(
     current_price: float | None = None,
     high_price: float | None = None,
     gas_cost: float = 0.0,
+    holding_duration: float | None = None,
+    max_holding_duration: float | None = None,
+    current_drawdown: float | None = None,
+    max_drawdown: float | None = None,
+    realized_roi: float | None = None,
+    take_profit: float | None = None,
+    stop_loss: float | None = None,
 ) -> bool:
     """Decide whether to sell a token based on simulation results.
 
@@ -138,19 +145,6 @@ def should_sell(
     selling.  By default a negative expected return or a success probability
     below ``max_success`` triggers a sell.
     """
-
-    if not sim_results:
-        return False
-    if sim_results[0].liquidity < min_liquidity:
-        return True
-    if sim_results[0].slippage > max_slippage:
-        return True
-
-    successes = [r.success_prob for r in sim_results]
-    rois = [r.expected_roi for r in sim_results]
-
-    avg_success = sum(successes) / len(successes)
-    avg_roi = sum(rois) / len(rois) - gas_cost
 
     trailing_hit = False
     if (
@@ -161,4 +155,42 @@ def should_sell(
     ):
         trailing_hit = current_price <= high_price * (1 - trailing_stop)
 
-    return trailing_hit or avg_success <= max_success or avg_roi <= max_roi
+    duration_hit = (
+        holding_duration is not None
+        and max_holding_duration is not None
+        and max_holding_duration > 0
+        and holding_duration >= max_holding_duration
+    )
+
+    drawdown_hit = (
+        current_drawdown is not None
+        and max_drawdown is not None
+        and max_drawdown > 0
+        and current_drawdown >= max_drawdown
+    )
+
+    realized_hit = False
+    if realized_roi is not None:
+        if take_profit is not None and take_profit > 0 and realized_roi >= take_profit:
+            realized_hit = True
+        if stop_loss is not None and stop_loss > 0 and realized_roi <= -abs(stop_loss):
+            realized_hit = True
+
+    metrics_triggered = trailing_hit or duration_hit or drawdown_hit or realized_hit
+
+    if not sim_results:
+        return metrics_triggered
+
+    first = sim_results[0]
+    if first.liquidity < min_liquidity:
+        return True
+    if first.slippage > max_slippage:
+        return True
+
+    successes = [r.success_prob for r in sim_results]
+    rois = [r.expected_roi for r in sim_results]
+
+    avg_success = sum(successes) / len(successes)
+    avg_roi = sum(rois) / len(rois) - gas_cost
+
+    return metrics_triggered or avg_success <= max_success or avg_roi <= max_roi

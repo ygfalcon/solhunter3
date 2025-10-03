@@ -40,15 +40,33 @@ async def evaluate(token: str, portfolio: Portfolio) -> List[Dict[str, Any]]:
     pos = portfolio.balances.get(token)
     if pos:
         roi = portfolio.position_roi(token, price) if price else 0.0
-        if stop_loss and roi <= -stop_loss:
-            return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
-        if take_profit and roi >= take_profit:
-            return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
+        current_drawdown = None
+        if prices:
+            portfolio.update_drawdown(prices)
+            current_drawdown = portfolio.current_drawdown(prices)
+
+        trailing_val = trailing_stop or 0.0
+        if trailing_val and price:
+            portfolio.trailing_stop_triggered(token, price, trailing_val)
+
+        max_drawdown_env = os.getenv("MAX_DRAWDOWN")
+        try:
+            max_drawdown_limit = float(max_drawdown_env) if max_drawdown_env else None
+        except ValueError:
+            max_drawdown_limit = None
+        if max_drawdown_limit == 0:
+            max_drawdown_limit = None
+
         if should_sell(
             sims,
             trailing_stop=trailing_stop or None,
             current_price=price if price else None,
             high_price=pos.high_price,
+            realized_roi=roi,
+            take_profit=take_profit or None,
+            stop_loss=stop_loss or None,
+            current_drawdown=current_drawdown,
+            max_drawdown=max_drawdown_limit,
         ):
             return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
 
