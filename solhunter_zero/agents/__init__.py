@@ -120,6 +120,7 @@ def _ensure_agents_loaded() -> None:
         "config",
         "dex_config",
         "http",
+        "order_book_ws",
         "prices",
         "token_discovery",
         "token_scanner",
