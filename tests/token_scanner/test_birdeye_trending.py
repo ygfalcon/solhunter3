@@ -138,7 +138,7 @@ def test_birdeye_trending_detects_compute_units_throttle() -> None:
     async def _run() -> List[str]:
         return await token_scanner._birdeye_trending(session, "api-key", limit=5)
 
-    with pytest.raises(token_scanner.BirdeyeFatalError) as excinfo:
+    with pytest.raises(token_scanner.BirdeyeThrottleError) as excinfo:
         asyncio.run(_run())
 
     assert len(calls) == 1
@@ -211,6 +211,7 @@ def test_scan_tokens_uses_cache_after_compute_units_throttle(
     monkeypatch.setattr(token_scanner, "_FAILURE_THRESHOLD", 1)
     monkeypatch.setattr(token_scanner, "_FAILURE_COOLDOWN", 30.0)
     monkeypatch.setattr(token_scanner, "_FATAL_FAILURE_COOLDOWN", 300.0)
+    monkeypatch.setattr(token_scanner, "_THROTTLE_COOLDOWN", 600.0)
 
     async def _helius_empty(session: aiohttp.ClientSession, *, limit: int) -> List[Dict[str, Any]]:
         return []
@@ -220,11 +221,17 @@ def test_scan_tokens_uses_cache_after_compute_units_throttle(
     calls: List[Dict[str, Any]] = []
 
     def _session_factory(*args: Any, **kwargs: Any) -> _DummySession:
-        response = _DummyErrorResponse(
-            status=400,
-            message="Compute units usage limit exceeded for plan Free",
-        )
-        return _DummySession([response], calls)
+        responses = [
+            _DummyErrorResponse(
+                status=400,
+                message="Compute units usage limit exceeded for plan Free",
+            ),
+            _DummyErrorResponse(
+                status=400,
+                message="Compute units usage limit exceeded for plan Free",
+            ),
+        ]
+        return _DummySession(responses, calls)
 
     monkeypatch.setattr(token_scanner.aiohttp, "ClientSession", _session_factory)
 
@@ -237,9 +244,9 @@ def test_scan_tokens_uses_cache_after_compute_units_throttle(
     assert token_scanner._COOLDOWN_UNTIL > time.time()
     assert (
         token_scanner._COOLDOWN_UNTIL - time.time()
-        >= token_scanner._FATAL_FAILURE_COOLDOWN - 1
+        >= token_scanner._THROTTLE_COOLDOWN - 1
     )
-    assert any("Birdeye trending fatal error" in rec.message for rec in caplog.records)
+    assert any("Birdeye trending throttle" in rec.message for rec in caplog.records)
 
     calls.clear()
 
