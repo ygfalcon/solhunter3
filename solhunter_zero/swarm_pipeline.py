@@ -1190,6 +1190,30 @@ class SwarmPipeline:
                 await _ensure_depth_executor(self.agent_manager, record.token)
             for act in actions:
                 order = act.to_order()
+                side = str(order.get("side") or "").strip().lower()
+                entry_price: float | None = None
+                if (
+                    self.portfolio
+                    and side in {"buy", "sell"}
+                ):
+                    balances = getattr(self.portfolio, "balances", {}) or {}
+                    position = None
+                    token_key = str(order.get("token") or act.token or "")
+                    if token_key and isinstance(balances, dict):
+                        position = balances.get(token_key)
+                    if position is not None:
+                        raw_entry = getattr(position, "entry_price", None)
+                        if raw_entry is None and isinstance(position, dict):
+                            raw_entry = position.get("entry_price")
+                        try:
+                            value = float(raw_entry)
+                        except (TypeError, ValueError):
+                            value = None
+                        if value is not None and math.isfinite(value) and value > 0:
+                            if side == "sell" or (side == "buy" and position is not None):
+                                entry_price = value
+                if entry_price is not None and "entry_price" not in order:
+                    order["entry_price"] = entry_price
                 risk = dict(order.get("risk", {}))
                 if self.stop_loss is not None:
                     risk["stop_loss"] = float(self.stop_loss)
@@ -1378,6 +1402,8 @@ class SwarmPipeline:
                     "success_prob": act.success_prob,
                     "evaluation_score": record.score,
                 }
+                if "entry_price" in order:
+                    record_entry["entry_price"] = order["entry_price"]
                 if risk:
                     record_entry["risk"] = risk
                 if self.dry_run:
