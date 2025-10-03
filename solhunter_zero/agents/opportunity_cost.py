@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from typing import Sequence, Dict, List, Any
 
+import logging
+
 from . import BaseAgent
 from .memory import MemoryAgent
 from ..portfolio import Portfolio
 from ..simulation import run_simulations
+from .price_utils import resolve_price
+
+logger = logging.getLogger(__name__)
 
 
 class OpportunityCostAgent(BaseAgent):
@@ -88,5 +93,21 @@ class OpportunityCostAgent(BaseAgent):
         if self._misses.get(token, 0) >= 2:
             pos = portfolio.balances.get(token)
             if pos:
-                return [{"token": token, "side": "sell", "amount": pos.amount, "price": 0.0}]
+                price, context = await resolve_price(token, portfolio)
+                if price <= 0:
+                    logger.info(
+                        "%s agent skipping sell for %s due to missing price: %s",
+                        self.name,
+                        token,
+                        context,
+                    )
+                    return []
+                return [
+                    {
+                        "token": token,
+                        "side": "sell",
+                        "amount": pos.amount,
+                        "price": price,
+                    }
+                ]
         return []

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from typing import List, Dict, Any
 
+import logging
+
 from . import BaseAgent
 
 from ..portfolio import Portfolio, calculate_order_size
-from ..prices import fetch_token_prices_async
+from .price_utils import resolve_price
+
+logger = logging.getLogger(__name__)
 
 
 class PortfolioAgent(BaseAgent):
@@ -41,7 +45,7 @@ class PortfolioAgent(BaseAgent):
             excess = allocation - self.max_allocation
             amount = pos.amount * excess / allocation
             if amount > 0:
-                actions.append({"token": token, "side": "sell", "amount": amount, "price": 0.0})
+                actions.append({"token": token, "side": "sell", "amount": amount})
         elif allocation < self.max_allocation and not portfolio.balances:
             size = calculate_order_size(
                 1.0,
@@ -51,27 +55,26 @@ class PortfolioAgent(BaseAgent):
                 current_allocation=allocation,
             )
             if size > 0:
-                actions.append({"token": token, "side": "buy", "amount": size, "price": 0.0})
+                actions.append({"token": token, "side": "buy", "amount": size})
 
         if not actions:
             self._skipped_adjustments = []
             return actions
 
-        symbols = {str(act.get("token")) for act in actions if act.get("token")}
-        prices: Dict[str, float] = {}
-        if symbols:
-            try:
-                fetched = await fetch_token_prices_async(symbols)
-                if isinstance(fetched, dict):
-                    prices = {str(k): float(v) for k, v in fetched.items() if isinstance(v, (int, float))}
-            except Exception:
-                prices = {}
-
         hydrated: List[Dict[str, Any]] = []
         for act in actions:
-            symbol = str(act.get("token")) if act.get("token") is not None else ""
-            price = float(prices.get(symbol, 0.0)) if symbol else 0.0
+            token = str(act.get("token")) if act.get("token") is not None else ""
+            if not token:
+                continue
+            price, context = await resolve_price(token, portfolio)
             if price <= 0:
+                logger.info(
+                    "%s agent skipping %s for %s due to missing price: %s",
+                    self.name,
+                    act.get("side"),
+                    token,
+                    context,
+                )
                 skipped.append(
                     {
                         "token": act.get("token"),

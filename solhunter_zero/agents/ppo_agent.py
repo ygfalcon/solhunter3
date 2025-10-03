@@ -39,6 +39,7 @@ import logging
 
 from . import BaseAgent
 from .memory import MemoryAgent
+from .price_utils import resolve_price
 from ..util import parse_bool_env
 from ..offline_data import OfflineData
 from ..order_book_ws import snapshot
@@ -288,10 +289,44 @@ class PPOAgent(BaseAgent):
         logits = logits + torch.tensor([pred, -pred], device=self.device)
         action = "buy" if logits[0] >= logits[1] else "sell"
         if action == "buy":
-            return [{"token": token, "side": "buy", "amount": 1.0, "price": 0.0, "agent": self.name}]
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                self._logger.info(
+                    "%s agent skipping buy for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
+            return [
+                {
+                    "token": token,
+                    "side": "buy",
+                    "amount": 1.0,
+                    "price": price,
+                    "agent": self.name,
+                }
+            ]
         position = portfolio.balances.get(token)
         if position:
-            return [{"token": token, "side": "sell", "amount": position.amount, "price": 0.0, "agent": self.name}]
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                self._logger.info(
+                    "%s agent skipping sell for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
+            return [
+                {
+                    "token": token,
+                    "side": "sell",
+                    "amount": position.amount,
+                    "price": price,
+                    "agent": self.name,
+                }
+            ]
         return []
 
     def close(self) -> None:

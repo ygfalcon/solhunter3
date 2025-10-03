@@ -4,8 +4,13 @@ import hashlib
 import math
 from typing import List, Dict, Any
 
+import logging
+
 from . import BaseAgent
 from ..portfolio import Portfolio
+from .price_utils import resolve_price
+
+logger = logging.getLogger(__name__)
 
 
 class RamanujanAgent(BaseAgent):
@@ -30,9 +35,41 @@ class RamanujanAgent(BaseAgent):
         score = math.tanh(math.sin(digest % 1000))
 
         if score > self.threshold:
-            return [{"token": token, "side": "buy", "amount": self.amount, "price": 0.0}]
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                logger.info(
+                    "%s agent skipping buy for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
+            return [
+                {
+                    "token": token,
+                    "side": "buy",
+                    "amount": self.amount,
+                    "price": price,
+                }
+            ]
         if score < -self.threshold:
             pos = portfolio.balances.get(token)
             if pos:
-                return [{"token": token, "side": "sell", "amount": pos.amount, "price": 0.0}]
+                price, context = await resolve_price(token, portfolio)
+                if price <= 0:
+                    logger.info(
+                        "%s agent skipping sell for %s due to missing price: %s",
+                        self.name,
+                        token,
+                        context,
+                    )
+                    return []
+                return [
+                    {
+                        "token": token,
+                        "side": "sell",
+                        "amount": pos.amount,
+                        "price": price,
+                    }
+                ]
         return []
