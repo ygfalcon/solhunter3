@@ -14,7 +14,13 @@ logger = logging.getLogger(__name__)
 
 
 class SwarmCoordinator:
-    """Compute dynamic agent weights based on historical ROI."""
+    """Compute dynamic agent weights from realized performance data.
+
+    The coordinator favours agents with higher realized ROI while scaling the
+    contribution of each agent by the realized notional they have traded.  When
+    realized execution metrics are unavailable it falls back to estimating ROI
+    from spend and revenue totals.
+    """
 
     def __init__(
         self,
@@ -62,6 +68,38 @@ class SwarmCoordinator:
             except (TypeError, ValueError):
                 return None
 
+        def _extract_metric(trade: Any, *keys: str) -> float | None:
+            """Return the first numeric metric found for ``keys``."""
+
+            containers: list[Any] = [trade]
+            # Common containers used when logging metrics from the execution
+            # pipeline.
+            for attr in (
+                "metrics",
+                "result",
+                "data",
+                "details",
+                "extra",
+                "metadata",
+                "payload",
+            ):
+                value = _lookup(trade, attr)
+                if isinstance(value, dict):
+                    containers.append(value)
+                    # Nested containers may also appear under the same keys
+                    for sub_key in ("metrics", "data", "details"):
+                        sub_val = value.get(sub_key) if isinstance(value, dict) else None
+                        if isinstance(sub_val, dict):
+                            containers.append(sub_val)
+
+            for container in containers:
+                for key in keys:
+                    result = _lookup(container, key)
+                    numeric = _as_float(result)
+                    if numeric is not None:
+                        return numeric
+            return None
+
         realized: Dict[str, Dict[str, float]] = {}
         fallback: Dict[str, Dict[str, float]] = {}
 
@@ -70,10 +108,45 @@ class SwarmCoordinator:
             if reason not in rois:
                 continue
 
-            realized_roi = _as_float(_lookup(trade, "realized_roi"))
-            realized_notional = _as_float(_lookup(trade, "realized_notional"))
-            realized_amount = _as_float(_lookup(trade, "realized_amount"))
-            realized_price = _as_float(_lookup(trade, "realized_price"))
+            realized_roi = _extract_metric(
+                trade,
+                "realized_roi",
+                "roi",
+                "return",
+                "realized_return",
+            )
+            realized_notional = _extract_metric(
+                trade,
+                "realized_notional",
+                "notional",
+                "filled_notional",
+                "gross_notional",
+                "trade_value",
+                "tradeValue",
+                "value",
+            )
+            realized_amount = _extract_metric(
+                trade,
+                "realized_amount",
+                "filled_amount",
+                "filledAmount",
+                "amount",
+                "executed_amount",
+                "executedAmount",
+                "qty",
+                "quantity",
+                "size",
+            )
+            realized_price = _extract_metric(
+                trade,
+                "realized_price",
+                "execution_price",
+                "executionPrice",
+                "avg_price",
+                "average_price",
+                "fill_price",
+                "price",
+            )
 
             notional = realized_notional
             if notional is None and realized_amount is not None and realized_price is not None:
@@ -163,12 +236,12 @@ class SwarmCoordinator:
             weights = {name: base.get(name, 1.0) for name in names}
             return await _apply_learning(weights)
 
-        max_exposure = max(exposures.values()) if exposures else 0.0
-        if max_exposure <= 0:
+        total_exposure = sum(value for value in exposures.values() if value > 0)
+        if total_exposure <= 0:
             exposure_scale = {name: 1.0 for name in names}
         else:
             exposure_scale = {
-                name: (exposures.get(name, 0.0) / max_exposure) if exposures.get(name) else 0.0
+                name: (exposures.get(name, 0.0) / total_exposure) if exposures.get(name) else 0.0
                 for name in names
             }
 

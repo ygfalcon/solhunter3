@@ -82,3 +82,22 @@ def test_swarm_coordinator_uses_realized_roi_weights():
         assert weights["a1"] > weights["a2"] > weights["a3"]
 
     asyncio.run(_run())
+
+
+def test_swarm_coordinator_scales_by_realized_notional():
+    trades = [
+        {"reason": "a1", "metrics": {"realized_roi": 0.5, "realized_notional": 1.0}},
+        {"reason": "a2", "metrics": {"realized_roi": 0.3, "realized_notional": 100.0}},
+        {"reason": "a3", "metrics": {"realized_roi": 0.1, "realized_notional": 10.0}},
+    ]
+    mem_agent = _StubMemoryAgent(trades)
+    coord = SwarmCoordinator(mem_agent, {"a1": 1.0, "a2": 1.0, "a3": 1.0})
+    agents = [DummyAgent("a1"), DummyAgent("a2"), DummyAgent("a3")]
+
+    async def _run() -> None:
+        weights = await coord.compute_weights(agents)
+        assert weights["a2"] > weights["a1"] > weights["a3"]
+        # The much smaller notional for ``a1`` should keep the weight limited
+        assert weights["a1"] < weights["a2"] * 0.1
+
+    asyncio.run(_run())
