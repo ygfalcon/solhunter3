@@ -32,5 +32,9 @@ def test_agent_modules_discoverable_and_importable() -> None:
 def test_onchain_metrics_private_helper_available() -> None:
     module = importlib.import_module("solhunter_zero.agents.onchain_metrics")
     assert hasattr(module, "_helius_price_overview")
-    from solhunter_zero.agents.onchain_metrics import _helius_price_overview  # noqa: F401
+    assert hasattr(module, "_birdeye_price_overview")
+    from solhunter_zero.agents.onchain_metrics import (  # noqa: F401
+        _birdeye_price_overview,
+        _helius_price_overview,
+    )
 
