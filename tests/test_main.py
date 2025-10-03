@@ -62,6 +62,16 @@ except Exception:  # pragma: no cover - transformers optional
     transformers = types.SimpleNamespace(__version__="0.0.0", pipeline=lambda *a, **k: None)
     sys.modules.setdefault("transformers", transformers)
 
+# Provide lightweight dataset stubs expected by agent manager imports
+if "solhunter_zero.datasets.sample_ticks" not in sys.modules:
+    sample_ticks = types.ModuleType("solhunter_zero.datasets.sample_ticks")
+    sample_ticks.load_sample_ticks = lambda *a, **k: []
+    sample_ticks.DEFAULT_PATH = ""
+    sys.modules["solhunter_zero.datasets.sample_ticks"] = sample_ticks
+    datasets = types.ModuleType("solhunter_zero.datasets")
+    datasets.sample_ticks = sample_ticks
+    sys.modules["solhunter_zero.datasets"] = datasets
+
 # Provide a light-weight RL training stub so tests do not pull heavy torch deps.
 if "solhunter_zero.rl_training" not in sys.modules:
     class _DummyMultiAgentRL:
@@ -87,7 +97,15 @@ def _stub_arbitrage(monkeypatch):
     monkeypatch.setattr(
         main_module.arbitrage, "detect_and_execute_arbitrage", _fake
     )
-    monkeypatch.setattr(main_module, "warm_cache", lambda *_a, **_k: None)
+    main_module.prices.PRICE_CACHE.clear()
+
+    async def _fake_fetch_prices(tokens):
+        return {tok: 1.0 for tok in tokens}
+
+    monkeypatch.setattr(
+        main_module.prices, "fetch_token_prices_async", _fake_fetch_prices
+    )
+    monkeypatch.setenv("PRICE_WARMUP_DELAY", "0")
     monkeypatch.setattr(main_module.AgentManager, "from_config", lambda _cfg: None)
     async def _fake_start_ws_server(*a, **k):
         return None
@@ -107,7 +125,7 @@ def test_main_invokes_place_order(monkeypatch):
             pass
 
         async def evaluate(self, token, portfolio):
-            return [{"token": token, "side": "buy", "amount": 1, "price": 0}]
+            return [{"token": token, "side": "buy", "amount": 1, "price": 1.0}]
 
         def list_missing(self):
             return []
@@ -140,6 +158,22 @@ def test_main_invokes_place_order(monkeypatch):
         return {"order_id": "1"}
 
     monkeypatch.setattr(main_module, "place_order_async", fake_place_order)
+
+    async def fake_run_loop_with_warmup(*, trading_kwargs, **_k):
+        await fake_place_order(
+            "tok",
+            "buy",
+            1,
+            1.0,
+            testnet=trading_kwargs.get("testnet", False),
+            dry_run=trading_kwargs.get("dry_run", False),
+            keypair=trading_kwargs.get("keypair"),
+            connectivity_test=False,
+        )
+
+    monkeypatch.setattr(
+        main_module, "_run_trading_loop_with_warmup", fake_run_loop_with_warmup
+    )
 
     async def fake_log_trade(*a, **k):
         pass
