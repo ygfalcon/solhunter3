@@ -818,6 +818,13 @@ def stub_torch() -> None:
 
     nn.Parameter = Parameter
 
+    functional = types.ModuleType('torch.nn.functional')
+    functional.__spec__ = importlib.machinery.ModuleSpec('torch.nn.functional', None)
+    functional.relu = lambda x, inplace=False: x
+    functional.softmax = lambda input, dim=None: input
+    functional.mse_loss = lambda input, target, *a, **k: 0.0
+    nn.functional = functional
+
     optim = types.ModuleType('torch.optim')
     optim.__spec__ = importlib.machinery.ModuleSpec('torch.optim', None)
     optim.__path__ = []
@@ -857,6 +864,7 @@ def stub_torch() -> None:
 
     sys.modules.setdefault('torch', mod)
     sys.modules.setdefault('torch.nn', nn)
+    sys.modules.setdefault('torch.nn.functional', functional)
     sys.modules.setdefault('torch.optim', optim)
     sys.modules.setdefault('torch.utils', utils)
     sys.modules.setdefault('torch.utils.data', data)
