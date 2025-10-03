@@ -5,15 +5,18 @@ import pkgutil
 
 import solhunter_zero.agents as agents_pkg
 
-LEGACY_SHIMS = {
-    "solhunter_zero.agents.dynamic_limit",
-    "solhunter_zero.agents.discovery",
-    "solhunter_zero.agents.http",
-    "solhunter_zero.agents.onchain_metrics",
-    "solhunter_zero.agents.resource_monitor",
-    "solhunter_zero.agents.runtime",
-    "solhunter_zero.agents.system",
-    "solhunter_zero.agents.util",
+LEGACY_AGENT_ALIASES = {
+    f"solhunter_zero.agents.{name}"
+    for name in (
+        "util",
+        "http",
+        "dynamic_limit",
+        "resource_monitor",
+        "system",
+        "onchain_metrics",
+        "runtime",
+        "discovery",
+    )
 }
 
 
@@ -25,7 +28,7 @@ def test_agent_modules_discoverable_and_importable() -> None:
         )
     }
 
-    for module_name in sorted(discovered | LEGACY_SHIMS):
+    for module_name in sorted(discovered | LEGACY_AGENT_ALIASES):
         importlib.import_module(module_name)
 
 
