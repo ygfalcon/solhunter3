@@ -16,6 +16,7 @@ LEGACY_AGENT_ALIASES = {
         "onchain_metrics",
         "runtime",
         "discovery",
+        "config",
     )
 }
 
