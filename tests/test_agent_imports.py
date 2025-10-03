@@ -8,15 +8,21 @@ import solhunter_zero.agents as agents_pkg
 LEGACY_AGENT_ALIASES = {
     f"solhunter_zero.agents.{name}"
     for name in (
-        "util",
-        "http",
-        "dynamic_limit",
-        "resource_monitor",
-        "system",
-        "onchain_metrics",
-        "runtime",
-        "discovery",
         "config",
+        "dex_config",
+        "discovery",
+        "dynamic_limit",
+        "exchange",
+        "http",
+        "onchain_metrics",
+        "prices",
+        "resource_monitor",
+        "runtime",
+        "scanner_common",
+        "system",
+        "token_discovery",
+        "token_scanner",
+        "util",
     )
 }
 
