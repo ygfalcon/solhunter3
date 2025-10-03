@@ -839,7 +839,7 @@ def test_ensure_endpoints_success(monkeypatch):
     monkeypatch.setattr(websockets, "connect", fake_connect)
 
     cfg = {
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
         "birdeye_api_key": "k",
         "jito_ws_url": "wss://mainnet.block-engine.jito.wtf/api/v1/ws",
         "jito_ws_auth": "T",
@@ -848,7 +848,7 @@ def test_ensure_endpoints_success(monkeypatch):
 
     urls = {u for u, _ in calls}
     assert urls == {
-        "https://quote-api.jup.ag",
+        "https://swap.helius.dev",
         "https://public-api.birdeye.so/defi/tokenlist",
     }
     assert all(m == "HEAD" for _, m in calls)
@@ -869,7 +869,7 @@ def test_ensure_endpoints_failure(monkeypatch, capsys):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    cfg = {"dex_base_url": "https://quote-api.jup.ag"}
+    cfg = {"dex_base_url": "https://swap.helius.dev"}
 
     with pytest.raises(SystemExit):
         ensure_endpoints(cfg)
@@ -1074,7 +1074,7 @@ def test_main_calls_ensure_endpoints(monkeypatch, capsys):
         startup.subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=0)
     )
     conf = types.SimpleNamespace(
-        load_config=lambda path=None: {"dex_base_url": "https://quote-api.jup.ag"},
+        load_config=lambda path=None: {"dex_base_url": "https://swap.helius.dev"},
         validate_config=lambda cfg: cfg,
         apply_env_overrides=lambda cfg: cfg,
         find_config_file=lambda: "config.toml",
@@ -1124,7 +1124,7 @@ def test_main_skips_endpoint_check(monkeypatch, capsys):
         startup.subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=0)
     )
     conf = types.SimpleNamespace(
-        load_config=lambda path=None: {"dex_base_url": "https://quote-api.jup.ag"},
+        load_config=lambda path=None: {"dex_base_url": "https://swap.helius.dev"},
         validate_config=lambda cfg: cfg,
         apply_env_overrides=lambda cfg: cfg,
         find_config_file=lambda: "config.toml",
@@ -1319,7 +1319,7 @@ def test_wallet_cli_failure_propagates(monkeypatch):
         ),
     )
     conf = types.SimpleNamespace(
-        load_config=lambda path=None: {"dex_base_url": "https://quote-api.jup.ag"},
+        load_config=lambda path=None: {"dex_base_url": "https://swap.helius.dev"},
         validate_config=lambda cfg: cfg,
         apply_env_overrides=lambda cfg: cfg,
         find_config_file=lambda: "config.toml",

@@ -25,8 +25,8 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
 
-QUOTE_URL = os.getenv("DEX_BASE_URL", "https://quote-api.jup.ag") + "/v6/quote"
-SWAP_URL = os.getenv("DEX_BASE_URL", "https://quote-api.jup.ag") + "/v6/swap"
+QUOTE_URL = os.getenv("DEX_BASE_URL", "https://swap.helius.dev") + "/v6/quote"
+SWAP_URL = os.getenv("DEX_BASE_URL", "https://swap.helius.dev") + "/v6/swap"
 
 # Mainnet mints
 WSOL = "So11111111111111111111111111111111111111112"

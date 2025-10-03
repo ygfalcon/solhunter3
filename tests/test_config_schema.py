@@ -5,7 +5,7 @@ from solhunter_zero.config_schema import validate_config
 def _cfg():
     return {
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
         "agents": ["a"],
         "agent_weights": {"a": 1.0},
     }

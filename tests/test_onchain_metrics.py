@@ -219,11 +219,11 @@ def test_fetch_dex_metrics(monkeypatch):
     monkeypatch.setattr("aiohttp.ClientSession", lambda *a, **k: FakeSession())
 
     metrics = asyncio.run(
-        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://quote-api.jup.ag")
+        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://swap.helius.dev")
     )
 
     assert metrics == {"liquidity": 10.0, "depth": 0.5, "volume": 20.0}
-    assert urls[0] == "https://quote-api.jup.ag/v1/liquidity?token=tok"
+    assert urls[0] == "https://swap.helius.dev/v1/liquidity?token=tok"
 
 
 def test_dex_metrics_cache(monkeypatch):
@@ -262,10 +262,10 @@ def test_dex_metrics_cache(monkeypatch):
     onchain_metrics.DEX_METRICS_CACHE.ttl = 60
 
     metrics1 = asyncio.run(
-        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://quote-api.jup.ag")
+        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://swap.helius.dev")
     )
     metrics2 = asyncio.run(
-        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://quote-api.jup.ag")
+        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://swap.helius.dev")
     )
 
     assert metrics1 == {"liquidity": 1.0, "depth": 0.1, "volume": 2.0}
@@ -291,7 +291,7 @@ def test_fetch_dex_metrics_error(monkeypatch):
     monkeypatch.setattr("aiohttp.ClientSession", fake_session)
 
     metrics = asyncio.run(
-        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://quote-api.jup.ag")
+        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://swap.helius.dev")
     )
 
     assert metrics == {"liquidity": 0.0, "depth": 0.0, "volume": 0.0}
@@ -626,8 +626,8 @@ def test_order_book_depth_change(monkeypatch):
 
     monkeypatch.setattr(onchain_metrics, "fetch_dex_metrics_async", fake_fetch)
 
-    first = onchain_metrics.order_book_depth_change("tok", base_url="https://quote-api.jup.ag")
-    second = onchain_metrics.order_book_depth_change("tok", base_url="https://quote-api.jup.ag")
+    first = onchain_metrics.order_book_depth_change("tok", base_url="https://swap.helius.dev")
+    second = onchain_metrics.order_book_depth_change("tok", base_url="https://swap.helius.dev")
     assert first == 0.0
     assert second == pytest.approx(1.0)
 
@@ -691,15 +691,15 @@ def test_fetch_dex_metrics_concurrent(monkeypatch):
 
     start = time.perf_counter()
     metrics = asyncio.run(
-        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://quote-api.jup.ag")
+        onchain_metrics.fetch_dex_metrics_async("tok", base_url="https://swap.helius.dev")
     )
     elapsed = time.perf_counter() - start
 
     assert metrics == {"liquidity": 1.0, "depth": 0.1, "volume": 2.0}
     assert set(calls) == {
-        "https://quote-api.jup.ag/v1/liquidity?token=tok",
-        "https://quote-api.jup.ag/v1/depth?token=tok",
-        "https://quote-api.jup.ag/v1/volume?token=tok",
+        "https://swap.helius.dev/v1/liquidity?token=tok",
+        "https://swap.helius.dev/v1/depth?token=tok",
+        "https://swap.helius.dev/v1/volume?token=tok",
     }
     assert elapsed < 0.12
 
