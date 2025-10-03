@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import time
 from typing import Any, Dict, Iterable, List, Sequence
 from urllib.parse import parse_qs, urlparse
 
@@ -42,12 +44,82 @@ _BIRDEYE_PAGE_DELAY = float(os.getenv("FAST_BIRDEYE_PAGE_DELAY", "0.35")) if FAS
 _HELIUS_TIMEOUT = float(os.getenv("FAST_HELIUS_TIMEOUT", "4.0")) if FAST_MODE else 8.0
 
 TRENDING_METADATA: Dict[str, Dict[str, Any]] = {}
+BIRDEYE_TRENDING_STATUS: Dict[str, Any] = {"ok": True, "last_error": None, "cooldown_seconds": 0.0}
+
+_BIRDEYE_FAILURE_STATE: Dict[str, Any] = {
+    "consecutive_failures": 0,
+    "cooldown_until": 0.0,
+    "last_error": None,
+}
+
+BIRDEYE_TRENDING_PATH = os.getenv("BIRDEYE_TRENDING_PATH", "/v1/trending")
+BIRDEYE_TRENDING_TYPE = os.getenv("BIRDEYE_TRENDING_TYPE", "token")
+BIRDEYE_TRENDING_TIMEFRAME = os.getenv("BIRDEYE_TRENDING_TIMEFRAME", "24h")
+BIRDEYE_CHAIN = os.getenv("BIRDEYE_CHAIN", "solana")
 
 __all__ = [
     "scan_tokens_async",
     "enrich_tokens_async",
     "TRENDING_METADATA",
+    "BIRDEYE_TRENDING_STATUS",
 ]
+
+
+def _monotonic() -> float:
+    try:
+        return asyncio.get_running_loop().time()
+    except RuntimeError:
+        return time.monotonic()
+
+
+def _reset_birdeye_failures() -> None:
+    state = _BIRDEYE_FAILURE_STATE
+    state["consecutive_failures"] = 0
+    state["cooldown_until"] = 0.0
+    state["last_error"] = None
+    BIRDEYE_TRENDING_STATUS.update({"ok": True, "last_error": None, "cooldown_seconds": 0.0})
+
+
+def _summarize_birdeye_error(payload: Any) -> str:
+    if isinstance(payload, dict):
+        for key in ("message", "msg", "error", "description", "detail"):
+            val = payload.get(key)
+            if isinstance(val, str) and val:
+                return val
+        try:
+            return json.dumps(payload)
+        except Exception:
+            return str(payload)
+    if isinstance(payload, str):
+        return payload
+    return repr(payload)
+
+
+def _record_birdeye_failure(status: int, payload: Any) -> None:
+    now = _monotonic()
+    state = _BIRDEYE_FAILURE_STATE
+    state["consecutive_failures"] = state.get("consecutive_failures", 0) + 1
+    cooldown = min(900.0, 30.0 * (2 ** (state["consecutive_failures"] - 1)))
+    state["cooldown_until"] = max(state.get("cooldown_until", 0.0), now + cooldown)
+    state["last_error"] = {"status": status, "payload": payload, "timestamp": now}
+    BIRDEYE_TRENDING_STATUS.update(
+        {
+            "ok": False,
+            "last_error": {
+                "status": status,
+                "summary": _summarize_birdeye_error(payload),
+                "payload": payload,
+            },
+            "cooldown_seconds": max(0.0, state["cooldown_until"] - now),
+        }
+    )
+
+
+def _birdeye_cooldown_remaining() -> float:
+    now = _monotonic()
+    remaining = max(0.0, float(_BIRDEYE_FAILURE_STATE.get("cooldown_until", 0.0) - now))
+    BIRDEYE_TRENDING_STATUS["cooldown_seconds"] = remaining
+    return remaining
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -139,13 +211,41 @@ async def _birdeye_trending(
         logger.debug("Birdeye API key missing; skipping trending fetch")
         return []
 
+    remaining = _birdeye_cooldown_remaining()
+    if remaining > 0:
+        state = _BIRDEYE_FAILURE_STATE
+        error = state.get("last_error") or {}
+        summary = "cooldown active"
+        if isinstance(error, dict):
+            detail = error.get("payload") or error.get("summary")
+            if detail:
+                summary = _summarize_birdeye_error(detail)
+        logger.debug(
+            "Skipping BirdEye trending request due to cooldown (%.1fs remaining, last=%s)",
+            remaining,
+            summary,
+        )
+        return []
+
     headers = {
         "accept": "application/json",
         "X-API-KEY": api_key,
-        "x-chain": os.getenv("BIRDEYE_CHAIN", "solana"),
+        "x-chain": BIRDEYE_CHAIN,
     }
-    params = {"offset": int(offset), "limit": int(limit)}
-    url = f"{BIRDEYE_BASE}/defi/token_trending"
+    params = {
+        "offset": max(0, int(offset)),
+        "limit": max(1, int(limit)),
+        "type": BIRDEYE_TRENDING_TYPE,
+        "timeframe": BIRDEYE_TRENDING_TIMEFRAME,
+        "chain": BIRDEYE_CHAIN,
+    }
+    url = f"{BIRDEYE_BASE}{BIRDEYE_TRENDING_PATH}"
+    BIRDEYE_TRENDING_STATUS.update(
+        {
+            "route": url,
+            "params": dict(params),
+        }
+    )
 
     backoffs = [0.1, 0.5, 1.0]
     last_exc: Exception | None = None
@@ -164,8 +264,24 @@ async def _birdeye_trending(
                         logger.info("BirdEye 429; backoff and retry (%d/3)", attempt + 1)
                         await asyncio.sleep(wait)
                         continue
+                if 400 <= resp.status < 500:
+                    body_text = await resp.text()
+                    try:
+                        payload = json.loads(body_text)
+                    except Exception:
+                        payload = body_text.strip()
+                    _record_birdeye_failure(resp.status, payload)
+                    summary = _summarize_birdeye_error(payload)
+                    logger.warning(
+                        "Birdeye trending %s error (attempt %d/3): %s",
+                        resp.status,
+                        attempt,
+                        summary,
+                    )
+                    return []
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
+                _reset_birdeye_failures()
                 if not isinstance(data, dict):
                     logger.warning("Unexpected Birdeye payload type %s", type(data).__name__)
                     return []
@@ -193,6 +309,9 @@ async def _birdeye_trending(
 
     if last_exc:
         logger.debug("Birdeye last_exc: %s", last_exc)
+        if isinstance(getattr(last_exc, "status", None), int) and 400 <= last_exc.status < 500:
+            payload = getattr(last_exc, "message", str(last_exc))
+            _record_birdeye_failure(last_exc.status, payload)
     return []
 
 
