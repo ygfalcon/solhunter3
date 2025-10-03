@@ -16,9 +16,14 @@ from __future__ import annotations
 import ast
 from typing import Dict, List, Any, Sequence, Mapping
 
+import logging
+
 from . import BaseAgent
 from ..portfolio import Portfolio
 from ..datasets.artifact_math import load_artifact_math, DEFAULT_PATH
+from .price_utils import resolve_price
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +112,40 @@ class ArtifactMathAgent(BaseAgent):
         series = map_glyph_series(list(token), mapping)
         score = aggregate_scores(series)
         if score > self.threshold:
-            return [{"token": token, "side": "buy", "amount": self.amount, "price": 0.0}]
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                logger.info(
+                    "%s agent skipping buy for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
+            return [
+                {
+                    "token": token,
+                    "side": "buy",
+                    "amount": self.amount,
+                    "price": price,
+                }
+            ]
         if score < -self.threshold and token in portfolio.balances:
             pos = portfolio.balances[token]
-            return [{"token": token, "side": "sell", "amount": pos.amount, "price": 0.0}]
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                logger.info(
+                    "%s agent skipping sell for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
+            return [
+                {
+                    "token": token,
+                    "side": "sell",
+                    "amount": pos.amount,
+                    "price": price,
+                }
+            ]
         return []

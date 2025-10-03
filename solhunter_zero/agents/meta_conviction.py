@@ -4,6 +4,8 @@ import asyncio
 import os
 from typing import List, Dict, Any, Iterable
 
+import logging
+
 import numpy as np
 
 from .. import models
@@ -15,6 +17,9 @@ from .simulation import SimulationAgent
 from .conviction import ConvictionAgent
 from .ramanujan_agent import RamanujanAgent
 from ..portfolio import Portfolio
+from .price_utils import resolve_price
+
+logger = logging.getLogger(__name__)
 
 
 class MetaConvictionAgent(BaseAgent):
@@ -107,11 +112,43 @@ class MetaConvictionAgent(BaseAgent):
             conviction -= self.weights.get("prediction", 1.0)
 
         if conviction > 0:
-            return [{"token": token, "side": "buy", "amount": 1.0, "price": 0.0}]
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                logger.info(
+                    "%s agent skipping buy for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
+            return [
+                {
+                    "token": token,
+                    "side": "buy",
+                    "amount": 1.0,
+                    "price": price,
+                }
+            ]
         if conviction < 0:
             pos = portfolio.balances.get(token)
             if pos:
-                return [{"token": token, "side": "sell", "amount": pos.amount, "price": 0.0}]
+                price, context = await resolve_price(token, portfolio)
+                if price <= 0:
+                    logger.info(
+                        "%s agent skipping sell for %s due to missing price: %s",
+                        self.name,
+                        token,
+                        context,
+                    )
+                    return []
+                return [
+                    {
+                        "token": token,
+                        "side": "sell",
+                        "amount": pos.amount,
+                        "price": price,
+                    }
+                ]
         return []
 
     def apply_threshold_profile(self, profile):

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import List, Dict, Any
 
+import logging
+
 import numpy as np
 
 try:  # optional dependency
@@ -10,10 +12,14 @@ except Exception:  # pragma: no cover - optional dependency
     pywt = None
 
 from . import BaseAgent
+from .price_utils import resolve_price
 from ..portfolio import Portfolio
 from ..memory import Memory
 from ..advanced_memory import AdvancedMemory
 from ..offline_data import OfflineData
+
+
+logger = logging.getLogger(__name__)
 
 
 class FractalAgent(BaseAgent):
@@ -148,12 +154,21 @@ class FractalAgent(BaseAgent):
                 best_idx = idx
 
         if best_sim >= self.similarity_threshold and 1.58 <= dim <= 1.63:
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                logger.info(
+                    "%s agent skipping buy for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
             return [
                 {
                     "token": token,
                     "side": "buy",
                     "amount": 1.0,
-                    "price": 0.0,
+                    "price": price,
                     "fractal_overlap_score": best_sim,
                     "hurst_shift_vector": best_shift,
                     "ghost_transfer_index": best_idx,
