@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Type
+import importlib
 import importlib.metadata
 
 from ..portfolio import Portfolio
@@ -113,10 +114,10 @@ def _ensure_agents_loaded() -> None:
     from .artifact_math_agent import ArtifactMathAgent
     from .rl_weight_agent import RLWeightAgent
     from .hierarchical_rl_agent import HierarchicalRLAgent
-    from . import system as _system_shim  # noqa: F401  Ensure shim module is loaded
-    from . import http as _http_shim  # noqa: F401  Ensure shim module is loaded
-    from . import dynamic_limit as _dynamic_limit_shim  # noqa: F401  Ensure shim module is loaded
-    from . import resource_monitor as _resource_monitor_shim  # noqa: F401  Ensure shim module is loaded
+
+    # Load legacy compatibility shims so old import paths remain valid.
+    for _shim_name in ("util", "http", "dynamic_limit", "resource_monitor", "system"):
+        importlib.import_module(f"{__name__}.{_shim_name}")
 
     BUILT_IN_AGENTS.update({
         "simulation": SimulationAgent,
