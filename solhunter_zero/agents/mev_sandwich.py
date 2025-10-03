@@ -18,7 +18,7 @@ from ..onchain_metrics import fetch_slippage_onchain
 from ..depth_client import prepare_signed_tx
 from ..mev_executor import MEVExecutor
 from ..portfolio import Portfolio
-from ..exchange import DEX_BASE_URL, SWAP_PATH
+from ..exchange import DEX_BASE_URL, resolve_swap_endpoint
 
 
 async def _fetch_swap_tx_message(
@@ -36,10 +36,9 @@ async def _fetch_swap_tx_message(
         "cluster": "mainnet-beta",
     }
     session = await get_session()
+    endpoint = resolve_swap_endpoint(base_url)
     try:
-        async with session.post(
-            f"{base_url}{SWAP_PATH}", json=payload, timeout=10
-        ) as resp:
+        async with session.post(endpoint, json=payload, timeout=10) as resp:
             resp.raise_for_status()
             data = await resp.json()
     except aiohttp.ClientError:

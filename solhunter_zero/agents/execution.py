@@ -15,8 +15,8 @@ from ..exchange import (
     place_order_async,
     DEX_BASE_URL,
     VENUE_URLS,
-    SWAP_PATH,
     _sign_transaction,
+    resolve_swap_endpoint,
 )
 from ..execution import EventExecutor
 from ..depth_client import submit_raw_tx
@@ -100,11 +100,11 @@ class ExecutionAgent(BaseAgent):
         side: str,
         amount: float,
         price: float,
-        base_url: str,
+        endpoint: str,
         *,
         priority_fee: int | None = None,
     ) -> str | None:
-        """Return a signed transaction for ``token`` using ``base_url``."""
+        """Return a signed transaction for ``token`` using ``endpoint``."""
 
         payload = {
             "token": token,
@@ -116,9 +116,7 @@ class ExecutionAgent(BaseAgent):
 
         session = await get_session()
         try:
-            async with session.post(
-                f"{base_url}{SWAP_PATH}", json=payload, timeout=10
-            ) as resp:
+            async with session.post(endpoint, json=payload, timeout=10) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
         except aiohttp.ClientError:
@@ -173,22 +171,65 @@ class ExecutionAgent(BaseAgent):
                     adjust_priority_fee(tx_rate) * self.priority_fees[pri_idx]
                 )
 
-            venue = str(action.get("venue", "")).lower()
-            venues = action.get("venues")
+            venue = str(action.get("venue", "")).strip().lower()
+            venues_raw = action.get("venues")
 
-            if venues and isinstance(venues, list):
-                base_urls = [VENUE_URLS.get(v, v) for v in venues]
+            base_entries: list[tuple[str | None, str]] = []
+            normalized_venues: list[str] | None = None
+
+            custom_base = action.get("base_url")
+            primary_base: str | None = None
+            if custom_base:
+                primary_base = str(custom_base)
+                base_entries.append((None, primary_base))
+
+            if isinstance(venues_raw, list):
+                normalized: list[str] = []
+                for entry in venues_raw:
+                    text = str(entry).strip()
+                    if not text:
+                        continue
+                    if "://" in text:
+                        normalized.append(text)
+                        base_entries.append((None, text))
+                    else:
+                        norm = text.lower()
+                        normalized.append(norm)
+                        base_entries.append((norm, str(VENUE_URLS.get(norm, text))))
+                normalized_venues = normalized or None
             else:
-                base_urls = [VENUE_URLS.get(venue, DEX_BASE_URL)]
+                normalized_venues = None
+
+            if primary_base is None:
+                if base_entries:
+                    primary_base = base_entries[0][1]
+                else:
+                    base_value = str(VENUE_URLS.get(venue, DEX_BASE_URL))
+                    base_entries.append((venue or None, base_value))
+                    primary_base = base_value
+
+            endpoints: list[str] = []
+            seen_endpoints: set[str] = set()
+            for hint, base in base_entries:
+                if not base:
+                    continue
+                endpoint = resolve_swap_endpoint(str(base), venue=hint)
+                if endpoint and endpoint not in seen_endpoints:
+                    endpoints.append(endpoint)
+                    seen_endpoints.add(endpoint)
+
+            if not endpoints:
+                primary_base = str(DEX_BASE_URL)
+                endpoints.append(resolve_swap_endpoint(primary_base))
 
             if self.depth_service:
-                for url in base_urls:
+                for endpoint in endpoints:
                     tx = await self._create_signed_tx(
                         action["token"],
                         action["side"],
                         action.get("amount", 0.0),
                         action.get("price", 0.0),
-                        url,
+                        endpoint,
                         priority_fee=priority_fee,
                     )
                     if tx:
@@ -224,8 +265,8 @@ class ExecutionAgent(BaseAgent):
                 testnet=self.testnet,
                 dry_run=self.dry_run,
                 keypair=self.keypair,
-                base_url=base_urls[0],
-                venues=venues,
+                base_url=primary_base,
+                venues=normalized_venues,
                 max_retries=action.get("retries", self.retries),
                 timeout=action.get("timeout"),
             )
