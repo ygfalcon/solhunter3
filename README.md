@@ -178,6 +178,8 @@ The bot reads its settings from `config.toml`. Ensure the following keys are def
 - `agent_weights` – table mapping each agent to a weight
 - `decision_thresholds` – optional table keyed by regime that tunes buy
   thresholds (success probability, ROI, Sharpe, liquidity floor, gas cost).
+  When omitted the runtime falls back to `min_success = 0.6`,
+  `min_roi = 0.05`, `min_sharpe = 0.05`, with all other thresholds at zero.
 
 A minimal example looks like:
 
@@ -198,14 +200,16 @@ values and override individual fields such as `min_success`, `min_roi`,
 ```toml
 [decision_thresholds.default]
 min_success = 0.6
-min_roi = 1.0
+min_roi = 0.1
+min_sharpe = 0.1
 min_liquidity = 50000.0
-gas_cost = 0.05
+gas_cost = 0.02
 
 [decision_thresholds.bear]
 min_success = 0.75
-min_roi = 1.3
-gas_cost = 0.2
+min_roi = 0.18
+min_sharpe = 0.15
+gas_cost = 0.06
 min_liquidity = 150000.0
 ```
 
