@@ -112,19 +112,23 @@ weight_config_paths: []
 To adapt buy decisions to market regimes, define a `decision_thresholds` table
 with per-regime overrides. Each regime inherits the values from the
 `default` section, letting you tighten liquidity floors or increase gas cost
-deductions when markets turn bearish:
+deductions when markets turn bearish. When no table is provided the bot uses
+`min_success = 0.6`, `min_roi = 0.05` and `min_sharpe = 0.05` with other
+thresholds at zero:
 
 ```toml
 [decision_thresholds.default]
 min_success = 0.6
-min_roi = 1.0
-gas_cost = 0.05
+min_roi = 0.1
+min_sharpe = 0.1
+gas_cost = 0.02
 
 [decision_thresholds.bear]
 min_success = 0.8
-min_roi = 1.4
+min_roi = 0.18
+min_sharpe = 0.15
 min_liquidity = 200000.0
-gas_cost = 0.25
+gas_cost = 0.08
 ```
 
 `AgentManager` passes the active regime into the evaluation swarm so agents that

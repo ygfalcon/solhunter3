@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import List, Mapping
+import copy
 import statistics
 
 from .simulation import SimulationResult
@@ -7,8 +8,8 @@ from .simulation import SimulationResult
 
 _DEFAULT_THRESHOLDS = {
     "min_success": 0.6,
-    "min_roi": 1.0,
-    "min_sharpe": 1.0,
+    "min_roi": 0.05,
+    "min_sharpe": 0.05,
     "min_volume": 0.0,
     "min_liquidity": 0.0,
     "max_slippage": 1.0,
@@ -17,6 +18,9 @@ _DEFAULT_THRESHOLDS = {
     "min_order_strength": 0.0,
     "gas_cost": 0.0,
 }
+
+_BASELINE_THRESHOLDS = dict(_DEFAULT_THRESHOLDS)
+_GLOBAL_THRESHOLD_PROFILE: dict[str, dict[str, float]] = {}
 
 
 def _coerce_threshold_profile(
@@ -34,6 +38,35 @@ def _coerce_threshold_profile(
                 continue
         coerced[str(regime)] = inner
     return coerced
+
+
+def set_global_threshold_profile(
+    profile: Mapping[str, Mapping[str, float]] | None,
+) -> dict[str, dict[str, float]]:
+    """Install a global threshold profile sourced from configuration."""
+
+    global _BASELINE_THRESHOLDS, _GLOBAL_THRESHOLD_PROFILE
+
+    previous = get_global_threshold_profile()
+    coerced = _coerce_threshold_profile(profile)
+    _BASELINE_THRESHOLDS = dict(_DEFAULT_THRESHOLDS)
+    default_scope = coerced.get("default", {})
+    for key in _BASELINE_THRESHOLDS.keys() & default_scope.keys():
+        _BASELINE_THRESHOLDS[key] = default_scope[key]
+    _GLOBAL_THRESHOLD_PROFILE = coerced
+    return previous
+
+
+def get_global_threshold_profile() -> dict[str, dict[str, float]]:
+    """Return a copy of the global threshold profile."""
+
+    return copy.deepcopy(_GLOBAL_THRESHOLD_PROFILE)
+
+
+def get_baseline_thresholds() -> dict[str, float]:
+    """Return the active baseline thresholds after configuration overrides."""
+
+    return dict(_BASELINE_THRESHOLDS)
 
 
 def should_buy(
@@ -63,8 +96,18 @@ def should_buy(
     if not sim_results:
         return False
 
-    thresholds = dict(_DEFAULT_THRESHOLDS)
-    profile = _coerce_threshold_profile(threshold_profile)
+    thresholds = dict(_BASELINE_THRESHOLDS)
+    profile: dict[str, dict[str, float]] = {}
+
+    if _GLOBAL_THRESHOLD_PROFILE:
+        profile = {k: dict(v) for k, v in _GLOBAL_THRESHOLD_PROFILE.items()}
+
+    if threshold_profile:
+        overrides = _coerce_threshold_profile(threshold_profile)
+        for scope, values in overrides.items():
+            merged = profile.setdefault(scope, {})
+            merged.update(values)
+
     for scope in ("default", regime or ""):
         if not scope:
             continue
