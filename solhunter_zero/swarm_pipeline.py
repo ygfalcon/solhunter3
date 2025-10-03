@@ -25,6 +25,7 @@ from .portfolio import Portfolio
 from .lru import TTLCache
 from .execution import EventExecutor
 from .prices import fetch_token_prices_async, get_cached_price, update_price_cache
+from .decision import should_sell
 
 log = logging.getLogger(__name__)
 
@@ -1179,6 +1180,94 @@ class SwarmPipeline:
 
         for record in simulation.records:
             actions = record.actions
+            if (
+                self.portfolio
+                and getattr(self.portfolio, "balances", None)
+                and record.token in self.portfolio.balances
+            ):
+                pos = self.portfolio.balances.get(record.token)
+                if pos and getattr(pos, "amount", 0.0) > 0:
+                    price_hint = 0.0
+                    if actions:
+                        try:
+                            price_hint = float(actions[0].price)
+                        except Exception:
+                            price_hint = 0.0
+                    if price_hint <= 0:
+                        cached_price = get_cached_price(record.token)
+                        if cached_price is not None:
+                            try:
+                                price_hint = float(cached_price)
+                            except Exception:
+                                price_hint = 0.0
+                    if price_hint <= 0:
+                        price_hint = float(
+                            getattr(pos, "high_price", 0.0)
+                            or getattr(pos, "entry_price", 0.0)
+                            or 0.0
+                        )
+
+                    holding_period = None
+                    for act in actions:
+                        raw_hp = (
+                            act.metadata.get("holding_period")
+                            if isinstance(act.metadata, dict)
+                            else None
+                        )
+                        if raw_hp is None and isinstance(act.metadata, dict):
+                            raw_hp = act.metadata.get("holdingPeriod")
+                        if raw_hp is not None:
+                            try:
+                                holding_period = float(raw_hp)
+                            except Exception:
+                                holding_period = None
+                            else:
+                                break
+
+                    drawdown = None
+                    position_roi = None
+                    if price_hint > 0:
+                        try:
+                            drawdown = self.portfolio.current_drawdown(
+                                {record.token: float(price_hint)}
+                            )
+                        except Exception:
+                            drawdown = None
+                        try:
+                            position_roi = self.portfolio.position_roi(
+                                record.token, float(price_hint)
+                            )
+                        except Exception:
+                            position_roi = None
+
+                    should_exit = should_sell(
+                        [],
+                        trailing_stop=self.trailing_stop or None,
+                        current_price=float(price_hint) if price_hint > 0 else None,
+                        high_price=getattr(pos, "high_price", None),
+                        position_roi=position_roi,
+                        stop_loss=self.stop_loss,
+                        take_profit=self.take_profit,
+                        drawdown=drawdown,
+                        max_drawdown=self.max_drawdown,
+                        holding_period=holding_period,
+                    )
+                    if (
+                        should_exit
+                        and price_hint > 0
+                        and not any(a.side == "sell" for a in actions)
+                    ):
+                        forced_action = SwarmAction(
+                            token=record.token,
+                            side="sell",
+                            amount=pos.amount,
+                            price=float(price_hint),
+                            agent="risk_exit",
+                            expected_roi=position_roi if position_roi is not None else 0.0,
+                            success_prob=0.0,
+                        )
+                        actions = [forced_action]
+                        record.actions = actions
             token_payload = {
                 "token": record.token,
                 "actions": [],

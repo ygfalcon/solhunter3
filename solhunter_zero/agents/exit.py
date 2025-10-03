@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 from . import BaseAgent
 from ..portfolio import Portfolio
 from .price_utils import resolve_price
+from ..decision import should_sell
 
 
 logger = logging.getLogger(__name__)
@@ -17,10 +18,17 @@ class ExitAgent(BaseAgent):
 
     name = "exit"
 
-    def __init__(self, trailing: float = 0.0, stop_loss: float = 0.0, take_profit: float = 0.0):
+    def __init__(
+        self,
+        trailing: float = 0.0,
+        stop_loss: float = 0.0,
+        take_profit: float = 0.0,
+        max_drawdown: float | None = None,
+    ):
         self.trailing = trailing
         self.stop_loss = stop_loss
         self.take_profit = take_profit
+        self.max_drawdown = max_drawdown
 
     async def propose_trade(
         self,
@@ -42,14 +50,30 @@ class ExitAgent(BaseAgent):
             return []
         pos = portfolio.balances[token]
 
-        roi = portfolio.position_roi(token, price)
-        if self.stop_loss and roi <= -self.stop_loss:
-            return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
-        if self.take_profit and roi >= self.take_profit:
-            return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
+        if price > 0 and self.trailing:
+            try:
+                portfolio.trailing_stop_triggered(token, price, self.trailing)
+            except Exception:
+                pass
 
-        if price > 0 and self.trailing and portfolio.trailing_stop_triggered(
-            token, price, self.trailing
+        roi = portfolio.position_roi(token, price) if price > 0 else None
+        drawdown = None
+        if price > 0:
+            try:
+                drawdown = portfolio.current_drawdown({token: price})
+            except Exception:
+                drawdown = None
+
+        if should_sell(
+            [],
+            trailing_stop=self.trailing or None,
+            current_price=price if price > 0 else None,
+            high_price=pos.high_price,
+            position_roi=roi,
+            stop_loss=self.stop_loss or None,
+            take_profit=self.take_profit or None,
+            drawdown=drawdown,
+            max_drawdown=self.max_drawdown,
         ):
             return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
         return []

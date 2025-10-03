@@ -194,6 +194,36 @@ def test_should_sell_low_liquidity():
     assert should_sell(sims, min_liquidity=100.0) is True
 
 
+def test_should_sell_take_profit_threshold():
+    sims = [
+        SimulationResult(success_prob=0.8, expected_roi=0.4, volume=200.0, liquidity=500.0)
+    ]
+    assert should_sell(sims, position_roi=0.3, take_profit=0.25) is True
+    assert should_sell(sims, position_roi=0.15, take_profit=0.25) is False
+
+
+def test_should_sell_stop_loss_threshold():
+    sims = [
+        SimulationResult(success_prob=0.85, expected_roi=0.6, volume=200.0, liquidity=500.0)
+    ]
+    assert should_sell(sims, position_roi=-0.25, stop_loss=0.2) is True
+    assert should_sell(sims, position_roi=-0.1, stop_loss=0.2) is False
+
+
+def test_should_sell_drawdown_threshold():
+    sims = [
+        SimulationResult(success_prob=0.85, expected_roi=0.6, volume=200.0, liquidity=500.0)
+    ]
+    assert should_sell(sims, drawdown=0.35, max_drawdown=0.3) is True
+    assert should_sell(sims, drawdown=0.2, max_drawdown=0.3) is False
+
+
+def test_should_sell_without_simulations_uses_risk_metrics():
+    assert should_sell([], position_roi=-0.3, stop_loss=0.2) is True
+    assert should_sell([], position_roi=0.1, take_profit=0.2) is False
+    assert should_sell([], drawdown=0.4, max_drawdown=0.3) is True
+
+
 def test_high_gas_cost_blocks_buy_and_triggers_sell():
     sims = [
         SimulationResult(success_prob=0.8, expected_roi=1.2, volume=200.0, liquidity=500.0)

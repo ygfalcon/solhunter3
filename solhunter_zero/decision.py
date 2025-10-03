@@ -130,14 +130,54 @@ def should_sell(
     current_price: float | None = None,
     high_price: float | None = None,
     gas_cost: float = 0.0,
+    holding_period: float | None = None,
+    max_holding_period: float | None = None,
+    position_roi: float | None = None,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
+    drawdown: float | None = None,
+    max_drawdown: float | None = None,
 ) -> bool:
-    """Decide whether to sell a token based on simulation results.
+    """Decide whether to sell a token based on simulation results and context.
 
     The function looks at the average expected ROI and the average success
     probability.  If either indicates poor future performance we recommend
-    selling.  By default a negative expected return or a success probability
-    below ``max_success`` triggers a sell.
+    selling.  Additional optional metrics—such as realised ROI, holding period
+    or portfolio drawdown—can force an exit even when simulations are not
+    available.
     """
+
+    trailing_hit = False
+    if (
+        trailing_stop is not None
+        and current_price is not None
+        and high_price is not None
+        and high_price > 0
+    ):
+        trailing_hit = current_price <= high_price * (1 - trailing_stop)
+        if trailing_hit:
+            return True
+
+    if position_roi is not None:
+        if stop_loss is not None and position_roi <= -abs(stop_loss):
+            return True
+        if take_profit is not None and position_roi >= take_profit:
+            return True
+
+    if (
+        drawdown is not None
+        and max_drawdown is not None
+        and max_drawdown > 0
+        and drawdown >= max_drawdown
+    ):
+        return True
+
+    if (
+        holding_period is not None
+        and max_holding_period is not None
+        and holding_period >= max_holding_period
+    ):
+        return True
 
     if not sim_results:
         return False
@@ -152,13 +192,4 @@ def should_sell(
     avg_success = sum(successes) / len(successes)
     avg_roi = sum(rois) / len(rois) - gas_cost
 
-    trailing_hit = False
-    if (
-        trailing_stop is not None
-        and current_price is not None
-        and high_price is not None
-        and high_price > 0
-    ):
-        trailing_hit = current_price <= high_price * (1 - trailing_stop)
-
-    return trailing_hit or avg_success <= max_success or avg_roi <= max_roi
+    return avg_success <= max_success or avg_roi <= max_roi
