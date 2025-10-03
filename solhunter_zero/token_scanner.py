@@ -14,7 +14,7 @@ DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12
 BIRDEYE_BASE = "https://public-api.birdeye.so"
 
 HELIUS_BASE = os.getenv("HELIUS_PRICE_BASE_URL", "https://api.helius.xyz")
-HELIUS_TREND_PATH = os.getenv("HELIUS_PRICE_PATH", "/v0/token-trending")
+HELIUS_TREND_PATH = os.getenv("HELIUS_PRICE_PATH", "/v1/trending-tokens")
 
 
 def _extract_helius_key() -> str:
@@ -69,10 +69,23 @@ def _normalize_helius_item(raw: Dict[str, Any], *, rank: int) -> Dict[str, Any] 
         return None
 
     address = None
-    for key in ("mint", "address", "token", "mintAddress", "tokenAddress"):
-        val = raw.get(key)
-        if isinstance(val, str) and len(val) > 10:
-            address = val
+    candidates: List[Any] = [raw]
+    token_info = raw.get("token") or raw.get("tokenInfo") or raw.get("tokenMetadata")
+    if isinstance(token_info, dict):
+        candidates.append(token_info)
+    market_info = raw.get("market") or raw.get("metadata")
+    if isinstance(market_info, dict):
+        candidates.append(market_info)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in ("mint", "address", "token", "mintAddress", "tokenAddress"):
+            val = candidate.get(key)
+            if isinstance(val, str) and len(val) > 10:
+                address = val
+                break
+        if address:
             break
     if not address:
         return None
@@ -83,38 +96,80 @@ def _normalize_helius_item(raw: Dict[str, Any], *, rank: int) -> Dict[str, Any] 
         "rank": rank,
     }
 
-    for key in ("symbol", "ticker"):
-        val = raw.get(key)
-        if isinstance(val, str) and val:
-            entry.setdefault("symbol", val)
+    symbol_sources: Iterable[Dict[str, Any]] = [raw]
+    if isinstance(token_info, dict):
+        symbol_sources = list(symbol_sources) + [token_info]
+    for source in symbol_sources:
+        for key in ("symbol", "ticker"):
+            val = source.get(key)
+            if isinstance(val, str) and val:
+                entry.setdefault("symbol", val)
+                break
+        if "symbol" in entry:
             break
 
-    name = raw.get("name") or raw.get("tokenName")
-    if isinstance(name, str) and name:
+    name = None
+    for source in symbol_sources:
+        candidate = source.get("name") or source.get("tokenName")
+        if isinstance(candidate, str) and candidate:
+            name = candidate
+            break
+    if name:
         entry.setdefault("name", name)
+
+    metrics = raw.get("metrics")
+    if isinstance(metrics, dict):
+        candidates.append(metrics)
 
     float_fields = {
         "score": ("score", "rankingScore", "momentumScore"),
-        "volume": ("volume", "volume24h", "volume_24h", "volumeUSD"),
-        "market_cap": ("marketCap", "market_cap", "marketCapUsd"),
+        "volume": (
+            "volume",
+            "volume24h",
+            "volume_24h",
+            "volumeUSD",
+            "volumeUsd",
+        ),
+        "market_cap": ("marketCap", "market_cap", "marketCapUsd", "marketCapUSD"),
         "price_change": (
-            "priceChange", "priceChange24h", "priceChange24hPercent", "change24h"
+            "priceChange",
+            "priceChange24h",
+            "priceChange24hPercent",
+            "change24h",
+            "priceChangePercent",
         ),
     }
 
     for dest, keys in float_fields.items():
         for key in keys:
-            value = raw.get(key)
-            number = _coerce_float(value)
-            if number is not None:
-                entry[dest] = number
+            for source in candidates:
+                if not isinstance(source, dict):
+                    continue
+                value = source.get(key)
+                number = _coerce_float(value)
+                if number is not None:
+                    entry[dest] = number
+                    break
+            if dest in entry:
                 break
 
-    price = _coerce_float(raw.get("price") or raw.get("priceUsd"))
+    price = None
+    for source in candidates:
+        if not isinstance(source, dict):
+            continue
+        price = _coerce_float(source.get("price") or source.get("priceUsd") or source.get("price_usd"))
+        if price is not None:
+            break
     if price is not None:
         entry["price"] = price
 
-    liquidity = _coerce_float(raw.get("liquidity") or raw.get("liquidityUsd"))
+    liquidity = None
+    for source in candidates:
+        if not isinstance(source, dict):
+            continue
+        liquidity = _coerce_float(source.get("liquidity") or source.get("liquidityUsd"))
+        if liquidity is not None:
+            break
     if liquidity is not None:
         entry["liquidity"] = liquidity
 
@@ -213,7 +268,13 @@ async def _helius_trending(
     url = os.getenv("HELIUS_TRENDING_URL", "").strip()
     params: Dict[str, Any] = {}
     headers = {"accept": "application/json"}
-    method = os.getenv("HELIUS_TRENDING_METHOD", "GET").upper()
+    method = os.getenv("HELIUS_TRENDING_METHOD", "POST").upper()
+    sort_override = os.getenv("HELIUS_PRICE_SORT") or os.getenv("HELIUS_TREND_SORT")
+    timeframe_override = (
+        os.getenv("HELIUS_PRICE_TIMEFRAME")
+        or os.getenv("HELIUS_TREND_TIMEFRAME")
+        or os.getenv("HELIUS_TREND_TIMEFRAME_DEFAULT")
+    )
     api_key = _extract_helius_key()
 
     if api_key:
@@ -226,25 +287,61 @@ async def _helius_trending(
         if not path.startswith("/"):
             path = "/" + path
         url = f"{base}{path}"
-        params.setdefault("limit", int(limit))
-        sort = os.getenv("HELIUS_PRICE_SORT") or os.getenv("HELIUS_TREND_SORT")
-        if sort:
-            params["sortBy"] = sort
-        timeframe = os.getenv("HELIUS_PRICE_TIMEFRAME") or os.getenv("HELIUS_TREND_TIMEFRAME")
-        if timeframe:
-            params["timeframe"] = timeframe
 
     if not url:
         logger.debug("Helius trending URL missing; skipping fetch")
         return []
 
+    request_payload: Dict[str, Any] | None = None
+    if method == "POST":
+        request_payload = {
+            "timeframe": (timeframe_override or "24h"),
+            "limit": int(limit),
+        }
+        # Cursor/offset preference defaults to zero; allow overriding via env.
+        cursor = os.getenv("HELIUS_TREND_CURSOR")
+        if cursor:
+            request_payload["cursor"] = cursor
+        else:
+            request_payload["offset"] = int(os.getenv("HELIUS_TREND_OFFSET", "0"))
+
+        network = os.getenv("HELIUS_TREND_NETWORK")
+        if network:
+            request_payload["network"] = network
+
+        if sort_override:
+            request_payload["sortBy"] = sort_override
+
+        include_nsfw = os.getenv("HELIUS_TREND_INCLUDE_NSFW")
+        if include_nsfw:
+            request_payload["includeNsfw"] = include_nsfw.lower() in {"1", "true", "yes", "on"}
+
+        categories = os.getenv("HELIUS_TREND_CATEGORIES")
+        if categories:
+            request_payload["categories"] = [
+                cat.strip()
+                for cat in categories.split(",")
+                if cat.strip()
+            ]
+        # remove None values for cleanliness
+        request_payload = {
+            key: value
+            for key, value in request_payload.items()
+            if value is not None and value != ""
+        }
+    else:
+        params.setdefault("limit", int(limit))
+        if sort_override:
+            params["sortBy"] = sort_override
+        if timeframe_override:
+            params["timeframe"] = timeframe_override
+
     try:
         request_coro: Any
         if method == "POST":
-            body = {k: v for k, v in params.items() if k not in {"api-key"}}
             request_coro = session.post(
                 url,
-                json=body or None,
+                json=request_payload or None,
                 params={"api-key": params.get("api-key")} if params.get("api-key") else None,
                 headers=headers,
                 timeout=_HELIUS_TIMEOUT,
@@ -285,10 +382,15 @@ async def _helius_trending(
                     tokens.append(normalized)
                     if len(tokens) >= limit:
                         return
+            for key in ("tokens", "items", "data", "results"):
+                value = obj.get(key)
+                if isinstance(value, (list, dict)):
+                    _walk(value)
             for value in obj.values():
                 if len(tokens) >= limit:
                     break
-                _walk(value)
+                if isinstance(value, (list, dict)):
+                    _walk(value)
 
     _walk(payload)
 
