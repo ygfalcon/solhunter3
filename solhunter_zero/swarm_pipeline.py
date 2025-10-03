@@ -362,7 +362,9 @@ def _stringify(value: Any) -> Any:
     return str(value)
 
 
-def _extract_realized_metrics(action: Dict[str, Any], result: Any) -> Dict[str, float]:
+def _extract_realized_metrics(
+    action: Dict[str, Any], result: Any
+) -> Dict[str, float | None]:
     """Return realized execution metrics derived from ``result``."""
 
     def _as_float(val: Any) -> Optional[float]:
@@ -415,19 +417,40 @@ def _extract_realized_metrics(action: Dict[str, Any], result: Any) -> Dict[str, 
         if isinstance(data, dict):
             yield from _iter_fills(data)
 
-    metrics: Dict[str, float] = {}
+    def _realized_roi(
+        realized_price: Optional[float], realized_amount: Optional[float]
+    ) -> Optional[float]:
+        entry_price = _as_float(action.get("entry_price"))
+        if entry_price in (None, 0.0):
+            return None
+        if realized_price is None:
+            return None
+        if realized_amount is None or realized_amount <= 0:
+            return None
+        side = str(action.get("side") or "").strip().lower()
+        if side == "sell":
+            return (realized_price - entry_price) / entry_price
+        if side == "buy":
+            return (entry_price - realized_price) / entry_price
+        return None
+
+    metrics: Dict[str, float | None] = {}
     if not isinstance(result, dict):
+        metrics["realized_roi"] = _realized_roi(None, None)
         return metrics
+
+    realized_amount: Optional[float] = None
+    realized_notional: Optional[float] = None
+    realized_price: Optional[float] = None
 
     fills = list(_iter_fills(result))
     if fills:
         total_amount = sum(amount for _, amount in fills)
         total_notional = sum(price * amount for price, amount in fills)
         if total_amount > 0:
-            metrics["realized_amount"] = total_amount
-            metrics["realized_notional"] = total_notional
-            metrics["realized_price"] = total_notional / total_amount
-            return metrics
+            realized_amount = total_amount
+            realized_notional = total_notional
+            realized_price = total_notional / total_amount
 
     amount = _lookup(
         result,
@@ -469,19 +492,42 @@ def _extract_realized_metrics(action: Dict[str, Any], result: Any) -> Dict[str, 
         ),
     )
 
-    if amount is not None and price is not None and notional is None:
-        notional = amount * price
-    elif notional is not None and amount is not None and price is None and amount:
-        price = notional / amount
-    elif notional is not None and price is not None and amount is None and price:
-        amount = notional / price
+    if realized_amount is None and amount is not None:
+        realized_amount = amount
+    if realized_notional is None and notional is not None:
+        realized_notional = notional
+    if realized_price is None and price is not None:
+        realized_price = price
 
-    if amount is not None:
-        metrics["realized_amount"] = amount
-    if notional is not None:
-        metrics["realized_notional"] = notional
-    if price is not None:
-        metrics["realized_price"] = price
+    if (
+        realized_amount is not None
+        and realized_price is not None
+        and realized_notional is None
+    ):
+        realized_notional = realized_amount * realized_price
+    elif (
+        realized_notional is not None
+        and realized_amount is not None
+        and realized_price is None
+        and realized_amount
+    ):
+        realized_price = realized_notional / realized_amount
+    elif (
+        realized_notional is not None
+        and realized_price is not None
+        and realized_amount is None
+        and realized_price
+    ):
+        realized_amount = realized_notional / realized_price
+
+    if realized_amount is not None:
+        metrics["realized_amount"] = realized_amount
+    if realized_notional is not None:
+        metrics["realized_notional"] = realized_notional
+    if realized_price is not None:
+        metrics["realized_price"] = realized_price
+
+    metrics["realized_roi"] = _realized_roi(realized_price, realized_amount)
 
     return metrics
 
