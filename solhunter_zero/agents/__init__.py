@@ -116,7 +116,14 @@ def _ensure_agents_loaded() -> None:
     from .hierarchical_rl_agent import HierarchicalRLAgent
 
     # Load legacy compatibility shims so old import paths remain valid.
-    for _shim_name in ("util", "http", "dynamic_limit", "resource_monitor", "system"):
+    for _shim_name in (
+        "util",
+        "http",
+        "dynamic_limit",
+        "resource_monitor",
+        "system",
+        "onchain_metrics",
+    ):
         importlib.import_module(f"{__name__}.{_shim_name}")
 
     BUILT_IN_AGENTS.update({
