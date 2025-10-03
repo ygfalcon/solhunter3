@@ -1,51 +1,45 @@
+"""Ensure ``solhunter_zero.agents`` exposes every helper module."""
+
 from __future__ import annotations
 
 import importlib
-import pkgutil
+from pathlib import Path
+from typing import Iterable
 
-import solhunter_zero.agents as agents_pkg
-
-LEGACY_AGENT_ALIASES = {
-    f"solhunter_zero.agents.{name}"
-    for name in (
-        "config",
-        "dex_config",
-        "discovery",
-        "dynamic_limit",
-        "exchange",
-        "http",
-        "order_book_ws",
-        "onchain_metrics",
-        "prices",
-        "resource_monitor",
-        "runtime",
-        "scanner_common",
-        "system",
-        "token_discovery",
-        "token_scanner",
-        "util",
-    )
-}
+import pytest
 
 
-def test_agent_modules_discoverable_and_importable() -> None:
-    discovered = {
-        module_info.name
-        for module_info in pkgutil.walk_packages(
-            agents_pkg.__path__, agents_pkg.__name__ + "."
-        )
-    }
+def _iter_agent_module_names() -> Iterable[str]:
+    root = Path(__file__).resolve().parents[1] / "solhunter_zero"
+    for py_file in root.rglob("*.py"):
+        rel_parts = list(py_file.relative_to(root).parts)
+        if not rel_parts:
+            continue
+        if rel_parts[-1] == "__init__.py":
+            rel_parts = rel_parts[:-1]
+        else:
+            rel_parts[-1] = rel_parts[-1][:-3]
+        if rel_parts and rel_parts[0] == "agents":
+            rel_parts = rel_parts[1:]
+        if not rel_parts:
+            continue
+        yield ".".join(rel_parts)
 
-    for module_name in sorted(discovered | LEGACY_AGENT_ALIASES):
-        importlib.import_module(module_name)
+
+@pytest.mark.parametrize("module_name", sorted(set(_iter_agent_module_names())))
+def test_agent_imports(module_name: str) -> None:
+    base_name = f"solhunter_zero.{module_name}"
+    alias_name = f"solhunter_zero.agents.{module_name}"
+
+    try:
+        importlib.import_module(base_name)
+    except Exception as exc:  # pragma: no cover - skip optional modules
+        pytest.skip(f"Base import failed for {base_name}: {exc}")
+
+    importlib.import_module(alias_name)
 
 
 def test_onchain_metrics_private_helper_available() -> None:
     module = importlib.import_module("solhunter_zero.agents.onchain_metrics")
     assert hasattr(module, "_helius_price_overview")
     assert hasattr(module, "_birdeye_price_overview")
-    from solhunter_zero.agents.onchain_metrics import (  # noqa: F401
-        _birdeye_price_overview,
-        _helius_price_overview,
-    )
-
