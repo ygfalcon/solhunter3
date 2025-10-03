@@ -61,6 +61,13 @@ class BirdeyeFatalError(RuntimeError):
             return f"{base} ({self.body})"
         return base
 
+
+class BirdeyeThrottleError(BirdeyeFatalError):
+    """Dedicated exception for Birdeye throttling responses."""
+
+    def __init__(self, status: int, message: str, *, body: str | None = None) -> None:
+        super().__init__(status, message, body=body, throttle=True)
+
 FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 _BIRDEYE_TIMEOUT = float(os.getenv("FAST_BIRDEYE_TIMEOUT", "6.0")) if FAST_MODE else 10.0
 _BIRDEYE_PAGE_DELAY = float(os.getenv("FAST_BIRDEYE_PAGE_DELAY", "0.35")) if FAST_MODE else 1.1
@@ -73,6 +80,10 @@ _FAILURE_COOLDOWN = max(0.0, float(os.getenv("TOKEN_SCAN_FAILURE_COOLDOWN", "45"
 _FATAL_FAILURE_COOLDOWN = max(
     _FAILURE_COOLDOWN,
     float(os.getenv("TOKEN_SCAN_FATAL_COOLDOWN", "180")),
+)
+_THROTTLE_COOLDOWN = max(
+    _FATAL_FAILURE_COOLDOWN,
+    float(os.getenv("TOKEN_SCAN_THROTTLE_COOLDOWN", "300")),
 )
 
 _LAST_TRENDING_RESULT: Dict[str, Any] = {"mints": [], "metadata": {}, "timestamp": 0.0}
@@ -251,7 +262,6 @@ async def _birdeye_trending(
     }
     url = f"{BIRDEYE_BASE}/defi/trending"
 
-    backoffs = [0.1, 0.5, 1.0]
     last_exc: Exception | None = None
 
     throttle_markers = (
@@ -289,20 +299,11 @@ async def _birdeye_trending(
                             detail_clean = " ".join(detail.split())
                             if detail_clean:
                                 message = f"{message} - {detail_clean}"
-                        raise BirdeyeFatalError(
+                        raise BirdeyeThrottleError(
                             resp.status,
                             message,
                             body=detail,
-                            throttle=True,
                         )
-                    if resp.status == 429:
-                        if attempt < 3:
-                            wait = backoffs[attempt - 1]
-                            logger.info(
-                                "BirdEye 429; backoff and retry (%d/3)", attempt + 1
-                            )
-                            await asyncio.sleep(wait)
-                            continue
                     message = f"Birdeye client error {resp.status}"
                     if resp.reason:
                         message = f"{message}: {resp.reason}"
@@ -622,6 +623,19 @@ async def scan_tokens_async(
                     limit=page_size,
                     offset=offset,
                 )
+            except BirdeyeThrottleError as exc:
+                reason = str(exc)
+                logger.warning(
+                    "Birdeye trending throttle; entering extended cooldown: %s",
+                    reason,
+                )
+                forced_cooldown_reason = reason or f"Birdeye status {exc.status}"
+                forced_cooldown_seconds = max(
+                    _THROTTLE_COOLDOWN,
+                    _FATAL_FAILURE_COOLDOWN,
+                    _FAILURE_COOLDOWN,
+                )
+                break
             except BirdeyeFatalError as exc:
                 reason = str(exc)
                 logger.warning(
