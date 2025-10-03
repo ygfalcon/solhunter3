@@ -205,3 +205,29 @@ def test_high_gas_cost_blocks_buy_and_triggers_sell():
     sims_sell = [SimulationResult(success_prob=0.8, expected_roi=0.5, volume=200.0, liquidity=500.0)]
     assert should_sell(sims_sell) is False
     assert should_sell(sims_sell, gas_cost=1.0) is True
+
+
+def test_should_sell_realized_take_profit():
+    sims = [SimulationResult(success_prob=0.8, expected_roi=0.5, volume=200.0, liquidity=500.0)]
+    assert should_sell(sims, realized_roi=0.25, take_profit=0.2) is True
+
+
+def test_should_sell_realized_stop_loss():
+    sims = [SimulationResult(success_prob=0.8, expected_roi=0.5, volume=200.0, liquidity=500.0)]
+    assert should_sell(sims, realized_roi=-0.15, stop_loss=0.1) is True
+
+
+def test_should_sell_drawdown_breach():
+    sims = [SimulationResult(success_prob=0.8, expected_roi=0.5, volume=200.0, liquidity=500.0)]
+    assert should_sell(sims, current_drawdown=0.35, max_drawdown=0.3) is True
+
+
+def test_should_sell_metrics_without_simulations():
+    assert (
+        should_sell(
+            [],
+            realized_roi=0.5,
+            take_profit=0.4,
+        )
+        is True
+    )

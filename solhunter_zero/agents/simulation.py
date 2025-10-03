@@ -79,9 +79,45 @@ class SimulationAgent(BaseAgent):
             sims = await asyncio.to_thread(run_simulations, token, self.count)
             actions: List[Dict[str, Any]] = []
             if sims:
-                prices = await fetch_token_prices_async({token})
+                tokens = set(portfolio.balances.keys()) | {token}
+                prices = await fetch_token_prices_async(tokens)
                 price = prices.get(token, 0.0)
-                if should_sell(sims):
+                realized_roi = None
+                if price > 0:
+                    realized_roi = portfolio.position_roi(token, price)
+
+                stop_loss_env = os.getenv("STOP_LOSS")
+                take_profit_env = os.getenv("TAKE_PROFIT")
+                max_drawdown_env = os.getenv("MAX_DRAWDOWN")
+
+                def _parse_threshold(raw: str | None) -> float | None:
+                    if not raw:
+                        return None
+                    try:
+                        value = float(raw)
+                    except ValueError:
+                        return None
+                    if value == 0:
+                        return None
+                    return value
+
+                stop_loss = _parse_threshold(stop_loss_env)
+                take_profit = _parse_threshold(take_profit_env)
+                max_drawdown = _parse_threshold(max_drawdown_env)
+
+                current_drawdown = None
+                if prices:
+                    portfolio.update_drawdown(prices)
+                    current_drawdown = portfolio.current_drawdown(prices)
+
+                if should_sell(
+                    sims,
+                    realized_roi=realized_roi,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    current_drawdown=current_drawdown,
+                    max_drawdown=max_drawdown,
+                ):
                     pos = portfolio.balances.get(token)
                     if pos:
                         actions.append({"token": token, "side": "sell", "amount": pos.amount, "price": price})

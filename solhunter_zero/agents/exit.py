@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 from . import BaseAgent
 from ..portfolio import Portfolio
 from .price_utils import resolve_price
+from ..decision import should_sell
 
 
 logger = logging.getLogger(__name__)
@@ -43,13 +44,21 @@ class ExitAgent(BaseAgent):
         pos = portfolio.balances[token]
 
         roi = portfolio.position_roi(token, price)
-        if self.stop_loss and roi <= -self.stop_loss:
-            return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
-        if self.take_profit and roi >= self.take_profit:
-            return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
 
-        if price > 0 and self.trailing and portfolio.trailing_stop_triggered(
-            token, price, self.trailing
+        trailing = self.trailing if self.trailing else None
+        if trailing and price > 0:
+            # Update the high watermark before evaluating the trailing stop via
+            # ``should_sell`` so the comparison uses the freshest price data.
+            portfolio.trailing_stop_triggered(token, price, trailing)
+
+        if should_sell(
+            [],
+            trailing_stop=trailing,
+            current_price=price if price > 0 else None,
+            high_price=pos.high_price,
+            realized_roi=roi,
+            take_profit=self.take_profit or None,
+            stop_loss=self.stop_loss or None,
         ):
             return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
         return []
