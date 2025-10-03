@@ -10,6 +10,38 @@ from solhunter_zero import prices
 from solhunter_zero.portfolio import Portfolio
 
 
+def _install_torch_stub(monkeypatch):
+    torch_mod = types.ModuleType("torch")
+    torch_mod.Tensor = type("_Tensor", (), {})
+    torch_mod.device = type("_Device", (), {"__init__": lambda self, *a, **k: None})
+    torch_mod.nn = types.SimpleNamespace(
+        Module=object,
+        ModuleList=list,
+        Sequential=lambda *args, **kwargs: list(args),
+        functional=types.SimpleNamespace(),
+    )
+    torch_mod.optim = types.SimpleNamespace(Adam=lambda *args, **kwargs: None)
+    torch_mod.utils = types.SimpleNamespace(
+        data=types.SimpleNamespace(Dataset=object, DataLoader=list)
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch_mod)
+    monkeypatch.setitem(sys.modules, "torch.nn", torch_mod.nn)
+    monkeypatch.setitem(sys.modules, "torch.nn.functional", torch_mod.nn.functional)
+    monkeypatch.setitem(sys.modules, "torch.optim", torch_mod.optim)
+    monkeypatch.setitem(sys.modules, "torch.utils", torch_mod.utils)
+    monkeypatch.setitem(sys.modules, "torch.utils.data", torch_mod.utils.data)
+    datasets_pkg = types.ModuleType("solhunter_zero.datasets")
+    datasets_pkg.__path__ = []  # type: ignore[attr-defined]
+    sample_ticks_module = types.ModuleType("solhunter_zero.datasets.sample_ticks")
+    sample_ticks_module.load_sample_ticks = lambda *args, **kwargs: []  # type: ignore[attr-defined]
+    sample_ticks_module.DEFAULT_PATH = ""  # type: ignore[attr-defined]
+    datasets_pkg.sample_ticks = sample_ticks_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "solhunter_zero.datasets", datasets_pkg)
+    monkeypatch.setitem(
+        sys.modules, "solhunter_zero.datasets.sample_ticks", sample_ticks_module
+    )
+
+
 class _DummyExecutor:
     async def execute(self, action):
         return {
@@ -176,6 +208,7 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
 
 
 def test_execution_skips_missing_price(monkeypatch, caplog):
+    _install_torch_stub(monkeypatch)
     from solhunter_zero.swarm_pipeline import (
         EvaluationRecord,
         SimulationStage,
@@ -449,3 +482,224 @@ def test_execution_carries_evaluation_score(monkeypatch):
     assert dispatcher.submitted
     token_payload = dispatcher.submitted[0].token_result
     assert token_payload["score"] == pytest.approx(2.5)
+
+
+def test_execution_skips_when_keypair_missing(monkeypatch, caplog):
+    _install_torch_stub(monkeypatch)
+    from solhunter_zero.swarm_pipeline import (
+        EvaluationRecord,
+        SimulationStage,
+        SwarmAction,
+        SwarmPipeline,
+    )
+
+    class _StubExecutor:
+        keypair = None
+        lane_budgets = {"default": 100.0}
+
+    class _StubAgentManager:
+        skip_simulation = False
+        depth_service = False
+
+        def __init__(self) -> None:
+            self.executor = _StubExecutor()
+            self.keypair = None
+            self.keypair_path = None
+
+        def consume_swarm(self, token, swarm):  # pragma: no cover - interface stub
+            return None
+
+    class _CapturingDispatcher:
+        def __init__(self, *args, **kwargs) -> None:
+            self.submitted: list = []
+
+        async def submit(self, lane, request):  # pragma: no cover - defensive
+            self.submitted.append(request)
+            fut = asyncio.get_running_loop().create_future()
+            fut.set_result({"status": "ok"})
+            return fut
+
+        def lane_snapshot(self):
+            return {}
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline.ExecutionDispatcher", _CapturingDispatcher
+    )
+
+    pipeline = SwarmPipeline(_StubAgentManager(), Portfolio(path=None), dry_run=True)
+    action = SwarmAction(
+        token="Tok",
+        side="buy",
+        amount=1.0,
+        price=1.0,
+        agent="stub",
+        metadata={"requires_keypair": True},
+    )
+    record = EvaluationRecord(
+        token="Tok",
+        score=1.0,
+        latency=0.0,
+        actions=[action],
+        context=None,
+    )
+
+    simulation = SimulationStage(records=[record])
+
+    caplog.set_level(logging.WARNING, logger="solhunter_zero.swarm_pipeline")
+    execution = asyncio.run(pipeline._run_execution(simulation))
+
+    assert execution.executed == []
+    assert execution.skipped == {"missing_keypair": 1}
+    assert "execution:missing_keypair" in execution.errors
+    assert record.errors == ["missing_keypair"]
+    assert "missing keypair" in caplog.text
+
+
+def test_execution_skips_when_lane_budget_missing(monkeypatch, caplog):
+    _install_torch_stub(monkeypatch)
+    from solhunter_zero.swarm_pipeline import (
+        EvaluationRecord,
+        SimulationStage,
+        SwarmAction,
+        SwarmPipeline,
+    )
+
+    class _StubExecutor:
+        keypair = object()
+        lane_budgets = {}
+
+    class _StubAgentManager:
+        skip_simulation = False
+        depth_service = False
+
+        def __init__(self) -> None:
+            self.executor = _StubExecutor()
+
+        def consume_swarm(self, token, swarm):  # pragma: no cover - interface stub
+            return None
+
+    class _CapturingDispatcher:
+        def __init__(self, *args, **kwargs) -> None:
+            self.submitted: list = []
+
+        async def submit(self, lane, request):  # pragma: no cover - defensive
+            self.submitted.append(request)
+            fut = asyncio.get_running_loop().create_future()
+            fut.set_result({"status": "ok"})
+            return fut
+
+        def lane_snapshot(self):
+            return {}
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline.ExecutionDispatcher", _CapturingDispatcher
+    )
+
+    pipeline = SwarmPipeline(_StubAgentManager(), Portfolio(path=None), dry_run=True)
+    action = SwarmAction(
+        token="Tok",
+        side="buy",
+        amount=1.0,
+        price=1.0,
+        agent="stub",
+        metadata={"lane_budget": 10.0},
+    )
+    record = EvaluationRecord(
+        token="Tok",
+        score=1.0,
+        latency=0.0,
+        actions=[action],
+        context=None,
+    )
+
+    simulation = SimulationStage(records=[record])
+
+    caplog.set_level(logging.WARNING, logger="solhunter_zero.swarm_pipeline")
+    execution = asyncio.run(pipeline._run_execution(simulation))
+
+    assert execution.executed == []
+    assert execution.skipped == {"missing_lane_budget": 1}
+    assert "execution:missing_lane_budget" in execution.errors
+    assert record.errors == ["missing_lane_budget"]
+    assert "missing lane budget" in caplog.text
+
+
+def test_execution_skips_when_executor_missing(monkeypatch, caplog):
+    _install_torch_stub(monkeypatch)
+    from solhunter_zero.swarm_pipeline import (
+        EvaluationRecord,
+        SimulationStage,
+        SwarmAction,
+        SwarmPipeline,
+    )
+
+    class _StubExecutor:
+        keypair = object()
+        lane_budgets = {"default": 50.0}
+        available_executors = set()
+        _executors = {}
+
+    class _StubAgentManager:
+        skip_simulation = False
+        depth_service = False
+        available_executors: set[str] = set()
+
+        def __init__(self) -> None:
+            self.executor = _StubExecutor()
+
+        def consume_swarm(self, token, swarm):  # pragma: no cover - interface stub
+            return None
+
+    class _CapturingDispatcher:
+        def __init__(self, *args, **kwargs) -> None:
+            self.submitted: list = []
+
+        async def submit(self, lane, request):  # pragma: no cover - defensive
+            self.submitted.append(request)
+            fut = asyncio.get_running_loop().create_future()
+            fut.set_result({"status": "ok"})
+            return fut
+
+        def lane_snapshot(self):
+            return {}
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline.ExecutionDispatcher", _CapturingDispatcher
+    )
+
+    pipeline = SwarmPipeline(_StubAgentManager(), Portfolio(path=None), dry_run=True)
+    action = SwarmAction(
+        token="Tok",
+        side="buy",
+        amount=1.0,
+        price=1.0,
+        agent="stub",
+        metadata={"requires_executor": "mev"},
+    )
+    record = EvaluationRecord(
+        token="Tok",
+        score=1.0,
+        latency=0.0,
+        actions=[action],
+        context=None,
+    )
+
+    simulation = SimulationStage(records=[record])
+
+    caplog.set_level(logging.WARNING, logger="solhunter_zero.swarm_pipeline")
+    execution = asyncio.run(pipeline._run_execution(simulation))
+
+    assert execution.executed == []
+    assert execution.skipped == {"missing_executor": 1}
+    assert "execution:missing_executor" in execution.errors
+    assert record.errors == ["missing_executor"]
+    assert "missing executors" in caplog.text
