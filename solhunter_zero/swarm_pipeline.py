@@ -486,6 +486,47 @@ def _extract_realized_metrics(action: Dict[str, Any], result: Any) -> Dict[str, 
     return metrics
 
 
+def _iter_container_keys(container: Any) -> Iterable[str]:
+    if container is None:
+        return []
+    if isinstance(container, dict):
+        return (str(k) for k in container.keys())
+    if isinstance(container, (set, list, tuple)):
+        return (str(v) for v in container)
+    keys = getattr(container, "keys", None)
+    if callable(keys):
+        try:
+            return (str(k) for k in keys())
+        except TypeError:
+            try:
+                return (str(k) for k in container.keys())
+            except Exception:
+                return []
+    return []
+
+
+def _available_executor_names(agent_manager: AgentManager) -> set[str]:
+    names: set[str] = set()
+    sources = [
+        getattr(agent_manager, "available_executors", None),
+        getattr(agent_manager, "executors", None),
+        getattr(agent_manager, "_event_executors", None),
+    ]
+    executor = getattr(agent_manager, "executor", None)
+    if executor is not None:
+        sources.extend(
+            [
+                getattr(executor, "available_executors", None),
+                getattr(executor, "executors", None),
+                getattr(executor, "_executors", None),
+            ]
+        )
+    for source in sources:
+        for key in _iter_container_keys(source):
+            names.add(key)
+    return names
+
+
 def _resolve_lane(action: Dict[str, Any]) -> str:
     venues = action.get("venues")
     if isinstance(venues, list) and venues:
@@ -1137,8 +1178,150 @@ class SwarmPipeline:
                     )
                     continue
 
-                token_payload["actions"].append(order)
                 lane = _resolve_lane(order)
+
+                def _skip(reason: str, stage_reason: str, message: str) -> None:
+                    if reason not in token_payload["errors"]:
+                        token_payload["errors"].append(reason)
+                    if stage_reason not in stage.errors:
+                        stage.errors.append(stage_reason)
+                    stage.skipped[reason] = stage.skipped.get(reason, 0) + 1
+                    log.warning(message)
+
+                requires_keypair = bool(
+                    order.get("requires_keypair")
+                    or order.get("require_keypair")
+                    or order.get("needs_keypair")
+                )
+                if requires_keypair:
+                    has_keypair = bool(order.get("keypair"))
+                    if not has_keypair:
+                        exec_keypair = getattr(self.agent_manager.executor, "keypair", None)
+                        manager_keypair = getattr(self.agent_manager, "keypair", None)
+                        keypair_path = getattr(self.agent_manager, "keypair_path", None)
+                        has_keypair = bool(exec_keypair or manager_keypair or keypair_path)
+                    if not has_keypair:
+                        _skip(
+                            "missing_keypair",
+                            "execution:missing_keypair",
+                            f"Skipping execution for {record.token} due to missing keypair",
+                        )
+                        continue
+
+                lane_budget_spec = order.get("lane_budget")
+                lane_budget_key: str | None = None
+                required_budget: float | None = None
+                if isinstance(lane_budget_spec, dict):
+                    value = lane_budget_spec.get(lane)
+                    if value is not None:
+                        lane_budget_key = lane
+                        try:
+                            required_budget = float(value)
+                        except Exception:
+                            required_budget = None
+                elif isinstance(lane_budget_spec, (int, float)):
+                    required_budget = float(lane_budget_spec)
+                    lane_budget_key = lane
+                elif isinstance(lane_budget_spec, str) and lane_budget_spec.strip():
+                    lane_budget_key = lane_budget_spec.strip()
+
+                extra_budget = order.get("lane_budgets")
+                if isinstance(extra_budget, dict):
+                    value = extra_budget.get(lane)
+                    if value is not None:
+                        try:
+                            required_budget = float(value)
+                        except Exception:
+                            required_budget = None
+                        if lane_budget_key is None:
+                            lane_budget_key = lane
+
+                if lane_budget_key is None:
+                    lane_budget_key = (
+                        order.get("lane_budget_key")
+                        or order.get("lane_budget_name")
+                        or order.get("required_lane_budget")
+                    )
+                    if isinstance(lane_budget_key, str) and lane_budget_key.strip():
+                        lane_budget_key = lane_budget_key.strip()
+                    else:
+                        lane_budget_key = None
+
+                if required_budget is None:
+                    raw_required = (
+                        order.get("lane_budget_amount")
+                        or order.get("lane_budget_required")
+                        or order.get("required_lane_budget_amount")
+                    )
+                    if isinstance(raw_required, dict):
+                        raw_required = raw_required.get(lane)
+                    if raw_required is not None:
+                        try:
+                            required_budget = float(raw_required)
+                        except Exception:
+                            required_budget = None
+                        if lane_budget_key is None:
+                            lane_budget_key = lane
+
+                if required_budget is not None and required_budget <= 0:
+                    required_budget = None
+
+                requires_lane_budget = bool(
+                    order.get("requires_lane_budget")
+                    or lane_budget_key is not None
+                    or required_budget is not None
+                )
+                if requires_lane_budget:
+                    budgets = getattr(self.agent_manager.executor, "lane_budgets", None)
+                    available_budget = None
+                    if budgets:
+                        keys_to_try = []
+                        if lane_budget_key:
+                            keys_to_try.append(str(lane_budget_key))
+                        keys_to_try.append(str(lane))
+                        for key in keys_to_try:
+                            if key in budgets:
+                                available_budget = budgets.get(key)
+                                break
+                    missing_budget = False
+                    if available_budget is None:
+                        missing_budget = True
+                    elif required_budget is not None:
+                        try:
+                            missing_budget = float(available_budget or 0.0) < float(required_budget)
+                        except Exception:
+                            missing_budget = not bool(available_budget)
+                    else:
+                        missing_budget = not bool(available_budget)
+                    if missing_budget:
+                        budget_name = lane_budget_key or lane
+                        _skip(
+                            "missing_lane_budget",
+                            "execution:missing_lane_budget",
+                            f"Skipping execution for {record.token} due to missing lane budget {budget_name}",
+                        )
+                        continue
+
+                required_execs = order.get("requires_executor") or order.get("requires_executors")
+                if isinstance(required_execs, str):
+                    required_execs = [required_execs]
+                elif isinstance(required_execs, Iterable):
+                    required_execs = [str(item) for item in required_execs if item]
+                else:
+                    required_execs = []
+
+                if required_execs:
+                    available_execs = _available_executor_names(self.agent_manager)
+                    missing = [name for name in required_execs if name not in available_execs]
+                    if missing:
+                        _skip(
+                            "missing_executor",
+                            "execution:missing_executor",
+                            f"Skipping execution for {record.token} due to missing executors: {', '.join(missing)}",
+                        )
+                        continue
+
+                token_payload["actions"].append(order)
                 record_entry = {
                     "token": act.token,
                     "side": act.side,
