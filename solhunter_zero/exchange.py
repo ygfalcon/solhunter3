@@ -91,6 +91,10 @@ def _ensure_path(path: str) -> str:
 
 
 DEFAULT_SWAP_PATH = _ensure_path(SWAP_PATHS.get(SWAP_PRIORITIES[0], "/v6/swap"))
+# Backwards compatibility shim; agent modules historically imported ``SWAP_PATH``
+# directly.  Keep the alias available while newer helpers compute endpoints
+# dynamically.
+SWAP_PATH = DEFAULT_SWAP_PATH
 
 
 RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
@@ -122,6 +126,30 @@ def _build_swap_endpoint(name: str, base_url: str, default_path: str = DEFAULT_S
     if base_url.rstrip("/").endswith(path.lstrip("/")):
         return base_url
     return f"{base_url.rstrip('/')}{path}"
+
+
+def resolve_swap_endpoint(base_url: str, *, venue: str | None = None) -> str:
+    """Return the swap endpoint for ``base_url`` respecting configured paths."""
+
+    if not base_url:
+        return base_url
+
+    name = (venue or "").strip().lower()
+    if not name or name == "custom" or "://" in name:
+        name = ""
+
+    if not name:
+        base_root = base_url.split("?", 1)[0].rstrip("/")
+        for candidate, candidate_url in VENUE_URLS.items():
+            cand_root = str(candidate_url).split("?", 1)[0].rstrip("/")
+            if cand_root == base_root:
+                name = candidate
+                break
+
+    if not name:
+        name = "custom"
+
+    return _build_swap_endpoint(name, base_url)
 
 
 def _resolve_swap_candidates(
@@ -156,7 +184,10 @@ def _resolve_swap_candidates(
             add(name, aggregator_map[name], True)
             continue
         if "://" in name:
-            add(name, name, False)
+            endpoint = resolve_swap_endpoint(name)
+            if endpoint and endpoint not in seen:
+                resolved.append((name, endpoint))
+                seen.add(endpoint)
             continue
         base = base_map.get(name)
         if base:

@@ -92,7 +92,7 @@ from .exchange import (
     RAYDIUM_DEX_URL,
     DEX_BASE_URL,
     VENUE_URLS,
-    SWAP_PATH,
+    resolve_swap_endpoint,
 )
 from .config import load_dex_config
 from . import order_book_ws
@@ -714,10 +714,9 @@ async def _prepare_service_tx(
         "cluster": "mainnet-beta",
     }
     session = await get_session()
+    endpoint = resolve_swap_endpoint(base_url)
     try:
-        async with session.post(
-            f"{base_url}{SWAP_PATH}", json=payload, timeout=10
-        ) as resp:
+        async with session.post(endpoint, json=payload, timeout=10) as resp:
             resp.raise_for_status()
             data = await resp.json()
     except aiohttp.ClientError:
