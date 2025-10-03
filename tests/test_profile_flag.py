@@ -39,12 +39,33 @@ def test_profile_flag_creates_file(tmp_path, monkeypatch):
         "solhunter_zero.decision",
         {"should_buy": lambda *_a, **_k: False, "should_sell": lambda *_a, **_k: False},
     )
-    _stub("solhunter_zero.prices", {"fetch_token_prices_async": _async, "warm_cache": _async})
+    _stub(
+        "solhunter_zero.prices",
+        {
+            "fetch_token_prices_async": _async,
+            "get_cached_price": lambda *_a, **_k: None,
+            "update_price_cache": lambda *_a, **_k: None,
+            "PRICE_CACHE": type(
+                "_Cache",
+                (),
+                {
+                    "clear": lambda self: None,
+                },
+            )(),
+        },
+    )
     _stub("solhunter_zero.order_book_ws", {})
     _stub(
         "solhunter_zero.memory",
         {
-            "Memory": type("Memory", (), {"__init__": lambda self, *a, **k: None}),
+            "Memory": type(
+                "Memory",
+                (),
+                {
+                    "__init__": lambda self, *a, **k: None,
+                    "start_writer": lambda self: None,
+                },
+            ),
             "load_snapshot": lambda *a, **k: None,
         },
     )
@@ -52,7 +73,11 @@ def test_profile_flag_creates_file(tmp_path, monkeypatch):
         "solhunter_zero.portfolio",
         {
             "Portfolio": type(
-                "Portfolio", (), {"__init__": lambda self, *a, **k: None}
+                "Portfolio",
+                (),
+                {
+                    "__init__": lambda self, *a, **k: setattr(self, "balances", {}),
+                },
             ),
             "calculate_order_size": lambda *a, **k: 1,
             "dynamic_order_size": lambda *a, **k: 1,
@@ -71,7 +96,12 @@ def test_profile_flag_creates_file(tmp_path, monkeypatch):
         "solhunter_zero.agent_manager",
         {
             "AgentManager": type(
-                "AgentManager", (), {"from_config": classmethod(lambda cls, cfg: None)}
+                "AgentManager",
+                (),
+                {
+                    "from_config": classmethod(lambda cls, cfg: None),
+                    "from_default": classmethod(lambda cls: None),
+                },
             )
         },
     )
