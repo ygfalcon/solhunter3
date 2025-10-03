@@ -1,6 +1,7 @@
 import base64
 import asyncio
 import pytest
+
 pytest.importorskip("solders")
 
 from solders.keypair import Keypair
@@ -15,22 +16,16 @@ from solhunter_zero.exchange import place_order, place_order_async
 import solhunter_zero.exchange as exchange
 
 
-async def _no_fee_async(*a, **k):
+async def _no_fee_async(*_a, **_k):
     return 0.0
 
 
-class FakeResponse:
-    def __init__(self, data, status_code=200):
-        self._data = data
-        self.status_code = status_code
-        self.text = "resp"
-
-    def raise_for_status(self):
-        if self.status_code != 200:
-            raise Exception("bad status")
-
-    def json(self):
-        return self._data
+def _configure_swap(monkeypatch: pytest.MonkeyPatch, mapping: dict[str, str]) -> None:
+    monkeypatch.setattr(exchange, "SWAP_PRIORITIES", list(mapping.keys()), raising=False)
+    monkeypatch.setattr(exchange, "SWAP_URLS", dict(mapping), raising=False)
+    monkeypatch.setattr(exchange, "SWAP_PATHS", {k: "/swap" for k in mapping}, raising=False)
+    monkeypatch.setattr(exchange, "DEFAULT_SWAP_PATH", "/swap", raising=False)
+    monkeypatch.setattr(exchange, "VENUE_URLS", dict(mapping), raising=False)
 
 
 def _dummy_tx(kp: Keypair) -> str:
@@ -41,84 +36,108 @@ def _dummy_tx(kp: Keypair) -> str:
     return base64.b64encode(bytes(tx)).decode()
 
 
-def test_place_order_sends(monkeypatch):
-    kp = Keypair()
-    sent = {}
+class DummyResponse:
+    def __init__(self, url: str, data: dict[str, object]):
+        self.url = url
+        self._data = data
 
-    def fake_post(url, json, timeout=10):
-        sent["url"] = url
-        return FakeResponse({"swapTransaction": _dummy_tx(kp)})
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self):
+        return self._data
+
+    def raise_for_status(self):
+        return None
+
+
+def test_place_order_sends(monkeypatch: pytest.MonkeyPatch):
+    kp = Keypair()
+    calls: list[str] = []
+
+    _configure_swap(monkeypatch, {"helius": "https://helius.test"})
+    monkeypatch.setattr(exchange, "DEX_BASE_URL", "https://helius.test", raising=False)
+    monkeypatch.setattr(exchange, "DEX_TESTNET_URL", "https://helius.test", raising=False)
+    monkeypatch.setattr(exchange, "_order_loop", None, raising=False)
+
+    class FakeSession:
+        def post(self, url, json, timeout=10, headers=None):
+            calls.append(url)
+            return DummyResponse(url, {"swapTransaction": _dummy_tx(kp)})
+
+    async def fake_get_session():
+        return FakeSession()
+
+    rpc_info: dict[str, object] = {}
 
     class FakeClient:
         def __init__(self, url):
-            sent["rpc"] = url
+            rpc_info["rpc"] = url
 
         def send_raw_transaction(self, data, opts=None):
-            sent["data_len"] = len(data)
+            rpc_info["data_len"] = len(data)
 
             class Resp:
                 value = "sig"
 
             return Resp()
 
-    monkeypatch.setattr("solhunter_zero.exchange.requests.post", fake_post)
-    monkeypatch.setattr("solhunter_zero.exchange.Client", FakeClient)
+    monkeypatch.setattr(exchange, "get_session", fake_get_session)
+    monkeypatch.setattr(exchange, "Client", FakeClient)
+
     result = place_order("tok", "buy", 1.0, 0.0, keypair=kp, testnet=True)
+
     assert result["signature"] == "sig"
-    assert sent["data_len"] > 0
-    assert "/v6/swap" in sent["url"]
+    assert rpc_info["data_len"] > 0
+    assert calls[0] == "https://helius.test/swap"
 
 
-def test_place_order_dry_run(monkeypatch):
+def test_place_order_dry_run(monkeypatch: pytest.MonkeyPatch):
     kp = Keypair()
-    called = {}
 
-    def fake_post(*a, **k):
-        called["post"] = True
-        return FakeResponse({})
+    _configure_swap(monkeypatch, {"helius": "https://helius.test"})
+    monkeypatch.setattr(exchange, "_order_loop", None, raising=False)
 
-    monkeypatch.setattr("solhunter_zero.exchange.requests.post", fake_post)
+    called: dict[str, bool] = {}
+
+    async def fake_get_session():
+        called["session"] = True
+        return None
+
+    monkeypatch.setattr(exchange, "get_session", fake_get_session)
+
     result = place_order("tok", "buy", 1.0, 0.0, keypair=kp, dry_run=True)
+
     assert result["dry_run"] is True
-    assert "post" not in called
+    assert "session" not in called
 
 
-def test_place_order_async(monkeypatch):
+def test_place_order_async(monkeypatch: pytest.MonkeyPatch):
     kp = Keypair()
-    sent = {}
+    calls: list[str] = []
+    rpc_info: dict[str, object] = {}
 
-    class FakeResp:
-        def __init__(self, url):
-            sent["url"] = url
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            pass
-
-        async def json(self):
-            return {"swapTransaction": _dummy_tx(kp)}
-
-        def raise_for_status(self):
-            pass
+    _configure_swap(monkeypatch, {"helius": "https://helius.test"})
+    monkeypatch.setattr(exchange, "DEX_BASE_URL", "https://helius.test", raising=False)
+    monkeypatch.setattr(exchange, "DEX_TESTNET_URL", "https://helius.test", raising=False)
 
     class FakeSession:
-        async def __aenter__(self):
-            return self
+        def post(self, url, json, timeout=10, headers=None):
+            calls.append(url)
+            return DummyResponse(url, {"swapTransaction": _dummy_tx(kp)})
 
-        async def __aexit__(self, exc_type, exc, tb):
-            pass
-
-        def post(self, url, json, timeout=10):
-            return FakeResp(url)
+    async def fake_get_session():
+        return FakeSession()
 
     class FakeClient:
         def __init__(self, url):
-            sent["rpc"] = url
+            rpc_info["rpc"] = url
 
         async def send_raw_transaction(self, data, opts=None):
-            sent["len"] = len(data)
+            rpc_info["len"] = len(data)
 
             class Resp:
                 value = "sig"
@@ -129,52 +148,35 @@ def test_place_order_async(monkeypatch):
             return self
 
         async def __aexit__(self, exc_type, exc, tb):
-            pass
+            return False
 
-    async def fake_get_session():
-        return FakeSession()
+    monkeypatch.setattr(exchange, "get_session", fake_get_session)
+    monkeypatch.setattr(exchange, "AsyncClient", FakeClient)
+    monkeypatch.setattr(exchange, "get_current_fee_async", _no_fee_async)
+    monkeypatch.setattr(exchange, "USE_RUST_EXEC", False, raising=False)
 
-    monkeypatch.setattr("solhunter_zero.exchange.get_session", fake_get_session)
-    import aiohttp
-    monkeypatch.setattr(aiohttp, "ClientError", Exception, raising=False)
-    monkeypatch.setattr("solhunter_zero.exchange.AsyncClient", FakeClient)
-    monkeypatch.setattr("solhunter_zero.exchange.get_current_fee_async", _no_fee_async)
-    monkeypatch.setattr("solhunter_zero.exchange.USE_RUST_EXEC", False)
     result = asyncio.run(place_order_async("tok", "buy", 1.0, 0.0, keypair=kp, testnet=True))
+
     assert result["signature"] == "sig"
-    assert sent["len"] > 0
+    assert rpc_info["len"] > 0
+    assert calls[0] == "https://helius.test/swap"
 
 
-def test_place_order_async_deducts_gas(monkeypatch):
+def test_place_order_async_deducts_gas(monkeypatch: pytest.MonkeyPatch):
     kp = Keypair()
-    sent = {}
+    payloads: list[dict[str, object]] = []
 
-    class FakeResp:
-        def __init__(self, url, data):
-            sent["url"] = url
-            sent["payload"] = data
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            pass
-
-        async def json(self):
-            return {"swapTransaction": _dummy_tx(kp)}
-
-        def raise_for_status(self):
-            pass
+    _configure_swap(monkeypatch, {"helius": "https://helius.test"})
+    monkeypatch.setattr(exchange, "DEX_BASE_URL", "https://helius.test", raising=False)
+    monkeypatch.setattr(exchange, "DEX_TESTNET_URL", "https://helius.test", raising=False)
 
     class FakeSession:
-        async def __aenter__(self):
-            return self
+        def post(self, url, json, timeout=10, headers=None):
+            payloads.append(json)
+            return DummyResponse(url, {"swapTransaction": _dummy_tx(kp)})
 
-        async def __aexit__(self, exc_type, exc, tb):
-            pass
-
-        def post(self, url, json, timeout=10):
-            return FakeResp(url, json)
+    async def fake_get_session():
+        return FakeSession()
 
     class FakeClient:
         def __init__(self, url):
@@ -190,37 +192,108 @@ def test_place_order_async_deducts_gas(monkeypatch):
             return self
 
         async def __aexit__(self, exc_type, exc, tb):
-            pass
+            return False
 
-    async def fake_get_session():
-        return FakeSession()
-
-    monkeypatch.setattr("solhunter_zero.exchange.get_session", fake_get_session)
-    import aiohttp
-    monkeypatch.setattr(aiohttp, "ClientError", Exception, raising=False)
-    monkeypatch.setattr("solhunter_zero.exchange.AsyncClient", FakeClient)
-    async def fake_fee(*a, **k):
+    async def fake_fee(*_a, **_k):
         return 1.0
-    monkeypatch.setattr("solhunter_zero.exchange.get_current_fee_async", fake_fee)
-    monkeypatch.setattr("solhunter_zero.exchange.USE_RUST_EXEC", False)
+
+    monkeypatch.setattr(exchange, "get_session", fake_get_session)
+    monkeypatch.setattr(exchange, "AsyncClient", FakeClient)
+    monkeypatch.setattr(exchange, "get_current_fee_async", fake_fee)
+    monkeypatch.setattr(exchange, "USE_RUST_EXEC", False, raising=False)
 
     asyncio.run(place_order_async("tok", "buy", 2.0, 0.0, keypair=kp))
-    assert sent["payload"]["amount"] == pytest.approx(1.0)
+
+    assert payloads[0]["amount"] == pytest.approx(1.0)
 
 
-def test_place_order_reuses_loop(monkeypatch):
+def test_place_order_async_cascade(monkeypatch: pytest.MonkeyPatch):
+    kp = Keypair()
+    order: list[str] = []
+    urls = {
+        "helius": "https://helius.test",
+        "birdeye": "https://birdeye.test",
+        "jupiter": "https://jupiter.test",
+    }
+
+    _configure_swap(monkeypatch, urls)
+    monkeypatch.setattr(exchange, "DEX_BASE_URL", urls["helius"], raising=False)
+    monkeypatch.setattr(exchange, "DEX_TESTNET_URL", urls["helius"], raising=False)
+
+    class FakeClientError(Exception):
+        pass
+
+    monkeypatch.setattr(exchange.aiohttp, "ClientError", FakeClientError, raising=False)
+    monkeypatch.setattr(exchange, "USE_RUST_EXEC", False, raising=False)
+    monkeypatch.setattr(exchange, "get_current_fee_async", _no_fee_async)
+
+    class FakeSession:
+        def post(self, url, json, timeout=10, headers=None):
+            order.append(url)
+            if "birdeye" in url:
+                raise FakeClientError("birdeye down")
+            if "helius" in url:
+                return DummyResponse(url, {})
+            return DummyResponse(url, {"swapTransaction": _dummy_tx(kp)})
+
+    async def fake_get_session():
+        return FakeSession()
+
+    class FakeClient:
+        def __init__(self, url):
+            pass
+
+        async def send_raw_transaction(self, data, opts=None):
+            class Resp:
+                value = "sig"
+
+            return Resp()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(exchange, "get_session", fake_get_session)
+    monkeypatch.setattr(exchange, "AsyncClient", FakeClient)
+
+    result = asyncio.run(
+        place_order_async("tok", "buy", 1.0, 0.0, keypair=kp, max_retries=1)
+    )
+
+    assert result["signature"] == "sig"
+    assert order == [
+        "https://helius.test/swap",
+        "https://birdeye.test/swap",
+        "https://jupiter.test/swap",
+    ]
+
+
+def test_place_order_reuses_loop(monkeypatch: pytest.MonkeyPatch):
     kp = Keypair()
     loops: list[asyncio.AbstractEventLoop] = []
 
-    orig_new_event_loop = asyncio.new_event_loop
+    _configure_swap(monkeypatch, {"helius": "https://helius.test"})
+    monkeypatch.setattr(exchange, "DEX_BASE_URL", "https://helius.test", raising=False)
+    monkeypatch.setattr(exchange, "DEX_TESTNET_URL", "https://helius.test", raising=False)
 
-    def fake_new_event_loop():
-        loop = orig_new_event_loop()
+    orig_new_loop = asyncio.new_event_loop
+
+    def fake_new_loop():
+        loop = orig_new_loop()
         loops.append(loop)
         return loop
 
-    def fake_post(url, json, timeout=10):
-        return FakeResponse({"swapTransaction": _dummy_tx(kp)})
+    monkeypatch.setattr(asyncio, "new_event_loop", fake_new_loop)
+    monkeypatch.setattr(exchange, "_order_loop", None, raising=False)
+
+    class FakeSession:
+        def post(self, url, json, timeout=10, headers=None):
+            return DummyResponse(url, {"swapTransaction": _dummy_tx(kp)})
+
+    async def fake_get_session():
+        return FakeSession()
 
     class FakeClient:
         def __init__(self, url):
@@ -232,10 +305,8 @@ def test_place_order_reuses_loop(monkeypatch):
 
             return Resp()
 
-    monkeypatch.setattr(asyncio, "new_event_loop", fake_new_event_loop)
-    monkeypatch.setattr("solhunter_zero.exchange.requests.post", fake_post)
-    monkeypatch.setattr("solhunter_zero.exchange.Client", FakeClient)
-    monkeypatch.setattr("solhunter_zero.exchange._order_loop", None, raising=False)
+    monkeypatch.setattr(exchange, "get_session", fake_get_session)
+    monkeypatch.setattr(exchange, "Client", FakeClient)
 
     place_order("tok", "buy", 1.0, 0.0, keypair=kp)
     place_order("tok", "buy", 1.0, 0.0, keypair=kp)
@@ -243,7 +314,7 @@ def test_place_order_reuses_loop(monkeypatch):
     assert len(loops) == 1
 
 
-def test_place_order_ipc_reuses_connection(monkeypatch):
+def test_place_order_ipc_reuses_connection(monkeypatch: pytest.MonkeyPatch):
     responses = [
         b'{"signature": "sig1"}',
         b'{"signature": "sig2"}',
@@ -265,7 +336,7 @@ def test_place_order_ipc_reuses_connection(monkeypatch):
             self.data += data
 
         async def drain(self):
-            pass
+            return None
 
         def close(self):
             self.closed = True
@@ -274,11 +345,11 @@ def test_place_order_ipc_reuses_connection(monkeypatch):
             return self.closed
 
         async def wait_closed(self):
-            pass
+            return None
 
     reader = FakeReader(responses)
     writer = FakeWriter()
-    calls = []
+    calls: list[str] = []
 
     async def fake_conn(path):
         calls.append(path)
