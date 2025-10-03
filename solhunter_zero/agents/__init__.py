@@ -123,6 +123,7 @@ def _ensure_agents_loaded() -> None:
         "resource_monitor",
         "system",
         "onchain_metrics",
+        "scanner_common",
     ):
         importlib.import_module(f"{__name__}.{_shim_name}")
 
