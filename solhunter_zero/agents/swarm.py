@@ -26,7 +26,9 @@ class AgentSwarm:
     ):
         self.agents: List[BaseAgent] = list(agents or [])
         self.memory = memory
-        self._last_outcomes: Dict[str, bool | None] = {a.name: None for a in self.agents}
+        self._last_outcomes: Dict[str, Dict[str, Any] | None] = {
+            a.name: None for a in self.agents
+        }
         self._last_actions: List[Dict[str, Any]] = []
         self._agent_timeout = agent_timeout if agent_timeout and agent_timeout > 0 else None
         # cache propose_trade parameter names for each agent to avoid repeated
@@ -52,24 +54,53 @@ class AgentSwarm:
     # ------------------------------------------------------------------
     def record_results(self, results: List[Dict[str, Any]]) -> None:
         """Store execution results and update agent state."""
-        if not self.memory:
-            return
-        by_agent: Dict[str, bool] = {}
+        def _as_float(value: Any) -> float | None:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        by_agent: Dict[str, Dict[str, Any]] = {}
         for action, res in zip(self._last_actions, results):
+            if not isinstance(action, dict):
+                continue
+            res_data = res if isinstance(res, dict) else {}
             name = action.get("agent")
             token = action.get("token")
             if not name or not token:
                 continue
-            ok = bool(res.get("ok", False))
-            by_agent[name] = ok
+            ok = bool(res_data.get("ok", False))
+            expected = float(action.get("expected_roi", 0.0))
+            realized_roi = _as_float(res_data.get("realized_roi"))
+            if realized_roi is None:
+                realized_roi = _as_float(action.get("realized_roi"))
+            realized_price = _as_float(res_data.get("realized_price"))
+            if realized_price is None:
+                realized_price = _as_float(action.get("realized_price"))
+            outcome: Dict[str, Any] = {
+                "ok": ok,
+                "expected_roi": expected,
+            }
+            if realized_roi is not None:
+                outcome["realized_roi"] = realized_roi
+            if realized_price is not None:
+                outcome["realized_price"] = realized_price
+            by_agent[name] = outcome
             expected = float(action.get("expected_roi", 0.0))
             prob = 1.0 if ok else 0.0
-            self.memory.log_simulation(
-                token,
-                expected_roi=expected,
-                success_prob=prob,
-                agent=name,
-            )
+            if self.memory:
+                kwargs = {
+                    "expected_roi": expected,
+                    "success_prob": prob,
+                    "agent": name,
+                }
+                if realized_roi is not None:
+                    kwargs["realized_roi"] = realized_roi
+                if realized_price is not None:
+                    kwargs["realized_price"] = realized_price
+                self.memory.log_simulation(token, **kwargs)
         for agent in self.agents:
             if agent.name in by_agent:
                 outcome = by_agent[agent.name]
