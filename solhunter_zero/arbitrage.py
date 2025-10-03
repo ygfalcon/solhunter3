@@ -23,6 +23,7 @@ import contextlib
 from .dynamic_limit import _target_concurrency, _step_limit
 from . import resource_monitor
 from .util import parse_bool_env
+from .onchain_metrics import _helius_price_overview, _birdeye_price_overview
 
 try:  # pragma: no cover - optional dependency
     from numba import njit as _numba_njit
@@ -844,7 +845,83 @@ async def fetch_meteora_price_async(token: str) -> float:
     return value
 
 
-JUPITER_API_URL = os.getenv("JUPITER_API_URL", "https://price.jup.ag/v4/price")
+ENABLE_BIRDEYE_FALLBACK = parse_bool_env("ENABLE_BIRDEYE_FALLBACK", True)
+ENABLE_DEXSCREENER_FALLBACK = parse_bool_env("ENABLE_DEXSCREENER_FALLBACK", True)
+DEXSCREENER_API_URL = os.getenv(
+    "DEXSCREENER_API_URL", "https://api.dexscreener.com/latest/dex/tokens"
+)
+
+
+async def _fetch_price_from_helius(session: aiohttp.ClientSession, token: str) -> float:
+    try:
+        price, *_ = await _helius_price_overview(session, token)
+    except Exception as exc:  # pragma: no cover - caching/optional failures
+        logger.debug("Helius price helper failed for %s: %s", token, exc)
+        return 0.0
+    try:
+        value = float(price)
+    except Exception:
+        value = 0.0
+    return value if value > 0 else 0.0
+
+
+async def _fetch_price_from_birdeye(session: aiohttp.ClientSession, token: str) -> float:
+    try:
+        price, *_ = await _birdeye_price_overview(session, token)
+    except Exception as exc:  # pragma: no cover - optional dependency failures
+        logger.debug("Birdeye price helper failed for %s: %s", token, exc)
+        return 0.0
+    try:
+        value = float(price)
+    except Exception:
+        value = 0.0
+    return value if value > 0 else 0.0
+
+
+async def _fetch_price_from_dexscreener(
+    session: aiohttp.ClientSession, token: str
+) -> float:
+    """Return price from DexScreener's token endpoint."""
+
+    url = f"{DEXSCREENER_API_URL.rstrip('/')}/{token}"
+    try:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status >= 400:
+                return 0.0
+            payload = await resp.json(content_type=None)
+    except aiohttp.ClientError as exc:  # pragma: no cover - network failures
+        logger.debug("DexScreener price request failed for %s: %s", token, exc)
+        return 0.0
+    except Exception:
+        return 0.0
+
+    best_price = 0.0
+    best_liquidity = -1.0
+
+    pairs = payload.get("pairs") if isinstance(payload, dict) else None
+    if isinstance(pairs, list):
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            price_val = pair.get("priceUsd") or pair.get("price")
+            try:
+                price_float = float(price_val)
+            except Exception:
+                continue
+            liquidity_info = pair.get("liquidity")
+            liquidity = 0.0
+            if isinstance(liquidity_info, dict):
+                for key in ("usd", "base", "quote"):
+                    cand = liquidity_info.get(key)
+                    if isinstance(cand, (int, float)):
+                        liquidity = max(liquidity, float(cand))
+            elif isinstance(liquidity_info, (int, float)):
+                liquidity = float(liquidity_info)
+            if liquidity > best_liquidity and price_float > 0:
+                best_price = price_float
+                best_liquidity = liquidity
+
+    return best_price if best_price > 0 else 0.0
 
 
 async def fetch_jupiter_price_async(token: str) -> float:
@@ -860,25 +937,25 @@ async def fetch_jupiter_price_async(token: str) -> float:
         update_price_cache(token, cached)
         return cached
 
-    url = f"{JUPITER_API_URL}?ids={token}"
     session = await get_session()
-    try:
-        async with session.get(url, timeout=10) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            info = data.get("data", {}).get(token)
-            if info and isinstance(info, dict):
-                price = info.get("price")
-                value = float(price) if isinstance(price, (int, float)) else 0.0
-            else:
-                value = 0.0
-    except aiohttp.ClientError as exc:  # pragma: no cover - network errors
-        logger.warning("Failed to fetch price from Jupiter: %s", exc)
-        return 0.0
+    value = await _fetch_price_from_helius(session, token)
+    if value <= 0 and ENABLE_BIRDEYE_FALLBACK:
+        value = await _fetch_price_from_birdeye(session, token)
+    if value <= 0 and ENABLE_DEXSCREENER_FALLBACK:
+        value = await _fetch_price_from_dexscreener(session, token)
 
     PRICE_CACHE.set(("jupiter", token), value)
     update_price_cache(token, value)
     return value
+
+
+async def fetch_helius_price_async(token: str) -> float:
+    """Compatibility wrapper exposing the Helius-backed price helper."""
+
+    return await fetch_jupiter_price_async(token)
+
+
+fetch_helius_price_async.__name__ = "fetch_helius_price_async"
 
 
 def make_api_price_fetch(url: str, name: str | None = None) -> PriceFeed:
