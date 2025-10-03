@@ -42,9 +42,17 @@ logger = logging.getLogger(__name__)
 class BirdeyeFatalError(RuntimeError):
     """Exception raised when Birdeye returns a non-retryable client error."""
 
-    def __init__(self, status: int, message: str, *, body: str | None = None) -> None:
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        *,
+        body: str | None = None,
+        throttle: bool = False,
+    ) -> None:
         self.status = status
         self.body = body
+        self.throttle = throttle
         super().__init__(message)
 
     def __str__(self) -> str:  # pragma: no cover - defensive formatting
@@ -62,6 +70,10 @@ TRENDING_METADATA: Dict[str, Dict[str, Any]] = {}
 
 _FAILURE_THRESHOLD = max(1, int(os.getenv("TOKEN_SCAN_FAILURE_THRESHOLD", "3")))
 _FAILURE_COOLDOWN = max(0.0, float(os.getenv("TOKEN_SCAN_FAILURE_COOLDOWN", "45")))
+_FATAL_FAILURE_COOLDOWN = max(
+    _FAILURE_COOLDOWN,
+    float(os.getenv("TOKEN_SCAN_FATAL_COOLDOWN", "180")),
+)
 
 _LAST_TRENDING_RESULT: Dict[str, Any] = {"mints": [], "metadata": {}, "timestamp": 0.0}
 _FAILURE_COUNT = 0
@@ -242,6 +254,15 @@ async def _birdeye_trending(
     backoffs = [0.1, 0.5, 1.0]
     last_exc: Exception | None = None
 
+    throttle_markers = (
+        "compute units usage limit exceeded",
+        "request limit exceeded",
+        "rate limit exceeded",
+        "too many requests",
+        "plan limit reached",
+        "exceeded your request limit",
+    )
+
     for attempt in range(1, 4):
         try:
             async with session.get(
@@ -250,26 +271,46 @@ async def _birdeye_trending(
                 params=params,
                 timeout=_BIRDEYE_TIMEOUT,
             ) as resp:
-                if resp.status == 429:
-                    if attempt < 3:
-                        wait = backoffs[attempt - 1]
-                        logger.info("BirdEye 429; backoff and retry (%d/3)", attempt + 1)
-                        await asyncio.sleep(wait)
-                        continue
+                detail: str | None = None
                 if 400 <= resp.status < 500:
-                    if resp.status != 429:
+                    try:
+                        detail = (await resp.text())[:400]
+                    except Exception:  # pragma: no cover - defensive guard
                         detail = ""
-                        try:
-                            detail = (await resp.text())[:200]
-                        except Exception:  # pragma: no cover - defensive guard
-                            detail = ""
-                        message = f"Birdeye client error {resp.status}"
+                    detail_lower = detail.lower() if detail else ""
+                    is_throttle = resp.status == 429 or any(
+                        marker in detail_lower for marker in throttle_markers
+                    )
+                    if is_throttle:
+                        message = f"Birdeye throttle {resp.status}"
                         if resp.reason:
                             message = f"{message}: {resp.reason}"
                         if detail:
                             detail_clean = " ".join(detail.split())
+                            if detail_clean:
+                                message = f"{message} - {detail_clean}"
+                        raise BirdeyeFatalError(
+                            resp.status,
+                            message,
+                            body=detail,
+                            throttle=True,
+                        )
+                    if resp.status == 429:
+                        if attempt < 3:
+                            wait = backoffs[attempt - 1]
+                            logger.info(
+                                "BirdEye 429; backoff and retry (%d/3)", attempt + 1
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+                    message = f"Birdeye client error {resp.status}"
+                    if resp.reason:
+                        message = f"{message}: {resp.reason}"
+                    if detail:
+                        detail_clean = " ".join(detail.split())
+                        if detail_clean:
                             message = f"{message} - {detail_clean}"
-                        raise BirdeyeFatalError(resp.status, message, body=detail)
+                    raise BirdeyeFatalError(resp.status, message, body=detail)
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 if not isinstance(data, dict):
@@ -540,6 +581,7 @@ async def scan_tokens_async(
     success = False
 
     forced_cooldown_reason: str | None = None
+    forced_cooldown_seconds: float | None = None
 
     async with aiohttp.ClientSession() as session:
         try:
@@ -587,6 +629,11 @@ async def scan_tokens_async(
                     reason,
                 )
                 forced_cooldown_reason = reason or f"Birdeye status {exc.status}"
+                if exc.throttle:
+                    forced_cooldown_seconds = max(
+                        _FATAL_FAILURE_COOLDOWN,
+                        _FAILURE_COOLDOWN,
+                    )
                 break
             if not batch:
                 break
@@ -641,7 +688,8 @@ async def scan_tokens_async(
 
     if forced_cooldown_reason:
         _FAILURE_COUNT = _FAILURE_THRESHOLD
-        _COOLDOWN_UNTIL = now + _FAILURE_COOLDOWN
+        cooldown_window = forced_cooldown_seconds or _FAILURE_COOLDOWN
+        _COOLDOWN_UNTIL = now + cooldown_window
     elif failure or not success:
         _FAILURE_COUNT += 1
         if _FAILURE_COUNT >= _FAILURE_THRESHOLD:
