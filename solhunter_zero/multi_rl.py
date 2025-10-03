@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 import inspect
+import logging
 import os
 import random
 from typing import Any, Dict, Iterable, List
@@ -10,6 +11,9 @@ from typing import Any, Dict, Iterable, List
 from .http import dumps
 
 from .agents.memory import MemoryAgent
+
+
+logger = logging.getLogger(__name__)
 
 
 class PopulationRL:
@@ -29,16 +33,30 @@ class PopulationRL:
         self._load()
 
     # ------------------------------------------------------------------
-    def _load(self) -> None:
+    def _load(self) -> bool:
+        success = False
         if self.weights_path and os.path.exists(self.weights_path):
             try:
                 with open(self.weights_path, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 if isinstance(data, list):
                     self.population = data
+                    success = True
                 elif isinstance(data, dict):
                     self.population = [data]
-            except Exception:
+                    success = True
+                else:
+                    self.population = []
+                    logger.warning(
+                        "RL weights file %s did not contain a list or dict",
+                        self.weights_path,
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "Failed to load RL weights from %s: %s",
+                    self.weights_path,
+                    exc,
+                )
                 self.population = []
         if not self.population:
             self.population = [
@@ -48,6 +66,7 @@ class PopulationRL:
                     "score": 0.0,
                 }
             ]
+        return success
 
     def _save(self) -> None:
         if not self.weights_path:
