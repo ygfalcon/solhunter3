@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
+import time
 from typing import Any, Dict, Iterable, List, Sequence
 from urllib.parse import parse_qs, urlparse
 
@@ -42,6 +44,13 @@ _BIRDEYE_PAGE_DELAY = float(os.getenv("FAST_BIRDEYE_PAGE_DELAY", "0.35")) if FAS
 _HELIUS_TIMEOUT = float(os.getenv("FAST_HELIUS_TIMEOUT", "4.0")) if FAST_MODE else 8.0
 
 TRENDING_METADATA: Dict[str, Dict[str, Any]] = {}
+
+_FAILURE_THRESHOLD = max(1, int(os.getenv("TOKEN_SCAN_FAILURE_THRESHOLD", "3")))
+_FAILURE_COOLDOWN = max(0.0, float(os.getenv("TOKEN_SCAN_FAILURE_COOLDOWN", "45")))
+
+_LAST_TRENDING_RESULT: Dict[str, Any] = {"mints": [], "metadata": {}, "timestamp": 0.0}
+_FAILURE_COUNT = 0
+_COOLDOWN_UNTIL = 0.0
 
 __all__ = [
     "scan_tokens_async",
@@ -307,10 +316,53 @@ async def scan_tokens_async(
     If both sources fail, return a small static set so the loop can proceed.
     """
     _ = rpc_url  # reserved for future use; enrichment uses this parameter
+    global _FAILURE_COUNT, _COOLDOWN_UNTIL
+
     requested = max(1, int(limit))
     api_key = api_key or ""
+
+    now = time.time()
+
+    def _apply_cached() -> List[str]:
+        cached_mints = list(_LAST_TRENDING_RESULT.get("mints") or [])
+        if not cached_mints:
+            return []
+        TRENDING_METADATA.clear()
+        cached_meta = _LAST_TRENDING_RESULT.get("metadata") or {}
+        for mint, meta in cached_meta.items():
+            TRENDING_METADATA[mint] = copy.deepcopy(meta)
+        return cached_mints[:requested]
+
+    def _apply_static() -> List[str]:
+        TRENDING_METADATA.clear()
+        fallback = [
+            "So11111111111111111111111111111111111111112",  # SOL
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
+            "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",  # JUP
+        ]
+        for mint in fallback:
+            TRENDING_METADATA.setdefault(
+                mint,
+                {
+                    "address": mint,
+                    "source": "static",
+                    "sources": ["static"],
+                    "rank": len(TRENDING_METADATA),
+                },
+            )
+        return fallback[:requested]
+
+    if _COOLDOWN_UNTIL and now < _COOLDOWN_UNTIL:
+        cached = _apply_cached()
+        if cached:
+            _LAST_TRENDING_RESULT["timestamp"] = now
+            return cached
+        return _apply_static()
+
     mints: List[str] = []
     TRENDING_METADATA.clear()
+    success = False
 
     async with aiohttp.ClientSession() as session:
         try:
@@ -338,6 +390,8 @@ async def scan_tokens_async(
             TRENDING_METADATA[mint] = meta
             if len(mints) >= requested:
                 break
+        if mints:
+            success = True
 
         offset = 0
         while len(mints) < requested:
@@ -374,32 +428,40 @@ async def scan_tokens_async(
                     "sources": ["birdeye"],
                     "rank": len(TRENDING_METADATA),
                 }
+                success = True
             offset += len(batch)
             if len(batch) < page_size or len(mints) >= requested:
                 break
             # Gentle pacing to respect Birdeye rate limits (60 req/min)
             await asyncio.sleep(_BIRDEYE_PAGE_DELAY)
 
-    if not mints:
-        # Fallback to a few known mints so evaluation can run
-        mints = [
-            "So11111111111111111111111111111111111111112",  # SOL
-            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
-            "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",  # JUP
-        ]
-        for mint in mints:
-            TRENDING_METADATA.setdefault(
-                mint,
-                {
-                    "address": mint,
-                    "source": "static",
-                    "sources": ["static"],
-                    "rank": len(TRENDING_METADATA),
-                },
-            )
+    result: List[str]
+    failure = False
 
-    return mints[:requested]
+    if not mints:
+        cached = _apply_cached()
+        if cached:
+            result = cached
+        else:
+            result = _apply_static()
+        failure = True
+    else:
+        result = mints[:requested]
+
+    if result:
+        _LAST_TRENDING_RESULT["mints"] = list(result)
+        _LAST_TRENDING_RESULT["metadata"] = copy.deepcopy(TRENDING_METADATA)
+        _LAST_TRENDING_RESULT["timestamp"] = now
+
+    if failure or not success:
+        _FAILURE_COUNT += 1
+        if _FAILURE_COUNT >= _FAILURE_THRESHOLD:
+            _COOLDOWN_UNTIL = now + _FAILURE_COOLDOWN
+    else:
+        _FAILURE_COUNT = 0
+        _COOLDOWN_UNTIL = 0.0
+
+    return result
 
 
 async def _rpc_get_multiple_accounts(
