@@ -1,12 +1,28 @@
+"""Utilities for working with the built-in trading agents.
+
+This package extends its module search path to include the parent
+``solhunter_zero`` directory. As a result, imports such as
+``solhunter_zero.agents.config`` transparently resolve to the module located at
+``solhunter_zero/config.py`` without requiring bespoke shims. New helper
+modules can therefore be dropped directly into ``solhunter_zero`` and remain
+accessible through the ``solhunter_zero.agents`` namespace.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import List, Dict, Any, Type
 import importlib
 import importlib.metadata
 
 from ..portfolio import Portfolio
 from typing import TYPE_CHECKING
+
+_agents_parent = Path(__file__).resolve().parent.parent
+_agents_parent_str = str(_agents_parent)
+if _agents_parent_str not in __path__:
+    __path__.append(_agents_parent_str)
 
 if TYPE_CHECKING:  # Imports for type checking only to avoid circular imports
     from .simulation import SimulationAgent
@@ -114,27 +130,6 @@ def _ensure_agents_loaded() -> None:
     from .artifact_math_agent import ArtifactMathAgent
     from .rl_weight_agent import RLWeightAgent
     from .hierarchical_rl_agent import HierarchicalRLAgent
-
-    # Load legacy compatibility shims so old import paths remain valid.
-    _legacy_shims = (
-        "config",
-        "dex_config",
-        "http",
-        "order_book_ws",
-        "prices",
-        "token_discovery",
-        "token_scanner",
-        "dynamic_limit",
-        "resource_monitor",
-        "system",
-        "onchain_metrics",
-        "scanner_common",
-        "exchange",
-        "util",
-    )
-
-    for _shim_name in _legacy_shims:
-        importlib.import_module(f"{__name__}.{_shim_name}")
 
     BUILT_IN_AGENTS.update({
         "simulation": SimulationAgent,
