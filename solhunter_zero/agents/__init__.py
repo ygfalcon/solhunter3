@@ -4,9 +4,23 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Type
 import importlib
 import importlib.metadata
+import logging
 
 from ..portfolio import Portfolio
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
+
+_MEMORY_DEPENDENT_AGENT_NAMES = [
+    "memory",
+    "reinforcement",
+    "dqn",
+    "ppo",
+    "sac",
+    "rl_weight",
+    "opportunity_cost",
+    "inferna",
+]
 
 if TYPE_CHECKING:  # Imports for type checking only to avoid circular imports
     from .simulation import SimulationAgent
@@ -84,9 +98,21 @@ def _ensure_agents_loaded() -> None:
     from .arbitrage import ArbitrageAgent
     from .exit import ExitAgent
     from .execution import ExecutionAgent
-    from .memory import MemoryAgent
+    memory_agent_cls: Type[BaseAgent] | None
+    try:
+        from .memory import MemoryAgent as _MemoryAgent
+    except ModuleNotFoundError as exc:
+        missing = exc.name or "unknown"
+        logger.warning(
+            "Skipping memory-dependent agents (%s) because optional dependency '%s' could not be imported (%s).",
+            ", ".join(_MEMORY_DEPENDENT_AGENT_NAMES),
+            missing,
+            exc,
+        )
+        memory_agent_cls = None
+    else:
+        memory_agent_cls = _MemoryAgent
     from .discovery import DiscoveryAgent
-    from .reinforcement import ReinforcementAgent
     from .portfolio_agent import PortfolioAgent
     from .portfolio_manager import PortfolioManager
     from .portfolio_optimizer import PortfolioOptimizer
@@ -94,17 +120,12 @@ def _ensure_agents_loaded() -> None:
     from .crossdex_arbitrage import CrossDEXArbitrage
     from .hedging_agent import HedgingAgent
     from .emotion_agent import EmotionAgent
-    from .opportunity_cost import OpportunityCostAgent
     from .trend import TrendAgent
     from .smart_discovery import SmartDiscoveryAgent
 
-    from .dqn import DQNAgent
     from .ramanujan_agent import RamanujanAgent
     from .strange_attractor import StrangeAttractorAgent
     from .meta_conviction import MetaConvictionAgent
-    from .ppo_agent import PPOAgent
-    from .sac_agent import SACAgent
-    from .fractal_agent import FractalAgent
     from .alien_cipher_agent import AlienCipherAgent
     from .momentum import MomentumAgent
     from .mempool_sniper import MempoolSniperAgent
@@ -112,7 +133,6 @@ def _ensure_agents_loaded() -> None:
     from .flashloan_sandwich import FlashloanSandwichAgent
     from .llm_reasoner import LLMReasoner
     from .artifact_math_agent import ArtifactMathAgent
-    from .rl_weight_agent import RLWeightAgent
     from .hierarchical_rl_agent import HierarchicalRLAgent
 
     # Load legacy compatibility shims so old import paths remain valid.
@@ -142,19 +162,13 @@ def _ensure_agents_loaded() -> None:
         "arbitrage": ArbitrageAgent,
         "exit": ExitAgent,
         "execution": ExecutionAgent,
-        "memory": MemoryAgent,
         "discovery": DiscoveryAgent,
-        "reinforcement": ReinforcementAgent,
         "portfolio": PortfolioAgent,
         "portfolio_manager": PortfolioManager,
         "portfolio_optimizer": PortfolioOptimizer,
         "hedging": HedgingAgent,
         "crossdex_rebalancer": CrossDEXRebalancer,
         "crossdex_arbitrage": CrossDEXArbitrage,
-        "dqn": DQNAgent,
-        "ppo": PPOAgent,
-        "sac": SACAgent,
-        "opportunity_cost": OpportunityCostAgent,
         "trend": TrendAgent,
         "smart_discovery": SmartDiscoveryAgent,
 
@@ -167,10 +181,8 @@ def _ensure_agents_loaded() -> None:
 
         "ramanujan": RamanujanAgent,
         "vanta": StrangeAttractorAgent,
-        "inferna": FractalAgent,
         "alien_cipher": AlienCipherAgent,
         "artifact_math": ArtifactMathAgent,
-        "rl_weight": RLWeightAgent,
         "hierarchical_rl": HierarchicalRLAgent,
 
         "llm_reasoner": LLMReasoner,
@@ -178,6 +190,28 @@ def _ensure_agents_loaded() -> None:
         "emotion": EmotionAgent,
 
     })
+
+    if memory_agent_cls is not None:
+        from .reinforcement import ReinforcementAgent
+        from .opportunity_cost import OpportunityCostAgent
+        from .dqn import DQNAgent
+        from .ppo_agent import PPOAgent
+        from .sac_agent import SACAgent
+        from .rl_weight_agent import RLWeightAgent
+        from .fractal_agent import FractalAgent
+
+        BUILT_IN_AGENTS.update(
+            {
+                "memory": memory_agent_cls,
+                "reinforcement": ReinforcementAgent,
+                "opportunity_cost": OpportunityCostAgent,
+                "dqn": DQNAgent,
+                "ppo": PPOAgent,
+                "sac": SACAgent,
+                "rl_weight": RLWeightAgent,
+                "inferna": FractalAgent,
+            }
+        )
 
     for ep in importlib.metadata.entry_points(group="solhunter_zero.agents"):
         try:
