@@ -586,6 +586,18 @@ class AgentManager:
             logger.warning("Swarm evaluation timed out for %s", token)
             result = []
         latency = time.perf_counter() - start
+        proposal_counts: dict[str, int] = {}
+        total_proposals: int | None = None
+        if hasattr(swarm, "last_proposal_counts"):
+            try:
+                proposal_counts = dict(swarm.last_proposal_counts)  # type: ignore[attr-defined]
+            except Exception:
+                proposal_counts = {}
+        if hasattr(swarm, "last_total_proposals"):
+            try:
+                total_proposals = int(swarm.last_total_proposals)  # type: ignore[attr-defined]
+            except Exception:
+                total_proposals = None
         ctx = EvaluationContext(
             token=token,
             actions=result,
@@ -593,15 +605,31 @@ class AgentManager:
             agents=agents,
             weights=weights,
         )
-        ctx.metadata = {"latency": latency, "regime": regime}
+        ctx.metadata = {
+            "latency": latency,
+            "regime": regime,
+            "proposals": proposal_counts,
+        }
+        if total_proposals is not None:
+            ctx.metadata["total_proposals"] = total_proposals
         logger.info("AgentManager: swarm produced %s actions for %s", len(result), token)
         if not result:
-            logger.warning(
+            level = logging.WARNING
+            if total_proposals in (None, 0):
+                level = logging.INFO
+            logger.log(
+                level,
                 "AgentManager: no actions produced for %s (regime=%s, latency=%.2fs)",
                 token,
                 regime,
                 latency,
             )
+            if level == logging.INFO:
+                logger.debug(
+                    "AgentManager: swarm returned zero proposals for %s; agents=%s",
+                    token,
+                    ", ".join(a.name for a in agents) if agents else "<none>",
+                )
         publish(
             "runtime.log",
             RuntimeLog(

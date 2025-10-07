@@ -2,6 +2,7 @@ import json
 import asyncio
 import logging
 from pathlib import Path
+import types
 
 import pytest
 
@@ -9,6 +10,7 @@ pytest.importorskip("torch.nn.utils.rnn")
 pytest.importorskip("transformers")
 
 from solhunter_zero.agent_manager import AgentManager, AgentManagerConfig
+from solhunter_zero.agents import BaseAgent
 from solhunter_zero.agents.memory import MemoryAgent
 from solhunter_zero.agents.attention_swarm import AttentionSwarm
 from solhunter_zero.advanced_memory import AdvancedMemory
@@ -30,13 +32,20 @@ def test_update_weights_persists(tmp_path):
     mem.log_trade(token="tok", direction="buy", amount=1, price=1, reason="a")
     mem.log_trade(token="tok", direction="sell", amount=1, price=2, reason="a")
 
-    mgr.update_weights()
+    asyncio.run(mgr.update_weights())
 
     assert path.exists()
     with open(path, "r", encoding="utf-8") as fh:
         data = json.load(fh)
 
     assert data.get("a", 0) > 1.0
+
+
+class _SilentAgent(BaseAgent):
+    name = "silent"
+
+    async def propose_trade(self, *args, **kwargs):
+        return []
 
 
 def test_rl_weights_event_updates_manager(tmp_path):
@@ -169,4 +178,38 @@ def test_from_config_loads_keypair(monkeypatch):
     assert mgr.keypair is sentinel
     assert Path(captured["path"]).name == "kp.json"
     assert mgr.keypair_path == captured["path"]
+
+
+def test_no_actions_logs_info_instead_of_warning(monkeypatch, caplog):
+    monkeypatch.setattr(
+        "solhunter_zero.agents.swarm.order_book_ws.snapshot",
+        lambda token: (0.0, 0.0, 0.0),
+    )
+
+    agent = _SilentAgent()
+    cfg = AgentManagerConfig()
+    mgr = AgentManager([agent], config=cfg)
+
+    class _StubCoordinator:
+        async def compute_weights(self, agents, regime=None):
+            return {a.name: 1.0 for a in agents}
+
+        async def _roi_by_agent(self, names):  # pragma: no cover - attention disabled
+            return {}, {}
+
+    mgr.coordinator = _StubCoordinator()
+    portfolio = types.SimpleNamespace(price_history={"tok": []}, balances={})
+
+    async def _run():
+        return await mgr.evaluate_with_swarm("tok", portfolio)
+
+    with caplog.at_level(logging.INFO, logger="solhunter_zero.agent_manager"):
+        ctx = asyncio.run(_run())
+
+    mgr.close()
+
+    assert ctx.metadata.get("total_proposals") in {0, None}
+    messages = [rec for rec in caplog.records if "no actions produced" in rec.message]
+    assert messages, "expected log message about missing actions"
+    assert all(rec.levelno <= logging.INFO for rec in messages)
 

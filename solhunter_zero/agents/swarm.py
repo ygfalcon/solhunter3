@@ -30,6 +30,10 @@ class AgentSwarm:
             a.name: None for a in self.agents
         }
         self._last_actions: List[Dict[str, Any]] = []
+        self._last_proposal_counts: Dict[str, int] = {
+            a.name: 0 for a in self.agents
+        }
+        self._last_total_proposals: int = 0
         self._agent_timeout = agent_timeout if agent_timeout and agent_timeout > 0 else None
         # cache propose_trade parameter names for each agent to avoid repeated
         # inspect.signature calls during execution
@@ -162,6 +166,8 @@ class AgentSwarm:
             *(run(a) for a in self.agents), return_exceptions=True
         )
         results: List[List[Dict[str, Any]]] = []
+        proposal_counts: Dict[str, int] = {}
+        total_proposals = 0
         for agent, raw in zip(self.agents, raw_results):
             res: List[Dict[str, Any]]
             if isinstance(raw, Exception):
@@ -171,6 +177,9 @@ class AgentSwarm:
                 res = []
             else:
                 res = raw
+            count = len(res) if isinstance(res, list) else 0
+            proposal_counts[agent.name] = count
+            total_proposals += count
             logger.info(
                 "Swarm: %s returned %s proposals for %s",
                 agent.name,
@@ -178,6 +187,9 @@ class AgentSwarm:
                 token,
             )
             results.append(res)
+
+        self._last_proposal_counts = proposal_counts
+        self._last_total_proposals = total_proposals
 
         weights_map = {a.name: float(weights.get(a.name, 1.0)) for a in self.agents} if weights else {}
 
@@ -269,3 +281,17 @@ class AgentSwarm:
                 ", ".join(breakdown) if breakdown else "<no agents>",
             )
         return final
+
+    # ------------------------------------------------------------------
+    @property
+    def last_proposal_counts(self) -> Dict[str, int]:
+        """Return a copy of proposal counts from the most recent run."""
+
+        return dict(self._last_proposal_counts)
+
+    # ------------------------------------------------------------------
+    @property
+    def last_total_proposals(self) -> int:
+        """Return the total number of proposals from the most recent run."""
+
+        return int(self._last_total_proposals)
