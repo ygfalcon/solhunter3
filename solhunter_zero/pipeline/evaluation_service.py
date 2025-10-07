@@ -5,7 +5,7 @@ import inspect
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from .types import ActionBundle, EvaluationResult, ScoredToken
 
@@ -17,8 +17,8 @@ class EvaluationService:
 
     def __init__(
         self,
-        input_queue: "asyncio.Queue[list[ScoredToken]]",
-        output_queue: "asyncio.Queue[list[ActionBundle]]",
+        input_queue: "asyncio.Queue[ScoredToken]",
+        output_queue: "asyncio.Queue[ActionBundle]",
         agent_manager,
         portfolio,
         *,
@@ -35,8 +35,13 @@ class EvaluationService:
         self._cache: Dict[str, tuple[float, EvaluationResult]] = {}
         self._stopped = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
-        workers = default_workers or (os.cpu_count() or 4)
-        self._worker_limit = max(1, int(workers))
+        self._worker_tasks: list[asyncio.Task] = []
+        workers = default_workers if default_workers is not None else (os.cpu_count() or 4)
+        try:
+            worker_count = int(workers)
+        except (TypeError, ValueError):
+            worker_count = os.cpu_count() or 4
+        self._worker_limit = max(5, worker_count)
         self._on_result = on_result
         self._should_skip = should_skip
         self._min_volume = self._parse_threshold("DISCOVERY_MIN_VOLUME_USD")
@@ -57,45 +62,51 @@ class EvaluationService:
             self._task = None
 
     async def _run(self) -> None:
-        sem = asyncio.Semaphore(max(1, self._worker_limit))
+        workers = [
+            asyncio.create_task(self._worker_loop(idx), name=f"evaluation_worker:{idx}")
+            for idx in range(self._worker_limit)
+        ]
+        self._worker_tasks = workers
+        try:
+            await self._stopped.wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            self._worker_tasks.clear()
+
+    async def _worker_loop(self, idx: int) -> None:
+        name = f"worker-{idx}"
         while not self._stopped.is_set():
+            scored: ScoredToken | None = None
             try:
-                scored_batch = await self.input_queue.get()
-                self.input_queue.task_done()
-                if self._should_skip:
-                    scored_batch = [st for st in scored_batch if not self._should_skip(st.token)]
-                    if not scored_batch:
-                        log.debug("EvaluationService skipped batch (all tokens cached)")
-                        continue
-                tasks = [
-                    asyncio.create_task(self._evaluate_token(st, sem), name=f"eval:{st.token}")
-                    for st in scored_batch
-                ]
-                bundles: List[ActionBundle] = []
-                for task in asyncio.as_completed(tasks):
-                    try:
-                        result = await task
-                    except Exception as exc:
-                        log.exception("Evaluation task failed: %s", exc)
-                        continue
-                    if result and result.actions:
-                        await self._notify_result(result)
-                        bundles.append(
-                            ActionBundle(
-                                token=result.token,
-                                actions=result.actions,
-                                created_at=time.time(),
-                                metadata={"latency": result.latency, "cached": result.cached},
-                            )
-                        )
-                    elif result:
-                        await self._notify_result(result)
-                if bundles:
-                    await self.output_queue.put(bundles)
+                scored = await self.input_queue.get()
             except asyncio.CancelledError:
-                raise
+                break
+            try:
+                if self._should_skip and self._should_skip(scored.token):
+                    log.debug("EvaluationService %s skipped %s via should_skip", name, scored.token)
+                    continue
+                result = await self._evaluate_token(scored)
+                if result:
+                    await self._notify_result(result)
+                    if result.actions:
+                        bundle = ActionBundle(
+                            token=result.token,
+                            actions=result.actions,
+                            created_at=time.time(),
+                            metadata={"latency": result.latency, "cached": result.cached},
+                        )
+                        await self.output_queue.put(bundle)
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
-                log.exception("EvaluationService failure: %s", exc)
+                log.exception("EvaluationService %s failure: %s", name, exc)
+            finally:
+                if scored is not None:
+                    self.input_queue.task_done()
 
     async def _notify_result(self, result: EvaluationResult) -> None:
         if not self._on_result:
@@ -107,54 +118,53 @@ class EvaluationService:
         except Exception:  # pragma: no cover - defensive logging
             log.exception("Result callback failed")
 
-    async def _evaluate_token(self, scored: ScoredToken, sem: asyncio.Semaphore) -> Optional[EvaluationResult]:
-        async with sem:
-            now = time.time()
-            cached = self._cache.get(scored.token)
-            if cached and (now - cached[0]) < self.cache_ttl:
-                return EvaluationResult(
-                    token=scored.token,
-                    actions=list(cached[1].actions),
-                    latency=0.0,
-                    cached=True,
-                    metadata=dict(cached[1].metadata),
-                )
-            start = time.perf_counter()
-            errors: List[str] = []
-            actions: List[Dict] = []
-            try:
-                ctx = await self.agent_manager.evaluate_with_swarm(scored.token, self.portfolio)
-                actions = list(ctx.actions)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                errors.append(str(exc))
-                log.exception("Evaluation failed for %s", scored.token)
-            exploratory_action = None
-            if not actions:
-                exploratory_action = self._maybe_build_exploratory_action(scored)
-                if exploratory_action:
-                    actions.append(exploratory_action)
-                    log.info(
-                        "EvaluationService generated exploratory action for %s (score=%.4f)",
-                        scored.token,
-                        scored.score,
-                    )
-            latency = time.perf_counter() - start
-            metadata = {"score": scored.score, "rank": scored.rank}
-            if exploratory_action:
-                metadata["exploratory"] = True
-            result = EvaluationResult(
+    async def _evaluate_token(self, scored: ScoredToken) -> Optional[EvaluationResult]:
+        now = time.time()
+        cached = self._cache.get(scored.token)
+        if cached and (now - cached[0]) < self.cache_ttl:
+            return EvaluationResult(
                 token=scored.token,
-                actions=actions,
-                latency=latency,
-                cached=False,
-                errors=errors,
-                metadata=metadata,
+                actions=list(cached[1].actions),
+                latency=0.0,
+                cached=True,
+                metadata=dict(cached[1].metadata),
             )
-            if self.cache_ttl and not errors:
-                self._cache[scored.token] = (time.time(), result)
-            return result
+        start = time.perf_counter()
+        errors: list[str] = []
+        actions: list[Dict] = []
+        try:
+            ctx = await self.agent_manager.evaluate_with_swarm(scored.token, self.portfolio)
+            actions = list(ctx.actions)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            errors.append(str(exc))
+            log.exception("Evaluation failed for %s", scored.token)
+        exploratory_action = None
+        if not actions:
+            exploratory_action = self._maybe_build_exploratory_action(scored)
+            if exploratory_action:
+                actions.append(exploratory_action)
+                log.info(
+                    "EvaluationService generated exploratory action for %s (score=%.4f)",
+                    scored.token,
+                    scored.score,
+                )
+        latency = time.perf_counter() - start
+        metadata = {"score": scored.score, "rank": scored.rank}
+        if exploratory_action:
+            metadata["exploratory"] = True
+        result = EvaluationResult(
+            token=scored.token,
+            actions=actions,
+            latency=latency,
+            cached=False,
+            errors=errors,
+            metadata=metadata,
+        )
+        if self.cache_ttl and not errors:
+            self._cache[scored.token] = (time.time(), result)
+        return result
 
     @staticmethod
     def _coerce_float(value: Any) -> float | None:

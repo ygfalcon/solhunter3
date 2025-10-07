@@ -10,6 +10,7 @@ from .discovery_service import DiscoveryService
 from .evaluation_service import EvaluationService
 from .execution_service import ExecutionService
 from .scoring_service import ScoringService
+from .portfolio_management_service import PortfolioManagementService
 from .types import ActionBundle, EvaluationResult, ExecutionReceipt, ScoredToken, TokenCandidate
 from .feedback_service import FeedbackService
 
@@ -79,8 +80,9 @@ class PipelineCoordinator:
         self.on_execution = on_execution
 
         self._discovery_queue: asyncio.Queue[list[TokenCandidate]] = asyncio.Queue(maxsize=4)
-        self._scoring_queue: asyncio.Queue[list[ScoredToken]] = asyncio.Queue(maxsize=4)
-        self._execution_queue: asyncio.Queue[list[ActionBundle]] = asyncio.Queue(maxsize=4)
+        self._scoring_queue: asyncio.Queue[ScoredToken] = asyncio.Queue(maxsize=64)
+        self._execution_queue: asyncio.Queue[ActionBundle] = asyncio.Queue(maxsize=64)
+        self._portfolio_service = PortfolioManagementService(portfolio)
 
         self._discovery_service = DiscoveryService(
             self._discovery_queue,
@@ -127,8 +129,9 @@ class PipelineCoordinator:
         await self._evaluation_service.start()
         await self._execution_service.start()
         await self._feedback_service.start()
+        await self._portfolio_service.start()
         log.info(
-            "PipelineCoordinator: all services started (discovery→scoring→evaluation→execution)"
+            "PipelineCoordinator: all services started (discovery→scoring→evaluation→execution→portfolio)"
         )
 
     async def stop(self) -> None:
@@ -138,6 +141,7 @@ class PipelineCoordinator:
         await self._scoring_service.stop()
         await self._discovery_service.stop()
         await self._feedback_service.stop()
+        await self._portfolio_service.stop()
         for task in self._tasks:
             task.cancel()
             try:
@@ -156,6 +160,7 @@ class PipelineCoordinator:
         }
         await self._record_telemetry("evaluation", payload)
         await self._feedback_service.put(result)
+        await self._portfolio_service.put(result)
         if self.on_evaluation:
             try:
                 await self.on_evaluation(result)
@@ -171,6 +176,7 @@ class PipelineCoordinator:
         }
         await self._record_telemetry("execution", payload)
         await self._feedback_service.put(receipt)
+        await self._portfolio_service.put(receipt)
         if self.on_execution:
             try:
                 await self.on_execution(receipt)
