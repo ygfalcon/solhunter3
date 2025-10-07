@@ -28,7 +28,7 @@ DEFAULTS: dict[str, str] = {
     "DEPTH_SERVICE_SOCKET": "/tmp/depth_service.sock",
     "DEPTH_MMAP_PATH": "/tmp/depth_service.mmap",
     "DEPTH_MMAP_POLL_INTERVAL": "1",
-    "DEPTH_START_TIMEOUT": "5",
+    "DEPTH_START_TIMEOUT": "10",
     "DEPTH_MAX_RESTARTS": "1",
     "DEPTH_CACHE_TTL": "0.5",
 
