@@ -156,10 +156,16 @@ def _import_agent_module(module_name: str) -> ModuleType:
 
     try:
         return importlib.import_module(f"{__name__}.{module_name}")
-    except ModuleNotFoundError:
-        # Module lives outside the agents directory; defer to the extended
-        # search path semantics to resolve it.
-        return importlib.import_module(f".{module_name}", __name__)
+    except ModuleNotFoundError as exc:
+        expected = f"{__name__}.{module_name}"
+        if exc.name not in {expected, module_name}:
+            raise
+
+        parent_pkg, _, _ = __name__.rpartition(".")
+        if not parent_pkg:
+            raise
+
+        return importlib.import_module(f"{parent_pkg}.{module_name}")
 
 
 def _load_agent_class(agent_name: str, module_name: str, class_name: str) -> Type[BaseAgent] | None:
