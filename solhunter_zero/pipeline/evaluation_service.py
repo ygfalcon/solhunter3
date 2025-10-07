@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .types import ActionBundle, EvaluationResult, ScoredToken
 
@@ -23,8 +24,8 @@ class EvaluationService:
         *,
         default_workers: Optional[int] = None,
         cache_ttl: float = 10.0,
-        on_result = None,
-        should_skip = None,
+        on_result: Optional[Callable[[EvaluationResult], Awaitable[None] | None]] = None,
+        should_skip: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.input_queue = input_queue
         self.output_queue = output_queue
@@ -34,7 +35,8 @@ class EvaluationService:
         self._cache: Dict[str, tuple[float, EvaluationResult]] = {}
         self._stopped = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
-        self._worker_limit = default_workers or (os.cpu_count() or 4)
+        workers = default_workers or (os.cpu_count() or 4)
+        self._worker_limit = max(1, int(workers))
         self._on_result = on_result
         self._should_skip = should_skip
         self._min_volume = self._parse_threshold("DISCOVERY_MIN_VOLUME_USD")
@@ -77,11 +79,7 @@ class EvaluationService:
                         log.exception("Evaluation task failed: %s", exc)
                         continue
                     if result and result.actions:
-                        if self._on_result:
-                            try:
-                                await self._on_result(result)
-                            except Exception:  # pragma: no cover - defensive
-                                log.exception("Result callback failed")
+                        await self._notify_result(result)
                         bundles.append(
                             ActionBundle(
                                 token=result.token,
@@ -90,17 +88,24 @@ class EvaluationService:
                                 metadata={"latency": result.latency, "cached": result.cached},
                             )
                         )
-                    elif result and self._on_result:
-                        try:
-                            await self._on_result(result)
-                        except Exception:
-                            log.exception("Result callback failed")
+                    elif result:
+                        await self._notify_result(result)
                 if bundles:
                     await self.output_queue.put(bundles)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.exception("EvaluationService failure: %s", exc)
+
+    async def _notify_result(self, result: EvaluationResult) -> None:
+        if not self._on_result:
+            return
+        try:
+            maybe = self._on_result(result)
+            if inspect.isawaitable(maybe):
+                await maybe  # pragma: no branch - best effort support
+        except Exception:  # pragma: no cover - defensive logging
+            log.exception("Result callback failed")
 
     async def _evaluate_token(self, scored: ScoredToken, sem: asyncio.Semaphore) -> Optional[EvaluationResult]:
         async with sem:

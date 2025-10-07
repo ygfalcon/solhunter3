@@ -64,6 +64,7 @@ class DiscoveryService:
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
         self._last_emitted: list[str] = []
+        self._last_fetch_fresh: bool = True
 
     async def start(self) -> None:
         if self._task is None:
@@ -82,7 +83,8 @@ class DiscoveryService:
     async def _run(self) -> None:
         while not self._stopped.is_set():
             try:
-                tokens, fresh = await self._fetch()
+                tokens = await self._fetch()
+                fresh = self._last_fetch_fresh
                 if tokens:
                     if not fresh and tokens == self._last_emitted:
                         log.debug("DiscoveryService skipping cached emission (%d tokens)", len(tokens))
@@ -97,7 +99,7 @@ class DiscoveryService:
                 log.exception("DiscoveryService failure: %s", exc)
             await asyncio.sleep(self.interval)
 
-    async def _fetch(self) -> tuple[list[str], bool]:
+    async def _fetch(self) -> list[str]:
         now = time.time()
         if now < self._cooldown_until:
             remaining = self._cooldown_until - now
@@ -106,7 +108,8 @@ class DiscoveryService:
                 remaining,
                 len(self._last_tokens),
             )
-            return list(self._last_tokens), False
+            self._last_fetch_fresh = False
+            return list(self._last_tokens)
         tokens = await self._agent.discover_tokens(
             offline=self.offline,
             token_file=self.token_file,
@@ -153,7 +156,8 @@ class DiscoveryService:
         else:
             self._cooldown_until = fetch_ts
 
-        return list(tokens), True
+        self._last_fetch_fresh = True
+        return list(tokens)
 
     def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
         ts = time.time()
