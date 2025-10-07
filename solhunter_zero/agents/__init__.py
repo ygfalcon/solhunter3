@@ -190,6 +190,25 @@ def _load_agent_class(agent_name: str, module_name: str, class_name: str) -> Typ
     try:
         return getattr(module, class_name)
     except AttributeError as exc:  # pragma: no cover - exercised via tests
+        # Some environments still resolve legacy helper modules from
+        # ``solhunter_zero.<module>`` when importing through
+        # ``solhunter_zero.agents``.  Those helper modules lazily re-export the
+        # concrete agent classes, so fall back to the legacy location before
+        # giving up.  This keeps the AgentManager usable even when the import
+        # path preference unexpectedly changes (for example due to stale
+        # ``.pyc`` files or packaging quirks on user machines).
+        fallback_module = None
+        if not module_name.startswith("solhunter_zero."):
+            try:
+                fallback_module = importlib.import_module(
+                    f"solhunter_zero.{module_name}"
+                )
+            except ModuleNotFoundError:
+                fallback_module = None
+            else:
+                candidate = getattr(fallback_module, class_name, None)
+                if candidate is not None:
+                    return candidate
         module_path = getattr(module, "__file__", None)
         detail = f" from {module_path!s}" if module_path else ""
         raise AttributeError(
