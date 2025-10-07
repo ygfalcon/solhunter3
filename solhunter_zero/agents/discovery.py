@@ -43,7 +43,7 @@ class DiscoveryAgent:
                 "BIRDEYE_API_KEY missing; discovery will fall back to static tokens"
             )
         self.limit = int(os.getenv("DISCOVERY_LIMIT", "60") or 60)
-        self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "20") or 20.0))
+        self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
         self.max_attempts = max(1, int(os.getenv("TOKEN_DISCOVERY_RETRIES", "2") or 2))
         self.mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)

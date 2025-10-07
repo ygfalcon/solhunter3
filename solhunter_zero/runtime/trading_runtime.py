@@ -453,13 +453,40 @@ class TradingRuntime:
                 "TradingRuntime: initialising staged pipeline (fast_mode=%s)",
                 fast_mode,
             )
+            discovery_interval_cfg = float(self.cfg.get("discovery_interval", 5.0) or 5.0)
+            discovery_interval_cfg = max(discovery_interval_cfg, 5.0)
+
+            cache_env = os.getenv("DISCOVERY_CACHE_TTL")
+            if cache_env:
+                try:
+                    discovery_cache_ttl = float(cache_env)
+                except ValueError:
+                    log.warning("Invalid DISCOVERY_CACHE_TTL=%r; defaulting to 45s", cache_env)
+                    discovery_cache_ttl = 45.0
+            else:
+                discovery_cache_ttl = float(self.cfg.get("discovery_cache_ttl", 45.0) or 45.0)
+
+            discovery_cache_ttl = max(discovery_cache_ttl, discovery_interval_cfg)
+
+            eval_cache_cfg = self.cfg.get("evaluation_cache_ttl")
+            evaluation_cache_ttl = None
+            if eval_cache_cfg is not None:
+                try:
+                    evaluation_cache_ttl = float(eval_cache_cfg)
+                except (TypeError, ValueError):
+                    log.warning(
+                        "Invalid evaluation_cache_ttl=%r in config; falling back to defaults",
+                        eval_cache_cfg,
+                    )
+                    evaluation_cache_ttl = None
+
             self.pipeline = PipelineCoordinator(
                 self.agent_manager,
                 self.portfolio,
-                discovery_interval=float(self.cfg.get("discovery_interval", 3.0) or 3.0),
-                discovery_cache_ttl=float(os.getenv("DISCOVERY_CACHE_TTL", "20") or 20.0),
+                discovery_interval=discovery_interval_cfg,
+                discovery_cache_ttl=discovery_cache_ttl,
                 scoring_batch=self._determine_scoring_batch(fast_mode),
-                evaluation_cache_ttl=float(os.getenv("EVALUATION_CACHE_TTL", "10") or 10.0),
+                evaluation_cache_ttl=evaluation_cache_ttl,
                 evaluation_workers=self._determine_eval_workers(fast_mode),
                 execution_lanes=self._determine_execution_lanes(fast_mode),
                 on_evaluation=self._pipeline_on_evaluation,

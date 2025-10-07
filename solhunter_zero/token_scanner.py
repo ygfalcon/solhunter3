@@ -86,6 +86,8 @@ _THROTTLE_COOLDOWN = max(
     float(os.getenv("TOKEN_SCAN_THROTTLE_COOLDOWN", "300")),
 )
 
+_MIN_SCAN_INTERVAL = max(0.0, float(os.getenv("TOKEN_SCAN_MIN_INTERVAL", "45")))
+
 _LAST_TRENDING_RESULT: Dict[str, Any] = {"mints": [], "metadata": {}, "timestamp": 0.0}
 _FAILURE_COUNT = 0
 _COOLDOWN_UNTIL = 0.0
@@ -576,6 +578,13 @@ async def scan_tokens_async(
             _LAST_TRENDING_RESULT["timestamp"] = now
             return cached
         return _apply_static()
+
+    last_ts = float(_LAST_TRENDING_RESULT.get("timestamp") or 0.0)
+    if _MIN_SCAN_INTERVAL and last_ts and (now - last_ts) < _MIN_SCAN_INTERVAL:
+        cached = _apply_cached()
+        if cached:
+            _LAST_TRENDING_RESULT["timestamp"] = now
+            return cached
 
     mints: List[str] = []
     TRENDING_METADATA.clear()

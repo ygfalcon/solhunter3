@@ -63,6 +63,7 @@ class DiscoveryService:
         self._current_backoff: float = 0.0
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
+        self._last_emitted: list[str] = []
 
     async def start(self) -> None:
         if self._task is None:
@@ -81,18 +82,22 @@ class DiscoveryService:
     async def _run(self) -> None:
         while not self._stopped.is_set():
             try:
-                tokens = await self._fetch()
+                tokens, fresh = await self._fetch()
                 if tokens:
+                    if not fresh and tokens == self._last_emitted:
+                        log.debug("DiscoveryService skipping cached emission (%d tokens)", len(tokens))
+                        continue
                     batch = self._build_candidates(tokens)
                     await self.queue.put(batch)
                     log.info("DiscoveryService queued %d tokens", len(batch))
+                    self._last_emitted = list(tokens)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 log.exception("DiscoveryService failure: %s", exc)
             await asyncio.sleep(self.interval)
 
-    async def _fetch(self) -> list[str]:
+    async def _fetch(self) -> tuple[list[str], bool]:
         now = time.time()
         if now < self._cooldown_until:
             remaining = self._cooldown_until - now
@@ -101,7 +106,7 @@ class DiscoveryService:
                 remaining,
                 len(self._last_tokens),
             )
-            return list(self._last_tokens)
+            return list(self._last_tokens), False
         tokens = await self._agent.discover_tokens(
             offline=self.offline,
             token_file=self.token_file,
@@ -148,7 +153,7 @@ class DiscoveryService:
         else:
             self._cooldown_until = fetch_ts
 
-        return list(tokens)
+        return list(tokens), True
 
     def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
         ts = time.time()
