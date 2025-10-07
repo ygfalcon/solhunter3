@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+from types import ModuleType
 from typing import List, Dict, Any, Type
 import importlib
 import importlib.metadata
@@ -139,9 +140,41 @@ _AGENT_IMPORTS: Dict[str, tuple[str, str]] = {
 }
 
 
+def _import_agent_module(module_name: str) -> ModuleType:
+    """Import ``module_name`` while preferring implementations inside ``agents``.
+
+    The ``solhunter_zero.agents`` package extends ``__path__`` so that helper
+    modules placed alongside the package (for example
+    ``solhunter_zero/flash_loans.py``) can still be reached via the
+    ``solhunter_zero.agents`` namespace.  When importing the built-in agents we
+    prefer the concrete implementation that lives inside the package and fall
+    back to the extended search path when that module does not exist.  Some
+    agent registrations, especially third-party entry points, may already use a
+    fully-qualified module name (e.g. ``solhunter_zero.flash_loans``).  Those
+    should be respected verbatim rather than being rewritten beneath the agents
+    namespace.
+    """
+
+    if module_name.startswith(__name__ + ".") or module_name.startswith("solhunter_zero."):
+        return importlib.import_module(module_name)
+
+    try:
+        return importlib.import_module(f"{__name__}.{module_name}")
+    except ModuleNotFoundError as exc:
+        # ``exc.name`` may refer to the fully-qualified module we attempted to
+        # import.  Only fall back to the extended search path when that module
+        # itself is missing; otherwise propagate the error so optional
+        # dependency diagnostics remain intact.
+        missing = exc.name or ""
+        qualified = f"{__name__}.{module_name}"
+        if missing and missing not in {qualified, module_name} and not missing.startswith(qualified + "."):
+            raise
+        return importlib.import_module(f".{module_name}", __name__)
+
+
 def _load_agent_class(agent_name: str, module_name: str, class_name: str) -> Type[BaseAgent] | None:
     try:
-        module = importlib.import_module(f".{module_name}", __name__)
+        module = _import_agent_module(module_name)
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
         missing_root = (exc.name or "").partition(".")[0]
         if not missing_root:
@@ -158,7 +191,14 @@ def _load_agent_class(agent_name: str, module_name: str, class_name: str) -> Typ
             )
             return None
         raise
-    return getattr(module, class_name)
+    try:
+        return getattr(module, class_name)
+    except AttributeError as exc:  # pragma: no cover - exercised via tests
+        module_path = getattr(module, "__file__", None)
+        detail = f" from {module_path!s}" if module_path else ""
+        raise AttributeError(
+            f"Module '{module.__name__}' does not define '{class_name}'{detail}"
+        ) from exc
 
 
 def _ensure_agents_loaded() -> None:
