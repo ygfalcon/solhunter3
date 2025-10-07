@@ -9,6 +9,7 @@ from ..memory import Memory
 from ..advanced_memory import AdvancedMemory
 from ..offline_data import OfflineData
 from ..portfolio import Portfolio
+from ..simple_memory import SimpleMemory
 
 
 class MemoryAgent(BaseAgent):
@@ -23,7 +24,16 @@ class MemoryAgent(BaseAgent):
         *,
         queue: asyncio.Queue | None = None,
     ):
-        self.memory = memory or Memory("sqlite:///:memory:")
+        if memory is not None:
+            self.memory = memory
+        else:
+            try:
+                self.memory = Memory("sqlite:///:memory:")
+            except ModuleNotFoundError as exc:
+                if "aiosqlite" in str(exc):
+                    self.memory = SimpleMemory()
+                else:
+                    raise
         self.offline_data = offline_data
         self.queue = queue
 
