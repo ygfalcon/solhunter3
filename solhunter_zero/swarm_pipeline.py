@@ -11,6 +11,7 @@ consistent action normalisation, and explicit asset feedback to the portfolio.
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 import asyncio
+import contextlib
 import logging
 import math
 import os
@@ -922,7 +923,26 @@ class SwarmPipeline:
         publish("runtime.log", RuntimeLog(stage="loop", detail="begin"))
 
         try:
-            discovery = await self._run_discovery()
+            token_queue: asyncio.Queue[tuple[str, float] | None] = asyncio.Queue()
+            discovery_task = asyncio.create_task(
+                self._run_discovery(token_queue=token_queue),
+                name="pipeline.discovery",
+            )
+            evaluation_task = asyncio.create_task(
+                self._run_evaluation_stream(token_queue),
+                name="pipeline.evaluation",
+            )
+
+            try:
+                discovery = await discovery_task
+            except Exception:
+                await token_queue.put(None)
+                with contextlib.suppress(Exception):
+                    await evaluation_task
+                raise
+            else:
+                await token_queue.put(None)
+                evaluation = await evaluation_task
             if not discovery.tokens:
                 elapsed = time.perf_counter() - start_ts
                 publish("runtime.log", RuntimeLog(stage="loop", detail=f"end:{elapsed:.3f}s"))
@@ -948,7 +968,6 @@ class SwarmPipeline:
                     },
                 }
 
-            evaluation = await self._run_evaluation(discovery)
             if discovery.tokens and not evaluation.records and evaluation.budget_hit:
                 simulation = SimulationStage(records=[])
                 execution = ExecutionStage()
@@ -1051,7 +1070,9 @@ class SwarmPipeline:
         finally:
             self._iteration_start = None
 
-    async def _run_discovery(self) -> DiscoveryStage:
+    async def _run_discovery(
+        self, *, token_queue: asyncio.Queue[tuple[str, float] | None] | None = None
+    ) -> DiscoveryStage:
         stage = DiscoveryStage()
         now = time.time()
         cached_tokens = list(self._discovery_cache_tokens)
@@ -1161,6 +1182,9 @@ class SwarmPipeline:
         stage.scores = scores
         ranked = sorted(stage.tokens, key=lambda t: scores.get(t, 0.0), reverse=True)
         stage.tokens = ranked[:limit]
+        if token_queue is not None and stage.tokens:
+            for tok in stage.tokens:
+                await token_queue.put((tok, stage.scores.get(tok, 0.0)))
         publish(
             "runtime.log",
             RuntimeLog(stage="pipeline", detail=f"queue:{len(stage.tokens)}/{len(scores)}"),
@@ -1180,6 +1204,138 @@ class SwarmPipeline:
                 self.state.last_tokens = list(stage.tokens)
             except Exception:
                 self.state.last_tokens = list(stage.tokens)
+        return stage
+
+    async def _run_evaluation_stream(
+        self, token_queue: asyncio.Queue[tuple[str, float] | None]
+    ) -> EvaluationStage:
+        stage = EvaluationStage()
+        start_time = time.perf_counter()
+        sem = asyncio.Semaphore(self.chunk_size)
+        records: List[EvaluationRecord] = []
+        errors: List[str] = []
+        active: set[asyncio.Task[None]] = set()
+
+        async def evaluate_token(token: str, score: float) -> None:
+            remaining_before = self._remaining_budget()
+            if remaining_before is not None and remaining_before <= 0:
+                stage.budget_hit = True
+                return
+            async with sem:
+                remaining_total = self._remaining_budget()
+                if remaining_total is not None and remaining_total <= 0:
+                    stage.budget_hit = True
+                    return
+                if self.time_budget and time.perf_counter() - start_time > self.time_budget:
+                    stage.budget_hit = True
+                    return
+                cached_expiry = (
+                    self._no_action_cache.get(token) if self.no_action_ttl else None
+                )
+                if cached_expiry is not None:
+                    publish(
+                        "runtime.log",
+                        RuntimeLog(stage="evaluation", detail=f"cached-skip:{token}"),
+                    )
+                    records.append(
+                        EvaluationRecord(
+                            token=token,
+                            score=score,
+                            latency=0.0,
+                            actions=[],
+                            context=None,
+                            errors=["cached:no-action"],
+                        )
+                    )
+                    return
+                publish(
+                    "runtime.log",
+                    RuntimeLog(stage="evaluation", detail=f"start:{token} score={score:.3f}"),
+                )
+                t0 = time.perf_counter()
+                ctx: EvaluationContext | None = None
+                actions: List[SwarmAction] = []
+                token_errors: List[str] = []
+                try:
+                    eval_coro = self.agent_manager.evaluate_with_swarm(
+                        token, self.portfolio
+                    )
+                    eval_timeout = self.token_timeout
+                    if remaining_total is not None:
+                        budget_slice = max(0.1, remaining_total * 0.4)
+                        if eval_timeout > 0:
+                            eval_timeout = min(eval_timeout, budget_slice)
+                        else:
+                            eval_timeout = budget_slice
+                    if eval_timeout and eval_timeout > 0:
+                        ctx = await asyncio.wait_for(eval_coro, timeout=eval_timeout)
+                    else:
+                        ctx = await eval_coro
+                    raw_actions = list(ctx.actions)
+                    for raw in raw_actions:
+                        if not isinstance(raw, dict):
+                            continue
+                        act = SwarmAction.from_raw(raw)
+                        if act is not None:
+                            actions.append(act)
+                    if actions:
+                        await asyncio.gather(
+                            *(self._ensure_action_price(act) for act in actions)
+                        )
+                    if not actions and self.no_action_ttl:
+                        self._no_action_cache[token] = time.time() + self.no_action_ttl
+                except asyncio.TimeoutError:
+                    token_errors.append("evaluation:timeout")
+                    publish(
+                        "runtime.log",
+                        RuntimeLog(stage="evaluation", detail=f"timeout:{token}"),
+                    )
+                except Exception as exc:
+                    token_errors.append(f"evaluation:{exc}")
+                    publish(
+                        "runtime.log",
+                        RuntimeLog(stage="evaluation", detail=f"error:{token}:{exc}"),
+                    )
+                    log.exception("Evaluation failed for %s", token)
+                latency = time.perf_counter() - t0
+                stage.latencies.append(latency)
+                publish(
+                    "runtime.log",
+                    RuntimeLog(
+                        stage="evaluation",
+                        detail=f"done:{token} actions={len(actions)} latency={latency:.2f}s",
+                    ),
+                )
+                records.append(
+                    EvaluationRecord(
+                        token=token,
+                        score=score,
+                        latency=latency,
+                        actions=actions,
+                        context=ctx,
+                        errors=token_errors,
+                    )
+                )
+                errors.extend(token_errors)
+
+        while True:
+            item = await token_queue.get()
+            if item is None:
+                break
+            token, score = item
+            task = asyncio.create_task(evaluate_token(token, score))
+            active.add(task)
+            task.add_done_callback(active.discard)
+
+        if active:
+            await asyncio.gather(*active)
+
+        stage.records = records
+        if errors:
+            publish(
+                "runtime.log",
+                RuntimeLog(stage="evaluation", detail=f"errors:{len(errors)}"),
+            )
         return stage
 
     async def _run_evaluation(self, discovery: DiscoveryStage) -> EvaluationStage:
