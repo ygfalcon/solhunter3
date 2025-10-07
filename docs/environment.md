@@ -66,6 +66,10 @@ This document lists environment variables recognized by the project.
 | `GNN_MODEL_PATH` | `route_gnn.pt` | Path to gnn model |
 | `GPU_MEMORY_INDEX` | `` | Configures gpu memory index |
 | `GRAPH_MODEL_PATH` | `` | Path to graph model |
+| `HELIUS_API_KEY` | `af30888b-b79f-4b12-b3fd-c5375d5bad2d` | API key used for Helius price and asset requests |
+| `HELIUS_PRICE_REST_URL` | `` | Optional legacy REST price endpoint for Helius |
+| `HELIUS_PRICE_RPC_METHOD` | `getAssetBatch` | JSON-RPC method used when querying Helius prices |
+| `HELIUS_PRICE_RPC_URL` | `https://rpc.helius.xyz` | Helius RPC endpoint for token price lookups |
 | `HTTP_CONNECTOR_LIMIT` | `0` | Configures http connector limit |
 | `HTTP_CONNECTOR_LIMIT_PER_HOST` | `0` | Configures http connector limit per host |
 | `JITO_AUTH` | `` | Authentication token for Jito; fetched automatically on first run and stored in `.env`; override via environment variable or personal config |

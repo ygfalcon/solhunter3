@@ -11,7 +11,11 @@ from .async_utils import run_async
 
 logger = logging.getLogger(__name__)
 
-HELIUS_PRICE_URL = os.getenv("HELIUS_PRICE_URL", "https://api.helius.xyz/v0/price")
+HELIUS_PRICE_RPC_URL = os.getenv("HELIUS_PRICE_RPC_URL", "https://rpc.helius.xyz")
+HELIUS_PRICE_RPC_METHOD = os.getenv("HELIUS_PRICE_RPC_METHOD", "getAssetBatch")
+HELIUS_PRICE_REST_URL = os.getenv("HELIUS_PRICE_REST_URL") or os.getenv(
+    "HELIUS_PRICE_URL", ""
+)
 HELIUS_API_KEY = os.getenv(
     "HELIUS_API_KEY", "af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 )
@@ -53,7 +57,14 @@ def _extract_price(value: Any) -> float | None:
         except (TypeError, ValueError):
             return None
     if isinstance(value, dict):
-        for key in ("price", "value", "priceUsd", "usd", "price_usd"):
+        for key in (
+            "price",
+            "value",
+            "priceUsd",
+            "usd",
+            "price_usd",
+            "price_per_token",
+        ):
             price = value.get(key)
             if isinstance(price, (int, float)):
                 return float(price)
@@ -115,35 +126,97 @@ async def _request_json(
     return None
 
 
-async def _fetch_prices_helius(
-    session: aiohttp.ClientSession, token_list: Sequence[str]
+async def _fetch_prices_helius_rpc(
+    session: aiohttp.ClientSession,
+    tokens: Sequence[str],
 ) -> Dict[str, float]:
-    if not token_list:
+    url = HELIUS_PRICE_RPC_URL.strip()
+    if not url or not tokens:
         return {}
 
-    params: Dict[str, Any] = {"ids": ",".join(token_list)}
+    unique_tokens = list(dict.fromkeys(t for t in tokens if isinstance(t, str) and t))
+    if not unique_tokens:
+        return {}
+
+    query: Dict[str, Any] | None = None
+    if HELIUS_API_KEY:
+        query = {"api-key": HELIUS_API_KEY}
+
+    request_body = {
+        "jsonrpc": "2.0",
+        "id": "solhunter-prices",
+        "method": HELIUS_PRICE_RPC_METHOD,
+        "params": {"ids": unique_tokens},
+    }
+
+    payload = await _request_json(
+        session,
+        url,
+        "Helius (RPC)",
+        params=query,
+        json=request_body,
+        method="POST",
+    )
+
+    if not isinstance(payload, dict):
+        return {}
+
+    result = payload.get("result")
+    if not isinstance(result, list):
+        return {}
+
+    prices: Dict[str, float] = {}
+    for entry in result:
+        if not isinstance(entry, dict):
+            continue
+        mint = entry.get("id")
+        if not isinstance(mint, str):
+            continue
+        token_info = entry.get("token_info")
+        if isinstance(token_info, dict):
+            price = _extract_price(token_info.get("price_info"))
+            if price is None and "price_info" in entry:
+                price = _extract_price(entry.get("price_info"))
+            if price is None:
+                price = _extract_price(token_info)
+        else:
+            price = _extract_price(entry.get("price_info"))
+        if price is None:
+            price = _extract_price(entry)
+        if price is None:
+            continue
+        prices[mint] = price
+
+    return prices
+
+
+async def _fetch_prices_helius_rest(
+    session: aiohttp.ClientSession,
+    tokens: Sequence[str],
+) -> Dict[str, float]:
+    url = HELIUS_PRICE_REST_URL.strip()
+    if not url or not tokens:
+        return {}
+
+    params: Dict[str, Any] = {"ids": ",".join(tokens)}
     if HELIUS_API_KEY:
         params["api-key"] = HELIUS_API_KEY
 
     payload = await _request_json(
         session,
-        HELIUS_PRICE_URL,
+        url,
         "Helius (GET)",
         params=params,
     )
 
     if payload is None:
-        # Older configs (and our unit tests) expected a POST request with the
-        # mint list in the JSON body. Newer Helius deployments reject that flow
-        # with a 404, so fall back to the legacy POST behaviour if the GET
-        # failed in order to preserve backwards compatibility.
         logger.debug("Helius GET price endpoint failed; retrying POST fallback")
         payload = await _request_json(
             session,
-            HELIUS_PRICE_URL,
+            url,
             "Helius",
             params={"api-key": HELIUS_API_KEY} if HELIUS_API_KEY else None,
-            json={"ids": list(token_list)},
+            json={"ids": list(tokens)},
             method="POST",
         )
     if not isinstance(payload, dict):
@@ -153,14 +226,40 @@ async def _fetch_prices_helius(
 
     prices: Dict[str, float] = {}
     if isinstance(data, dict):
-        for token in token_list:
+        for token in tokens:
             entry = data.get(token)
             price = _extract_price(entry)
             if price is not None:
                 prices[token] = price
-                update_price_cache(token, price)
 
     return prices
+
+
+async def _fetch_prices_helius(
+    session: aiohttp.ClientSession, token_list: Sequence[str]
+) -> Dict[str, float]:
+    if not token_list:
+        return {}
+
+    rpc_prices = await _fetch_prices_helius_rpc(session, token_list)
+    prices = dict(rpc_prices)
+
+    missing = [token for token in token_list if token not in prices]
+    if missing and HELIUS_PRICE_REST_URL:
+        logger.debug(
+            "Helius RPC missing %d token(s); retrying REST fallback",
+            len(missing),
+        )
+        rest_prices = await _fetch_prices_helius_rest(session, missing)
+        if rest_prices:
+            prices.update(rest_prices)
+
+    for token in token_list:
+        price = prices.get(token)
+        if price is not None:
+            update_price_cache(token, price)
+
+    return {token: prices[token] for token in token_list if token in prices}
 
 
 async def _fetch_prices_birdeye(
