@@ -93,7 +93,7 @@ def start_depth_service(cfg: dict) -> subprocess.Popen | None:
     logging.debug("Launching depth_service with args: %s", " ".join(args))
     proc = subprocess.Popen(args)
 
-    timeout = float(os.getenv("DEPTH_START_TIMEOUT", "5") or 5)
+    timeout = float(os.getenv("DEPTH_START_TIMEOUT", "10") or 10)
 
     # Synchronous wait for unix socket so we don't nest event loops
     deadline = time.monotonic() + timeout
