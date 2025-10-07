@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+import time
 import types
 from dataclasses import dataclass
 
@@ -205,6 +206,73 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
         assert cached == pytest.approx(1.23)
 
     asyncio.run(_run())
+
+
+def test_discovery_uses_cached_tokens(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline._score_token",
+        lambda token, pf: float(len(token)),
+    )
+
+    pipeline = SwarmPipeline(_DummyAgentManager([]), Portfolio(path=None), dry_run=True)
+    pipeline.discovery_cache_limit = 8
+    pipeline.discovery_cache_ttl = 30.0
+    pipeline._discovery_cache_tokens = ["TokA", "TokB"]
+    pipeline._discovery_cache_scores = {"TokA": 4.0, "TokB": 3.0}
+    pipeline._discovery_cache_expiry = time.time() + 10.0
+
+    class _SentinelAgent:
+        def __init__(self) -> None:
+            self.called = False
+
+        async def discover_tokens(self, **kwargs):  # pragma: no cover - should not run
+            self.called = True
+            return ["TokC"]
+
+    sentinel = _SentinelAgent()
+    pipeline._discovery_agent = sentinel
+
+    stage = asyncio.run(pipeline._run_discovery())
+
+    assert not sentinel.called
+    assert set(stage.tokens) >= {"TokA", "TokB"}
+    assert stage.fallback_used is False
+
+
+def test_discovery_refreshes_cache(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline._score_token",
+        lambda token, pf: 10.0 if token == "TokC" else 1.0,
+    )
+
+    pipeline = SwarmPipeline(_DummyAgentManager([]), Portfolio(path=None), dry_run=True)
+    pipeline.discovery_cache_limit = 6
+    pipeline.discovery_cache_ttl = 20.0
+    pipeline._discovery_cache_tokens = ["TokA"]
+    pipeline._discovery_cache_scores = {"TokA": 1.0}
+    pipeline._discovery_cache_expiry = time.time() - 5.0
+
+    call_counter = {"count": 0}
+
+    class _StubAgent:
+        async def discover_tokens(self, **kwargs):
+            call_counter["count"] += 1
+            return ["TokC", "TokB"]
+
+    pipeline._discovery_agent = _StubAgent()
+
+    stage = asyncio.run(pipeline._run_discovery())
+
+    assert call_counter["count"] == 1
+    assert "TokC" in stage.tokens
+    assert pipeline._discovery_cache_tokens[0] == "TokC"
+    assert pipeline._discovery_cache_expiry > time.time()
 
 
 def test_execution_skips_missing_price(monkeypatch, caplog):

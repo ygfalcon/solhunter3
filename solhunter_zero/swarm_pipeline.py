@@ -689,6 +689,22 @@ class SwarmPipeline:
         self.no_action_ttl = self._get_float_env("NO_ACTION_CACHE_TTL", default=(10.0 if self.fast_mode else 0.0))
         if self.no_action_ttl:
             self._no_action_cache.ttl = float(self.no_action_ttl)
+        cache_ttl_default = 60.0 if self.fast_mode else 45.0
+        self.discovery_cache_ttl = self._get_float_env(
+            "SWARM_DISCOVERY_CACHE_TTL", default=cache_ttl_default
+        )
+        cache_limit_env = os.getenv("SWARM_DISCOVERY_CACHE_LIMIT")
+        try:
+            cache_limit = int(cache_limit_env) if cache_limit_env else 0
+        except Exception:
+            cache_limit = 0
+        if cache_limit <= 0:
+            cache_limit = max(self.chunk_size * 8, 96)
+        self.discovery_cache_limit = max(1, cache_limit)
+        self._discovery_cache_tokens: list[str] = []
+        self._discovery_cache_scores: dict[str, float] = {}
+        self._discovery_cache_expiry: float = 0.0
+        self._discovery_agent: DiscoveryAgent | None = None
         self.min_expected_roi = self._get_float_env("SWARM_MIN_EXPECTED_ROI", default=0.0)
         self.min_success_prob = self._get_float_env("SWARM_MIN_SUCCESS_PROB", default=0.0)
         self.min_score = self._get_float_env("SWARM_MIN_SCORE", default=0.0)
@@ -725,6 +741,68 @@ class SwarmPipeline:
         elapsed = time.perf_counter() - self._iteration_start
         remaining = self.time_budget - elapsed
         return remaining if remaining > 0 else 0.0
+
+    def _ensure_discovery_agent(self) -> DiscoveryAgent:
+        if self._discovery_agent is None:
+            self._discovery_agent = DiscoveryAgent()
+        return self._discovery_agent
+
+    def _update_discovery_cache(
+        self,
+        tokens: Iterable[str],
+        *,
+        scores: Optional[Dict[str, float]] = None,
+        ttl: Optional[float] = None,
+        refresh_ttl: bool = True,
+        now: Optional[float] = None,
+    ) -> None:
+        if self.discovery_cache_limit <= 0:
+            return
+
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for token in tokens:
+            if not isinstance(token, str):
+                continue
+            candidate = token.strip()
+            if not candidate or candidate in seen:
+                continue
+            ordered.append(candidate)
+            seen.add(candidate)
+
+        if not ordered:
+            return
+
+        for token in self._discovery_cache_tokens:
+            if token not in seen:
+                ordered.append(token)
+                seen.add(token)
+            if len(ordered) >= self.discovery_cache_limit:
+                break
+
+        if len(ordered) > self.discovery_cache_limit:
+            ordered = ordered[: self.discovery_cache_limit]
+
+        merged_scores = dict(self._discovery_cache_scores)
+        if scores:
+            for tok, value in scores.items():
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    merged_scores[tok] = float(value)
+
+        for tok in ordered:
+            if tok not in merged_scores:
+                merged_scores[tok] = _score_token(tok, self.portfolio)
+
+        self._discovery_cache_tokens = ordered
+        self._discovery_cache_scores = {tok: merged_scores[tok] for tok in ordered}
+
+        if refresh_ttl:
+            ttl_value = self.discovery_cache_ttl if ttl is None else float(ttl)
+            if ttl_value and ttl_value > 0:
+                ts = time.time() if now is None else float(now)
+                self._discovery_cache_expiry = ts + ttl_value
+            else:
+                self._discovery_cache_expiry = 0.0
 
     async def _ensure_action_price(self, action: SwarmAction) -> None:
         """Ensure ``action`` carries a positive price using the shared cache."""
@@ -899,18 +977,58 @@ class SwarmPipeline:
 
     async def _run_discovery(self) -> DiscoveryStage:
         stage = DiscoveryStage()
-        try:
-            disc = DiscoveryAgent()
-            tokens = await disc.discover_tokens(
-                offline=self.offline,
-                token_file=self.token_file,
-                method=self.discovery_method,
+        now = time.time()
+        cached_tokens = list(self._discovery_cache_tokens)
+        cache_hit = False
+        cache_refreshed = False
+
+        if (
+            self.discovery_cache_ttl > 0
+            and cached_tokens
+            and now < self._discovery_cache_expiry
+        ):
+            stage.discovered = list(cached_tokens)
+            cache_hit = True
+            publish(
+                "runtime.log",
+                RuntimeLog(
+                    stage="discovery",
+                    detail=f"cache-hit:{len(stage.discovered)}",
+                ),
             )
-            stage.discovered = list(tokens)
-        except Exception as exc:
-            publish("runtime.log", RuntimeLog(stage="discovery", detail=f"error:{exc}"))
-            log.exception("Discovery failed")
-            stage.discovered = []
+        else:
+            tokens: list[str] = []
+            try:
+                disc = self._ensure_discovery_agent()
+                tokens = await disc.discover_tokens(
+                    offline=self.offline,
+                    token_file=self.token_file,
+                    method=self.discovery_method,
+                )
+            except Exception as exc:
+                publish("runtime.log", RuntimeLog(stage="discovery", detail=f"error:{exc}"))
+                log.exception("Discovery failed")
+                tokens = []
+
+            if tokens:
+                stage.discovered = list(tokens)
+                self._update_discovery_cache(tokens, refresh_ttl=True, now=now)
+                cache_refreshed = True
+                cached_tokens = list(self._discovery_cache_tokens)
+            elif cached_tokens:
+                stage.discovered = list(cached_tokens)
+            else:
+                stage.discovered = []
+
+        if not stage.discovered and hasattr(self.state, "last_tokens"):
+            try:
+                last_tokens = list(getattr(self.state, "last_tokens", []) or [])
+            except Exception:
+                last_tokens = []
+            if last_tokens:
+                stage.discovered = [
+                    str(tok) for tok in last_tokens if isinstance(tok, str) and tok
+                ]
 
         if not stage.discovered:
             stage.tokens = [
@@ -923,6 +1041,20 @@ class SwarmPipeline:
             publish("runtime.log", RuntimeLog(stage="discovery", detail="fallback"))
         else:
             stage.tokens = list(stage.discovered)
+
+        if cached_tokens and stage.tokens:
+            for tok in cached_tokens:
+                if tok not in stage.tokens:
+                    stage.tokens.append(tok)
+                    if 0 < self.discovery_cache_limit <= len(stage.tokens):
+                        break
+
+        if getattr(self.portfolio, "balances", None):
+            for tok in getattr(self.portfolio, "balances").keys():
+                if tok not in stage.tokens:
+                    stage.tokens.append(tok)
+                    if 0 < self.discovery_cache_limit <= len(stage.tokens):
+                        break
 
         limit = max(self.chunk_size * 4, self.chunk_size)
         fast_limit = os.getenv("PIPELINE_TOKEN_LIMIT")
@@ -937,7 +1069,17 @@ class SwarmPipeline:
             limit = min(limit, default_cap)
         if self.time_budget:
             limit = min(limit, max(4, int(self.time_budget / 4)))
+        if self.discovery_cache_limit:
+            limit = min(limit, self.discovery_cache_limit)
         stage.limit = limit
+
+        deduped: list[str] = []
+        seen_tokens: set[str] = set()
+        for tok in stage.tokens:
+            if tok not in seen_tokens:
+                deduped.append(tok)
+                seen_tokens.add(tok)
+        stage.tokens = deduped
 
         scores = {mint: _score_token(mint, self.portfolio) for mint in stage.tokens}
         stage.scores = scores
@@ -946,6 +1088,16 @@ class SwarmPipeline:
         publish(
             "runtime.log",
             RuntimeLog(stage="pipeline", detail=f"queue:{len(stage.tokens)}/{len(scores)}"),
+        )
+        refresh_ttl = not cache_hit and not cache_refreshed
+        ttl_override = None
+        if refresh_ttl and not stage.discovered:
+            ttl_override = min(5.0, self.discovery_cache_ttl or 5.0)
+        self._update_discovery_cache(
+            stage.tokens,
+            scores=stage.scores,
+            refresh_ttl=refresh_ttl,
+            ttl=ttl_override,
         )
         if hasattr(self.state, "last_tokens"):
             try:
@@ -1191,6 +1343,11 @@ class SwarmPipeline:
             for act in actions:
                 order = act.to_order()
                 side = str(order.get("side") or "").strip().lower()
+                price_value_raw = order.get("price", 0.0)
+                try:
+                    price_value = float(price_value_raw)
+                except Exception:
+                    price_value = 0.0
                 balances = getattr(self.portfolio, "balances", {}) or {}
                 entry_price: float | None = None
                 if (
@@ -1255,11 +1412,6 @@ class SwarmPipeline:
                     order["risk"] = risk
                 else:
                     order.pop("risk", None)
-                price_value = order.get("price", 0.0)
-                try:
-                    price_value = float(price_value)
-                except Exception:
-                    price_value = 0.0
 
                 if price_value <= 0 or not math.isfinite(price_value):
                     if "missing_price" not in token_payload["errors"]:
