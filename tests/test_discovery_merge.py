@@ -24,8 +24,8 @@ async def fake_stream(*a, **k):
         yield item
 
 
-async def test_merge_sources(monkeypatch):
-    async def fake_trend():
+def test_merge_sources(monkeypatch):
+    async def fake_trend(limit=None):
         return ["a", "b"]
 
     async def fake_onchain(url, return_metrics=False):
@@ -57,7 +57,42 @@ async def test_merge_sources(monkeypatch):
         fake_metric_liq,
     )
 
-    result = asyncio.run(merge_sources("rpc"))
+    result = asyncio.run(merge_sources("rpc", ws_url="ws://rpc"))
     addresses = [e["address"] for e in result]
     assert addresses[0] == "a"
     assert set(addresses) == {"a", "b", "c", "d"}
+
+
+def test_merge_sources_retries_mempool(monkeypatch):
+    async def fake_trend(limit=None):
+        return []
+
+    async def fake_onchain(url, return_metrics=False):
+        return []
+
+    async def fake_stream(*_a, **_k):
+        yield {"address": "m", "volume": 1.0, "liquidity": 1.0}
+
+    attempts = {"n": 0}
+    real_wait_for = asyncio.wait_for
+
+    async def flaky_wait_for(awaitable, timeout):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise asyncio.TimeoutError
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.fetch_trending_tokens_async", fake_trend
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.scan_tokens_onchain", fake_onchain
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.stream_ranked_mempool_tokens_with_depth",
+        fake_stream,
+    )
+    monkeypatch.setattr(asyncio, "wait_for", flaky_wait_for)
+
+    result = asyncio.run(merge_sources("rpc", limit=1, ws_url="ws://rpc"))
+    assert [entry["address"] for entry in result] == ["m"]

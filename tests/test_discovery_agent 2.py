@@ -61,7 +61,7 @@ def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
 def test_discover_tokens_retries_on_empty_merge(monkeypatch, caplog):
     calls = []
 
-    async def fake_merge(url, mempool_threshold=0.0):
+    async def fake_merge(url, mempool_threshold=0.0, ws_url=None):
         calls.append(None)
         if len(calls) == 1:
             return []

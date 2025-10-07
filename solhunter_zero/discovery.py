@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_LIMIT = int(os.getenv("DISCOVERY_MAX_TOKENS", "50") or 50)
 _DEFAULT_MEMPOOL_THRESHOLD = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
 _MEMPOOL_TIMEOUT = float(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT", "2.5") or 2.5)
+_MEMPOOL_TIMEOUT_RETRIES = max(
+    1, int(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT_RETRIES", "3") or 3)
+)
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -55,6 +58,7 @@ async def _collect_mempool_candidates(
     *,
     limit: int,
     threshold: float,
+    ws_url: str | None = None,
 ) -> List[Dict[str, Any]]:
     """Collect a handful of ranked mempool events with depth information."""
 
@@ -63,16 +67,29 @@ async def _collect_mempool_candidates(
 
     results: List[Dict[str, Any]] = []
     gen = None
+    timeouts = 0
+    timeout = max(_MEMPOOL_TIMEOUT, 0.1)
+    target_url = ws_url or rpc_url
     try:
-        gen = stream_ranked_mempool_tokens_with_depth(rpc_url, threshold=threshold)
+        gen = stream_ranked_mempool_tokens_with_depth(target_url, threshold=threshold)
         while len(results) < limit:
             try:
-                item = await asyncio.wait_for(anext(gen), timeout=_MEMPOOL_TIMEOUT)
-            except (asyncio.TimeoutError, StopAsyncIteration):
+                item = await asyncio.wait_for(anext(gen), timeout=timeout)
+            except asyncio.TimeoutError:
+                timeouts += 1
+                if timeouts >= _MEMPOOL_TIMEOUT_RETRIES:
+                    logger.debug(
+                        "Mempool stream timed out after %d attempts", timeouts
+                    )
+                    break
+                continue
+            except StopAsyncIteration:
                 break
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("Mempool stream yielded error: %s", exc)
                 break
+            else:
+                timeouts = 0
             if not isinstance(item, dict):
                 continue
             address = item.get("address")
@@ -123,8 +140,14 @@ async def merge_sources(
     *,
     limit: int | None = None,
     mempool_threshold: float | None = None,
+    ws_url: str | None = None,
 ) -> List[Dict[str, Any]]:
-    """Merge BirdEye/Helius trending tokens with on-chain metrics and mempool data."""
+    """Merge BirdEye/Helius trending tokens with on-chain metrics and mempool data.
+
+    When ``ws_url`` is provided it will be used for websocket mempool discovery,
+    allowing callers to supply a pre-validated websocket endpoint separate from
+    the HTTP RPC URL.
+    """
 
     size = max(1, int(limit or _DEFAULT_LIMIT))
     threshold = (
@@ -138,7 +161,7 @@ async def merge_sources(
         scan_tokens_onchain(rpc_url, return_metrics=True)
     )
     mempool_candidates = await _collect_mempool_candidates(
-        rpc_url, limit=size, threshold=threshold
+        rpc_url, limit=size, threshold=threshold, ws_url=ws_url
     )
 
     trending_result, onchain_result = await asyncio.gather(

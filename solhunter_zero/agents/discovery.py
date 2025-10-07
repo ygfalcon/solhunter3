@@ -7,10 +7,15 @@ import os
 import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
+from .. import config
 from ..discovery import merge_sources
 from ..event_bus import publish
 from ..mempool_scanner import stream_ranked_mempool_tokens_with_depth
-from ..scanner_common import scan_tokens_from_file
+from ..scanner_common import (
+    DEFAULT_SOLANA_RPC,
+    DEFAULT_SOLANA_WS,
+    scan_tokens_from_file,
+)
 from ..scanner_onchain import scan_tokens_onchain
 from ..schemas import RuntimeLog
 from ..token_scanner import enrich_tokens_async, scan_tokens_async
@@ -65,10 +70,14 @@ class DiscoveryAgent:
     """Token discovery orchestrator supporting multiple discovery methods."""
 
     def __init__(self) -> None:
-        self.rpc_url = os.getenv(
-            "SOLANA_RPC_URL",
-            "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        )
+        rpc_env = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
+        os.environ.setdefault("SOLANA_RPC_URL", rpc_env)
+        self.rpc_url = rpc_env
+
+        ws_env = self._resolve_ws_url()
+        ws_resolved = self._as_websocket_url(ws_env) or DEFAULT_SOLANA_WS
+        os.environ.setdefault("SOLANA_WS_URL", ws_resolved)
+        self.ws_url = ws_resolved
         self.birdeye_api_key = os.getenv(
             "BIRDEYE_API_KEY",
             "b1e60d72780940d1bd929b9b2e9225e6",
@@ -99,9 +108,50 @@ class DiscoveryAgent:
     ) -> AsyncIterator[Dict[str, Any]]:
         """Expose the ranked mempool stream for tests and advanced callers."""
 
-        url = rpc_url or self.rpc_url
+        url = rpc_url or self.ws_url or self.rpc_url
+        url = self._as_websocket_url(url) or self.ws_url or self.rpc_url
         thresh = self.mempool_threshold if threshold is None else float(threshold)
         return stream_ranked_mempool_tokens_with_depth(url, threshold=thresh)
+
+    # ------------------------------------------------------------------
+    # Internal wiring helpers
+    # ------------------------------------------------------------------
+    def _resolve_ws_url(self) -> Optional[str]:
+        """Derive and cache a websocket RPC endpoint."""
+
+        ws_url: Optional[str]
+        try:
+            ws_url = config.get_solana_ws_url()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("get_solana_ws_url failed: %s", exc)
+            ws_url = None
+
+        ws_url = self._as_websocket_url(ws_url) or self._as_websocket_url(
+            os.getenv("SOLANA_WS_URL")
+        )
+
+        if not ws_url:
+            ws_url = self._as_websocket_url(self.rpc_url)
+
+        if ws_url:
+            os.environ.setdefault("SOLANA_WS_URL", ws_url)
+
+        return ws_url
+
+    @staticmethod
+    def _as_websocket_url(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        text = url.strip()
+        if not text:
+            return None
+        if text.startswith("wss://") or text.startswith("ws://"):
+            return text
+        if text.startswith("https://"):
+            return "wss://" + text[len("https://") :]
+        if text.startswith("http://"):
+            return "ws://" + text[len("http://") :]
+        return text
 
     # ------------------------------------------------------------------
     # Core discovery API
@@ -214,6 +264,7 @@ class DiscoveryAgent:
             results = await merge_sources(
                 self.rpc_url,
                 mempool_threshold=self.mempool_threshold,
+                ws_url=self.ws_url,
             )
             if isinstance(results, list) and len(results) > self.limit:
                 results = results[: self.limit]
