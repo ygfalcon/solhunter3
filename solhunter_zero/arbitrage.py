@@ -3,9 +3,16 @@
 Latency measurements now run concurrently using :func:`asyncio.gather`. With
 dynamic concurrency enabled this refreshes endpoint latency around 30-50% faster
 when multiple URLs are checked.
+
+The module historically doubled as both the low-level arbitrage helper library
+and the concrete :class:`~solhunter_zero.agents.arbitrage.ArbitrageAgent`
+implementation.  Some environments still resolve the agent class through this
+module, so we lazily re-export it via :func:`__getattr__` below to keep those
+imports working.
 """
 
 import asyncio
+import importlib
 import logging
 import os
 
@@ -112,6 +119,13 @@ DEPTH_SERVICE_SOCKET = os.getenv("DEPTH_SERVICE_SOCKET", "/tmp/depth_service.soc
 PriceFeed = Callable[[str], Awaitable[float]]
 
 
+def _load_arbitrage_agent():
+    """Return the :class:`ArbitrageAgent` without import-time recursion."""
+
+    module = importlib.import_module(".agents.arbitrage", __package__)
+    return getattr(module, "ArbitrageAgent")
+
+
 # Default API endpoints for direct price queries
 ORCA_API_URL = os.getenv("ORCA_API_URL", "https://api.orca.so")
 RAYDIUM_API_URL = os.getenv("RAYDIUM_API_URL", "https://api.raydium.io")
@@ -144,6 +158,16 @@ else:
         USE_FFI_ROUTE = _routeffi.is_routeffi_available()
     except Exception:
         USE_FFI_ROUTE = False
+
+
+def __getattr__(name: str):
+    if name == "ArbitrageAgent":  # pragma: no cover - import guard
+        return _load_arbitrage_agent()
+    raise AttributeError(name)
+
+
+def __dir__() -> List[str]:  # pragma: no cover - convenience for REPLs
+    return sorted({*globals(), "ArbitrageAgent"})
 
 
 def _parse_mapping_env(env: str) -> dict:
