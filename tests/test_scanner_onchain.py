@@ -96,6 +96,72 @@ def test_scan_tokens_onchain_retries(monkeypatch):
 
 
 
+def test_scan_tokens_onchain_helius_paginates(monkeypatch):
+    requests_made = []
+
+    class _Response:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return self._payload
+
+    class _Session:
+        def __init__(self):
+            self.calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, *, json, timeout):
+            requests_made.append({"url": url, "json": json, "timeout": timeout})
+            if self.calls == 0:
+                payload = {
+                    "result": {
+                        "accounts": [
+                            {
+                                "account": {
+                                    "data": {"parsed": {"info": {"mint": "Mint1"}}}
+                                }
+                            }
+                        ],
+                        "paginationKey": "next-page",
+                    }
+                }
+            else:
+                payload = {
+                    "result": {
+                        "accounts": [
+                            {
+                                "account": {
+                                    "data": {"parsed": {"info": {"mint": "Mint2"}}}
+                                }
+                            }
+                        ]
+                    }
+                }
+            self.calls += 1
+            return _Response(payload)
+
+    monkeypatch.setattr(scanner_onchain.requests, "Session", lambda: _Session())
+
+    tokens = scanner_onchain.scan_tokens_onchain_sync("https://rpc.helius.dev/?api-key=test")
+
+    assert tokens == ["Mint1", "Mint2"]
+    assert len(requests_made) == 2
+    first, second = requests_made
+    assert first["json"]["method"] == "getProgramAccountsV2"
+    assert first["json"]["params"][1]["limit"] == scanner_onchain._HELIUS_GPA_PAGE_LIMIT
+    assert "paginationKey" not in first["json"]["params"][1]
+    assert second["json"]["params"][1]["paginationKey"] == "next-page"
+
+
 def test_mempool_tx_rate(monkeypatch):
     class Client:
         def __init__(self, url):
