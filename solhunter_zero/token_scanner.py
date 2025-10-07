@@ -5,7 +5,8 @@ import copy
 import logging
 import os
 import time
-from typing import Any, Dict, Iterable, List, Sequence
+from collections import deque
+from typing import Any, Dict, Iterable, List, Sequence, Set
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
@@ -117,6 +118,20 @@ def _normalize_helius_item(raw: Dict[str, Any], *, rank: int) -> Dict[str, Any] 
     if not isinstance(raw, dict):
         return None
 
+    relevant_keys = {
+        "token",
+        "tokenInfo",
+        "tokenMetadata",
+        "metrics",
+        "market",
+        "mint",
+        "address",
+        "tokenAddress",
+        "mintAddress",
+    }
+    if not any(key in raw for key in relevant_keys):
+        return None
+
     address = None
     candidates: List[Any] = [raw]
     token_info = raw.get("token") or raw.get("tokenInfo") or raw.get("tokenMetadata")
@@ -126,9 +141,34 @@ def _normalize_helius_item(raw: Dict[str, Any], *, rank: int) -> Dict[str, Any] 
     if isinstance(market_info, dict):
         candidates.append(market_info)
 
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
+    metrics = raw.get("metrics")
+    if isinstance(metrics, dict):
+        candidates.append(metrics)
+
+    def _iter_nested_dicts(*objects: Any) -> Iterable[Dict[str, Any]]:
+        queue: deque[Dict[str, Any]] = deque()
+        seen: Set[int] = set()
+        for obj in objects:
+            if isinstance(obj, dict):
+                queue.append(obj)
+        while queue:
+            current = queue.popleft()
+            ident = id(current)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            yield current
+            for value in current.values():
+                if isinstance(value, dict):
+                    queue.append(value)
+                elif isinstance(value, (list, tuple, set)):
+                    for item in value:
+                        if isinstance(item, dict):
+                            queue.append(item)
+
+    nested_candidates = list(_iter_nested_dicts(*candidates)) or [raw]
+
+    for candidate in nested_candidates:
         for key in ("mint", "address", "token", "mintAddress", "tokenAddress"):
             val = candidate.get(key)
             if isinstance(val, str) and len(val) > 10:
@@ -145,9 +185,7 @@ def _normalize_helius_item(raw: Dict[str, Any], *, rank: int) -> Dict[str, Any] 
         "rank": rank,
     }
 
-    symbol_sources: Iterable[Dict[str, Any]] = [raw]
-    if isinstance(token_info, dict):
-        symbol_sources = list(symbol_sources) + [token_info]
+    symbol_sources = list(_iter_nested_dicts(raw, token_info, market_info))
     for source in symbol_sources:
         for key in ("symbol", "ticker"):
             val = source.get(key)
@@ -166,61 +204,106 @@ def _normalize_helius_item(raw: Dict[str, Any], *, rank: int) -> Dict[str, Any] 
     if name:
         entry.setdefault("name", name)
 
-    metrics = raw.get("metrics")
+    def _normalise_key(text: str) -> str:
+        return "".join(ch for ch in text.lower() if ch.isalnum())
+
+    def _search_metric(
+        obj: Any,
+        include: Sequence[str],
+        *,
+        avoid: Sequence[str] = (),
+        matched: bool = False,
+        visited: Set[int] | None = None,
+    ) -> float | None:
+        if obj is None:
+            return None
+        if visited is None:
+            visited = set()
+        if isinstance(obj, dict):
+            ident = id(obj)
+            if ident in visited:
+                return None
+            visited.add(ident)
+            for key, value in obj.items():
+                if not isinstance(key, str):
+                    continue
+                key_norm = _normalise_key(key)
+                if avoid and any(avoid_key in key_norm for avoid_key in avoid):
+                    continue
+                next_matched = matched or any(target in key_norm for target in include)
+                result = _search_metric(
+                    value,
+                    include,
+                    avoid=avoid,
+                    matched=next_matched,
+                    visited=visited,
+                )
+                if result is not None:
+                    return result
+            return None
+        if isinstance(obj, (list, tuple, set)):
+            ident = id(obj)
+            if ident in visited:
+                return None
+            visited.add(ident)
+            for item in obj:
+                result = _search_metric(
+                    item,
+                    include,
+                    avoid=avoid,
+                    matched=matched,
+                    visited=visited,
+                )
+                if result is not None:
+                    return result
+            return None
+        if matched:
+            return _coerce_float(obj)
+        return None
+
+    search_space: List[Dict[str, Any]] = []
     if isinstance(metrics, dict):
-        candidates.append(metrics)
+        search_space.append(metrics)
+    search_space.append(raw)
+    if isinstance(market_info, dict):
+        search_space.append(market_info)
+    if isinstance(token_info, dict):
+        search_space.append(token_info)
 
     float_fields = {
-        "score": ("score", "rankingScore", "momentumScore"),
-        "volume": (
-            "volume",
-            "volume24h",
-            "volume_24h",
-            "volumeUSD",
-            "volumeUsd",
-        ),
-        "market_cap": ("marketCap", "market_cap", "marketCapUsd", "marketCapUSD"),
+        "score": ("score", "rankingscore", "momentumscore"),
+        "volume": ("volume", "volume24h", "volumeusd", "usdvolume"),
+        "market_cap": ("marketcap", "marketcapusd", "usdmarketcap"),
         "price_change": (
-            "priceChange",
-            "priceChange24h",
-            "priceChange24hPercent",
+            "pricechange",
+            "pricechange24h",
+            "pricechange24hpercent",
             "change24h",
-            "priceChangePercent",
+            "changepercent",
         ),
     }
 
     for dest, keys in float_fields.items():
-        for key in keys:
-            for source in candidates:
-                if not isinstance(source, dict):
-                    continue
-                value = source.get(key)
-                number = _coerce_float(value)
-                if number is not None:
-                    entry[dest] = number
-                    break
-            if dest in entry:
+        number = None
+        for source in search_space:
+            number = _search_metric(source, keys)
+            if number is not None:
+                entry[dest] = number
                 break
 
     price = None
-    for source in candidates:
-        if not isinstance(source, dict):
-            continue
-        price = _coerce_float(source.get("price") or source.get("priceUsd") or source.get("price_usd"))
+    for source in search_space:
+        price = _search_metric(source, ("price", "priceusd", "usdprice", "lastprice", "currentprice"), avoid=("change", "percent", "delta"))
         if price is not None:
+            entry["price"] = price
             break
-    if price is not None:
-        entry["price"] = price
 
     liquidity = None
-    for source in candidates:
-        if not isinstance(source, dict):
-            continue
-        liquidity = _coerce_float(source.get("liquidity") or source.get("liquidityUsd"))
+    for source in search_space:
+        liquidity = _search_metric(source, ("liquidity", "liquidityusd", "usdliquidity", "totalliquidity"))
         if liquidity is not None:
+            entry["liquidity"] = liquidity
             break
-    if liquidity is not None:
-        entry["liquidity"] = liquidity
 
     entry["sources"] = ["helius"]
     entry["raw"] = raw
