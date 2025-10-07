@@ -5,10 +5,11 @@ from typing import Dict, List
 from pydantic import BaseModel, AnyUrl, ValidationError
 
 try:  # Pydantic v2
-    from pydantic import field_validator, model_validator  # type: ignore
+    from pydantic import field_validator, model_validator, ValidationInfo  # type: ignore
 except Exception:  # pragma: no cover - fallback for Pydantic v1
     from pydantic import validator as field_validator, root_validator
     model_validator = None  # type: ignore
+    ValidationInfo = None  # type: ignore
 
 
 class ConfigModel(BaseModel):
@@ -28,18 +29,21 @@ class ConfigModel(BaseModel):
             raise ValueError("agents must be a list of non-empty strings")
         return value
 
-    if model_validator is not None:  # Pydantic v2
+    if model_validator is not None and ValidationInfo is not None:  # Pydantic v2
 
-        @model_validator(mode="after")
-        def _weights_for_agents(cls, model: "ConfigModel") -> "ConfigModel":
-            agents = model.agents or []
-            weights = model.agent_weights or {}
-            missing = [a for a in agents if a not in weights]
+        @field_validator("agent_weights")
+        def _weights_for_agents(
+            cls, value: Dict[str, float], info: ValidationInfo
+        ) -> Dict[str, float]:
+            agents = []
+            if getattr(info, "data", None):
+                agents = list(info.data.get("agents") or [])
+            missing = [a for a in agents if a not in value]
             if missing:
                 raise ValueError(
                     f"missing weight for agent(s): {', '.join(missing)}"
                 )
-            return model
+            return value
 
     else:  # pragma: no cover - Pydantic v1
 
