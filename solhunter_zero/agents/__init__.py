@@ -12,6 +12,8 @@ shadowed ``solhunter_zero.agents.arbitrage`` (the agent implementation).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
+from types import ModuleType
 from typing import List, Dict, Any, Type
 import importlib
 import importlib.metadata
@@ -89,6 +91,111 @@ logger = logging.getLogger(__name__)
 
 BUILT_IN_AGENTS: Dict[str, Type[BaseAgent]] = {}
 
+_OPTIONAL_DEPENDENCIES = {
+    "sqlalchemy": (
+        "Memory-based agents require the optional SQLAlchemy dependency. "
+        "Install it to enable persistent trade logging."
+    ),
+}
+
+_AGENT_IMPORTS: Dict[str, tuple[str, str]] = {
+    "simulation": ("simulation", "SimulationAgent"),
+    "conviction": ("conviction", "ConvictionAgent"),
+    "arbitrage": ("arbitrage", "ArbitrageAgent"),
+    "exit": ("exit", "ExitAgent"),
+    "execution": ("execution", "ExecutionAgent"),
+    "memory": ("memory", "MemoryAgent"),
+    "discovery": ("discovery", "DiscoveryAgent"),
+    "reinforcement": ("reinforcement", "ReinforcementAgent"),
+    "portfolio": ("portfolio_agent", "PortfolioAgent"),
+    "portfolio_manager": ("portfolio_manager", "PortfolioManager"),
+    "portfolio_optimizer": ("portfolio_optimizer", "PortfolioOptimizer"),
+    "hedging": ("hedging_agent", "HedgingAgent"),
+    "crossdex_rebalancer": ("crossdex_rebalancer", "CrossDEXRebalancer"),
+    "crossdex_arbitrage": ("crossdex_arbitrage", "CrossDEXArbitrage"),
+    "dqn": ("dqn", "DQNAgent"),
+    "ppo": ("ppo_agent", "PPOAgent"),
+    "sac": ("sac_agent", "SACAgent"),
+    "opportunity_cost": ("opportunity_cost", "OpportunityCostAgent"),
+    "trend": ("trend", "TrendAgent"),
+    "smart_discovery": ("smart_discovery", "SmartDiscoveryAgent"),
+    "momentum": ("momentum", "MomentumAgent"),
+    "mempool_sniper": ("mempool_sniper", "MempoolSniperAgent"),
+    "mev_sandwich": ("mev_sandwich", "MEVSandwichAgent"),
+    "flashloan_sandwich": ("flashloan_sandwich", "FlashloanSandwichAgent"),
+    "meta_conviction": ("meta_conviction", "MetaConvictionAgent"),
+    "ramanujan": ("ramanujan_agent", "RamanujanAgent"),
+    "vanta": ("strange_attractor", "StrangeAttractorAgent"),
+    "inferna": ("fractal_agent", "FractalAgent"),
+    "alien_cipher": ("alien_cipher_agent", "AlienCipherAgent"),
+    "artifact_math": ("artifact_math_agent", "ArtifactMathAgent"),
+    "rl_weight": ("rl_weight_agent", "RLWeightAgent"),
+    "hierarchical_rl": ("hierarchical_rl_agent", "HierarchicalRLAgent"),
+    "llm_reasoner": ("llm_reasoner", "LLMReasoner"),
+    "emotion": ("emotion_agent", "EmotionAgent"),
+}
+
+
+def _import_agent_module(module_name: str) -> ModuleType:
+    """Import ``module_name`` while preferring implementations inside ``agents``.
+
+    The ``solhunter_zero.agents`` package extends ``__path__`` so that helper
+    modules placed alongside the package (for example
+    ``solhunter_zero/flash_loans.py``) can still be reached via the
+    ``solhunter_zero.agents`` namespace.  When importing the built-in agents we
+    prefer the concrete implementation that lives inside the package and fall
+    back to the extended search path when that module does not exist.  Some
+    agent registrations, especially third-party entry points, may already use a
+    fully-qualified module name (e.g. ``solhunter_zero.flash_loans``).  Those
+    should be respected verbatim rather than being rewritten beneath the agents
+    namespace.
+    """
+
+    if module_name.startswith(__name__ + ".") or module_name.startswith("solhunter_zero."):
+        return importlib.import_module(module_name)
+
+    try:
+        return importlib.import_module(f"{__name__}.{module_name}")
+    except ModuleNotFoundError as exc:
+        # ``exc.name`` may refer to the fully-qualified module we attempted to
+        # import.  Only fall back to the extended search path when that module
+        # itself is missing; otherwise propagate the error so optional
+        # dependency diagnostics remain intact.
+        missing = exc.name or ""
+        qualified = f"{__name__}.{module_name}"
+        if missing and missing not in {qualified, module_name} and not missing.startswith(qualified + "."):
+            raise
+        return importlib.import_module(f".{module_name}", __name__)
+
+
+def _load_agent_class(agent_name: str, module_name: str, class_name: str) -> Type[BaseAgent] | None:
+    try:
+        module = _import_agent_module(module_name)
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
+        missing_root = (exc.name or "").partition(".")[0]
+        if not missing_root:
+            text = str(exc)
+            if text.startswith("No module named"):
+                missing_root = text.split("'", 2)[1]
+        message = _OPTIONAL_DEPENDENCIES.get(missing_root)
+        if message is not None:
+            logger.warning(
+                "Skipping agent '%s' because optional dependency '%s' is not installed. %s",
+                agent_name,
+                missing_root,
+                message,
+            )
+            return None
+        raise
+    try:
+        return getattr(module, class_name)
+    except AttributeError as exc:  # pragma: no cover - exercised via tests
+        module_path = getattr(module, "__file__", None)
+        detail = f" from {module_path!s}" if module_path else ""
+        raise AttributeError(
+            f"Module '{module.__name__}' does not define '{class_name}'{detail}"
+        ) from exc
+
 
 _AGENT_SPECS = {
     "simulation": ("simulation", "SimulationAgent"),
@@ -153,11 +260,10 @@ def _load_agent(module_name: str, class_name: str):
 def _ensure_agents_loaded() -> None:
     if BUILT_IN_AGENTS:
         return
-    for name, (module_name, class_name) in _AGENT_SPECS.items():
-        agent_cls = _load_agent(module_name, class_name)
-        if agent_cls is None:
-            continue
-        BUILT_IN_AGENTS[name] = agent_cls
+    for agent_name, (module_name, class_name) in _AGENT_IMPORTS.items():
+        agent_cls = _load_agent_class(agent_name, module_name, class_name)
+        if agent_cls is not None:
+            BUILT_IN_AGENTS[agent_name] = agent_cls
 
     for ep in importlib.metadata.entry_points(group="solhunter_zero.agents"):
         try:

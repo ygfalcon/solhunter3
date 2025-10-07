@@ -17,7 +17,6 @@ LEGACY_HELPERS = [
     "token_scanner",
     "token_discovery",
     "onchain_metrics",
-    "flash_loans",
     "http",
     "dynamic_limit",
     "resource_monitor",
