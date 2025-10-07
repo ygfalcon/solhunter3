@@ -6,6 +6,8 @@ import logging
 import os
 from typing import List, Dict, Any, Iterable, Tuple
 
+import requests
+
 from solana.rpc.api import Client
 from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey
@@ -49,6 +51,11 @@ MEMPOOL_FEATURE_HISTORY: Dict[Tuple[str, str], list[list[float]]] = {}
 
 # Cap for safety when doing a raw program scan (can be heavy on public RPC)
 MAX_PROGRAM_SCAN_ACCOUNTS = int(os.getenv("MAX_PROGRAM_SCAN_ACCOUNTS", "2000") or 2000)
+
+# Helius-specific pagination settings. Requests default to 1k accounts per page which keeps
+# memory bounded while avoiding the "Too many accounts requested" RPC errors.
+_HELIUS_GPA_PAGE_LIMIT = int(os.getenv("HELIUS_GPA_PAGE_LIMIT", "1000") or 1000)
+_HELIUS_GPA_TIMEOUT = float(os.getenv("HELIUS_GPA_TIMEOUT", "20") or 20.0)
 
 
 # ---------------------------------------------------------------------------
@@ -146,18 +153,24 @@ async def scan_tokens_onchain(
     if _should_backoff_heavy_scan(rpc_url):
         return []
 
-    client = Client(rpc_url)
-
     # Fetch program accounts (capped)
     try:
-        resp = await asyncio.to_thread(
-            client.get_program_accounts,
-            TOKEN_PROGRAM_ID,
-            encoding="jsonParsed",
-            # depth limit is NOT available on older solana-py for GPA; we rely on MAX_PROGRAM_SCAN_ACCOUNTS cap below
-        )
         if _is_helius_url(rpc_url):
+            resp = await asyncio.to_thread(
+                _fetch_program_accounts_v2_helius,
+                rpc_url,
+                TOKEN_PROGRAM_ID,
+                MAX_PROGRAM_SCAN_ACCOUNTS,
+            )
             _HEAVY_SCAN_BACKOFF.pop(rpc_url, None)
+        else:
+            client = Client(rpc_url)
+            resp = await asyncio.to_thread(
+                client.get_program_accounts,
+                TOKEN_PROGRAM_ID,
+                encoding="jsonParsed",
+                # depth limit is NOT available on older solana-py for GPA; we rely on MAX_PROGRAM_SCAN_ACCOUNTS cap below
+            )
     except Exception as exc:
         if _is_helius_url(rpc_url) and _is_provider_plan_error(exc):
             _HEAVY_SCAN_BACKOFF.set(rpc_url, True)
@@ -217,6 +230,82 @@ async def scan_tokens_onchain(
             }
         )
     return results
+
+
+def _fetch_program_accounts_v2_helius(
+    rpc_url: str,
+    program_id: Pubkey,
+    max_accounts: int,
+    *,
+    encoding: str = "jsonParsed",
+) -> Dict[str, Any]:
+    """Fetch program accounts from Helius using getProgramAccountsV2 pagination."""
+
+    per_page = max(1, min(_HELIUS_GPA_PAGE_LIMIT, max_accounts))
+    aggregated: list[Dict[str, Any]] = []
+    pagination_key: str | None = None
+    previous_key: str | None = None
+
+    with requests.Session() as session:
+        while len(aggregated) < max_accounts:
+            remaining = max_accounts - len(aggregated)
+            limit = max(1, min(per_page, remaining))
+            config: Dict[str, Any] = {"encoding": encoding, "limit": limit}
+            if pagination_key:
+                config["paginationKey"] = pagination_key
+
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "solhunter-program-scan",
+                "method": "getProgramAccountsV2",
+                "params": [str(program_id), config],
+            }
+
+            try:
+                response = session.post(rpc_url, json=payload, timeout=_HELIUS_GPA_TIMEOUT)
+                response.raise_for_status()
+            except requests.RequestException as exc:  # pragma: no cover - network issues
+                raise RuntimeError(f"Helius getProgramAccountsV2 failed: {exc}") from exc
+
+            try:
+                data = response.json()
+            except ValueError as exc:  # pragma: no cover - unexpected provider payload
+                raise RuntimeError("Helius getProgramAccountsV2 returned non-JSON response") from exc
+
+            if not isinstance(data, dict):
+                raise RuntimeError("Helius getProgramAccountsV2 returned unexpected payload")
+
+            if "error" in data:
+                error = data["error"]
+                message = None
+                if isinstance(error, dict):
+                    message = error.get("message") or error.get("data")
+                raise RuntimeError(f"Helius getProgramAccountsV2 error: {message or error}")
+
+            result = data.get("result")
+            if not isinstance(result, dict):
+                break
+
+            accounts = result.get("accounts")
+            if not isinstance(accounts, list):
+                accounts = []
+
+            for entry in accounts:
+                if isinstance(entry, dict):
+                    aggregated.append(entry)
+                    if len(aggregated) >= max_accounts:
+                        break
+
+            next_key = result.get("paginationKey")
+            if not isinstance(next_key, str) or not accounts:
+                break
+
+            if next_key == previous_key:
+                break
+
+            previous_key = pagination_key = next_key
+
+    return {"result": {"value": aggregated}}
 
 
 def scan_tokens_onchain_sync(
