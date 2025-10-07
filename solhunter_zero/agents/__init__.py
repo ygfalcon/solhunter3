@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+from types import ModuleType
 from typing import List, Dict, Any, Type
 import importlib
 import importlib.metadata
@@ -139,9 +140,35 @@ _AGENT_IMPORTS: Dict[str, tuple[str, str]] = {
 }
 
 
+def _import_agent_module(module_name: str) -> ModuleType:
+    """Import ``module_name`` from the agents package.
+
+    ``solhunter_zero.agents`` extends ``__path__`` to include the parent
+    ``solhunter_zero`` package so helpers such as ``solhunter_zero.agents.config``
+    continue to work.  Unfortunately this also means a relative import like
+    ``importlib.import_module('.arbitrage', __name__)`` may resolve to the
+    top-level ``solhunter_zero.arbitrage`` module whenever duplicate module
+    names exist.  That module does not define the agent classes which leads to
+    confusing ``AttributeError`` exceptions during startup.
+
+    To avoid this ambiguity we explicitly import from the agents package first
+    and only fall back to the broader search path when that import truly does
+    not exist.  This guarantees that built-in agents always resolve to the
+    implementation in ``solhunter_zero/agents`` while preserving the original
+    convenience behaviour for helper modules.
+    """
+
+    try:
+        return importlib.import_module(f"{__name__}.{module_name}")
+    except ModuleNotFoundError:
+        # Module lives outside the agents directory; defer to the extended
+        # search path semantics to resolve it.
+        return importlib.import_module(f".{module_name}", __name__)
+
+
 def _load_agent_class(agent_name: str, module_name: str, class_name: str) -> Type[BaseAgent] | None:
     try:
-        module = importlib.import_module(f".{module_name}", __name__)
+        module = _import_agent_module(module_name)
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised via tests
         missing_root = (exc.name or "").partition(".")[0]
         if not missing_root:
@@ -158,7 +185,14 @@ def _load_agent_class(agent_name: str, module_name: str, class_name: str) -> Typ
             )
             return None
         raise
-    return getattr(module, class_name)
+    try:
+        return getattr(module, class_name)
+    except AttributeError as exc:  # pragma: no cover - exercised via tests
+        module_path = getattr(module, "__file__", None)
+        detail = f" from {module_path!s}" if module_path else ""
+        raise AttributeError(
+            f"Module '{module.__name__}' does not define '{class_name}'{detail}"
+        ) from exc
 
 
 def _ensure_agents_loaded() -> None:
