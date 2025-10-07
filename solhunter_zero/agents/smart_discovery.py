@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import List, Dict, Any, Iterable
 
 from sklearn.ensemble import GradientBoostingRegressor
@@ -36,6 +39,16 @@ class SmartDiscoveryAgent(BaseAgent):
         self.trade_volume_threshold = float(trade_volume_threshold)
         self.trade_liquidity_threshold = float(trade_liquidity_threshold)
         self.metrics: Dict[str, Dict[str, Any]] = {}
+        self._executor: ThreadPoolExecutor | None = None
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        if self._executor is None:
+            workers = min(4, max(2, (os.cpu_count() or 4)))
+            self._executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="smart-discovery",
+            )
+        return self._executor
 
     async def discover_tokens(self, rpc_url: str, limit: int = 10) -> List[str]:
         gen = stream_ranked_mempool_tokens(
@@ -52,15 +65,23 @@ class SmartDiscoveryAgent(BaseAgent):
             await gen.aclose()
 
         tokens = [e["address"] for e in events]
+        loop = asyncio.get_running_loop()
+        executor = self._get_executor()
         volumes = await asyncio.gather(
             *[
-                asyncio.to_thread(onchain_metrics.fetch_volume_onchain, t, rpc_url)
+                loop.run_in_executor(
+                    executor,
+                    partial(onchain_metrics.fetch_volume_onchain, t, rpc_url),
+                )
                 for t in tokens
             ]
         )
         liquidities = await asyncio.gather(
             *[
-                asyncio.to_thread(onchain_metrics.fetch_liquidity_onchain, t, rpc_url)
+                loop.run_in_executor(
+                    executor,
+                    partial(onchain_metrics.fetch_liquidity_onchain, t, rpc_url),
+                )
                 for t in tokens
             ]
         )
