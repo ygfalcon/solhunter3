@@ -31,7 +31,10 @@ from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
 
 
-DEVNET_RPC = os.getenv("SOLANA_TESTNET_RPC_URL", "https://api.devnet.solana.com")
+DEVNET_RPC = os.getenv(
+    "SOLANA_TESTNET_RPC_URL",
+    "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+)
 QUOTE_URL = os.getenv("DEX_TESTNET_URL", "https://quote-api.jup.ag") + "/v6/quote"
 SWAP_URL = os.getenv("DEX_TESTNET_URL", "https://quote-api.jup.ag") + "/v6/swap"
 

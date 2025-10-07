@@ -6,7 +6,7 @@
 #
 # Usage:
 #   KEYPAIR_PATH=keypairs/cli.json scripts/devnet_pool_swap.sh --mint <MINT> \
-#       [--rpc https://api.devnet.solana.com] [--sol 0.01] [--amount 100000]
+#       [--rpc https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d] [--sol 0.01] [--amount 100000]
 
 set -euo pipefail
 
@@ -17,7 +17,7 @@ SOL_RELEASE_BIN="$HOME/.local/share/solana/install/active_release/bin"
 LOCAL_BIN="$HOME/.local/bin"
 export PATH="$SOL_RELEASE_BIN:$LOCAL_BIN:$PATH"
 
-RPC_URL="https://api.devnet.solana.com"
+RPC_URL="https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 SOL_AMOUNT="0.01"
 TOKEN_AMOUNT="100000"
 MINT=""
