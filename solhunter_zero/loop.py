@@ -107,7 +107,10 @@ async def _init_rl_training(
     shutdown.
     """
     cfg = cfg or {}
-    enabled = bool(cfg.get("rl_auto_train", False))
+    auto_flag = cfg.get("rl_auto_train")
+    if auto_flag is None:
+        auto_flag = cfg.get("use_rl_weights")
+    enabled = bool(auto_flag)
     if rl_daemon is not None:
         enabled = enabled or bool(rl_daemon)
     enabled = enabled or parse_bool_env("RL_DAEMON", False)
