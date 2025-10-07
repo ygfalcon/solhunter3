@@ -69,7 +69,7 @@ class DiscoveryService:
         elif clones_override is not None:
             startup_clones = clones_override
         if startup_clones is None:
-            startup_clones = 3
+            startup_clones = 5
         self.startup_clones = max(1, int(startup_clones))
         self._agent = DiscoveryAgent()
         self._last_tokens: list[str] = []
