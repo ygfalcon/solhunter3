@@ -108,3 +108,48 @@ def test_helius_trending_parses_nested_payload() -> None:
     assert body["timeframe"] == "24h"
     assert body["limit"] == 3
     assert body.get("offset") == 0
+
+
+def test_helius_trending_parses_deeply_nested_metrics() -> None:
+    payload = {
+        "results": [
+            {
+                "tokenInfo": {
+                    "mintAddress": "Mint3333333333333333333333333333333333333",
+                    "details": {"symbol": "CCC"},
+                },
+                "market": {
+                    "metadata": {
+                        "tokenName": "Gamma",
+                    }
+                },
+                "metrics": {
+                    "priceInfo": {
+                        "currentPrice": {"usd": "2.5"},
+                        "priceChange": {"percent": "12.5"},
+                    },
+                    "volumeMetrics": [
+                        {"usdVolume24h": "321.0"},
+                    ],
+                    "liquidityMetrics": {
+                        "totalLiquidity": {"usd": "654.0"}
+                    },
+                    "scorecard": {"momentumScore": "0.88"},
+                },
+            }
+        ]
+    }
+
+    session = _DummySession(payload)
+    tokens = asyncio.run(token_scanner._helius_trending(session, limit=1))
+
+    assert tokens
+    item = tokens[0]
+    assert item["address"] == "Mint3333333333333333333333333333333333333"
+    assert item["symbol"] == "CCC"
+    assert item["name"] == "Gamma"
+    assert pytest.approx(item["price"]) == 2.5
+    assert pytest.approx(item["volume"]) == 321.0
+    assert pytest.approx(item["liquidity"]) == 654.0
+    assert pytest.approx(item["score"]) == 0.88
+    assert pytest.approx(item["price_change"]) == 12.5
