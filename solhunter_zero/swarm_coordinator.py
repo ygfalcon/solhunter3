@@ -220,22 +220,52 @@ class SwarmCoordinator:
             base.update(self.regime_weights[regime])
 
         async def _apply_learning(weights: Dict[str, float]) -> Dict[str, float]:
-            if rl_agent:
+            rl_weights: Dict[str, float] | None = None
+            hier_weights: Dict[str, float] | None = None
+
+            async def _run_rl() -> None:
+                nonlocal rl_weights
+                if not rl_agent:
+                    return
                 try:
                     rl_weights = await rl_agent.train(names)
-                    for n, w in rl_weights.items():
-                        if n in weights:
-                            weights[n] *= float(w)
                 except Exception as exc:
                     logger.debug("RLWeightAgent error: %s", exc)
-            if hier_agent:
+                    rl_weights = None
+
+            async def _run_hier() -> None:
+                nonlocal hier_weights
+                if not hier_agent:
+                    return
                 try:
-                    h_weights = hier_agent.train(names)
-                    for n, w in h_weights.items():
-                        if n in weights:
-                            weights[n] *= float(w)
+                    hier_weights = await asyncio.to_thread(hier_agent.train, names)
                 except Exception as exc:
                     logger.debug("HierarchicalRLAgent error: %s", exc)
+                    hier_weights = None
+
+            tasks: list[asyncio.Task[None]] = []
+            if rl_agent:
+                tasks.append(asyncio.create_task(_run_rl()))
+            if hier_agent:
+                tasks.append(asyncio.create_task(_run_hier()))
+
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            if rl_weights:
+                for n, w in rl_weights.items():
+                    if n in weights:
+                        try:
+                            weights[n] *= float(w)
+                        except Exception:
+                            continue
+            if hier_weights:
+                for n, w in hier_weights.items():
+                    if n in weights:
+                        try:
+                            weights[n] *= float(w)
+                        except Exception:
+                            continue
             return weights
 
         if not rois:

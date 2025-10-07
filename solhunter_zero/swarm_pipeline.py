@@ -1191,8 +1191,10 @@ class SwarmPipeline:
                         act = SwarmAction.from_raw(raw)
                         if act is not None:
                             actions.append(act)
-                    for act in actions:
-                        await self._ensure_action_price(act)
+                    if actions:
+                        await asyncio.gather(
+                            *(self._ensure_action_price(act) for act in actions)
+                        )
                     if not actions and self.no_action_ttl:
                         self._no_action_cache[token] = time.time() + self.no_action_ttl
                 except asyncio.TimeoutError:
@@ -1345,6 +1347,19 @@ class SwarmPipeline:
         futures: List[asyncio.Future] = []
         raw_results_by_token: Dict[str, List[Any]] = {}
 
+        if not self.dry_run:
+            unique_tokens = {
+                record.token
+                for record in simulation.records
+                if getattr(record, "token", None)
+            }
+            depth_tasks = [
+                _ensure_depth_executor(self.agent_manager, token)
+                for token in unique_tokens
+            ]
+            if depth_tasks:
+                await asyncio.gather(*depth_tasks)
+
         for record in simulation.records:
             actions = record.actions
             token_payload = {
@@ -1354,8 +1369,6 @@ class SwarmPipeline:
                 "score": record.score,
             }
             raw_results_by_token[record.token] = []
-            if not self.dry_run:
-                await _ensure_depth_executor(self.agent_manager, record.token)
             for act in actions:
                 order = act.to_order()
                 side = str(order.get("side") or "").strip().lower()
