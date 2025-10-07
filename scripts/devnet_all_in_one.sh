@@ -68,8 +68,8 @@ pick_rpc() {
   local candidates
   candidates=(
     "${DEVNET_RPC_URL:-}"
-    "https://api.devnet.solana.com"
-    "https://rpc.ankr.com/solana_devnet"
+    "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+    "https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
   )
   for url in "${candidates[@]}"; do
     [[ -z "$url" ]] && continue
@@ -77,7 +77,7 @@ pick_rpc() {
       echo "$url"; return 0
     fi
   done
-  echo "https://rpc.ankr.com/solana_devnet"
+  echo "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 }
 
 RPC_URL=$(pick_rpc)

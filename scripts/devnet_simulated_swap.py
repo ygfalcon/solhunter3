@@ -41,7 +41,10 @@ from solders.message import MessageV0
 from solana.rpc.api import Client
 
 
-DEVNET_RPC = os.getenv("SOLANA_TESTNET_RPC_URL", "https://api.devnet.solana.com")
+DEVNET_RPC = os.getenv(
+    "SOLANA_TESTNET_RPC_URL",
+    "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+)
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 
 

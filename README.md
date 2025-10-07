@@ -359,7 +359,7 @@ profit calculation so routes are ranked based on the borrowed size.
 10. **Priority RPC endpoints**
     Specify one or more RPC URLs used for high-priority submission:
     ```bash
-export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.ankr.com/solana
+export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
     ```
 11. **Priority fee multipliers**
     Configure compute unit price multipliers used when the mempool is busy:
@@ -537,7 +537,7 @@ endpoints using ``priority_rpc`` (or the ``PRIORITY_RPC`` environment
 variable):
 
 ```bash
-export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.ankr.com/solana
+export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
 ```
 ### Running in a Cluster
 
@@ -558,7 +558,7 @@ solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3f
 solana_keypair = "keypairs/node1.json"
 
 [[nodes]]
-solana_rpc_url = "https://rpc.ankr.com/solana"
+solana_rpc_url = "https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 solana_keypair = "keypairs/node2.json"
 ```
 

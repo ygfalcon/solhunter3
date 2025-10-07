@@ -18,7 +18,7 @@ export AUTO_SELECT_KEYPAIR=1
 
 # Make sure we’re clearly not using MEV bundles or mainnet-only settings
 export USE_MEV_BUNDLES=0
-export SOLANA_TESTNET_RPC_URL=${SOLANA_TESTNET_RPC_URL:-https://api.devnet.solana.com}
+export SOLANA_TESTNET_RPC_URL=${SOLANA_TESTNET_RPC_URL:-https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d}
 
 exec "$PY" -m solhunter_zero.main --auto --testnet --min-delay 10 --max-delay 120 "$@"
 

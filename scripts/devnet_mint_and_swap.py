@@ -34,7 +34,10 @@ from spl.token.instructions import (
 )
 
 
-DEVNET_RPC = os.getenv("SOLANA_TESTNET_RPC_URL", "https://api.devnet.solana.com")
+DEVNET_RPC = os.getenv(
+    "SOLANA_TESTNET_RPC_URL",
+    "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+)
 
 
 def load_or_create(path: str) -> Keypair:

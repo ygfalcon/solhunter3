@@ -19,7 +19,7 @@ DEFAULTS: dict[str, str] = {
 
     # Solana RPC endpoints
     "SOLANA_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-    "SOLANA_TESTNET_RPC_URL": "https://api.devnet.solana.com",
+    "SOLANA_TESTNET_RPC_URL": "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
     "DEX_BASE_URL": "https://swap.helius.dev",
     "AGENTS": "['sim']",
     "AGENT_WEIGHTS": "{'sim': 1.0}",

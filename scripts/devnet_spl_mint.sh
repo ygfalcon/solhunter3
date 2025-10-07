@@ -22,7 +22,7 @@ fi
 export SOLANA_KEYPAIR="$KEYPAIR_PATH"
 
 echo "==> Setting Solana cluster to devnet"
-solana config set --url https://api.devnet.solana.com >/dev/null
+solana config set --url https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d >/dev/null
 
 echo "==> Airdropping devnet SOL if needed"
 BAL=$(solana balance | awk '{print $1}' || echo 0)
