@@ -197,6 +197,66 @@ def _load_agent_class(agent_name: str, module_name: str, class_name: str) -> Typ
         ) from exc
 
 
+_AGENT_SPECS = {
+    "simulation": ("simulation", "SimulationAgent"),
+    "conviction": ("conviction", "ConvictionAgent"),
+    "arbitrage": ("arbitrage", "ArbitrageAgent"),
+    "exit": ("exit", "ExitAgent"),
+    "execution": ("execution", "ExecutionAgent"),
+    "memory": ("memory", "MemoryAgent"),
+    "discovery": ("discovery", "DiscoveryAgent"),
+    "reinforcement": ("reinforcement", "ReinforcementAgent"),
+    "portfolio": ("portfolio_agent", "PortfolioAgent"),
+    "portfolio_manager": ("portfolio_manager", "PortfolioManager"),
+    "portfolio_optimizer": ("portfolio_optimizer", "PortfolioOptimizer"),
+    "hedging": ("hedging_agent", "HedgingAgent"),
+    "crossdex_rebalancer": ("crossdex_rebalancer", "CrossDEXRebalancer"),
+    "crossdex_arbitrage": ("crossdex_arbitrage", "CrossDEXArbitrage"),
+    "dqn": ("dqn", "DQNAgent"),
+    "ppo": ("ppo_agent", "PPOAgent"),
+    "sac": ("sac_agent", "SACAgent"),
+    "opportunity_cost": ("opportunity_cost", "OpportunityCostAgent"),
+    "trend": ("trend", "TrendAgent"),
+    "smart_discovery": ("smart_discovery", "SmartDiscoveryAgent"),
+    "momentum": ("momentum", "MomentumAgent"),
+    "mempool_sniper": ("mempool_sniper", "MempoolSniperAgent"),
+    "mev_sandwich": ("mev_sandwich", "MEVSandwichAgent"),
+    "flashloan_sandwich": ("flashloan_sandwich", "FlashloanSandwichAgent"),
+    "meta_conviction": ("meta_conviction", "MetaConvictionAgent"),
+    "ramanujan": ("ramanujan_agent", "RamanujanAgent"),
+    "vanta": ("strange_attractor", "StrangeAttractorAgent"),
+    "inferna": ("fractal_agent", "FractalAgent"),
+    "alien_cipher": ("alien_cipher_agent", "AlienCipherAgent"),
+    "artifact_math": ("artifact_math_agent", "ArtifactMathAgent"),
+    "rl_weight": ("rl_weight_agent", "RLWeightAgent"),
+    "hierarchical_rl": ("hierarchical_rl_agent", "HierarchicalRLAgent"),
+    "llm_reasoner": ("llm_reasoner", "LLMReasoner"),
+    "emotion": ("emotion_agent", "EmotionAgent"),
+}
+
+
+def _load_agent(module_name: str, class_name: str):
+    try:
+        module = importlib.import_module(f".{module_name}", __name__)
+    except Exception as exc:  # pragma: no cover - logging only
+        logger.warning(
+            "Failed to import agent module %s: %s", module_name, exc, exc_info=True
+        )
+        return None
+
+    try:
+        return getattr(module, class_name)
+    except AttributeError as exc:  # pragma: no cover - logging only
+        logger.warning(
+            "Agent class %s missing from module %s: %s",
+            class_name,
+            module_name,
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
 def _ensure_agents_loaded() -> None:
     if BUILT_IN_AGENTS:
         return
