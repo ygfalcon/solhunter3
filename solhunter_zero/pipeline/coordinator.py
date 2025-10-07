@@ -27,7 +27,7 @@ class PipelineCoordinator:
         discovery_interval: float = 5.0,
         discovery_cache_ttl: float = 20.0,
         scoring_batch: Optional[int] = None,
-        evaluation_cache_ttl: float = 10.0,
+        evaluation_cache_ttl: Optional[float] = None,
         evaluation_workers: Optional[int] = None,
         execution_lanes: Optional[int] = None,
         on_evaluation = None,
@@ -35,10 +35,44 @@ class PipelineCoordinator:
     ) -> None:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
-        self.discovery_interval = discovery_interval
-        self.discovery_cache_ttl = discovery_cache_ttl
+
+        interval_override: Optional[float] = None
+        raw_interval = os.getenv("DISCOVERY_INTERVAL")
+        if raw_interval:
+            try:
+                interval_override = float(raw_interval)
+            except ValueError:
+                log.warning("Invalid DISCOVERY_INTERVAL=%r; ignoring", raw_interval)
+        base_interval = float(discovery_interval or 0.0)
+        if base_interval <= 0:
+            base_interval = 5.0
+        soft_floor = float(os.getenv("DISCOVERY_MIN_INTERVAL", "5") or 5.0)
+        if interval_override is not None:
+            base_interval = interval_override
+        self.discovery_interval = max(base_interval, soft_floor)
+
+        self.discovery_cache_ttl = max(
+            discovery_cache_ttl if discovery_cache_ttl and discovery_cache_ttl > 0 else self.discovery_interval,
+            self.discovery_interval,
+        )
         self.scoring_batch = scoring_batch
-        self.evaluation_cache_ttl = evaluation_cache_ttl
+
+        eval_override: Optional[float] = None
+        raw_eval_ttl = os.getenv("EVALUATION_CACHE_TTL")
+        if raw_eval_ttl:
+            try:
+                eval_override = float(raw_eval_ttl)
+            except ValueError:
+                log.warning("Invalid EVALUATION_CACHE_TTL=%r; ignoring", raw_eval_ttl)
+        base_eval_ttl: float
+        if eval_override is not None:
+            base_eval_ttl = eval_override
+        elif evaluation_cache_ttl is not None:
+            base_eval_ttl = float(evaluation_cache_ttl)
+        else:
+            base_eval_ttl = 30.0
+        eval_floor = float(os.getenv("EVALUATION_MIN_CACHE_TTL", "15") or 15.0)
+        self.evaluation_cache_ttl = max(base_eval_ttl, eval_floor, 0.0)
         self.evaluation_workers = evaluation_workers
         self.execution_lanes = execution_lanes
         self.on_evaluation = on_evaluation
@@ -93,6 +127,9 @@ class PipelineCoordinator:
         await self._evaluation_service.start()
         await self._execution_service.start()
         await self._feedback_service.start()
+        log.info(
+            "PipelineCoordinator: all services started (discovery→scoring→evaluation→execution)"
+        )
 
     async def stop(self) -> None:
         self._stopped.set()

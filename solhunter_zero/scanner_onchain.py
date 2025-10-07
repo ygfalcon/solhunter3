@@ -35,6 +35,15 @@ MEMPOOL_RATE_CACHE: TTLCache[Tuple[str, str], float] = TTLCache(maxsize=512, ttl
 WHALE_ACTIVITY_CACHE: TTLCache[Tuple[str, str], float] = TTLCache(maxsize=512, ttl=_METRIC_TTL)
 AVG_SWAP_SIZE_CACHE: TTLCache[Tuple[str, str], float] = TTLCache(maxsize=512, ttl=_METRIC_TTL)
 
+# Backoff window when a provider (currently Helius) rejects heavy GPA scans. Using a TTL cache
+# keeps the behaviour stateless between runs but prevents hammering the RPC on every discovery
+# cycle when we already know the request will be refused.
+_HEAVY_SCAN_BACKOFF_TTL = float(os.getenv("PROGRAM_SCAN_BACKOFF", "600") or 600.0)
+_HEAVY_SCAN_BACKOFF: TTLCache[str, bool] = TTLCache(
+    maxsize=16,
+    ttl=_HEAVY_SCAN_BACKOFF_TTL,
+)
+
 # History buffer used for optional forecasting in fetch_mempool_tx_rate
 MEMPOOL_FEATURE_HISTORY: Dict[Tuple[str, str], list[list[float]]] = {}
 
@@ -84,6 +93,37 @@ def _to_pubkey(token: str | Pubkey) -> Pubkey:
     return Pubkey.from_string(str(token))
 
 
+def _is_helius_url(rpc_url: str) -> bool:
+    return "helius" in (rpc_url or "").lower()
+
+
+def _should_backoff_heavy_scan(rpc_url: str) -> bool:
+    if not _is_helius_url(rpc_url):
+        return False
+    if _HEAVY_SCAN_BACKOFF.get(rpc_url):
+        logger.debug(
+            "Skipping getProgramAccounts on %s due to recent provider backoff", rpc_url
+        )
+        return True
+    return False
+
+
+def _is_provider_plan_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    plan_markers = (
+        "compute units usage limit exceeded",
+        "compute units limit exceeded",
+        "plan requires upgrade",
+        "access denied",
+        "forbidden",
+        "not permitted",
+        "429",
+        "too many requests",
+        "heavy request",
+    )
+    return any(marker in message for marker in plan_markers)
+
+
 # ---------------------------------------------------------------------------
 # Optional raw on-chain *discovery* (conservative, numeric-only, capped)
 # ---------------------------------------------------------------------------
@@ -103,9 +143,7 @@ async def scan_tokens_onchain(
     if not rpc_url:
         raise ValueError("rpc_url is required")
 
-    # Avoid scanning against Helius when policy/plan disallows heavy GPA
-    if "helius" in (rpc_url or "").lower():
-        logger.warning("Skipping getProgramAccounts scan on Helius; returning empty list.")
+    if _should_backoff_heavy_scan(rpc_url):
         return []
 
     client = Client(rpc_url)
@@ -118,7 +156,17 @@ async def scan_tokens_onchain(
             encoding="jsonParsed",
             # depth limit is NOT available on older solana-py for GPA; we rely on MAX_PROGRAM_SCAN_ACCOUNTS cap below
         )
+        if _is_helius_url(rpc_url):
+            _HEAVY_SCAN_BACKOFF.pop(rpc_url, None)
     except Exception as exc:
+        if _is_helius_url(rpc_url) and _is_provider_plan_error(exc):
+            _HEAVY_SCAN_BACKOFF.set(rpc_url, True)
+            logger.warning(
+                "Helius rejected getProgramAccounts (%s); backing off for %.0fs",
+                exc,
+                _HEAVY_SCAN_BACKOFF_TTL,
+            )
+            return []
         logger.warning("Program scan failed: %s", exc)
         return []
 
