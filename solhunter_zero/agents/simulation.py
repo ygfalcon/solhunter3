@@ -4,6 +4,27 @@ from typing import List, Dict, Any, Mapping
 import asyncio
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+
+
+_SIM_EXECUTOR: ThreadPoolExecutor | None = None
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    """Return a dedicated executor for blocking simulation workloads."""
+
+    global _SIM_EXECUTOR
+    if _SIM_EXECUTOR is None:
+        # Simulations are CPU heavy; keep a modest worker pool so other agents
+        # using the default loop executor (for example discovery) are not
+        # starved while simulations run.
+        workers = min(4, max(2, (os.cpu_count() or 4)))
+        _SIM_EXECUTOR = ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="simulation-agent",
+        )
+    return _SIM_EXECUTOR
 
 from . import BaseAgent
 from ..simulation import run_simulations
@@ -76,7 +97,11 @@ class SimulationAgent(BaseAgent):
             if cached and (time.time() - cached[0]) < ttl:
                 return list(cached[1])
 
-            sims = await asyncio.to_thread(run_simulations, token, self.count)
+            loop = asyncio.get_running_loop()
+            sims = await loop.run_in_executor(
+                _get_executor(),
+                partial(run_simulations, token, self.count),
+            )
             actions: List[Dict[str, Any]] = []
             if sims:
                 tokens = set(portfolio.balances.keys()) | {token}
