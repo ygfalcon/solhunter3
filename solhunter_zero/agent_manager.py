@@ -465,6 +465,9 @@ class AgentManager:
         self, token: str, portfolio
     ) -> EvaluationContext:
         agents = self._select_agents()
+        logger.info(
+            "AgentManager: evaluating %s agents for token %s", len(agents), token
+        )
         publish(
             "runtime.log",
             RuntimeLog(
@@ -475,6 +478,19 @@ class AgentManager:
         regime = detect_regime(portfolio.price_history.get(token, []))
         weights = await self.coordinator.compute_weights(agents, regime=regime)
         logger.info("AgentManager: weights computed for %s", token)
+        if weights:
+            sorted_weights = sorted(weights.items(), key=lambda item: item[1], reverse=True)
+            top_weights = ", ".join(
+                f"{name}={weight:.3f}" for name, weight in sorted_weights[:5]
+            )
+            logger.debug(
+                "AgentManager: top weights for %s -> %s%s",
+                token,
+                top_weights,
+                " ..." if len(sorted_weights) > 5 else "",
+            )
+        else:
+            logger.warning("AgentManager: no weights produced for %s", token)
         if self.selector:
             agents, weights = await self.selector.weight_agents(agents, weights)
             logger.info("AgentManager: selector adjusted weights for %s", token)
@@ -525,6 +541,9 @@ class AgentManager:
                 )
             except Exception:
                 rl_action = None
+            logger.debug(
+                "AgentManager: RL daemon action for %s -> %s", token, rl_action
+            )
         if self.use_attention_swarm and self.attention_swarm:
             rois, _ = await self.coordinator._roi_by_agent([a.name for a in agents])
             prices = portfolio.price_history.get(token, [])
@@ -576,6 +595,13 @@ class AgentManager:
         )
         ctx.metadata = {"latency": latency, "regime": regime}
         logger.info("AgentManager: swarm produced %s actions for %s", len(result), token)
+        if not result:
+            logger.warning(
+                "AgentManager: no actions produced for %s (regime=%s, latency=%.2fs)",
+                token,
+                regime,
+                latency,
+            )
         publish(
             "runtime.log",
             RuntimeLog(
@@ -685,6 +711,10 @@ class AgentManager:
     async def execute(self, token: str, portfolio) -> List[Any]:
         ctx = await self.evaluate_with_swarm(token, portfolio)
         actions = list(ctx.actions)
+        if not actions:
+            logger.warning(
+                "AgentManager: execute called for %s but no actions were produced", token
+            )
         results = []
         if self.depth_service and token not in self._event_executors:
             execer = EventExecutor(

@@ -158,7 +158,9 @@ class AgentSwarm:
                 logger.warning("Agent %s timed out for %s (%.2fs)", agent.name, token, self._agent_timeout)
                 return []
 
-        raw_results = await asyncio.gather(*(run(a) for a in self.agents), return_exceptions=True)
+        raw_results = await asyncio.gather(
+            *(run(a) for a in self.agents), return_exceptions=True
+        )
         results: List[List[Dict[str, Any]]] = []
         for agent, raw in zip(self.agents, raw_results):
             res: List[Dict[str, Any]]
@@ -255,4 +257,15 @@ class AgentSwarm:
                 final.append(entry)
 
         self._last_actions = list(final)
+        if not final:
+            breakdown = []
+            for agent, res in zip(self.agents, results):
+                weight = weights_map.get(agent.name, 1.0) if weights_map else 1.0
+                count = len(res) if isinstance(res, list) else 0
+                breakdown.append(f"{agent.name}(w={weight:.3f}, proposals={count})")
+            logger.warning(
+                "Swarm: no aggregated actions for %s; breakdown=%s",
+                token,
+                ", ".join(breakdown) if breakdown else "<no agents>",
+            )
         return final
