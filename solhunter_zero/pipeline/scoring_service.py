@@ -19,11 +19,12 @@ class ScoringService:
     def __init__(
         self,
         input_queue: "asyncio.Queue[list[TokenCandidate]]",
-        output_queue: "asyncio.Queue[list[ScoredToken]]",
+        output_queue: "asyncio.Queue[ScoredToken]",
         portfolio,
         *,
         max_batch: Optional[int] = None,
         cooldown: float = 2.0,
+        workers: Optional[int] = None,
     ) -> None:
         self.input_queue = input_queue
         self.output_queue = output_queue
@@ -33,6 +34,18 @@ class ScoringService:
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
         self._last_scores: dict[str, tuple[float, float]] = {}
+        env_workers: Optional[int] = None
+        raw_env = os.getenv("SCORING_WORKERS")
+        if raw_env:
+            try:
+                env_workers = int(raw_env)
+            except ValueError:
+                log.warning("Invalid SCORING_WORKERS=%r; ignoring", raw_env)
+        chosen = workers if workers is not None else env_workers
+        if chosen is None or chosen <= 0:
+            chosen = os.cpu_count() or 5
+        self._worker_limit = max(5, int(chosen))
+        self._worker_tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
         if self._task is None:
@@ -47,22 +60,51 @@ class ScoringService:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._worker_tasks:
+            for task in self._worker_tasks:
+                task.cancel()
+            await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+            self._worker_tasks.clear()
 
     async def _run(self) -> None:
         cooldown = max(self.cooldown, float(os.getenv("SCORING_COOLDOWN", "0.5") or 0.5))
+        workers = [
+            asyncio.create_task(self._worker_loop(idx, cooldown), name=f"scoring_worker:{idx}")
+            for idx in range(self._worker_limit)
+        ]
+        self._worker_tasks = workers
+        try:
+            await self._stopped.wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            self._worker_tasks.clear()
+
+    async def _worker_loop(self, idx: int, cooldown: float) -> None:
+        name = f"scoring-{idx}"
         while not self._stopped.is_set():
+            batch: list[TokenCandidate] | None = None
             try:
                 batch = await self.input_queue.get()
-                self.input_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            try:
                 scored = self._score_batch(batch)
                 if scored:
-                    await self.output_queue.put(scored)
+                    for scored_token in scored:
+                        await self.output_queue.put(scored_token)
                 if cooldown:
                     await asyncio.sleep(cooldown)
             except asyncio.CancelledError:
-                raise
+                break
             except Exception as exc:  # pragma: no cover - logging
-                log.exception("ScoringService failure: %s", exc)
+                log.exception("ScoringService %s failure: %s", name, exc)
+            finally:
+                if batch is not None:
+                    self.input_queue.task_done()
 
     def _score_batch(self, batch: Iterable[TokenCandidate]) -> list[ScoredToken]:
         heap: list[tuple[float, TokenCandidate]] = []

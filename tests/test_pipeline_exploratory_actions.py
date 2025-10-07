@@ -49,7 +49,7 @@ async def test_exploratory_action_generated_when_thresholds_met(monkeypatch):
         cache_ttl=0.0,
     )
 
-    result = await service._evaluate_token(scored, asyncio.Semaphore(1))
+    result = await service._evaluate_token(scored)
     assert len(result.actions) == 1
     action = result.actions[0]
     assert action["type"] == "exploratory"
@@ -82,5 +82,5 @@ async def test_exploratory_action_respects_volume_and_liquidity(monkeypatch):
         cache_ttl=0.0,
     )
 
-    result = await service._evaluate_token(scored, asyncio.Semaphore(1))
+    result = await service._evaluate_token(scored)
     assert result.actions == []
