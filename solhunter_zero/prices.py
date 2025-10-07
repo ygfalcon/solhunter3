@@ -75,13 +75,17 @@ async def _request_json(
     *,
     params: Dict[str, Any] | None = None,
     headers: Dict[str, str] | None = None,
+    json: Any | None = None,
+    method: str = "GET",
 ) -> Any:
     for attempt in range(PRICE_RETRY_ATTEMPTS):
         try:
-            async with session.get(
+            async with session.request(
+                method,
                 url,
                 params=params,
                 headers=headers,
+                json=json,
                 timeout=10,
             ) as resp:
                 resp.raise_for_status()
@@ -117,11 +121,18 @@ async def _fetch_prices_helius(
     if not token_list:
         return {}
 
-    params = {"ids": ",".join(token_list)}
+    params: Dict[str, Any] | None = None
     if HELIUS_API_KEY:
-        params["api-key"] = HELIUS_API_KEY
+        params = {"api-key": HELIUS_API_KEY}
 
-    payload = await _request_json(session, HELIUS_PRICE_URL, "Helius", params=params)
+    payload = await _request_json(
+        session,
+        HELIUS_PRICE_URL,
+        "Helius",
+        params=params,
+        json={"ids": list(token_list)},
+        method="POST",
+    )
     if not isinstance(payload, dict):
         return {}
 
