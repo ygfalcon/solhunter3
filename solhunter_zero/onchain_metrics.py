@@ -12,8 +12,11 @@ import copy
 import aiohttp
 
 from .scanner_onchain import (
+    fetch_average_swap_size as _scanner_fetch_average_swap_size,
+    fetch_mempool_tx_rate as _scanner_fetch_mempool_tx_rate,
     fetch_volume_onchain_async as _scanner_fetch_volume_async,
     fetch_volume_onchain as _scanner_fetch_volume,
+    fetch_whale_wallet_activity as _scanner_fetch_whale_wallet_activity,
 )
 from .http import get_session
 from .lru import TTLCache
@@ -37,6 +40,9 @@ TOP_VOLUME_TOKENS_CACHE: TTLCache = TTLCache(maxsize=64, ttl=TOP_VOLUME_TOKENS_C
 
 _BIRDEYE_MAX_CONCURRENCY = max(1, int(os.getenv("BIRDEYE_MAX_CONCURRENCY", "8") or 8))
 _BIRDEYE_SEMAPHORE: asyncio.Semaphore | None = None
+
+ORDER_BOOK_DEPTH_CACHE_TTL = float(os.getenv("ORDER_BOOK_DEPTH_CACHE_TTL", "30") or 30.0)
+ORDER_BOOK_DEPTH_CACHE: TTLCache = TTLCache(maxsize=1024, ttl=ORDER_BOOK_DEPTH_CACHE_TTL)
 
 DEXSCREENER_BASE = os.getenv(
     "DEXSCREENER_BASE", "https://api.dexscreener.com/latest/dex"
@@ -90,6 +96,12 @@ __all__ = [
     "fetch_dex_metrics",
     "fetch_slippage_onchain_async",
     "fetch_slippage_onchain",
+    "order_book_depth_change",
+    "collect_onchain_insights_async",
+    "collect_onchain_insights",
+    "fetch_mempool_tx_rate",
+    "fetch_whale_wallet_activity",
+    "fetch_average_swap_size",
     "fetch_liquidity_onchain_async",
     "fetch_liquidity_onchain",
     "fetch_volume_onchain_async",
@@ -625,6 +637,117 @@ def fetch_slippage_onchain(
             fetch_slippage_onchain_async(mint, rpc_url=rpc_url, in_amount_sol=in_amount_sol), loop
         ).result()
     return asyncio.run(fetch_slippage_onchain_async(mint, rpc_url=rpc_url, in_amount_sol=in_amount_sol))
+
+# -------------------- Order book / insight helpers --------------------
+
+async def _order_book_depth_change_async(
+    mint: str,
+    *,
+    rpc_url: Optional[str] = None,
+    base_url: str | None = None,
+) -> float:
+    rpc = rpc_url or SOLANA_RPC_URL
+    cache_key = (mint, rpc, base_url or "")
+    try:
+        metrics = await fetch_dex_metrics_async(mint, rpc_url=rpc, base_url=base_url)
+    except Exception:
+        metrics = {}
+    depth_val = 0.0
+    if isinstance(metrics, dict):
+        depth_val = _numeric(metrics.get("depth"), 0.0)
+    previous = ORDER_BOOK_DEPTH_CACHE.get(cache_key)
+    ORDER_BOOK_DEPTH_CACHE.set(cache_key, depth_val)
+    if previous is None:
+        return 0.0
+    prev_val = _numeric(previous, 0.0)
+    return _numeric(depth_val - prev_val, 0.0)
+
+
+def order_book_depth_change(
+    mint: str,
+    *,
+    base_url: str | None = None,
+    rpc_url: Optional[str] = None,
+) -> float:
+    """Return the change in reported order book depth since the previous call."""
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    coro = _order_book_depth_change_async(mint, rpc_url=rpc_url, base_url=base_url)
+    if loop and loop.is_running():
+        return asyncio.run_coroutine_threadsafe(coro, loop).result()
+    return asyncio.run(coro)
+
+
+def fetch_mempool_tx_rate(
+    token: str,
+    rpc_url: Optional[str] = None,
+    *,
+    limit: int = 20,
+) -> float:
+    rpc = rpc_url or SOLANA_RPC_URL
+    return _scanner_fetch_mempool_tx_rate(token, rpc, limit=limit)
+
+
+def fetch_whale_wallet_activity(
+    token: str,
+    rpc_url: Optional[str] = None,
+    *,
+    threshold: float = 1_000_000.0,
+) -> float:
+    rpc = rpc_url or SOLANA_RPC_URL
+    return _scanner_fetch_whale_wallet_activity(token, rpc, threshold=threshold)
+
+
+def fetch_average_swap_size(
+    token: str,
+    rpc_url: Optional[str] = None,
+    *,
+    limit: int = 20,
+) -> float:
+    rpc = rpc_url or SOLANA_RPC_URL
+    return _scanner_fetch_average_swap_size(token, rpc, limit=limit)
+
+
+async def collect_onchain_insights_async(
+    token: str,
+    rpc_url: Optional[str] = None,
+) -> Dict[str, float]:
+    rpc = rpc_url or SOLANA_RPC_URL
+    depth = await _order_book_depth_change_async(token, rpc_url=rpc)
+    tx_rate_task = asyncio.to_thread(fetch_mempool_tx_rate, token, rpc, limit=20)
+    whale_task = asyncio.to_thread(fetch_whale_wallet_activity, token, rpc)
+    swap_task = asyncio.to_thread(fetch_average_swap_size, token, rpc, limit=20)
+    tx_rate, whale_activity, avg_swap = await asyncio.gather(
+        tx_rate_task,
+        whale_task,
+        swap_task,
+    )
+    return {
+        "depth_change": _numeric(depth, 0.0),
+        "tx_rate": _numeric(tx_rate, 0.0),
+        "whale_activity": _numeric(whale_activity, 0.0),
+        "avg_swap_size": _numeric(avg_swap, 0.0),
+    }
+
+
+def collect_onchain_insights(
+    token: str,
+    rpc_url: Optional[str] = None,
+) -> Dict[str, float]:
+    rpc = rpc_url or SOLANA_RPC_URL
+    depth = order_book_depth_change(token)
+    tx_rate = fetch_mempool_tx_rate(token, rpc)
+    whale_activity = fetch_whale_wallet_activity(token, rpc)
+    avg_swap = fetch_average_swap_size(token, rpc)
+    return {
+        "depth_change": _numeric(depth, 0.0),
+        "tx_rate": _numeric(tx_rate, 0.0),
+        "whale_activity": _numeric(whale_activity, 0.0),
+        "avg_swap_size": _numeric(avg_swap, 0.0),
+    }
 
 # -------------------- DEX metrics (Birdeye + Helius) --------------------
 

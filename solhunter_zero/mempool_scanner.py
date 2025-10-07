@@ -122,6 +122,10 @@ async def stream_mempool_tokens(
             yield None
         return
 
+    ws_env = (os.getenv("SOLANA_WS_URL") or "").strip()
+    if ws_env:
+        rpc_url = ws_env
+
     rpc_url = _to_ws_url(rpc_url)
 
     async with connect(rpc_url) as ws:
