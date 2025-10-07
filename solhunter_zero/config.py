@@ -18,6 +18,9 @@ from .dex_config import DEXConfig
 from .paths import ROOT
 from .config_schema import ConfigModel
 
+DEFAULT_HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+DEFAULT_HELIUS_WS_URL = "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -202,7 +205,7 @@ def get_solana_ws_url() -> str | None:
     url = os.getenv("SOLANA_WS_URL")
 
     if not url:
-        rpc = os.getenv("SOLANA_RPC_URL")
+        rpc = os.getenv("SOLANA_RPC_URL") or DEFAULT_HELIUS_RPC_URL
         if rpc:
             # preserve host/path/query while flipping scheme
             parsed = urllib.parse.urlparse(rpc)
@@ -222,8 +225,13 @@ def get_solana_ws_url() -> str | None:
             logger.error(str(exc))
             return None
 
-    logger.error("SOLANA_WS_URL or SOLANA_RPC_URL must be set to a valid URL")
-    return None
+    try:
+        return _validate_and_store_url(
+            "SOLANA_WS_URL", DEFAULT_HELIUS_WS_URL, {"ws", "wss"}
+        )
+    except ValueError as exc:  # pragma: no cover - defaults are static
+        logger.error(str(exc))
+        return None
 
 
 # Commonly required environment variables

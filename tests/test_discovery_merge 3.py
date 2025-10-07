@@ -57,7 +57,7 @@ async def test_merge_sources(monkeypatch):
         fake_metric_liq,
     )
 
-    result = asyncio.run(merge_sources("rpc"))
+    result = asyncio.run(merge_sources("rpc", ws_url="ws://rpc"))
     addresses = [e["address"] for e in result]
     assert addresses[0] == "a"
     assert set(addresses) == {"a", "b", "c", "d"}
