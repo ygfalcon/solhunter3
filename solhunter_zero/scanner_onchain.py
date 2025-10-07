@@ -103,10 +103,16 @@ async def scan_tokens_onchain(
     if not rpc_url:
         raise ValueError("rpc_url is required")
 
-    # Avoid scanning against Helius when policy/plan disallows heavy GPA
+    # Avoid scanning against Helius when policy/plan disallows heavy GPA unless explicitly overridden.
     if "helius" in (rpc_url or "").lower():
-        logger.warning("Skipping getProgramAccounts scan on Helius; returning empty list.")
-        return []
+        allow_env = os.getenv("ALLOW_HELIUS_PROGRAM_SCAN", "")
+        if allow_env.lower() not in {"1", "true", "yes", "on"}:
+            logger.warning(
+                "Skipping getProgramAccounts scan on Helius; returning empty list. Set"
+                " ALLOW_HELIUS_PROGRAM_SCAN=1 to override."
+            )
+            return []
+        logger.info("Helius program scan override enabled via ALLOW_HELIUS_PROGRAM_SCAN.")
 
     client = Client(rpc_url)
 

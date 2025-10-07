@@ -93,6 +93,9 @@ class PipelineCoordinator:
         await self._evaluation_service.start()
         await self._execution_service.start()
         await self._feedback_service.start()
+        log.info(
+            "PipelineCoordinator: all services started (discovery→scoring→evaluation→execution)"
+        )
 
     async def stop(self) -> None:
         self._stopped.set()

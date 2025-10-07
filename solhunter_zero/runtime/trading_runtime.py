@@ -448,8 +448,11 @@ class TradingRuntime:
         self.agent_manager = manager
 
         fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
-        fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
         if self._use_new_pipeline:
+            log.info(
+                "TradingRuntime: initialising staged pipeline (fast_mode=%s)",
+                fast_mode,
+            )
             self.pipeline = PipelineCoordinator(
                 self.agent_manager,
                 self.portfolio,
@@ -461,6 +464,9 @@ class TradingRuntime:
                 execution_lanes=self._determine_execution_lanes(fast_mode),
                 on_evaluation=self._pipeline_on_evaluation,
                 on_execution=self._pipeline_on_execution,
+            )
+            log.info(
+                "TradingRuntime: pipeline created; evaluations will run through AgentManager swarm"
             )
 
         rl_enabled = bool(self.cfg.get("rl_auto_train", False)) or parse_bool_env(
