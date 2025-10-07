@@ -16,8 +16,12 @@ async def resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[s
     """Return the best available USD price for ``token`` and debug context.
 
     Agents frequently need to evaluate a position using the most recent price
-    available.  This helper consolidates the common fallbacks used across the
-    codebase:
+    available.  The live quote fetch can legitimately fail when upstream REST
+    or websocket providers are unreachable, credentials such as the Birdeye API
+    key are missing, or a token simply is not listed by any of the configured
+    feeds (Helius, Birdeye, Dexscreener).  This helper consolidates the common
+    fallbacks used across the codebase so agents can continue operating in
+    those scenarios:
 
     1.  The latest entry in the portfolio's recorded price history.
     2.  A cached quote from :mod:`solhunter_zero.prices`.
@@ -30,6 +34,7 @@ async def resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[s
 
     context: Dict[str, Any] = {}
     price = 0.0
+    source: str | None = None
 
     history = portfolio.price_history.get(token, [])
     if history:
@@ -41,6 +46,8 @@ async def resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[s
             context["history_price"] = hist_price
             if hist_price > 0:
                 price = hist_price
+                source = "history"
+                context["source"] = source
 
     if price <= 0:
         cached = get_cached_price(token)
@@ -53,6 +60,8 @@ async def resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[s
                 context["cached_price"] = cached_price
                 if cached_price > 0:
                     price = cached_price
+                    source = "cache"
+                    context["source"] = source
 
     if price <= 0:
         fetched_price = 0.0
@@ -66,6 +75,8 @@ async def resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[s
             context["fetched_price"] = fetched_price
         if fetched_price > 0:
             price = fetched_price
+            source = "fetch"
+            context["source"] = source
 
     return price, context
 

@@ -74,39 +74,52 @@ class AlienCipherAgent(BaseAgent):
 
         if x >= self.threshold:
             price, context = await resolve_price(token, portfolio)
+            metadata = {"price_context": context}
             if price <= 0:
-                logger.info(
-                    "%s agent skipping buy for %s due to missing price: %s",
-                    self.name,
-                    token,
-                    context,
-                )
-                return []
+                fallback = None
+                for key in ("history_price", "cached_price", "fetched_price"):
+                    value = context.get(key)
+                    if isinstance(value, (int, float)) and value > 0:
+                        fallback = float(value)
+                        metadata["price_fallback"] = key
+                        break
+                if fallback is not None:
+                    price = fallback
+                else:
+                    metadata["price_missing"] = True
+                    logger.info(
+                        "%s agent proceeding without live price for %s", self.name, token
+                    )
             return [
                 {
                     "token": token,
                     "side": "buy",
                     "amount": self.amount,
                     "price": price,
+                    "metadata": metadata,
                 }
             ]
         if x <= 1.0 - self.threshold and token in portfolio.balances:
             pos = portfolio.balances[token]
             price, context = await resolve_price(token, portfolio)
+            metadata = {"price_context": context}
             if price <= 0:
-                logger.info(
-                    "%s agent skipping sell for %s due to missing price: %s",
-                    self.name,
-                    token,
-                    context,
-                )
-                return []
+                entry = getattr(pos, "entry_price", 0.0)
+                if isinstance(entry, (int, float)) and entry > 0:
+                    price = float(entry)
+                    metadata["price_fallback"] = "entry_price"
+                else:
+                    metadata["price_missing"] = True
+                    logger.info(
+                        "%s agent proceeding without live price for %s", self.name, token
+                    )
             return [
                 {
                     "token": token,
                     "side": "sell",
                     "amount": pos.amount,
                     "price": price,
+                    "metadata": metadata,
                 }
             ]
         return []
