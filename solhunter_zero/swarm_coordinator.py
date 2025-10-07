@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable, Dict, Any, Tuple
 import inspect
 import asyncio
 import logging
+import math
 
 from .agents import BaseAgent
 from .agents.memory import MemoryAgent
@@ -15,6 +17,87 @@ except Exception:  # pragma: no cover - import guard
     HierarchicalRLAgent = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AgentPerformance:
+    """Aggregated realized performance metrics for a single agent."""
+
+    weighted_roi: float = 0.0
+    weighted_roi_squared: float = 0.0
+    notional: float = 0.0
+    wins: int = 0
+    losses: int = 0
+    fallback_buy: float = 0.0
+    fallback_sell: float = 0.0
+
+    def register_realized(self, roi: float, notional: float) -> None:
+        if notional <= 0:
+            return
+        self.weighted_roi += roi * notional
+        self.weighted_roi_squared += (roi * roi) * notional
+        self.notional += notional
+        if roi > 0:
+            self.wins += 1
+        elif roi < 0:
+            self.losses += 1
+
+    def register_directional(self, direction: str, subtotal: float) -> None:
+        if direction == "buy":
+            self.fallback_buy += max(subtotal, 0.0)
+        elif direction == "sell":
+            self.fallback_sell += max(subtotal, 0.0)
+
+    @property
+    def roi(self) -> float:
+        if self.notional > 0:
+            return self.weighted_roi / self.notional
+        if self.fallback_buy > 0:
+            return (self.fallback_sell - self.fallback_buy) / self.fallback_buy
+        return 0.0
+
+    @property
+    def exposure(self) -> float:
+        if self.notional > 0:
+            return self.notional
+        return self.fallback_buy
+
+    @property
+    def trade_count(self) -> int:
+        return self.wins + self.losses
+
+    def win_rate(self) -> float:
+        total = self.trade_count
+        if total <= 0:
+            return 0.5
+        return self.wins / total
+
+    def volatility(self) -> float:
+        if self.notional <= 0:
+            return 0.0
+        mean = self.weighted_roi / self.notional
+        mean_sq = self.weighted_roi_squared / self.notional
+        variance = max(0.0, mean_sq - mean * mean)
+        return math.sqrt(variance)
+
+    def tactical_factor(self) -> float:
+        """Return a multiplicative boost favouring consistent performers."""
+
+        win_component = 0.25 + 0.75 * self.win_rate()
+        consistency = 1.0 / (1.0 + self.volatility())
+        consistency_component = 0.25 + 0.75 * consistency
+        trade_count = self.trade_count
+        if trade_count <= 0:
+            trade_component = 0.5
+        else:
+            trade_component = 0.5 + 0.5 * min(
+                1.0, math.log1p(trade_count) / math.log(1.0 + 10.0)
+            )
+        score = win_component * consistency_component * trade_component
+        baseline = 0.625 * 1.0 * 0.5  # Neutral win-rate, perfect consistency, sparse data
+        if baseline <= 0:
+            return max(0.25, min(4.0, score))
+        return max(0.25, min(4.0, score / baseline))
 
 
 class SwarmCoordinator:
@@ -36,18 +119,17 @@ class SwarmCoordinator:
         self.base_weights = base_weights or {}
         self.regime_weights = regime_weights or {}
 
-    async def _roi_by_agent(
+    async def _agent_performance(
         self, agent_names: Iterable[str]
-    ) -> Tuple[Dict[str, float], Dict[str, float]]:
-        rois = {name: 0.0 for name in agent_names}
-        exposures = {name: 0.0 for name in agent_names}
+    ) -> Dict[str, AgentPerformance]:
+        profiles = {name: AgentPerformance() for name in agent_names}
         if not self.memory_agent or not getattr(self.memory_agent, "memory", None):
-            return rois, exposures
+            return profiles
 
         memory = self.memory_agent.memory
         loader = getattr(memory, "list_trades", None)
         if loader is None:
-            return rois, exposures
+            return profiles
 
         try:
             trades_obj = loader(limit=1000)
@@ -57,7 +139,7 @@ class SwarmCoordinator:
                 trades = trades_obj or []
         except Exception as exc:
             logger.debug("Trade history fetch failed: %s", exc)
-            return rois, exposures
+            return profiles
 
         def _lookup(obj: Any, key: str) -> Any:
             if isinstance(obj, dict):
@@ -104,13 +186,13 @@ class SwarmCoordinator:
                         return numeric
             return None
 
-        realized: Dict[str, Dict[str, float]] = {}
-        fallback: Dict[str, Dict[str, float]] = {}
-
         for trade in trades:
             reason = _lookup(trade, "reason")
-            if reason not in rois:
+            if reason not in profiles:
                 continue
+
+            key = str(reason)
+            stats = profiles[key]
 
             realized_roi = _extract_metric(
                 trade,
@@ -165,9 +247,7 @@ class SwarmCoordinator:
                     notional = amount * price
 
             if realized_roi is not None and notional:
-                stats = realized.setdefault(str(reason), {"weighted": 0.0, "notional": 0.0})
-                stats["weighted"] += realized_roi * notional
-                stats["notional"] += notional
+                stats.register_realized(float(realized_roi), float(notional))
                 continue
 
             direction = _lookup(trade, "direction")
@@ -180,23 +260,18 @@ class SwarmCoordinator:
             if amount is None or price is None:
                 continue
             subtotal = amount * price
-            info = fallback.setdefault(str(reason), {"buy": 0.0, "sell": 0.0})
-            info[direction_key] += subtotal
+            stats.register_directional(direction_key, subtotal)
 
-        for name in rois:
-            stats = realized.get(name)
-            if stats and stats["notional"] > 0:
-                exposures[name] = stats["notional"]
-                rois[name] = stats["weighted"] / stats["notional"]
-                continue
-            info = fallback.get(name)
-            if not info:
-                continue
-            spent = info.get("buy", 0.0)
-            revenue = info.get("sell", 0.0)
-            if spent > 0:
-                exposures[name] = spent
-                rois[name] = (revenue - spent) / spent
+        return profiles
+
+    async def _roi_by_agent(
+        self, agent_names: Iterable[str]
+    ) -> Tuple[Dict[str, float], Dict[str, float]]:
+        profiles = await self._agent_performance(agent_names)
+        rois = {name: profiles.get(name, AgentPerformance()).roi for name in agent_names}
+        exposures = {
+            name: profiles.get(name, AgentPerformance()).exposure for name in agent_names
+        }
         return rois, exposures
 
     async def compute_weights(
@@ -214,7 +289,9 @@ class SwarmCoordinator:
             hier_agent = None
             agents = [a for a in agents if not isinstance(a, RLWeightAgent)]
         names = [a.name for a in agents]
-        rois, exposures = await self._roi_by_agent(names)
+        profiles = await self._agent_performance(names)
+        rois = {name: profiles.get(name, AgentPerformance()).roi for name in names}
+        exposures = {name: profiles.get(name, AgentPerformance()).exposure for name in names}
         base = dict(self.base_weights)
         if regime and regime in self.regime_weights:
             base.update(self.regime_weights[regime])
@@ -268,30 +345,32 @@ class SwarmCoordinator:
                             continue
             return weights
 
-        if not rois:
-            weights = {name: base.get(name, 1.0) for name in names}
-            return await _apply_learning(weights)
-
-        min_roi = min(rois.values())
-        max_roi = max(rois.values())
-        if max_roi == min_roi:
-            weights = {name: base.get(name, 1.0) for name in names}
-            return await _apply_learning(weights)
+        min_roi = min(rois.values()) if rois else 0.0
+        max_roi = max(rois.values()) if rois else 0.0
 
         total_exposure = sum(value for value in exposures.values() if value > 0)
         if total_exposure <= 0:
             exposure_scale = {name: 1.0 for name in names}
         else:
             exposure_scale = {
-                name: (exposures.get(name, 0.0) / total_exposure) if exposures.get(name) else 0.0
+                name: (exposures.get(name, 0.0) / total_exposure)
+                if exposures.get(name)
+                else 0.1
                 for name in names
             }
 
         weights = {}
         for name in names:
             roi = rois.get(name, 0.0)
-            norm = (roi - min_roi) / (max_roi - min_roi)
+            roi_range = max_roi - min_roi
+            if roi_range <= 0:
+                norm = 1.0 if roi >= 0 else 0.0
+            else:
+                norm = (roi - min_roi) / roi_range
+            norm = max(0.0, min(1.0, norm))
             exposure_factor = exposure_scale.get(name, 1.0)
-            weights[name] = base.get(name, 1.0) * norm * exposure_factor
+            profile = profiles.get(name, AgentPerformance())
+            tactical = profile.tactical_factor()
+            weights[name] = base.get(name, 1.0) * norm * exposure_factor * tactical
 
         return await _apply_learning(weights)

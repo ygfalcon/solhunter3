@@ -141,6 +141,11 @@ class MyAgent(BaseAgent):
 - **Weight updates and ROI** — `SwarmCoordinator` computes ROI for each agent
   using the `MemoryAgent` logs and normalizes these values to produce
   per‑agent confidence scores supplied to `AgentSwarm` during evaluation.
+- **Tactical overlay** — the coordinator also builds a rolling performance
+  profile per agent that tracks win-rate, realized-notional dispersion and trade
+  depth.  These metrics produce a multiplicative "tactical" boost that rewards
+  consistent execution and penalises high-volatility or low‑sample strategies,
+  ensuring the hive mind leans into agents that deliver reliable alpha.
 - **Token discovery fallback** — the default `websocket` discovery mode uses
   BirdEye when `BIRDEYE_API_KEY` is set and automatically falls back to
   on-chain scanning if the key is missing.

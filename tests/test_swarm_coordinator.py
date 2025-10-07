@@ -101,3 +101,29 @@ def test_swarm_coordinator_scales_by_realized_notional():
         assert weights["a1"] < weights["a2"] * 0.1
 
     asyncio.run(_run())
+
+
+def test_swarm_coordinator_tactical_overlay_rewards_consistency():
+    trades = []
+    for roi in (0.1, 0.1, 0.1, 0.1):
+        trades.append(
+            types.SimpleNamespace(
+                reason="a1", realized_roi=roi, realized_notional=10.0
+            )
+        )
+    for roi in (0.3, -0.1, 0.3, -0.1):
+        trades.append(
+            types.SimpleNamespace(
+                reason="a2", realized_roi=roi, realized_notional=10.0
+            )
+        )
+
+    mem_agent = _StubMemoryAgent(trades)
+    coord = SwarmCoordinator(mem_agent, {"a1": 1.0, "a2": 1.0})
+    agents = [DummyAgent("a1"), DummyAgent("a2")]
+
+    async def _run() -> None:
+        weights = await coord.compute_weights(agents)
+        assert weights["a1"] > weights["a2"]
+
+    asyncio.run(_run())
