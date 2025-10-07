@@ -16,6 +16,10 @@ from typing import Sequence
 import cProfile
 
 from .util import install_uvloop, parse_bool_env
+from .agents.discovery import (
+    DEFAULT_DISCOVERY_METHOD,
+    resolve_discovery_method,
+)
 from .paths import ROOT
 from .config import (
     load_config,
@@ -299,10 +303,15 @@ def main(
     if risk_multiplier is not None:
         os.environ["RISK_MULTIPLIER"] = str(risk_multiplier)
 
-    if discovery_method is None:
-        discovery_method = cfg.get("discovery_method")
-    if discovery_method is None:
-        discovery_method = os.getenv("DISCOVERY_METHOD", "websocket")
+    if discovery_method is not None:
+        resolved_method = resolve_discovery_method(discovery_method)
+    else:
+        resolved_method = resolve_discovery_method(cfg.get("discovery_method"))
+        if resolved_method is None:
+            resolved_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+    if resolved_method is None:
+        resolved_method = DEFAULT_DISCOVERY_METHOD
+    discovery_method = resolved_method
 
     if stop_loss is None:
         stop_loss = cfg.get("stop_loss")

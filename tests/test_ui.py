@@ -542,7 +542,7 @@ def test_get_and_set_discovery_method(monkeypatch):
     client = ui.app.test_client()
 
     resp = client.get("/discovery")
-    assert resp.get_json()["method"] == "websocket"
+    assert resp.get_json()["method"] == "helius"
 
     resp = client.post("/discovery", json={"method": "mempool"})
     assert resp.get_json()["status"] == "ok"

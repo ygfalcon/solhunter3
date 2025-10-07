@@ -31,6 +31,7 @@ from ..event_bus import (
     stop_ws_server,
     verify_broker_connection,
 )
+from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
 from ..loop import FirstTradeTimeoutError, run_iteration, _init_rl_training
 from ..pipeline import PipelineCoordinator
 from ..main import perform_startup_async
@@ -642,9 +643,11 @@ class TradingRuntime:
                 min_delay = min(min_delay, 1.0)
             if self.explicit_max_delay is None and self.cfg.get("max_delay") is None:
                 max_delay = min(max_delay, 15.0)
-        discovery_method = self.cfg.get("discovery_method") or os.getenv(
-            "DISCOVERY_METHOD", "websocket"
-        )
+        discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
+        if discovery_method is None:
+            discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if discovery_method is None:
+            discovery_method = DEFAULT_DISCOVERY_METHOD
         stop_loss = _maybe_float(self.cfg.get("stop_loss"))
         take_profit = _maybe_float(self.cfg.get("take_profit"))
         trailing_stop = _maybe_float(self.cfg.get("trailing_stop"))
