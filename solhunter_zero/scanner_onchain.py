@@ -4,12 +4,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import List, Dict, Any, Iterable, Tuple
+from typing import List, Dict, Any, Iterable, Tuple, Sequence
 
 import requests
 
 from solana.rpc.api import Client
 from solana.rpc.async_api import AsyncClient
+from solana.rpc.core import RPCException
 from solders.pubkey import Pubkey
 
 # Backwards-compatibility alias for tests that patch ``PublicKey`` directly.
@@ -115,6 +116,153 @@ def _safe_int(x: Any, default: int = 0) -> int:
     return default
 
 
+def _parse_int_sequence(raw: str | None, default: Sequence[int]) -> tuple[int, ...]:
+    """Parse a comma-delimited list of ints from ``raw``.
+
+    Keeps ordering, ignores invalid/empty entries, and falls back to ``default``
+    when nothing valid is provided.
+    """
+
+    values: list[int] = []
+    for part in (raw or "").split(","):
+        chunk = part.strip()
+        if not chunk:
+            continue
+        try:
+            num = int(chunk)
+        except Exception:
+            continue
+        if num > 0 and num not in values:
+            values.append(num)
+    if values:
+        return tuple(values)
+    return tuple(default)
+
+
+_DEFAULT_SIGNATURE_LIMITS: tuple[int, ...] = (250, 120, 60, 30, 15, 8)
+_SIGNATURE_SCAN_LIMITS: tuple[int, ...] = _parse_int_sequence(
+    os.getenv("SIGNATURE_SCAN_LIMITS"), _DEFAULT_SIGNATURE_LIMITS
+)
+
+_RETRYABLE_SIGNATURE_ERROR_SNIPPETS: tuple[str, ...] = (
+    "429",
+    "rate limit",
+    "too many",
+    "too many requests",
+    "heavy",
+    "improve",
+    "still failing",
+    "timeout",
+    "timed out",
+    "deadline",
+    "gateway",
+    "overloaded",
+    "busy",
+    "temporarily unavailable",
+)
+
+
+def _signature_attempt_limits(initial: int | None = None) -> tuple[int, ...]:
+    """Return the list of limits to try when fetching signatures."""
+
+    limits = list(_SIGNATURE_SCAN_LIMITS)
+    if initial is not None:
+        try:
+            init = int(initial)
+        except Exception:
+            init = 0
+        if init > 0:
+            if init in limits:
+                limits.remove(init)
+            limits.insert(0, init)
+    return tuple(limits)
+
+
+def _extract_error_message(exc: Exception) -> str:
+    """Human-friendly error message from ``exc`` for logging/retry decisions."""
+
+    if isinstance(exc, RPCException):
+        payload = exc.args[0] if exc.args else None
+        if isinstance(payload, dict):
+            message = payload.get("message")
+            if not message:
+                data = payload.get("data")
+                if isinstance(data, dict):
+                    message = data.get("message") or data.get("error")
+            if message:
+                return str(message)
+        return str(exc)
+    return str(exc)
+
+
+def _is_retryable_signature_error(exc: Exception) -> bool:
+    if isinstance(exc, requests.RequestException):
+        return True
+    message = _extract_error_message(exc).lower()
+    return any(snippet in message for snippet in _RETRYABLE_SIGNATURE_ERROR_SNIPPETS)
+
+
+async def _get_signatures_for_address_async(
+    client: AsyncClient,
+    pubkey: Pubkey,
+    *,
+    limits: Sequence[int] | None = None,
+):
+    """Fetch signatures with graceful backoff on provider errors."""
+
+    attempt_limits = tuple(limits or _SIGNATURE_SCAN_LIMITS)
+    last_exc: Exception | None = None
+    for idx, limit in enumerate(attempt_limits):
+        try:
+            return await client.get_signatures_for_address(pubkey, limit=limit)
+        except Exception as exc:  # pragma: no cover - network variability
+            last_exc = exc
+            should_retry = _is_retryable_signature_error(exc)
+            if should_retry and idx < len(attempt_limits) - 1:
+                next_limit = attempt_limits[idx + 1]
+                logger.debug(
+                    "getSignaturesForAddress(%s) failed with limit=%s: %s; retrying with %s",
+                    pubkey,
+                    limit,
+                    _extract_error_message(exc),
+                    next_limit,
+                )
+                await asyncio.sleep(0)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+
+
+def _get_signatures_for_address(
+    client: Client,
+    pubkey: Pubkey,
+    *,
+    limits: Sequence[int] | None = None,
+):
+    """Sync variant of ``_get_signatures_for_address_async``."""
+
+    attempt_limits = tuple(limits or _SIGNATURE_SCAN_LIMITS)
+    last_exc: Exception | None = None
+    for idx, limit in enumerate(attempt_limits):
+        try:
+            return client.get_signatures_for_address(pubkey, limit=limit)
+        except Exception as exc:  # pragma: no cover - network variability
+            last_exc = exc
+            should_retry = _is_retryable_signature_error(exc)
+            if should_retry and idx < len(attempt_limits) - 1:
+                next_limit = attempt_limits[idx + 1]
+                logger.debug(
+                    "getSignaturesForAddress(%s) failed with limit=%s: %s; retrying with %s",
+                    pubkey,
+                    limit,
+                    _extract_error_message(exc),
+                    next_limit,
+                )
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
 def _to_pubkey(token: str | Pubkey) -> Pubkey:
     if isinstance(token, Pubkey):
         return token
@@ -464,7 +612,8 @@ async def fetch_volume_onchain_async(token: str, rpc_url: str) -> float:
 
     async with AsyncClient(rpc_url) as client:
         try:
-            resp = await client.get_signatures_for_address(_to_pubkey(token))
+            pubkey = _to_pubkey(token)
+            resp = await _get_signatures_for_address_async(client, pubkey)
             entries = extract_signature_entries(resp)
             return _tx_volume(entries)
         except Exception as exc:  # pragma: no cover
@@ -479,7 +628,8 @@ def fetch_volume_onchain(token: str, rpc_url: str) -> float:
 
     client = Client(rpc_url)
     try:
-        resp = client.get_signatures_for_address(_to_pubkey(token))
+        pubkey = _to_pubkey(token)
+        resp = _get_signatures_for_address(client, pubkey)
         entries = extract_signature_entries(resp)
         return _tx_volume(entries)
     except Exception as exc:  # pragma: no cover
@@ -514,7 +664,9 @@ def fetch_mempool_tx_rate(token: str, rpc_url: str, limit: int = 20) -> float:
 
     client = Client(rpc_url)
     try:
-        resp = client.get_signatures_for_address(_to_pubkey(token), limit=limit)
+        pubkey = _to_pubkey(token)
+        limits = _signature_attempt_limits(limit)
+        resp = _get_signatures_for_address(client, pubkey, limits=limits)
         entries = extract_signature_entries(resp)
         times = [_safe_int(e.get("blockTime")) for e in entries if e.get("blockTime") is not None]
         times = [t for t in times if t > 0]
@@ -627,7 +779,9 @@ def fetch_average_swap_size(token: str, rpc_url: str, limit: int = 20) -> float:
 
     client = Client(rpc_url)
     try:
-        resp = client.get_signatures_for_address(_to_pubkey(token), limit=limit)
+        pubkey = _to_pubkey(token)
+        limits = _signature_attempt_limits(limit)
+        resp = _get_signatures_for_address(client, pubkey, limits=limits)
         entries = extract_signature_entries(resp)
         total = 0.0
         count = 0
