@@ -12,6 +12,9 @@ from solana.rpc.api import Client
 from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey
 
+# Backwards-compatibility alias for tests that patch ``PublicKey`` directly.
+PublicKey = Pubkey
+
 from solhunter_zero.lru import TTLCache
 
 from .rpc_helpers import (
@@ -51,6 +54,24 @@ MEMPOOL_FEATURE_HISTORY: Dict[Tuple[str, str], list[list[float]]] = {}
 
 # Cap for safety when doing a raw program scan (can be heavy on public RPC)
 MAX_PROGRAM_SCAN_ACCOUNTS = int(os.getenv("MAX_PROGRAM_SCAN_ACCOUNTS", "2000") or 2000)
+
+# Token accounts (SPL Token program) are 165 bytes. We perform a secondary scan using this
+# size to retain the historical "token account" discovery path while still filtering the
+# dataset aggressively enough to keep the RPC payload bounded.
+TOKEN_ACCOUNT_DATA_SIZE = int(os.getenv("TOKEN_ACCOUNT_DATA_SIZE", "165") or 165)
+
+# Mint accounts in the SPL Token program have a fixed data size of 82 bytes. Fetching only
+# accounts of this size dramatically reduces the volume of data returned by
+# ``getProgramAccounts`` and makes the results relevant for discovery (previously the scan was
+# dominated by regular token accounts, most of which were long-lived and unrelated to recent
+# launches).
+MINT_ACCOUNT_DATA_SIZE = int(os.getenv("MINT_ACCOUNT_DATA_SIZE", "82") or 82)
+_MINT_ACCOUNT_FILTERS: list[dict[str, int]] = [
+    {"dataSize": MINT_ACCOUNT_DATA_SIZE},
+]
+_TOKEN_ACCOUNT_FILTERS: list[dict[str, int]] = [
+    {"dataSize": TOKEN_ACCOUNT_DATA_SIZE},
+]
 
 # Helius-specific pagination settings. Requests default to 1k accounts per page which keeps
 # memory bounded while avoiding the "Too many accounts requested" RPC errors.
@@ -131,6 +152,94 @@ def _is_provider_plan_error(exc: Exception) -> bool:
     return any(marker in message for marker in plan_markers)
 
 
+async def _perform_program_scan(
+    rpc_url: str,
+    *,
+    filters: Iterable[Dict[str, Any]] | None,
+    data_size: int | None,
+    limit: int,
+) -> tuple[Dict[str, Any] | None, bool]:
+    """Run a capped ``getProgramAccounts`` request with defensive error handling."""
+
+    delays = [0.0, 1.0, 2.0]
+    last_exc: Exception | None = None
+
+    for attempt in range(len(delays)):
+        try:
+            if _is_helius_url(rpc_url):
+                resp = await asyncio.to_thread(
+                    _fetch_program_accounts_v2_helius,
+                    rpc_url,
+                    TOKEN_PROGRAM_ID,
+                    limit,
+                    filters=filters,
+                )
+                _HEAVY_SCAN_BACKOFF.pop(rpc_url, None)
+            else:
+                client = Client(rpc_url)
+                kwargs: Dict[str, Any] = {"encoding": "jsonParsed"}
+                if data_size is not None:
+                    kwargs["data_size"] = data_size
+                if filters:
+                    kwargs["filters"] = list(filters)
+                resp = await asyncio.to_thread(
+                    client.get_program_accounts,
+                    TOKEN_PROGRAM_ID,
+                    **kwargs,
+                )
+            return resp, False
+        except Exception as exc:
+            if _is_helius_url(rpc_url) and _is_provider_plan_error(exc):
+                _HEAVY_SCAN_BACKOFF.set(rpc_url, True)
+                logger.warning(
+                    "Helius rejected getProgramAccounts (%s); backing off for %.0fs",
+                    exc,
+                    _HEAVY_SCAN_BACKOFF_TTL,
+                )
+                return None, True
+            last_exc = exc
+            if attempt < len(delays) - 1:
+                await asyncio.sleep(delays[attempt + 1])
+
+    if last_exc is not None:
+        logger.warning("Program scan failed: %s", last_exc)
+    return None, False
+
+
+def _collect_mint_candidates(resp: Dict[str, Any] | None, limit: int) -> list[str]:
+    if not resp or limit <= 0:
+        return []
+
+    mints: list[str] = []
+    for acc in extract_program_accounts(resp):
+        if len(mints) >= limit:
+            break
+        account = acc.get("account", {})
+        data = account.get("data", {}) if isinstance(account, dict) else {}
+        parsed = data.get("parsed", {}) if isinstance(data, dict) else {}
+        parsed_type = parsed.get("type") if isinstance(parsed, dict) else None
+        candidate: str | None = None
+
+        if (
+            isinstance(parsed_type, str)
+            and parsed_type.lower() == "mint"
+            and isinstance(acc.get("pubkey"), str)
+        ):
+            candidate = acc.get("pubkey")
+        else:
+            info = parsed.get("info", {}) if isinstance(parsed, dict) else {}
+            mint = info.get("mint") if isinstance(info, dict) else None
+            if isinstance(mint, str):
+                candidate = mint
+
+        if isinstance(candidate, str) and len(candidate) >= 32:
+            mints.append(candidate)
+            if len(mints) >= limit:
+                break
+
+    return mints
+
+
 # ---------------------------------------------------------------------------
 # Optional raw on-chain *discovery* (conservative, numeric-only, capped)
 # ---------------------------------------------------------------------------
@@ -153,55 +262,35 @@ async def scan_tokens_onchain(
     if _should_backoff_heavy_scan(rpc_url):
         return []
 
-    # Fetch program accounts (capped)
-    try:
-        if _is_helius_url(rpc_url):
-            resp = await asyncio.to_thread(
-                _fetch_program_accounts_v2_helius,
-                rpc_url,
-                TOKEN_PROGRAM_ID,
-                MAX_PROGRAM_SCAN_ACCOUNTS,
-            )
-            _HEAVY_SCAN_BACKOFF.pop(rpc_url, None)
-        else:
-            client = Client(rpc_url)
-            resp = await asyncio.to_thread(
-                client.get_program_accounts,
-                TOKEN_PROGRAM_ID,
-                encoding="jsonParsed",
-                # depth limit is NOT available on older solana-py for GPA; we rely on MAX_PROGRAM_SCAN_ACCOUNTS cap below
-            )
-    except Exception as exc:
-        if _is_helius_url(rpc_url) and _is_provider_plan_error(exc):
-            _HEAVY_SCAN_BACKOFF.set(rpc_url, True)
-            logger.warning(
-                "Helius rejected getProgramAccounts (%s); backing off for %.0fs",
-                exc,
-                _HEAVY_SCAN_BACKOFF_TTL,
-            )
-            return []
-        logger.warning("Program scan failed: %s", exc)
+    resp_mints, backoff = await _perform_program_scan(
+        rpc_url,
+        filters=_MINT_ACCOUNT_FILTERS,
+        data_size=MINT_ACCOUNT_DATA_SIZE,
+        limit=MAX_PROGRAM_SCAN_ACCOUNTS,
+    )
+    if backoff:
         return []
 
-    # Extract mints
-    mints: list[str] = []
-    for i, acc in enumerate(extract_program_accounts(resp)):
-        if i >= MAX_PROGRAM_SCAN_ACCOUNTS:
-            break
-        info = (
-            acc.get("account", {})
-            .get("data", {})
-            .get("parsed", {})
-            .get("info", {})
+    mint_candidates = _collect_mint_candidates(resp_mints, MAX_PROGRAM_SCAN_ACCOUNTS)
+
+    remaining = max(0, MAX_PROGRAM_SCAN_ACCOUNTS - len(mint_candidates))
+    combined_candidates = list(mint_candidates)
+
+    if remaining > 0:
+        resp_tokens, backoff_tokens = await _perform_program_scan(
+            rpc_url,
+            filters=_TOKEN_ACCOUNT_FILTERS,
+            data_size=TOKEN_ACCOUNT_DATA_SIZE,
+            limit=remaining,
         )
-        mint = info.get("mint")
-        if isinstance(mint, str) and len(mint) >= 32:
-            mints.append(mint)
+        if not backoff_tokens:
+            token_candidates = _collect_mint_candidates(resp_tokens, remaining)
+            combined_candidates.extend(token_candidates)
 
     # De-dup while preserving order
     seen = set()
     uniq_mints = []
-    for m in mints:
+    for m in combined_candidates:
         if m not in seen:
             uniq_mints.append(m)
             seen.add(m)
@@ -238,6 +327,7 @@ def _fetch_program_accounts_v2_helius(
     max_accounts: int,
     *,
     encoding: str = "jsonParsed",
+    filters: Iterable[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """Fetch program accounts from Helius using getProgramAccountsV2 pagination."""
 
@@ -251,6 +341,8 @@ def _fetch_program_accounts_v2_helius(
             remaining = max_accounts - len(aggregated)
             limit = max(1, min(per_page, remaining))
             config: Dict[str, Any] = {"encoding": encoding, "limit": limit}
+            if filters:
+                config["filters"] = list(filters)
             if pagination_key:
                 config["paginationKey"] = pagination_key
 
