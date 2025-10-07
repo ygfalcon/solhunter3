@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import pytest
 
 from solhunter_zero import prices
-from solhunter_zero.portfolio import Portfolio
+from solhunter_zero.portfolio import Portfolio, Position
 
 
 def _install_torch_stub(monkeypatch):
@@ -182,11 +182,12 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
 
     captured = {}
 
-    async def fake_fetch(tokens):
-        captured["tokens"] = list(tokens)
-        return {token: 1.23}
+    async def fake_resolve(tok, pf):
+        captured["token"] = tok
+        captured["portfolio"] = pf
+        return 1.23, {"history_price": 1.23, "source": "history"}
 
-    monkeypatch.setattr("solhunter_zero.swarm_pipeline.fetch_token_prices_async", fake_fetch)
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.resolve_price", fake_resolve)
     monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *args, **kwargs: None)
 
     async def _run() -> None:
@@ -196,14 +197,90 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
         discovery.scores = {token: 1.0}
 
         evaluation = await pipeline._run_evaluation(discovery)
-        assert captured["tokens"] == [token]
+        assert captured["token"] == token
+        assert captured["portfolio"] is portfolio
         assert evaluation.records
         record = evaluation.records[0]
         assert record.actions
         action = record.actions[0]
         assert action.price == pytest.approx(1.23)
+        assert action.metadata["price_context"]["source"] == "history"
+        assert action.metadata.get("price_fallback") == "history"
         cached = prices.get_cached_price(token)
         assert cached == pytest.approx(1.23)
+
+    asyncio.run(_run())
+
+
+def test_swarm_pipeline_marks_missing_price(monkeypatch):
+    from solhunter_zero.swarm_pipeline import DiscoveryStage, SwarmPipeline
+
+    token = "Tok"
+    raw_action = {
+        "token": token,
+        "side": "buy",
+        "amount": 1,
+        "price": 0,
+        "agent": "tester",
+    }
+
+    agent_manager = _DummyAgentManager([raw_action])
+    portfolio = Portfolio(path=None)
+
+    async def fake_resolve(tok, pf):
+        return 0.0, {"fetch_error": "boom"}
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.resolve_price", fake_resolve)
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *args, **kwargs: None)
+
+    async def _run() -> None:
+        pipeline = SwarmPipeline(agent_manager, portfolio, dry_run=True)
+        discovery = DiscoveryStage(tokens=[token], discovered=[token], limit=1)
+        discovery.scores = {token: 1.0}
+
+        evaluation = await pipeline._run_evaluation(discovery)
+        record = evaluation.records[0]
+        action = record.actions[0]
+        assert action.price == 0.0
+        assert action.metadata.get("price_missing") is True
+        assert action.metadata["price_context"]["fetch_error"] == "boom"
+
+    asyncio.run(_run())
+
+
+def test_swarm_pipeline_uses_entry_price_fallback(monkeypatch):
+    from solhunter_zero.swarm_pipeline import DiscoveryStage, SwarmPipeline
+
+    token = "Tok"
+    raw_action = {
+        "token": token,
+        "side": "sell",
+        "amount": 1,
+        "price": 0,
+        "agent": "tester",
+    }
+
+    agent_manager = _DummyAgentManager([raw_action])
+    portfolio = Portfolio(path=None)
+    portfolio.balances[token] = Position(token, 1.0, 2.5, 2.5)
+
+    async def fake_resolve(tok, pf):
+        return 0.0, {}
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.resolve_price", fake_resolve)
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *args, **kwargs: None)
+
+    async def _run() -> None:
+        pipeline = SwarmPipeline(agent_manager, portfolio, dry_run=True)
+        discovery = DiscoveryStage(tokens=[token], discovered=[token], limit=1)
+        discovery.scores = {token: 1.0}
+
+        evaluation = await pipeline._run_evaluation(discovery)
+        record = evaluation.records[0]
+        action = record.actions[0]
+        assert action.price == pytest.approx(2.5)
+        assert action.metadata.get("price_fallback") == "entry_price"
+        assert action.metadata["price_context"]["entry_price"] == pytest.approx(2.5)
 
     asyncio.run(_run())
 

@@ -24,7 +24,8 @@ from .simulation import SimulationResult, run_simulations_async
 from .portfolio import Portfolio
 from .lru import TTLCache
 from .execution import EventExecutor
-from .prices import fetch_token_prices_async, get_cached_price, update_price_cache
+from .agents.price_utils import resolve_price
+from .prices import update_price_cache
 
 log = logging.getLogger(__name__)
 
@@ -813,32 +814,47 @@ class SwarmPipeline:
         if not token:
             return
 
-        cached = get_cached_price(token)
-        if isinstance(cached, (int, float)):
-            cached_val = float(cached)
-            if cached_val > 0 and math.isfinite(cached_val):
-                action.price = cached_val
-                return
+        existing_context = (
+            action.metadata.get("price_context")
+            if isinstance(action.metadata.get("price_context"), dict)
+            else {}
+        )
 
         try:
-            prices = await fetch_token_prices_async([token])
-        except Exception as exc:  # pragma: no cover - network/IO failures
-            log.debug("price fetch failed for %s: %s", token, exc)
+            resolved_price, price_context = await resolve_price(token, self.portfolio)
+        except Exception as exc:  # pragma: no cover - unexpected resolve failures
+            log.debug("resolve_price failed for %s: %s", token, exc)
+            action.metadata.setdefault("price_missing", True)
             return
 
-        price = prices.get(token)
-        if not isinstance(price, (int, float)):
+        merged_context = {**existing_context, **price_context}
+        price_value = float(resolved_price)
+
+        if (price_value <= 0 or not math.isfinite(price_value)) and action.side == "sell":
+            position = self.portfolio.balances.get(token)
+            entry_price = getattr(position, "entry_price", 0.0) if position else 0.0
+            if isinstance(entry_price, (int, float)) and entry_price > 0:
+                price_value = float(entry_price)
+                merged_context.setdefault("entry_price", price_value)
+                merged_context.setdefault("source", "entry_price")
+                action.metadata.setdefault("price_fallback", "entry_price")
+
+        if merged_context:
+            action.metadata["price_context"] = merged_context
+
+        if price_value <= 0 or not math.isfinite(price_value):
+            action.metadata.setdefault("price_missing", True)
             return
 
-        value = float(price)
-        if value <= 0 or not math.isfinite(value):
-            return
+        source = merged_context.get("source")
+        if source in {"history", "cache"}:
+            action.metadata.setdefault("price_fallback", source)
 
-        action.price = value
+        action.price = price_value
         try:
-            update_price_cache(token, value)
+            update_price_cache(token, price_value)
         except Exception:  # pragma: no cover - cache errors shouldn't break pipeline
-            pass
+            log.debug("price cache update failed for %s", token, exc_info=True)
 
     async def run(self) -> Dict[str, Any]:
         start_ts = time.perf_counter()
