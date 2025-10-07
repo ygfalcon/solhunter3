@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
-from typing import List, Optional
+from typing import Awaitable, Callable, List, Optional
 
 from ..event_bus import publish
 from ..schemas import ActionExecuted
@@ -21,7 +22,7 @@ class ExecutionService:
         agent_manager,
         *,
         lane_workers: int = 2,
-        on_receipt = None,
+        on_receipt: Optional[Callable[[ExecutionReceipt], Awaitable[None] | None]] = None,
     ) -> None:
         self.input_queue = input_queue
         self.agent_manager = agent_manager
@@ -57,17 +58,23 @@ class ExecutionService:
                 for task in asyncio.as_completed(tasks):
                     try:
                         receipt = await task
-                        if self._on_receipt:
-                            try:
-                                await self._on_receipt(receipt)
-                            except Exception:  # pragma: no cover - defensive
-                                log.exception("Receipt callback failed")
+                        await self._notify_receipt(receipt)
                     except Exception as exc:
                         log.exception("Execution task failed: %s", exc)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.exception("ExecutionService failure: %s", exc)
+
+    async def _notify_receipt(self, receipt: ExecutionReceipt) -> None:
+        if not self._on_receipt:
+            return
+        try:
+            maybe = self._on_receipt(receipt)
+            if inspect.isawaitable(maybe):
+                await maybe  # pragma: no branch - cooperative with async callbacks
+        except Exception:  # pragma: no cover - defensive logging
+            log.exception("Receipt callback failed")
 
     async def _execute_bundle(self, bundle: ActionBundle) -> ExecutionReceipt:
         async with self._lane_semaphore:

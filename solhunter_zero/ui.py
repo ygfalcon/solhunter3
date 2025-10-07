@@ -140,8 +140,11 @@ class UIState:
             return []
 
 
-def create_app(state: UIState) -> Flask:
+def create_app(state: UIState | None = None) -> Flask:
     """Return a configured Flask application bound to *state*."""
+
+    if state is None:
+        state = UIState()
 
     app = Flask(__name__)  # type: ignore[arg-type]
 
