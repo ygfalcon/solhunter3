@@ -857,6 +857,69 @@ class TradingRuntime:
         with self._iteration_lock:
             return list(self._last_actions)
 
+    def _emit_action_decisions(self, actions: Iterable[Dict[str, Any]]) -> int:
+        count = 0
+        for action in actions:
+            payload = self._prepare_action_decision(action)
+            if not payload:
+                continue
+            try:
+                publish("action_decision", payload)
+            except Exception:  # pragma: no cover - defensive logging
+                log.exception("Failed to publish action_decision")
+                continue
+            count += 1
+        return count
+
+    def _prepare_action_decision(self, action: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(action, dict):
+            return None
+        token = action.get("token") or action.get("mint")
+        if not token:
+            return None
+        side = str(action.get("side", "")).lower()
+        if side not in {"buy", "sell"}:
+            return None
+        price = _maybe_float(action.get("price"))
+        if price is None or price <= 0:
+            price = _maybe_float(action.get("entry_price")) or _maybe_float(
+                action.get("target_price")
+            )
+        if price is None or price <= 0:
+            return None
+        amount = _maybe_float(action.get("amount"))
+        if amount is None or amount <= 0:
+            amount = _maybe_float(action.get("size"))
+        if amount is None or amount <= 0:
+            amount = _maybe_float(action.get("quantity"))
+        if (amount is None or amount <= 0) and price:
+            notional = _maybe_float(action.get("notional_usd"))
+            if notional is None or notional <= 0:
+                notional = _maybe_float(action.get("notional"))
+            if notional is not None and notional > 0:
+                amount = notional / price
+        if amount is None or amount <= 0:
+            return None
+        payload: Dict[str, Any] = {
+            "token": str(token),
+            "side": side,
+            "size": float(amount),
+            "price": float(price),
+        }
+        rationale: Dict[str, Any] = {}
+        agent = action.get("agent")
+        if agent:
+            rationale["agent"] = str(agent)
+        conv = _maybe_float(action.get("conviction_delta"))
+        if conv is not None:
+            rationale["conviction_delta"] = conv
+        metadata = action.get("metadata")
+        if isinstance(metadata, dict) and metadata:
+            rationale["metadata"] = metadata
+        if rationale:
+            payload["rationale"] = rationale
+        return payload
+
     def _determine_scoring_batch(self, fast_mode: bool) -> Optional[int]:
         raw = int(os.getenv("PIPELINE_TOKEN_LIMIT", "0") or 0)
         if raw > 0:
@@ -1016,6 +1079,9 @@ class TradingRuntime:
                 "errors": receipt.errors,
             }
         )
+        emitted = self._emit_action_decisions(actions)
+        if emitted:
+            updated["telemetry"]["execution"]["decisions_emitted"] = emitted
         updated["committed"] = receipt.success
         updated.setdefault("timestamp", timestamp)
         updated.setdefault("timestamp_epoch", time.time())
