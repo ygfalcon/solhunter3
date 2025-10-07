@@ -53,15 +53,42 @@ except Exception:  # pragma: no cover - torch not available
 
 
 from .agents.rl_weight_agent import RLWeightAgent
-from .agents.hierarchical_rl_agent import HierarchicalRLAgent
+
+try:  # Optional hierarchical RL agent (requires torch stack)
+    from .agents.hierarchical_rl_agent import HierarchicalRLAgent
+except Exception as _hierarchical_import_error:  # pragma: no cover - import guard
+    HierarchicalRLAgent = None  # type: ignore[assignment]
+else:  # pragma: no cover - executed in environments with deps
+    _hierarchical_import_error = None
+
 from .device import get_default_device
-from .hierarchical_rl import SupervisorAgent
+
+try:  # Optional RL supervisor (torch dependency)
+    from .hierarchical_rl import SupervisorAgent
+except Exception as _supervisor_import_error:  # pragma: no cover
+    SupervisorAgent = None  # type: ignore[assignment]
+else:  # pragma: no cover
+    _supervisor_import_error = None
+
 from .regime import detect_regime
 from . import mutation
 from .event_bus import publish, subscription
 from .schemas import ActionExecuted, WeightsUpdated, RuntimeLog
-from .multi_rl import PopulationRL
-from .rl_training import MultiAgentRL
+
+try:
+    from .multi_rl import PopulationRL
+except Exception as _population_rl_import_error:  # pragma: no cover
+    PopulationRL = None  # type: ignore[assignment]
+else:  # pragma: no cover
+    _population_rl_import_error = None
+
+try:
+    from .rl_training import MultiAgentRL
+except Exception as _multi_agent_rl_import_error:  # pragma: no cover
+    MultiAgentRL = None  # type: ignore[assignment]
+else:  # pragma: no cover
+    _multi_agent_rl_import_error = None
+
 from .datasets.sample_ticks import load_sample_ticks, DEFAULT_PATH as _TICKS_PATH
 from .config import load_config
 
@@ -275,11 +302,19 @@ class AgentManager:
         self.hierarchical_rl = cfg.hierarchical_rl
         self.hierarchical_agent: HierarchicalRLAgent | None = None
         if self.hierarchical_rl is not None:
+            if HierarchicalRLAgent is None:
+                raise ImportError(
+                    "HierarchicalRLAgent requires optional dependencies"
+                ) from _hierarchical_import_error
             self.hierarchical_agent = HierarchicalRLAgent(self.hierarchical_rl)
             self.agents.append(self.hierarchical_agent)
 
         self.supervisor: SupervisorAgent | None = None
         if cfg.use_supervisor:
+            if SupervisorAgent is None:
+                raise ImportError(
+                    "SupervisorAgent requires optional dependencies"
+                ) from _supervisor_import_error
             self.supervisor = SupervisorAgent(
                 checkpoint=cfg.supervisor_checkpoint or "supervisor.json",
             )

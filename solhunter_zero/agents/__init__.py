@@ -1,11 +1,12 @@
 """Utilities for working with the built-in trading agents.
 
-This package extends its module search path to include the parent
-``solhunter_zero`` directory. As a result, imports such as
-``solhunter_zero.agents.config`` transparently resolve to the module located at
-``solhunter_zero/config.py`` without requiring bespoke shims. New helper
-modules can therefore be dropped directly into ``solhunter_zero`` and remain
-accessible through the ``solhunter_zero.agents`` namespace.
+Legacy helper modules are re-exported via small compatibility shims that live
+alongside the concrete agent implementations. Keeping those shims in the
+package avoids modifying ``__path__`` at runtime which previously caused Python
+to resolve ``solhunter_zero.agents.<module>`` imports to similarly named
+modules in the parent package. That behaviour broke imports for agents such as
+``ArbitrageAgent`` because ``solhunter_zero.arbitrage`` (the helper module)
+shadowed ``solhunter_zero.agents.arbitrage`` (the agent implementation).
 """
 
 from __future__ import annotations
@@ -20,11 +21,6 @@ import logging
 
 from ..portfolio import Portfolio
 from typing import TYPE_CHECKING
-
-_agents_parent = Path(__file__).resolve().parent.parent
-_agents_parent_str = str(_agents_parent)
-if _agents_parent_str not in __path__:
-    __path__.append(_agents_parent_str)
 
 if TYPE_CHECKING:  # Imports for type checking only to avoid circular imports
     from .simulation import SimulationAgent
