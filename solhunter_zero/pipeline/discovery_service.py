@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Dict, Iterable, Optional
 
@@ -43,6 +44,7 @@ class DiscoveryService:
         limit: Optional[int] = None,
         offline: bool = False,
         token_file: Optional[str] = None,
+        startup_clones: Optional[int] = None,
     ) -> None:
         self.queue = queue
         self.interval = max(0.1, float(interval))
@@ -55,6 +57,20 @@ class DiscoveryService:
         self.limit = limit
         self.offline = offline
         self.token_file = token_file
+        clones_override: Optional[int] = None
+        raw_clones = os.getenv("DISCOVERY_STARTUP_CLONES")
+        if raw_clones:
+            try:
+                clones_override = int(raw_clones)
+            except ValueError:
+                log.warning("Invalid DISCOVERY_STARTUP_CLONES=%r; ignoring", raw_clones)
+        if startup_clones is None:
+            startup_clones = clones_override
+        elif clones_override is not None:
+            startup_clones = clones_override
+        if startup_clones is None:
+            startup_clones = 3
+        self.startup_clones = max(1, int(startup_clones))
         self._agent = DiscoveryAgent()
         self._last_tokens: list[str] = []
         self._last_fetch_ts: float = 0.0
@@ -65,9 +81,13 @@ class DiscoveryService:
         self._stopped = asyncio.Event()
         self._last_emitted: list[str] = []
         self._last_fetch_fresh: bool = True
+        self._primed = False
 
     async def start(self) -> None:
         if self._task is None:
+            if not self._primed:
+                await self._prime_startup_clones()
+                self._primed = True
             self._task = asyncio.create_task(self._run(), name="discovery_service")
 
     async def stop(self) -> None:
@@ -85,21 +105,14 @@ class DiscoveryService:
             try:
                 tokens = await self._fetch()
                 fresh = self._last_fetch_fresh
-                if tokens:
-                    if not fresh and tokens == self._last_emitted:
-                        log.debug("DiscoveryService skipping cached emission (%d tokens)", len(tokens))
-                        continue
-                    batch = self._build_candidates(tokens)
-                    await self.queue.put(batch)
-                    log.info("DiscoveryService queued %d tokens", len(batch))
-                    self._last_emitted = list(tokens)
+                await self._emit_tokens(tokens, fresh=fresh)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 log.exception("DiscoveryService failure: %s", exc)
             await asyncio.sleep(self.interval)
 
-    async def _fetch(self) -> list[str]:
+    async def _fetch(self, *, agent: DiscoveryAgent | None = None) -> list[str]:
         now = time.time()
         if now < self._cooldown_until:
             remaining = self._cooldown_until - now
@@ -110,53 +123,15 @@ class DiscoveryService:
             )
             self._last_fetch_fresh = False
             return list(self._last_tokens)
-        tokens = await self._agent.discover_tokens(
+        worker = agent or self._agent
+        tokens = await worker.discover_tokens(
             offline=self.offline,
             token_file=self.token_file,
         )
         if self.limit:
             tokens = tokens[: self.limit]
         fetch_ts = time.time()
-        self._last_fetch_ts = fetch_ts
-        self._last_tokens = list(tokens)
-
-        cooldown = 0.0
-        if tokens:
-            self._consecutive_empty = 0
-            self._current_backoff = 0.0
-            if self.cache_ttl:
-                cooldown = self.cache_ttl
-        else:
-            self._consecutive_empty += 1
-            base_ttl = self.empty_cache_ttl
-            if base_ttl:
-                if self.backoff_factor > 1.0:
-                    cooldown = base_ttl * (self.backoff_factor ** (self._consecutive_empty - 1))
-                else:
-                    cooldown = base_ttl
-            self._current_backoff = cooldown
-
-        if self.max_backoff is not None and cooldown:
-            cooldown = min(cooldown, self.max_backoff)
-
-        if cooldown:
-            self._cooldown_until = fetch_ts + cooldown
-            if tokens:
-                log.info(
-                    "DiscoveryService applying cache cooldown of %.2fs after %d tokens",
-                    cooldown,
-                    len(tokens),
-                )
-            else:
-                log.info(
-                    "DiscoveryService empty fetch #%d; backoff for %.2fs",
-                    self._consecutive_empty,
-                    cooldown,
-                )
-        else:
-            self._cooldown_until = fetch_ts
-
-        self._last_fetch_fresh = True
+        self._apply_fetch_stats(tokens, fetch_ts)
         return list(tokens)
 
     def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
@@ -217,3 +192,121 @@ class DiscoveryService:
             pass
 
         return metadata
+
+    async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
+        seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+        if not seq:
+            return
+        if not fresh and seq == self._last_emitted:
+            log.debug(
+                "DiscoveryService skipping cached emission (%d tokens)", len(seq)
+            )
+            return
+        batch = self._build_candidates(seq)
+        await self.queue.put(batch)
+        log.info("DiscoveryService queued %d tokens", len(batch))
+        self._last_emitted = list(seq)
+
+    def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
+        payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+        self._last_fetch_ts = fetch_ts
+        self._last_tokens = list(payload)
+
+        cooldown = 0.0
+        if payload:
+            self._consecutive_empty = 0
+            self._current_backoff = 0.0
+            if self.cache_ttl:
+                cooldown = self.cache_ttl
+        else:
+            self._consecutive_empty += 1
+            base_ttl = self.empty_cache_ttl
+            if base_ttl:
+                if self.backoff_factor > 1.0:
+                    cooldown = base_ttl * (self.backoff_factor ** (self._consecutive_empty - 1))
+                else:
+                    cooldown = base_ttl
+            self._current_backoff = cooldown
+
+        if self.max_backoff is not None and cooldown:
+            cooldown = min(cooldown, self.max_backoff)
+
+        if cooldown:
+            self._cooldown_until = fetch_ts + cooldown
+            if payload:
+                log.info(
+                    "DiscoveryService applying cache cooldown of %.2fs after %d tokens",
+                    cooldown,
+                    len(payload),
+                )
+            else:
+                log.info(
+                    "DiscoveryService empty fetch #%d; backoff for %.2fs",
+                    self._consecutive_empty,
+                    cooldown,
+                )
+        else:
+            self._cooldown_until = fetch_ts
+
+        self._last_fetch_fresh = True
+
+    async def _prime_startup_clones(self) -> None:
+        clones = max(1, int(self.startup_clones))
+        log.info(
+            "DiscoveryService priming discovery with %d startup clone(s)", clones
+        )
+        tasks: list[asyncio.Task] = []
+        for idx in range(clones):
+            tasks.append(
+                asyncio.create_task(
+                    self._clone_fetch(idx), name=f"discovery_prime_{idx}"
+                )
+            )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        aggregated: list[str] = []
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                log.warning(
+                    "DiscoveryService startup clone %d failed: %s", idx, result
+                )
+                continue
+            aggregated.extend(result)
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for token in aggregated:
+            tok = str(token).strip()
+            if not tok or tok in seen:
+                continue
+            seen.add(tok)
+            unique.append(tok)
+
+        if self.limit:
+            unique = unique[: self.limit]
+
+        fetch_ts = time.time()
+        self._apply_fetch_stats(unique, fetch_ts)
+
+        if unique:
+            await self._emit_tokens(unique, fresh=True)
+        else:
+            log.info("DiscoveryService startup clones produced no tokens")
+
+    async def _clone_fetch(self, idx: int) -> list[str]:
+        agent = DiscoveryAgent()
+        try:
+            tokens = await agent.discover_tokens(
+                offline=self.offline,
+                token_file=self.token_file,
+            )
+            if self.limit:
+                tokens = tokens[: self.limit]
+            log.debug(
+                "DiscoveryService startup clone %d fetched %d tokens", idx, len(tokens)
+            )
+            return [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive logging
+            log.exception("DiscoveryService startup clone %d failed", idx)
+            return []
