@@ -814,17 +814,64 @@ class SwarmPipeline:
         if not token:
             return
 
-        existing_context = (
-            action.metadata.get("price_context")
-            if isinstance(action.metadata.get("price_context"), dict)
-            else {}
-        )
+        metadata = action.metadata
+        nested_meta = metadata.get("metadata") if isinstance(metadata.get("metadata"), dict) else None
+
+        def _meta_get(key: str) -> Any:
+            if key != "metadata" and key in metadata:
+                return metadata[key]
+            if nested_meta and key in nested_meta:
+                return nested_meta[key]
+            return None
+
+        def _meta_set(key: str, value: Any) -> None:
+            if key != "metadata":
+                metadata[key] = value
+            if nested_meta is not None:
+                nested_meta[key] = value
+
+        def _meta_setdefault(key: str, value: Any) -> Any:
+            existing = _meta_get(key)
+            if existing is None:
+                _meta_set(key, value)
+                return value
+            return existing
+
+        def _meta_pop(key: str) -> None:
+            if key != "metadata":
+                metadata.pop(key, None)
+            if nested_meta is not None:
+                nested_meta.pop(key, None)
+
+        existing_context: Dict[str, Any] = {}
+        for container in (metadata, nested_meta):
+            if isinstance(container, dict):
+                ctx = container.get("price_context")
+                if isinstance(ctx, dict):
+                    existing_context.update(ctx)
+
+        needs_price_agents_raw = _meta_get("needs_price_agents")
+        hydrated_agents: list[str] = []
+        if isinstance(needs_price_agents_raw, (list, tuple, set)):
+            hydrated_agents = sorted(
+                {
+                    str(agent).strip()
+                    for agent in needs_price_agents_raw
+                    if str(agent).strip()
+                }
+            )
+        elif isinstance(needs_price_agents_raw, str):
+            agent = needs_price_agents_raw.strip()
+            if agent:
+                hydrated_agents = [agent]
+
+        needs_price_flag = bool(_meta_get("needs_price"))
 
         try:
             resolved_price, price_context = await resolve_price(token, self.portfolio)
         except Exception as exc:  # pragma: no cover - unexpected resolve failures
             log.debug("resolve_price failed for %s: %s", token, exc)
-            action.metadata.setdefault("price_missing", True)
+            _meta_setdefault("price_missing", True)
             return
 
         merged_context = {**existing_context, **price_context}
@@ -837,24 +884,37 @@ class SwarmPipeline:
                 price_value = float(entry_price)
                 merged_context.setdefault("entry_price", price_value)
                 merged_context.setdefault("source", "entry_price")
-                action.metadata.setdefault("price_fallback", "entry_price")
-
-        if merged_context:
-            action.metadata["price_context"] = merged_context
+                _meta_setdefault("price_fallback", "entry_price")
 
         if price_value <= 0 or not math.isfinite(price_value):
-            action.metadata.setdefault("price_missing", True)
+            if merged_context:
+                _meta_set("price_context", merged_context)
+            _meta_setdefault("price_missing", True)
             return
 
         source = merged_context.get("source")
         if source in {"history", "cache"}:
-            action.metadata.setdefault("price_fallback", source)
+            _meta_setdefault("price_fallback", source)
+
+        if needs_price_flag:
+            _meta_pop("needs_price")
+        if needs_price_agents_raw is not None:
+            _meta_pop("needs_price_agents")
+        if hydrated_agents:
+            merged_context.setdefault("hydrated_agents", hydrated_agents)
+        merged_context.setdefault("hydrated_by", "pipeline")
+
+        if merged_context:
+            _meta_set("price_context", merged_context)
 
         action.price = price_value
         try:
             update_price_cache(token, price_value)
         except Exception:  # pragma: no cover - cache errors shouldn't break pipeline
             log.debug("price cache update failed for %s", token, exc_info=True)
+
+        if nested_meta is not None and not nested_meta:
+            metadata.pop("metadata", None)
 
     async def run(self) -> Dict[str, Any]:
         start_ts = time.perf_counter()

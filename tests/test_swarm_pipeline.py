@@ -167,6 +167,7 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
         "amount": 2,
         "price": 0,
         "agent": "tester",
+        "metadata": {"needs_price": True, "needs_price_agents": ["swarm_zero"]},
     }
 
     agent_manager = _DummyAgentManager([raw_action])
@@ -205,7 +206,17 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
         action = record.actions[0]
         assert action.price == pytest.approx(1.23)
         assert action.metadata["price_context"]["source"] == "history"
+        assert action.metadata["price_context"].get("hydrated_by") == "pipeline"
+        assert action.metadata["price_context"].get("hydrated_agents") == [
+            "swarm_zero"
+        ]
         assert action.metadata.get("price_fallback") == "history"
+        nested_meta = action.metadata.get("metadata")
+        if isinstance(nested_meta, dict):
+            assert "needs_price" not in nested_meta
+            assert "needs_price_agents" not in nested_meta
+        assert "needs_price" not in action.metadata
+        assert "needs_price_agents" not in action.metadata
         cached = prices.get_cached_price(token)
         assert cached == pytest.approx(1.23)
 
