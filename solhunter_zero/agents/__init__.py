@@ -1,28 +1,24 @@
 """Utilities for working with the built-in trading agents.
 
-This package extends its module search path to include the parent
-``solhunter_zero`` directory. As a result, imports such as
-``solhunter_zero.agents.config`` transparently resolve to the module located at
-``solhunter_zero/config.py`` without requiring bespoke shims. New helper
-modules can therefore be dropped directly into ``solhunter_zero`` and remain
-accessible through the ``solhunter_zero.agents`` namespace.
+Legacy helper modules are re-exported via small compatibility shims that live
+alongside the concrete agent implementations. Keeping those shims in the
+package avoids modifying ``__path__`` at runtime which previously caused Python
+to resolve ``solhunter_zero.agents.<module>`` imports to similarly named
+modules in the parent package. That behaviour broke imports for agents such as
+``ArbitrageAgent`` because ``solhunter_zero.arbitrage`` (the helper module)
+shadowed ``solhunter_zero.agents.arbitrage`` (the agent implementation).
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import List, Dict, Any, Type
 import importlib
 import importlib.metadata
+import logging
 
 from ..portfolio import Portfolio
 from typing import TYPE_CHECKING
-
-_agents_parent = Path(__file__).resolve().parent.parent
-_agents_parent_str = str(_agents_parent)
-if _agents_parent_str not in __path__:
-    __path__.append(_agents_parent_str)
 
 if TYPE_CHECKING:  # Imports for type checking only to avoid circular imports
     from .simulation import SimulationAgent
@@ -89,90 +85,79 @@ class BaseAgent(ABC):
         return ""
 
 
+logger = logging.getLogger(__name__)
+
 BUILT_IN_AGENTS: Dict[str, Type[BaseAgent]] = {}
+
+
+_AGENT_SPECS = {
+    "simulation": ("simulation", "SimulationAgent"),
+    "conviction": ("conviction", "ConvictionAgent"),
+    "arbitrage": ("arbitrage", "ArbitrageAgent"),
+    "exit": ("exit", "ExitAgent"),
+    "execution": ("execution", "ExecutionAgent"),
+    "memory": ("memory", "MemoryAgent"),
+    "discovery": ("discovery", "DiscoveryAgent"),
+    "reinforcement": ("reinforcement", "ReinforcementAgent"),
+    "portfolio": ("portfolio_agent", "PortfolioAgent"),
+    "portfolio_manager": ("portfolio_manager", "PortfolioManager"),
+    "portfolio_optimizer": ("portfolio_optimizer", "PortfolioOptimizer"),
+    "hedging": ("hedging_agent", "HedgingAgent"),
+    "crossdex_rebalancer": ("crossdex_rebalancer", "CrossDEXRebalancer"),
+    "crossdex_arbitrage": ("crossdex_arbitrage", "CrossDEXArbitrage"),
+    "dqn": ("dqn", "DQNAgent"),
+    "ppo": ("ppo_agent", "PPOAgent"),
+    "sac": ("sac_agent", "SACAgent"),
+    "opportunity_cost": ("opportunity_cost", "OpportunityCostAgent"),
+    "trend": ("trend", "TrendAgent"),
+    "smart_discovery": ("smart_discovery", "SmartDiscoveryAgent"),
+    "momentum": ("momentum", "MomentumAgent"),
+    "mempool_sniper": ("mempool_sniper", "MempoolSniperAgent"),
+    "mev_sandwich": ("mev_sandwich", "MEVSandwichAgent"),
+    "flashloan_sandwich": ("flashloan_sandwich", "FlashloanSandwichAgent"),
+    "meta_conviction": ("meta_conviction", "MetaConvictionAgent"),
+    "ramanujan": ("ramanujan_agent", "RamanujanAgent"),
+    "vanta": ("strange_attractor", "StrangeAttractorAgent"),
+    "inferna": ("fractal_agent", "FractalAgent"),
+    "alien_cipher": ("alien_cipher_agent", "AlienCipherAgent"),
+    "artifact_math": ("artifact_math_agent", "ArtifactMathAgent"),
+    "rl_weight": ("rl_weight_agent", "RLWeightAgent"),
+    "hierarchical_rl": ("hierarchical_rl_agent", "HierarchicalRLAgent"),
+    "llm_reasoner": ("llm_reasoner", "LLMReasoner"),
+    "emotion": ("emotion_agent", "EmotionAgent"),
+}
+
+
+def _load_agent(module_name: str, class_name: str):
+    try:
+        module = importlib.import_module(f".{module_name}", __name__)
+    except Exception as exc:  # pragma: no cover - logging only
+        logger.warning(
+            "Failed to import agent module %s: %s", module_name, exc, exc_info=True
+        )
+        return None
+
+    try:
+        return getattr(module, class_name)
+    except AttributeError as exc:  # pragma: no cover - logging only
+        logger.warning(
+            "Agent class %s missing from module %s: %s",
+            class_name,
+            module_name,
+            exc,
+            exc_info=True,
+        )
+        return None
 
 
 def _ensure_agents_loaded() -> None:
     if BUILT_IN_AGENTS:
         return
-    from .simulation import SimulationAgent
-    from .conviction import ConvictionAgent
-    from .arbitrage import ArbitrageAgent
-    from .exit import ExitAgent
-    from .execution import ExecutionAgent
-    from .memory import MemoryAgent
-    from .discovery import DiscoveryAgent
-    from .reinforcement import ReinforcementAgent
-    from .portfolio_agent import PortfolioAgent
-    from .portfolio_manager import PortfolioManager
-    from .portfolio_optimizer import PortfolioOptimizer
-    from .crossdex_rebalancer import CrossDEXRebalancer
-    from .crossdex_arbitrage import CrossDEXArbitrage
-    from .hedging_agent import HedgingAgent
-    from .emotion_agent import EmotionAgent
-    from .opportunity_cost import OpportunityCostAgent
-    from .trend import TrendAgent
-    from .smart_discovery import SmartDiscoveryAgent
-
-    from .dqn import DQNAgent
-    from .ramanujan_agent import RamanujanAgent
-    from .strange_attractor import StrangeAttractorAgent
-    from .meta_conviction import MetaConvictionAgent
-    from .ppo_agent import PPOAgent
-    from .sac_agent import SACAgent
-    from .fractal_agent import FractalAgent
-    from .alien_cipher_agent import AlienCipherAgent
-    from .momentum import MomentumAgent
-    from .mempool_sniper import MempoolSniperAgent
-    from .mev_sandwich import MEVSandwichAgent
-    from .flashloan_sandwich import FlashloanSandwichAgent
-    from .llm_reasoner import LLMReasoner
-    from .artifact_math_agent import ArtifactMathAgent
-    from .rl_weight_agent import RLWeightAgent
-    from .hierarchical_rl_agent import HierarchicalRLAgent
-
-    BUILT_IN_AGENTS.update({
-        "simulation": SimulationAgent,
-        "conviction": ConvictionAgent,
-        "arbitrage": ArbitrageAgent,
-        "exit": ExitAgent,
-        "execution": ExecutionAgent,
-        "memory": MemoryAgent,
-        "discovery": DiscoveryAgent,
-        "reinforcement": ReinforcementAgent,
-        "portfolio": PortfolioAgent,
-        "portfolio_manager": PortfolioManager,
-        "portfolio_optimizer": PortfolioOptimizer,
-        "hedging": HedgingAgent,
-        "crossdex_rebalancer": CrossDEXRebalancer,
-        "crossdex_arbitrage": CrossDEXArbitrage,
-        "dqn": DQNAgent,
-        "ppo": PPOAgent,
-        "sac": SACAgent,
-        "opportunity_cost": OpportunityCostAgent,
-        "trend": TrendAgent,
-        "smart_discovery": SmartDiscoveryAgent,
-
-        "momentum": MomentumAgent,
-        "mempool_sniper": MempoolSniperAgent,
-        "mev_sandwich": MEVSandwichAgent,
-        "flashloan_sandwich": FlashloanSandwichAgent,
-
-        "meta_conviction": MetaConvictionAgent,
-
-        "ramanujan": RamanujanAgent,
-        "vanta": StrangeAttractorAgent,
-        "inferna": FractalAgent,
-        "alien_cipher": AlienCipherAgent,
-        "artifact_math": ArtifactMathAgent,
-        "rl_weight": RLWeightAgent,
-        "hierarchical_rl": HierarchicalRLAgent,
-
-        "llm_reasoner": LLMReasoner,
-
-        "emotion": EmotionAgent,
-
-    })
+    for name, (module_name, class_name) in _AGENT_SPECS.items():
+        agent_cls = _load_agent(module_name, class_name)
+        if agent_cls is None:
+            continue
+        BUILT_IN_AGENTS[name] = agent_cls
 
     for ep in importlib.metadata.entry_points(group="solhunter_zero.agents"):
         try:
