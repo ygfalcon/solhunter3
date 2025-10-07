@@ -118,7 +118,12 @@ def _safe_int(x: Any, default: int = 0) -> int:
 def _to_pubkey(token: str | Pubkey) -> Pubkey:
     if isinstance(token, Pubkey):
         return token
-    return Pubkey.from_string(str(token))
+    if isinstance(token, bytes):
+        token = token.decode("utf-8", "ignore")
+    text = str(token).strip()
+    if not text:
+        raise ValueError("token is required")
+    return Pubkey.from_string(text)
 
 
 def _is_helius_url(rpc_url: str) -> bool:
