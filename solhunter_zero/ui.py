@@ -26,11 +26,18 @@ front of it if richer dashboards are required.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from flask import Flask, jsonify, render_template_string, request
+
+from .agents.discovery import (
+    DEFAULT_DISCOVERY_METHOD,
+    DISCOVERY_METHODS,
+    resolve_discovery_method,
+)
 
 
 log = logging.getLogger(__name__)
@@ -1276,6 +1283,52 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.get("/logs")
     def logs() -> Any:
         return jsonify({"entries": state.snapshot_logs()})
+
+    @app.get("/discovery")
+    def discovery_settings() -> Any:
+        method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if method is None:
+            method = DEFAULT_DISCOVERY_METHOD
+        return jsonify(
+            {
+                "method": method,
+                "allowed_methods": sorted(DISCOVERY_METHODS),
+            }
+        )
+
+    @app.post("/discovery")
+    def update_discovery() -> Any:
+        payload = request.get_json(silent=True) or {}
+        raw_method = payload.get("method")
+        if not isinstance(raw_method, str) or not raw_method.strip():
+            return (
+                jsonify(
+                    {
+                        "error": "method must be a non-empty string",
+                        "allowed_methods": sorted(DISCOVERY_METHODS),
+                    }
+                ),
+                400,
+            )
+        method = resolve_discovery_method(raw_method)
+        if method is None:
+            return (
+                jsonify(
+                    {
+                        "error": f"Invalid discovery method: {raw_method}",
+                        "allowed_methods": sorted(DISCOVERY_METHODS),
+                    }
+                ),
+                400,
+            )
+        os.environ["DISCOVERY_METHOD"] = method
+        return jsonify(
+            {
+                "status": "ok",
+                "method": method,
+                "allowed_methods": sorted(DISCOVERY_METHODS),
+            }
+        )
 
     @app.get("/__shutdown__")
     def _shutdown() -> Any:  # pragma: no cover - invoked via HTTP

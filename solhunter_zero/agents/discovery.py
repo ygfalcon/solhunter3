@@ -25,6 +25,41 @@ _STATIC_FALLBACK = [
     "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",  # JUP
 ]
 
+DEFAULT_DISCOVERY_METHOD = "helius"
+
+_DISCOVERY_METHOD_ALIASES: dict[str, str] = {
+    "helius": "helius",
+    "api": "helius",
+    "rest": "helius",
+    "http": "helius",
+    "websocket": "websocket",
+    "ws": "websocket",
+    "merge": "websocket",
+    "mempool": "mempool",
+    "onchain": "onchain",
+    "file": "file",
+}
+
+DISCOVERY_METHODS: frozenset[str] = frozenset(
+    {"helius", "websocket", "mempool", "onchain", "file"}
+)
+
+
+def resolve_discovery_method(value: Any) -> Optional[str]:
+    """Return a canonical discovery method or ``None`` if ``value`` is invalid."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    method = value.strip().lower()
+    if not method:
+        return None
+    canonical = _DISCOVERY_METHOD_ALIASES.get(method, method)
+    if canonical in DISCOVERY_METHODS:
+        return canonical
+    return None
+
 
 class DiscoveryAgent:
     """Token discovery orchestrator supporting multiple discovery methods."""
@@ -47,7 +82,8 @@ class DiscoveryAgent:
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
         self.max_attempts = max(1, int(os.getenv("TOKEN_DISCOVERY_RETRIES", "2") or 2))
         self.mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
-        self.default_method = (os.getenv("DISCOVERY_METHOD") or "api").lower()
+        env_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        self.default_method = env_method or DEFAULT_DISCOVERY_METHOD
         self.last_details: Dict[str, Dict[str, Any]] = {}
         self.last_tokens: List[str] = []
         self.last_method: str | None = None
@@ -79,7 +115,20 @@ class DiscoveryAgent:
     ) -> List[str]:
         now = time.time()
         ttl = self.cache_ttl
-        active_method = (method or self.default_method or "api").lower()
+        method_override = method is not None
+        requested_method = resolve_discovery_method(method)
+        if requested_method is None and offline and not method_override:
+            requested_method = "helius"
+        if requested_method is None:
+            active_method = self.default_method or DEFAULT_DISCOVERY_METHOD
+            if method_override and isinstance(method, str) and method.strip():
+                logger.warning(
+                    "Unsupported discovery method %r; falling back to %s",
+                    method,
+                    active_method,
+                )
+        else:
+            active_method = requested_method
         cached_tokens = (
             list(_CACHE.get("tokens", []))
             if isinstance(_CACHE.get("tokens"), list)
@@ -87,7 +136,6 @@ class DiscoveryAgent:
         )
         cache_limit = int(_CACHE.get("limit", 0))
         cached_method = (_CACHE.get("method") or "").lower()
-        method_override = method is not None
         if (
             ttl > 0
             and cached_tokens
@@ -255,4 +303,10 @@ class DiscoveryAgent:
         return _STATIC_FALLBACK[: self.limit]
 
 
-__all__ = ["DiscoveryAgent", "merge_sources"]
+__all__ = [
+    "DISCOVERY_METHODS",
+    "DEFAULT_DISCOVERY_METHOD",
+    "DiscoveryAgent",
+    "merge_sources",
+    "resolve_discovery_method",
+]

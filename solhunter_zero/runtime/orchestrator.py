@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from ..util import install_uvloop, parse_bool_env
+from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
 from .. import event_bus
 from ..config import (
     initialize_event_bus,
@@ -190,7 +191,11 @@ class RuntimeOrchestrator:
         rl_interval = float(cfg.get("rl_interval", 3600.0))
 
         # Derive discovery & arbitrage
-        discovery_method = cfg.get("discovery_method") or os.getenv("DISCOVERY_METHOD", "websocket")
+        discovery_method = resolve_discovery_method(cfg.get("discovery_method"))
+        if discovery_method is None:
+            discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if discovery_method is None:
+            discovery_method = DEFAULT_DISCOVERY_METHOD
         arbitrage_threshold = float(cfg.get("arbitrage_threshold", 0.0))
         arbitrage_amount = float(cfg.get("arbitrage_amount", 0.0))
         arbitrage_tokens = None
