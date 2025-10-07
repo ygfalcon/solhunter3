@@ -121,18 +121,31 @@ async def _fetch_prices_helius(
     if not token_list:
         return {}
 
-    params: Dict[str, Any] | None = None
+    params: Dict[str, Any] = {"ids": ",".join(token_list)}
     if HELIUS_API_KEY:
-        params = {"api-key": HELIUS_API_KEY}
+        params["api-key"] = HELIUS_API_KEY
 
     payload = await _request_json(
         session,
         HELIUS_PRICE_URL,
-        "Helius",
+        "Helius (GET)",
         params=params,
-        json={"ids": list(token_list)},
-        method="POST",
     )
+
+    if payload is None:
+        # Older configs (and our unit tests) expected a POST request with the
+        # mint list in the JSON body. Newer Helius deployments reject that flow
+        # with a 404, so fall back to the legacy POST behaviour if the GET
+        # failed in order to preserve backwards compatibility.
+        logger.debug("Helius GET price endpoint failed; retrying POST fallback")
+        payload = await _request_json(
+            session,
+            HELIUS_PRICE_URL,
+            "Helius",
+            params={"api-key": HELIUS_API_KEY} if HELIUS_API_KEY else None,
+            json={"ids": list(token_list)},
+            method="POST",
+        )
     if not isinstance(payload, dict):
         return {}
 
