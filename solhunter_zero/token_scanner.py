@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
+from .discovery.mint_resolver import normalize_candidate
 from .token_aliases import canonical_mint
 
 # Hard-coded Helius defaults (per your request)
@@ -77,6 +78,17 @@ class BirdeyeThrottleError(BirdeyeFatalError):
 
     def __init__(self, status: int, message: str, *, body: str | None = None) -> None:
         super().__init__(status, message, body=body, throttle=True)
+
+
+def _normalize_mint_candidate(candidate: object) -> str | None:
+    """Return canonical mint when ``candidate`` looks like a plausible address."""
+
+    if not isinstance(candidate, str):
+        return None
+    normalized = normalize_candidate(candidate)
+    if not normalized:
+        return None
+    return canonical_mint(normalized)
 
 FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 _BIRDEYE_TIMEOUT = float(os.getenv("FAST_BIRDEYE_TIMEOUT", "6.0")) if FAST_MODE else 10.0
@@ -459,7 +471,7 @@ async def _birdeye_trending(
                     return []
                 mints: List[str] = []
                 for it in items:
-                    addr = None
+                    addr: object = None
                     if isinstance(it, dict):
                         addr = (
                             it.get("address")
@@ -478,8 +490,9 @@ async def _birdeye_trending(
                                 )
                     elif isinstance(it, (list, tuple)) and it:
                         addr = it[0]
-                    if isinstance(addr, str):
-                        mints.append(addr)
+                    normalized = _normalize_mint_candidate(addr)
+                    if normalized:
+                        mints.append(normalized)
                 return mints
         except BirdeyeFatalError:
             raise
@@ -736,11 +749,8 @@ async def _pump_trending(
     for entry in payload:
         if not isinstance(entry, dict):
             continue
-        mint = entry.get("mint") or entry.get("tokenMint")
-        if not isinstance(mint, str):
-            continue
-        mint = canonical_mint(mint)
-        if mint in seen:
+        mint = _normalize_mint_candidate(entry.get("mint") or entry.get("tokenMint"))
+        if not mint or mint in seen:
             continue
         seen.add(mint)
         meta = {
@@ -833,16 +843,17 @@ async def _helius_search_assets(
     for entry in items:
         if not isinstance(entry, dict):
             continue
-        address = entry.get("id") or entry.get("mint")
+        address: object = entry.get("id") or entry.get("mint")
         if not isinstance(address, str):
             token_info = entry.get("token_info") or entry.get("tokenInfo")
             if isinstance(token_info, dict):
                 address = token_info.get("mint") or token_info.get("address")
-        if not isinstance(address, str):
+        mint = _normalize_mint_candidate(address)
+        if not mint:
             continue
         normalized.append(
             {
-                "address": address,
+                "address": mint,
                 "source": "helius_search",
                 "rank": len(normalized),
                 "raw": entry,
@@ -958,10 +969,9 @@ async def scan_tokens_async(
         for item in helius_tokens:
             if not isinstance(item, dict):
                 continue
-            mint = item.get("address")
-            if not isinstance(mint, str):
+            mint = _normalize_mint_candidate(item.get("address"))
+            if not mint:
                 continue
-            mint = canonical_mint(mint)
             if mint in mints:
                 existing = TRENDING_METADATA.setdefault(mint, dict(item))
                 if isinstance(existing, dict):
@@ -1067,10 +1077,10 @@ async def scan_tokens_async(
                 break
             if not batch:
                 break
-            for mint in batch:
-                if not isinstance(mint, str):
+            for candidate in batch:
+                mint = _normalize_mint_candidate(candidate)
+                if not mint:
                     continue
-                mint = canonical_mint(mint)
                 if mint in mints:
                     existing = TRENDING_METADATA.setdefault(
                         mint,
@@ -1117,7 +1127,7 @@ async def scan_tokens_async(
                 rpc_url=os.getenv("SOLANA_RPC_URL", DEFAULT_SOLANA_RPC),
             )
             for item in search_items:
-                address = canonical_mint(item.get("address", ""))
+                address = _normalize_mint_candidate(item.get("address"))
                 if not address or address in mints:
                     continue
                 mints.append(address)
@@ -1154,7 +1164,7 @@ async def scan_tokens_async(
         if not mints:
             pump_tokens = await _pump_trending(session, limit=requested)
             for meta in pump_tokens:
-                mint = canonical_mint(meta.get("address", ""))
+                mint = _normalize_mint_candidate(meta.get("address"))
                 if not mint or mint in mints:
                     continue
                 mints.append(mint)
@@ -1237,7 +1247,11 @@ async def enrich_tokens_async(
     Verify token accounts exist and filter obviously bad ones.
     Keeps tokens if decimals parsing fails (agents can still decide).
     """
-    as_list = [m for m in mints if isinstance(m, str) and len(m) > 10]
+    as_list = []
+    for candidate in mints:
+        mint = _normalize_mint_candidate(candidate)
+        if mint:
+            as_list.append(mint)
     if not as_list:
         return []
 
