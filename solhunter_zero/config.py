@@ -30,6 +30,22 @@ logger = logging.getLogger(__name__)
 _VALIDATED_URLS: dict[str, str] = {}
 
 
+def _extract_helius_api_key(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parsed = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qs(parsed.query)
+        keys = params.get("api-key") or params.get("api_key")
+        if keys:
+            for item in reversed(keys):
+                if item:
+                    return str(item)
+    except Exception:
+        return None
+    return None
+
+
 def _validate_and_store_url(name: str, url: str, schemes: set[str] | None = None) -> str:
     """
     Validate a URL (preserving path & query) and store in env + cache.
@@ -63,6 +79,19 @@ ENV_VARS = {
     "solana_rpc_url": "SOLANA_RPC_URL",
     "solana_ws_url": "SOLANA_WS_URL",
     "solana_keypair": "SOLANA_KEYPAIR",
+    "helius_rpc_url": "HELIUS_RPC_URL",
+    "helius_ws_url": "HELIUS_WS_URL",
+    "helius_api_key": "HELIUS_API_KEY",
+    "helius_api_keys": "HELIUS_API_KEYS",
+    "helius_api_token": "HELIUS_API_TOKEN",
+    "helius_price_rpc_url": "HELIUS_PRICE_RPC_URL",
+    "helius_price_rpc_method": "HELIUS_PRICE_RPC_METHOD",
+    "helius_price_single_method": "HELIUS_PRICE_SINGLE_METHOD",
+    "helius_price_rest_url": "HELIUS_PRICE_REST_URL",
+    "helius_price_base_url": "HELIUS_PRICE_BASE_URL",
+    "helius_price_metadata_path": "HELIUS_PRICE_METADATA_PATH",
+    "helius_price_timeout": "HELIUS_PRICE_TIMEOUT",
+    "helius_price_concurrency": "HELIUS_PRICE_CONCURRENCY",
     "dex_base_url": "DEX_BASE_URL",
     "dex_testnet_url": "DEX_TESTNET_URL",
     "orca_api_url": "ORCA_API_URL",
@@ -234,6 +263,94 @@ def get_solana_ws_url() -> str | None:
         return None
 
 
+def _ensure_helius_environment(config: Mapping[str, Any]) -> None:
+    """Propagate user supplied Helius credentials and endpoints into the runtime."""
+
+    def _first_str(values: Sequence[object]) -> str | None:
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _should_update(name: str, default: str | None = None) -> bool:
+        current = os.getenv(name)
+        if not current:
+            return True
+        if default and current.strip() == default.strip():
+            return True
+        return False
+
+    cfg_rpc = _first_str(
+        [config.get("helius_rpc_url"), config.get("solana_rpc_url"), config.get("priority_rpc")]
+    )
+    env_rpc = _first_str([os.getenv("SOLANA_RPC_URL"), os.getenv("HELIUS_RPC_URL")])
+
+    if cfg_rpc and _should_update("HELIUS_RPC_URL", DEFAULT_HELIUS_RPC_URL):
+        os.environ["HELIUS_RPC_URL"] = cfg_rpc
+    elif env_rpc and not os.getenv("HELIUS_RPC_URL"):
+        os.environ["HELIUS_RPC_URL"] = env_rpc
+
+    if cfg_rpc and _should_update("SOLANA_RPC_URL", DEFAULT_HELIUS_RPC_URL):
+        try:
+            _validate_and_store_url("SOLANA_RPC_URL", cfg_rpc, {"http", "https"})
+        except ValueError as exc:
+            logger.error(str(exc))
+    elif env_rpc and not os.getenv("SOLANA_RPC_URL"):
+        try:
+            _validate_and_store_url("SOLANA_RPC_URL", env_rpc, {"http", "https"})
+        except ValueError as exc:
+            logger.error(str(exc))
+
+    cfg_ws = _first_str([config.get("helius_ws_url"), config.get("solana_ws_url")])
+    env_ws = _first_str([os.getenv("SOLANA_WS_URL"), os.getenv("HELIUS_WS_URL")])
+
+    if cfg_ws and _should_update("HELIUS_WS_URL", DEFAULT_HELIUS_WS_URL):
+        try:
+            _validate_and_store_url("HELIUS_WS_URL", cfg_ws, {"ws", "wss"})
+        except ValueError as exc:
+            logger.error(str(exc))
+    elif env_ws and not os.getenv("HELIUS_WS_URL"):
+        try:
+            _validate_and_store_url("HELIUS_WS_URL", env_ws, {"ws", "wss"})
+        except ValueError as exc:
+            logger.error(str(exc))
+
+    if cfg_ws and _should_update("SOLANA_WS_URL", DEFAULT_HELIUS_WS_URL):
+        try:
+            _validate_and_store_url("SOLANA_WS_URL", cfg_ws, {"ws", "wss"})
+        except ValueError as exc:
+            logger.error(str(exc))
+    elif env_ws and not os.getenv("SOLANA_WS_URL"):
+        try:
+            _validate_and_store_url("SOLANA_WS_URL", env_ws, {"ws", "wss"})
+        except ValueError as exc:
+            logger.error(str(exc))
+
+    key_candidate = _first_str(
+        [
+            os.getenv("HELIUS_API_KEY"),
+            config.get("helius_api_key"),
+            config.get("helius_api_token"),
+            _extract_helius_api_key(os.getenv("SOLANA_RPC_URL")),
+            _extract_helius_api_key(os.getenv("SOLANA_WS_URL")),
+            _extract_helius_api_key(os.getenv("HELIUS_RPC_URL")),
+            _extract_helius_api_key(os.getenv("HELIUS_WS_URL")),
+        ]
+    )
+
+    if key_candidate and (not os.getenv("HELIUS_API_KEY") or not os.getenv("HELIUS_API_KEY").strip()):
+        os.environ["HELIUS_API_KEY"] = key_candidate
+
+    multi = config.get("helius_api_keys")
+    if (
+        multi
+        and isinstance(multi, (list, tuple, set))
+        and (_should_update("HELIUS_API_KEYS") or not os.getenv("HELIUS_API_KEYS"))
+    ):
+        joined = ",".join(str(item).strip() for item in multi if str(item).strip())
+        if joined:
+            os.environ["HELIUS_API_KEYS"] = joined
+
 # Commonly required environment variables
 REQUIRED_ENV_VARS = (
     "EVENT_BUS_URL",
@@ -273,6 +390,38 @@ def _read_config_file(path: Path) -> dict:
     raise ValueError(f"Unsupported config format: {path}")
 
 
+def _apply_helius_defaults(cfg: dict[str, Any]) -> None:
+    """Replace placeholder Helius credentials with usable defaults."""
+
+    def _sanitize(url: Any, default: str) -> str | None:
+        if not isinstance(url, str):
+            return None
+        text = url.strip()
+        if not text:
+            return default
+        for marker in ("YOUR_KEY", "YOUR_HELIUS_KEY"):
+            if marker in text:
+                return default
+        return None
+
+    rpc_default = _sanitize(cfg.get("solana_rpc_url"), DEFAULT_HELIUS_RPC_URL)
+    if rpc_default:
+        cfg["solana_rpc_url"] = rpc_default
+        cfg.setdefault("helius_rpc_url", rpc_default)
+        cfg.setdefault("priority_rpc", rpc_default)
+
+    ws_default = _sanitize(cfg.get("solana_ws_url"), DEFAULT_HELIUS_WS_URL)
+    if ws_default:
+        cfg["solana_ws_url"] = ws_default
+        cfg.setdefault("helius_ws_url", ws_default)
+
+    api_key = cfg.get("helius_api_key") or cfg.get("helius_api_token")
+    if not api_key:
+        extracted = _extract_helius_api_key(cfg.get("solana_rpc_url"))
+        if not extracted:
+            extracted = _extract_helius_api_key(cfg.get("helius_rpc_url"))
+        if extracted:
+            cfg.setdefault("helius_api_key", extracted)
 def load_config(path: str | os.PathLike | None = None) -> dict:
     """Load configuration from `path` or default locations, validate via Pydantic."""
     if path is None:
@@ -290,6 +439,7 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         cfg = model.model_dump(mode="json") if hasattr(model, "model_dump") else model.dict()
     except ValidationError as exc:
         raise ValueError(f"Invalid configuration: {exc}") from exc
+    _apply_helius_defaults(cfg)
     return cfg
 
 
@@ -324,12 +474,19 @@ def set_env_from_config(config: dict) -> None:
     """Set environment variables for values present in `config`."""
     for key, env in ENV_VARS.items():
         val = config.get(key)
-        if (
-            val is not None
-            and os.getenv(env) is None
-            and not isinstance(val, (list, dict, set, tuple))
-        ):
-            os.environ[env] = str(val)
+        if val is None or os.getenv(env) is not None:
+            continue
+        if isinstance(val, (dict, tuple, set)):
+            continue
+        if isinstance(val, list):
+            if env == "HELIUS_API_KEYS":
+                joined = ",".join(str(item).strip() for item in val if str(item).strip())
+                if joined:
+                    os.environ[env] = joined
+            continue
+        os.environ[env] = str(val)
+
+    _ensure_helius_environment(config)
 
     # Ensure SOLANA_WS_URL is always normalized/derived and available
     get_solana_ws_url()
@@ -396,6 +553,7 @@ def find_config_file() -> str | None:
         p = Path.cwd() / name
         if p.is_file():
             return str(p)
+    for name in ("config.toml", "config.yaml", "config.yml"):
         p = ROOT / name
         if p.is_file():
             return str(p)
@@ -524,7 +682,7 @@ def load_dex_config(config: Mapping[str, Any] | None = None) -> DEXConfig:
             "birdeye": "/defi/swap/v1",
             "jupiter": "/v6/swap",
         },
-        "dex_priorities": "jupiter,helius,birdeye",
+        "dex_priorities": "helius,jupiter,birdeye",
         "agents": ["sim"],
         "agent_weights": {"sim": 1.0},
     }

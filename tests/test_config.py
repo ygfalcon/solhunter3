@@ -251,6 +251,27 @@ def test_set_env_from_config(monkeypatch):
     assert os.getenv("AGENT_WEIGHTS") is None
 
 
+def test_set_env_from_config_helius(monkeypatch):
+    cfg = {
+        "helius_rpc_url": "https://mainnet.helius-rpc.com/?api-key=CUSTOM",
+        "helius_ws_url": "wss://mainnet.helius-rpc.com/?api-key=CUSTOM",
+        "helius_api_keys": ["k1", "k2"],
+    }
+    monkeypatch.delenv("SOLANA_RPC_URL", raising=False)
+    monkeypatch.delenv("SOLANA_WS_URL", raising=False)
+    monkeypatch.delenv("HELIUS_RPC_URL", raising=False)
+    monkeypatch.delenv("HELIUS_WS_URL", raising=False)
+    monkeypatch.delenv("HELIUS_API_KEY", raising=False)
+    monkeypatch.delenv("HELIUS_API_KEYS", raising=False)
+    set_env_from_config(cfg)
+    assert os.getenv("HELIUS_RPC_URL") == cfg["helius_rpc_url"]
+    assert os.getenv("HELIUS_WS_URL") == cfg["helius_ws_url"]
+    assert os.getenv("SOLANA_RPC_URL") == cfg["helius_rpc_url"]
+    assert os.getenv("SOLANA_WS_URL") == cfg["helius_ws_url"]
+    assert os.getenv("HELIUS_API_KEY") == "CUSTOM"
+    assert os.getenv("HELIUS_API_KEYS") == "k1,k2"
+
+
 def test_set_env_llm(monkeypatch):
     cfg = {"llm_model": "model", "llm_context_length": 64}
     monkeypatch.delenv("LLM_MODEL", raising=False)
