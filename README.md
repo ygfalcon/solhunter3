@@ -87,6 +87,7 @@ Legacy path remains available via `SOLHUNTER_LEGACY=1` when using `python -m sol
 - [Configuration](#configuration)
 - [Usage](docs/usage.md)
 - [Architecture](docs/architecture.md)
+- [Event Pipeline Blueprint](docs/blueprint.md)
 - [Environment Variables](docs/environment.md)
 - [Testing](TESTING.md)
 
