@@ -73,6 +73,19 @@ This repo now has a single, obvious entry for the new, event‑driven runtime.
 
 Legacy path remains available via `SOLHUNTER_LEGACY=1` when using `python -m solhunter_zero.launcher`.
 
+## Chain Readiness Toolkit
+
+- `./env_doctor.sh` — one-line environment doctor that validates required variables, probes Solana
+  RPC/WS endpoints, verifies Redis reachability, and checks Helius authentication.
+- `python -m scripts.bus_smoke <ping|keys>` — Redis smoke tool that appends/reads test messages
+  across the required streams and key TTLs.
+- `.env.example`, `.env.staging`, `.env.prod` — canonical environment baselines for local, staging,
+  and production deployments.
+- `docs/ui_topic_map.md` — authoritative UI wiring map with staleness badges and endpoints.
+- `docs/runbook.md` — end-to-end operational guide including launch order, kill switches, and go/no-go
+  criteria.
+- `docs/data_contracts.md` — machine-readable schemas for stream and key-value payloads.
+
 ### Live Ops Prep (Recommended)
 
 - Config: Start from `configs/live_recommended.toml` and tune risk/sizing to taste.
