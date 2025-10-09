@@ -2,10 +2,58 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Optional
 
 from .types import Decision, GoldenSnapshot, LiveFill, VirtualFill, VirtualPnL
 from .utils import clamp, now_ts
+
+
+@dataclass
+class _Position:
+    qty: float = 0.0
+    avg_price: float = 0.0
+
+    def apply_trade(
+        self,
+        *,
+        direction: int,
+        qty: float,
+        price: float,
+        fees: float = 0.0,
+    ) -> float:
+        """Update position for a trade and return realised PnL."""
+
+        if qty <= 0:
+            return 0.0
+        signed_trade = qty if direction > 0 else -qty
+        realized = 0.0
+        if self.qty == 0 or self.qty * signed_trade > 0:
+            total_qty = abs(self.qty) + qty
+            numerator = self.avg_price * abs(self.qty) + price * qty
+            numerator += fees if direction > 0 else -fees
+            self.avg_price = numerator / total_qty if total_qty else 0.0
+            self.qty += signed_trade
+            return realized
+
+        closing_qty = min(abs(self.qty), qty)
+        realized += (price - self.avg_price) * closing_qty * (
+            1 if self.qty > 0 else -1
+        )
+        residual = qty - closing_qty
+        self.qty += signed_trade
+        if self.qty == 0:
+            self.avg_price = 0.0
+        elif residual > 0:
+            self.avg_price = price
+        return realized
+
+    def mark_to_market(self, mid: float, spread_bps: float) -> float:
+        if self.qty == 0:
+            return 0.0
+        half_spread = mid * (spread_bps / 20000.0)
+        mark = mid - half_spread if self.qty > 0 else mid + half_spread
+        return (mark - self.avg_price) * self.qty
 
 
 class ExecutionContext:
@@ -36,6 +84,7 @@ class ShadowExecutor:
         self._emit_pnl = emit_pnl
         self._latency_bps = latency_bps
         self._fee_bps = fee_bps
+        self._positions: Dict[str, _Position] = {}
 
     async def submit(self, decision: Decision, snapshot: GoldenSnapshot) -> None:
         depth1 = float(snapshot.liq.get("depth_pct", {}).get("1", 0.0)) or 1.0
@@ -47,6 +96,15 @@ class ShadowExecutor:
         total_slippage_bps = (impact_bps + self._latency_bps + self._fee_bps) * direction
         price = mid * (1 + total_slippage_bps / 10_000)
         fees = decision.notional_usd * (self._fee_bps / 10_000)
+        position = self._positions.setdefault(decision.mint, _Position())
+        inventory_realized = position.apply_trade(
+            direction=direction,
+            qty=base_qty,
+            price=price,
+            fees=fees,
+        )
+        trade_edge = (mid - price) * base_qty * direction - fees
+        realized = inventory_realized + trade_edge
         fill = VirtualFill(
             order_id=decision.client_order_id,
             mint=decision.mint,
@@ -61,14 +119,14 @@ class ShadowExecutor:
         )
         await self._emit_fill(fill)
         if self._emit_pnl:
-            pnl_price_component = (price - mid) * base_qty * (-direction)
-            pnl = pnl_price_component - fees
+            mark = position.mark_to_market(mid, float(snapshot.px.get("spread_bps", 0.0)))
+            pnl = realized + mark
             pnl_event = VirtualPnL(
                 order_id=decision.client_order_id,
                 mint=decision.mint,
                 snapshot_hash=decision.snapshot_hash,
-                realized_usd=pnl,
-                unrealized_usd=0.0,
+                realized_usd=realized,
+                unrealized_usd=mark,
                 ts=fill.ts,
             )
             await self._emit_pnl(pnl_event)

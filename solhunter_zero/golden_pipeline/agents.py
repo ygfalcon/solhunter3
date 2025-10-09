@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, Iterable, List, Sequence
+from typing import Awaitable, Callable, Iterable, List, Sequence, Set
 
 from .types import GoldenSnapshot, TradeSuggestion
-from .utils import now_ts
+from .utils import TTLCache, now_ts
 
 log = logging.getLogger(__name__)
 
@@ -58,12 +58,17 @@ class AgentStage:
         agents: Iterable[BaseAgent] | None = None,
         max_spread_bps: float = 80.0,
         min_depth1_pct_usd: float = 8_000.0,
+        blacklist: Iterable[str] | None = None,
+        cooldown_sec: float = 0.0,
     ) -> None:
         self._emit = emit
         self._agents: List[BaseAgent] = list(agents or [])
         self._max_spread = max_spread_bps
         self._min_depth = min_depth1_pct_usd
         self._lock = asyncio.Lock()
+        self._blacklist: Set[str] = {str(m).lower() for m in (blacklist or [])}
+        self._cooldown = TTLCache()
+        self._cooldown_sec = max(0.0, cooldown_sec)
 
     def register_agent(self, agent: BaseAgent) -> None:
         self._agents.append(agent)
@@ -73,6 +78,11 @@ class AgentStage:
             return
         depth1 = float(snapshot.liq.get("depth_pct", {}).get("1", 0.0))
         if depth1 < self._min_depth:
+            return
+        mint_key = snapshot.mint.lower()
+        if mint_key in self._blacklist:
+            return
+        if self._cooldown_sec > 0 and not self._cooldown.add(mint_key, self._cooldown_sec):
             return
         async with self._lock:
             for agent in self._agents:

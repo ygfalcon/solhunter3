@@ -7,6 +7,8 @@ import hashlib
 from collections import defaultdict
 from typing import Awaitable, Callable, Dict, List, Mapping, Tuple
 
+from .contracts import vote_dedupe_key
+from .kv import KeyValueStore
 from .types import Decision, TradeSuggestion
 from .utils import now_ts
 
@@ -22,6 +24,8 @@ class VotingStage:
         quorum: int = 2,
         min_score: float = 0.04,
         rl_weights: Mapping[str, float] | None = None,
+        kv: KeyValueStore | None = None,
+        dedupe_ttl: float = 300.0,
     ) -> None:
         self._emit = emit
         self._window_sec = window_ms / 1000.0
@@ -34,6 +38,8 @@ class VotingStage:
             agent: float(weight)
             for agent, weight in (rl_weights.items() if rl_weights else [])
         }
+        self._kv = kv
+        self._dedupe_ttl = dedupe_ttl
 
     async def submit(self, suggestion: TradeSuggestion) -> None:
         key = (suggestion.mint, suggestion.side, suggestion.inputs_hash)
@@ -88,6 +94,14 @@ class VotingStage:
             agents=agents,
             ts=now_ts(),
         )
+        if self._kv:
+            stored = await self._kv.set_if_absent(
+                vote_dedupe_key(order_id),
+                "1",
+                ttl=self._dedupe_ttl,
+            )
+            if not stored:
+                return
         await self._emit(decision)
 
     def set_rl_weights(self, weights: Mapping[str, float]) -> None:

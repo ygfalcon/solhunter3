@@ -7,6 +7,8 @@ import logging
 import re
 from typing import Awaitable, Callable, Iterable, Optional
 
+from .contracts import discovery_cursor_key, discovery_seen_key
+from .kv import KeyValueStore
 from .types import DiscoveryCandidate
 from .utils import CircuitBreaker, TTLCache
 
@@ -27,9 +29,11 @@ class DiscoveryStage:
         failure_window: float = 30.0,
         cooldown: float = 60.0,
         allow_program_prefixes: Optional[Iterable[str]] = None,
+        kv: KeyValueStore | None = None,
     ) -> None:
         self._emit = emit
         self._seen = TTLCache()
+        self._kv = kv
         self._dedupe_ttl = dedupe_ttl
         self._allow_program_prefixes = set(allow_program_prefixes or [])
         self._breaker = CircuitBreaker(
@@ -52,8 +56,19 @@ class DiscoveryStage:
                 self._breaker.record_failure()
                 return False
 
-            if not self._seen.add(candidate.mint, self._dedupe_ttl):
-                return False
+            if self._kv:
+                key = discovery_seen_key(candidate.mint)
+                stored = await self._kv.set_if_absent(
+                    key,
+                    "1",
+                    ttl=self._dedupe_ttl,
+                )
+                if not stored:
+                    return False
+                self._seen.add(candidate.mint, self._dedupe_ttl)
+            else:
+                if not self._seen.add(candidate.mint, self._dedupe_ttl):
+                    return False
 
             try:
                 await self._emit(candidate)
@@ -96,3 +111,14 @@ class DiscoveryStage:
         """Return ``True`` if ``mint`` has been observed within the TTL."""
 
         return self._seen.is_active(mint)
+
+    async def persist_cursor(self, cursor: str) -> None:
+        """Persist the upstream cursor so discovery can resume on restart."""
+
+        if self._kv:
+            await self._kv.set(discovery_cursor_key(), cursor)
+
+    async def load_cursor(self) -> str | None:
+        if not self._kv:
+            return None
+        return await self._kv.get(discovery_cursor_key())
