@@ -26,6 +26,7 @@ from .types import (
     TokenSnapshot,
     TradeSuggestion,
     VirtualFill,
+    VirtualPnL,
 )
 
 log = logging.getLogger(__name__)
@@ -210,6 +211,7 @@ class GoldenPipelineService:
             on_golden=self._handle_snapshot,
             on_suggestion=self._handle_suggestion,
             on_virtual_fill=self._handle_virtual_fill,
+            on_virtual_pnl=self._handle_virtual_pnl,
         )
 
         self._subscriptions: List[Callable[[], None]] = []
@@ -377,6 +379,19 @@ class GoldenPipelineService:
             {
                 "stage": "golden",
                 "detail": f"virtual_fill:{fill.mint}:{fill.side}:{fill.price_usd:.4f}",
+            },
+        )
+
+    async def _handle_virtual_pnl(self, pnl: VirtualPnL) -> None:
+        publish(
+            "virtual_pnl",
+            {
+                "order_id": pnl.order_id,
+                "mint": pnl.mint,
+                "snapshot_hash": pnl.snapshot_hash,
+                "realized_usd": pnl.realized_usd,
+                "unrealized_usd": pnl.unrealized_usd,
+                "ts": pnl.ts,
             },
         )
 

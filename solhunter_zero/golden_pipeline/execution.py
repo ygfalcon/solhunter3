@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Dict, Optional
 
-from .types import Decision, GoldenSnapshot, LiveFill, VirtualFill
+from .types import Decision, GoldenSnapshot, LiveFill, VirtualFill, VirtualPnL
 from .utils import clamp, now_ts
 
 
@@ -26,12 +26,14 @@ class ShadowExecutor:
 
     def __init__(
         self,
-        emit: Callable[[VirtualFill], Awaitable[None]],
+        emit_fill: Callable[[VirtualFill], Awaitable[None]],
+        emit_pnl: Callable[[VirtualPnL], Awaitable[None]] | None = None,
         *,
         latency_bps: float = 2.0,
         fee_bps: float = 4.0,
     ) -> None:
-        self._emit = emit
+        self._emit_fill = emit_fill
+        self._emit_pnl = emit_pnl
         self._latency_bps = latency_bps
         self._fee_bps = fee_bps
 
@@ -57,7 +59,19 @@ class ShadowExecutor:
             route="VIRTUAL",
             ts=now_ts(),
         )
-        await self._emit(fill)
+        await self._emit_fill(fill)
+        if self._emit_pnl:
+            pnl_price_component = (price - mid) * base_qty * (-direction)
+            pnl = pnl_price_component - fees
+            pnl_event = VirtualPnL(
+                order_id=decision.client_order_id,
+                mint=decision.mint,
+                snapshot_hash=decision.snapshot_hash,
+                realized_usd=pnl,
+                unrealized_usd=0.0,
+                ts=fill.ts,
+            )
+            await self._emit_pnl(pnl_event)
 
 
 class LiveExecutor:

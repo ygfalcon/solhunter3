@@ -27,6 +27,7 @@ class _BarState:
     vol_usd: float = 0.0
     trades: int = 0
     buyers: set[str] = field(default_factory=set)
+    flow_usd: float = 0.0
 
     def apply(self, event: TapeEvent) -> None:
         price = event.price_usd
@@ -42,6 +43,7 @@ class _BarState:
         self.trades += 1
         if event.buyer:
             self.buyers.add(event.buyer)
+        self.flow_usd += float(event.amount_base) * price
 
     def to_bar(self) -> OHLCVBar:
         buyers = len(self.buyers)
@@ -54,6 +56,7 @@ class _BarState:
             vol_usd=self.vol_usd,
             trades=self.trades,
             buyers=buyers,
+            flow_usd=self.flow_usd,
             zret=0.0,
             zvol=0.0,
             asof_close=self.window_end,

@@ -62,6 +62,7 @@ class SnapshotCoalescer:
                 "c": bar.close,
                 "vol_usd": bar.vol_usd,
                 "buyers": bar.buyers,
+                "flow_usd": bar.flow_usd,
                 "zret": bar.zret,
                 "zvol": bar.zvol,
             },

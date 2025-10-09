@@ -66,6 +66,7 @@ class OHLCVBar:
     vol_usd: float
     trades: int
     buyers: int
+    flow_usd: float
     zret: float
     zvol: float
     asof_close: Timestamp
@@ -155,4 +156,16 @@ class LiveFill:
     slippage_bps: float
     route: str
     snapshot_hash: str
+
+
+@dataclass(slots=True)
+class VirtualPnL:
+    """Paper trading PnL derived from virtual fills."""
+
+    order_id: str
+    mint: str
+    snapshot_hash: str
+    realized_usd: float
+    unrealized_usd: float
+    ts: Timestamp
 
