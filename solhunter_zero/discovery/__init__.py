@@ -7,13 +7,15 @@ import math
 import os
 from typing import Any, Dict, List
 
-from . import onchain_metrics
-from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
-from .scanner_onchain import (
+from .. import onchain_metrics
+from ..mempool_scanner import stream_ranked_mempool_tokens_with_depth
+from ..scanner_onchain import (
     scan_tokens_onchain,
     fetch_liquidity_onchain_async as raw_liquidity_onchain_async,
 )
-from .token_scanner import TRENDING_METADATA, enrich_tokens_async, scan_tokens_async
+from ..token_aliases import canonical_mint
+from ..token_scanner import TRENDING_METADATA, enrich_tokens_async, scan_tokens_async
+from .mint_resolver import normalize_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +104,14 @@ async def _collect_mempool_candidates(
                 timeouts = 0
             if not isinstance(item, dict):
                 continue
-            address = item.get("address")
-            if not isinstance(address, str) or not address.strip():
+            address_raw = item.get("address")
+            if not isinstance(address_raw, str):
                 continue
+            candidate = normalize_candidate(address_raw)
+            if not candidate:
+                continue
+            canonical = canonical_mint(candidate)
+            item["address"] = canonical
             results.append(item)
             if len(results) >= limit:
                 break
