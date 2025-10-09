@@ -1,0 +1,93 @@
+"""Agent execution stage for Golden Snapshots."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Awaitable, Callable, Iterable, List, Sequence
+
+from .types import GoldenSnapshot, TradeSuggestion
+from .utils import now_ts
+
+log = logging.getLogger(__name__)
+
+
+class BaseAgent:
+    """Base class for agents that consume Golden Snapshots."""
+
+    name: str
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    async def generate(self, snapshot: GoldenSnapshot) -> Sequence[TradeSuggestion]:
+        return []
+
+    def build_suggestion(
+        self,
+        *,
+        snapshot: GoldenSnapshot,
+        side: str,
+        notional_usd: float,
+        max_slippage_bps: float,
+        risk: dict,
+        confidence: float,
+        ttl_sec: float,
+    ) -> TradeSuggestion:
+        return TradeSuggestion(
+            agent=self.name,
+            mint=snapshot.mint,
+            side=side,
+            notional_usd=notional_usd,
+            max_slippage_bps=max_slippage_bps,
+            risk=risk,
+            confidence=confidence,
+            inputs_hash=snapshot.hash,
+            ttl_sec=ttl_sec,
+            generated_at=now_ts(),
+        )
+
+
+class AgentStage:
+    """Evaluates registered agents against Golden Snapshots."""
+
+    def __init__(
+        self,
+        emit: Callable[[TradeSuggestion], Awaitable[None]],
+        *,
+        agents: Iterable[BaseAgent] | None = None,
+        max_spread_bps: float = 80.0,
+        min_depth1_pct_usd: float = 8_000.0,
+    ) -> None:
+        self._emit = emit
+        self._agents: List[BaseAgent] = list(agents or [])
+        self._max_spread = max_spread_bps
+        self._min_depth = min_depth1_pct_usd
+        self._lock = asyncio.Lock()
+
+    def register_agent(self, agent: BaseAgent) -> None:
+        self._agents.append(agent)
+
+    async def submit(self, snapshot: GoldenSnapshot) -> None:
+        if snapshot.px.get("spread_bps", 0.0) > self._max_spread:
+            return
+        depth1 = float(snapshot.liq.get("depth_pct", {}).get("1", 0.0))
+        if depth1 < self._min_depth:
+            return
+        async with self._lock:
+            for agent in self._agents:
+                try:
+                    suggestions = await agent.generate(snapshot)
+                except Exception:  # pragma: no cover - defensive
+                    log.exception("Agent %s failed", agent.name)
+                    continue
+                for suggestion in suggestions or []:
+                    if suggestion.inputs_hash != snapshot.hash:
+                        log.warning(
+                            "Agent %s emitted suggestion with mismatched hash %s != %s",
+                            agent.name,
+                            suggestion.inputs_hash,
+                            snapshot.hash,
+                        )
+                        continue
+                    await self._emit(suggestion)

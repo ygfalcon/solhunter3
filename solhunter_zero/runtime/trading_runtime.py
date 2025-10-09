@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Optional
 
 from ..agent_manager import AgentManager
 from ..config import (
@@ -38,6 +38,9 @@ from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory
 from ..portfolio import Portfolio
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..golden_pipeline.service import GoldenPipelineService
 from ..paths import ROOT
 from ..redis_util import ensure_local_redis_if_needed
 from ..ui import UIState, UIServer
@@ -201,6 +204,8 @@ class TradingRuntime:
             pipeline_env.lower() in {"1", "true", "yes", "on"}
             or fast_flag.lower() in {"1", "true", "yes", "on"}
         )
+        self._use_golden_pipeline = False
+        self._golden_service: Optional["GoldenPipelineService"] = None
         self.pipeline: Optional[PipelineCoordinator] = None
         self._pending_tokens: Dict[str, Dict[str, Any]] = {}
         self._last_eval_summary: Dict[str, Any] = {}
@@ -255,6 +260,11 @@ class TradingRuntime:
             return
         self.stop_event.set()
         self.activity.add("runtime", "stopping")
+
+        if self._golden_service is not None:
+            with contextlib.suppress(Exception):
+                await self._golden_service.stop()
+            self._golden_service = None
 
         tasks_to_cancel = list(self._tasks)
         if self.rl_task is not None and self.rl_task not in tasks_to_cancel:
@@ -363,6 +373,14 @@ class TradingRuntime:
                 os.environ[env_name] = str(val)
         if os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is None:
             os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+        cfg_flag = bool(
+            cfg.get("use_golden_pipeline")
+            or cfg.get("golden_pipeline")
+            or cfg.get("golden_pipeline_enabled")
+        )
+        env_flag = parse_bool_env("GOLDEN_PIPELINE", False)
+        self._use_golden_pipeline = bool(cfg_flag or env_flag)
 
     async def _start_event_bus(self) -> None:
         broker_urls = get_broker_urls(self.cfg) if self.cfg else []
@@ -505,6 +523,21 @@ class TradingRuntime:
             log.info(
                 "TradingRuntime: pipeline created; evaluations will run through AgentManager swarm"
             )
+
+        if self._use_golden_pipeline and self.agent_manager is not None and self.portfolio is not None:
+            try:
+                from ..golden_pipeline.service import GoldenPipelineService
+
+                self._golden_service = GoldenPipelineService(
+                    agent_manager=self.agent_manager,
+                    portfolio=self.portfolio,
+                )
+                await self._golden_service.start()
+                self.activity.add("golden_pipeline", "enabled")
+                log.info("TradingRuntime: Golden pipeline service started")
+            except Exception:
+                log.exception("Failed to start Golden pipeline service")
+                self.activity.add("golden_pipeline", "failed", ok=False)
 
         rl_enabled = bool(self.cfg.get("rl_auto_train", False)) or parse_bool_env(
             "RL_DAEMON", False
