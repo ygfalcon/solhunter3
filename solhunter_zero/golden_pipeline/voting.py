@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections import defaultdict
-from typing import Awaitable, Callable, Dict, List, Tuple
+from typing import Awaitable, Callable, Dict, List, Mapping, Tuple
 
 from .types import Decision, TradeSuggestion
 from .utils import now_ts
@@ -21,6 +21,7 @@ class VotingStage:
         window_ms: int = 400,
         quorum: int = 2,
         min_score: float = 0.04,
+        rl_weights: Mapping[str, float] | None = None,
     ) -> None:
         self._emit = emit
         self._window_sec = window_ms / 1000.0
@@ -29,6 +30,10 @@ class VotingStage:
         self._pending: Dict[Tuple[str, str, str], List[TradeSuggestion]] = defaultdict(list)
         self._locks: Dict[Tuple[str, str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
         self._timers: Dict[Tuple[str, str, str], asyncio.Task] = {}
+        self._weights: Dict[str, float] = {
+            agent: float(weight)
+            for agent, weight in (rl_weights.items() if rl_weights else [])
+        }
 
     async def submit(self, suggestion: TradeSuggestion) -> None:
         key = (suggestion.mint, suggestion.side, suggestion.inputs_hash)
@@ -46,18 +51,25 @@ class VotingStage:
             return
         now = now_ts()
         valid = [s for s in suggestions if now <= s.generated_at + s.ttl_sec]
-        if len(valid) < self._quorum:
+        weighted = [
+            (s, max(self._weights.get(s.agent, 1.0), 0.0)) for s in valid
+        ]
+        weighted = [(s, w) for s, w in weighted if w > 0]
+        if len(weighted) < self._quorum:
             return
-        confidences = [s.confidence for s in valid]
-        total_conf = sum(confidences)
-        if total_conf <= 0:
+        total_weight = sum(weight for _, weight in weighted)
+        if total_weight <= 0:
             return
-        score = total_conf / len(valid)
+        total_conf = sum(max(s.confidence, 0.0) * weight for s, weight in weighted)
+        score = total_conf / total_weight
         if score < self._min_score:
             return
-        notional = sum(s.notional_usd for s in valid) / len(valid)
-        agents = sorted({s.agent for s in valid})
-        time_bucket = int(min(s.generated_at for s in valid) / self._window_sec)
+        weighted_notional = sum(s.notional_usd * weight for s, weight in weighted)
+        notional = weighted_notional / total_weight
+        agents = sorted({s.agent for s, _ in weighted})
+        time_bucket = int(
+            min(s.generated_at for s, _ in weighted) / self._window_sec
+        )
         order_id = self._build_order_id(
             mint=key[0],
             side=key[1],
@@ -77,6 +89,15 @@ class VotingStage:
             ts=now_ts(),
         )
         await self._emit(decision)
+
+    def set_rl_weights(self, weights: Mapping[str, float]) -> None:
+        """Update reinforcement learning weights applied during voting."""
+
+        self._weights = {
+            agent: float(weight)
+            for agent, weight in weights.items()
+            if weight is not None
+        }
 
     @staticmethod
     def _build_order_id(

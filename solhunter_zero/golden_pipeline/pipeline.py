@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable, Iterable
+from typing import Awaitable, Callable, Iterable, Mapping
 
 from .agents import AgentStage, BaseAgent
 from .coalescer import SnapshotCoalescer
@@ -22,6 +22,7 @@ from .types import (
     TokenSnapshot,
     TradeSuggestion,
     VirtualFill,
+    VirtualPnL,
 )
 from .voting import VotingStage
 
@@ -38,6 +39,7 @@ class GoldenPipeline:
         on_suggestion: Callable[[TradeSuggestion], Awaitable[None]] | None = None,
         on_decision: Callable[[Decision], Awaitable[None]] | None = None,
         on_virtual_fill: Callable[[VirtualFill], Awaitable[None]] | None = None,
+        on_virtual_pnl: Callable[[VirtualPnL], Awaitable[None]] | None = None,
         live_fill_handler: Callable[[LiveFill], Awaitable[None]] | None = None,
     ) -> None:
         self._context = ExecutionContext()
@@ -45,6 +47,7 @@ class GoldenPipeline:
         self._on_suggestion = on_suggestion
         self._on_decision = on_decision
         self._on_virtual_fill = on_virtual_fill
+        self._on_virtual_pnl = on_virtual_pnl
 
         async def _emit_golden(snapshot: GoldenSnapshot) -> None:
             self._context.record(snapshot)
@@ -79,7 +82,14 @@ class GoldenPipeline:
             if self._on_virtual_fill:
                 await self._on_virtual_fill(fill)
 
-        self._shadow_executor = ShadowExecutor(_emit_virtual)
+        async def _emit_virtual_pnl(pnl: VirtualPnL) -> None:
+            if self._on_virtual_pnl:
+                await self._on_virtual_pnl(pnl)
+
+        self._shadow_executor = ShadowExecutor(
+            _emit_virtual,
+            _emit_virtual_pnl,
+        )
         self._live_executor = LiveExecutor(live_fill_handler)
 
         async def _on_metadata(snapshot: TokenSnapshot) -> None:
@@ -136,3 +146,8 @@ class GoldenPipeline:
     @property
     def context(self) -> ExecutionContext:
         return self._context
+
+    def set_rl_weights(self, weights: Mapping[str, float]) -> None:
+        """Update reinforcement learning weights for voting."""
+
+        self._voting_stage.set_rl_weights(weights)
