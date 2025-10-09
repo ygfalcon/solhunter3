@@ -110,6 +110,7 @@ def extract_signature_entries(resp: Any) -> List[Dict[str, Any]]:
             ("memo", "memo"),
             ("confirmationStatus", "confirmationStatus"),
             ("confirmation_status", "confirmationStatus"),
+            ("amount", "amount"),
         ):
             if src in raw and raw[src] is not None:
                 entry[dest] = raw[src]
