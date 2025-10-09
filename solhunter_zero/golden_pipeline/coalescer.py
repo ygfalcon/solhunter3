@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Awaitable, Callable, Dict
 
+from .contracts import golden_hash_key
+from .kv import KeyValueStore
 from .types import DepthSnapshot, GoldenSnapshot, OHLCVBar, TokenSnapshot
 from .utils import canonical_hash, now_ts
 
@@ -12,13 +14,21 @@ from .utils import canonical_hash, now_ts
 class SnapshotCoalescer:
     """Join token metadata, OHLCV, and depth into Golden Snapshots."""
 
-    def __init__(self, emit: Callable[[GoldenSnapshot], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        emit: Callable[[GoldenSnapshot], Awaitable[None]],
+        *,
+        kv: KeyValueStore | None = None,
+        hash_ttl: float = 90.0,
+    ) -> None:
         self._emit = emit
         self._meta: Dict[str, TokenSnapshot] = {}
         self._bars: Dict[str, OHLCVBar] = {}
         self._depth: Dict[str, DepthSnapshot] = {}
         self._hash_cache: Dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self._kv = kv
+        self._hash_ttl = hash_ttl
 
     async def update_metadata(self, snapshot: TokenSnapshot) -> None:
         async with self._lock:
@@ -71,6 +81,12 @@ class SnapshotCoalescer:
         if self._hash_cache.get(mint) == snapshot_hash:
             return
         self._hash_cache[mint] = snapshot_hash
+        if self._kv:
+            key = golden_hash_key(mint)
+            cached = await self._kv.get(key)
+            if cached == snapshot_hash:
+                return
+            await self._kv.set(key, snapshot_hash, ttl=self._hash_ttl)
         asof = max(meta.asof, depth.asof, bar.asof_close, now_ts())
         golden = GoldenSnapshot(
             mint=mint,
