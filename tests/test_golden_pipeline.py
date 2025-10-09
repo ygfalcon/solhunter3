@@ -4,17 +4,24 @@ from collections import deque
 
 import pytest
 
+from solhunter_zero.golden_pipeline.agents import BaseAgent
 from solhunter_zero.golden_pipeline.market import MarketDataStage
 from solhunter_zero.golden_pipeline.depth import DepthStage
+from solhunter_zero.golden_pipeline.pipeline import GoldenPipeline
 from solhunter_zero.golden_pipeline.voting import VotingStage
 from solhunter_zero.golden_pipeline.execution import ShadowExecutor
 from solhunter_zero.golden_pipeline.types import (
     Decision,
     DepthSnapshot,
+    DiscoveryCandidate,
     GoldenSnapshot,
+    LiveFill,
     OHLCVBar,
     TapeEvent,
+    TokenSnapshot,
+    TradeSuggestion,
     VirtualFill,
+    VirtualPnL,
 )
 
 
@@ -156,7 +163,7 @@ def test_voting_stage_applies_rl_weights():
 
         await stage.submit(suggestion_a)
         await stage.submit(suggestion_b)
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
 
         assert len(decisions) == 1
         decision = decisions[0]
@@ -208,5 +215,140 @@ def test_shadow_executor_emits_virtual_pnl():
         assert pnl.mint == "MINT"
         assert pnl.realized_usd < 0
         assert pytest.approx(pnl.realized_usd, rel=1e-6) == pytest.approx(-1.0, rel=1e-6)
+
+    asyncio.run(runner())
+
+
+def test_pipeline_end_to_end_flow():
+    class StaticAgent(BaseAgent):
+        def __init__(self, name: str, side: str = "buy") -> None:
+            super().__init__(name)
+            self._side = side
+
+        async def generate(self, snapshot: GoldenSnapshot):
+            return [
+                self.build_suggestion(
+                    snapshot=snapshot,
+                    side=self._side,
+                    notional_usd=5_000.0,
+                    max_slippage_bps=40.0,
+                    risk={},
+                    confidence=0.6,
+                    ttl_sec=1.0,
+                )
+            ]
+
+    async def runner() -> None:
+        goldens: deque[GoldenSnapshot] = deque()
+        suggestions: deque[TradeSuggestion] = deque()
+        decisions: deque[Decision] = deque()
+        virtual_fills: deque[VirtualFill] = deque()
+        virtual_pnls: deque[VirtualPnL] = deque()
+        live_fills: deque[LiveFill] = deque()
+
+        async def on_golden(snapshot: GoldenSnapshot) -> None:
+            goldens.append(snapshot)
+
+        async def on_suggestion(suggestion: TradeSuggestion) -> None:
+            suggestions.append(suggestion)
+
+        async def on_decision(decision: Decision) -> None:
+            decisions.append(decision)
+
+        async def on_virtual_fill(fill: VirtualFill) -> None:
+            virtual_fills.append(fill)
+
+        async def on_virtual_pnl(pnl: VirtualPnL) -> None:
+            virtual_pnls.append(pnl)
+
+        async def on_live(fill: LiveFill) -> None:
+            live_fills.append(fill)
+
+        async def fetch_metadata(mints):
+            return {
+                mint: TokenSnapshot(
+                    mint=mint,
+                    symbol="TEST",
+                    name="Test Token",
+                    decimals=6,
+                    token_program="Tokenkeg",
+                    asof=time.time(),
+                )
+                for mint in mints
+            }
+
+        pipeline = GoldenPipeline(
+            enrichment_fetcher=fetch_metadata,
+            agents=[StaticAgent("alpha"), StaticAgent("beta")],
+            on_golden=on_golden,
+            on_suggestion=on_suggestion,
+            on_decision=on_decision,
+            on_virtual_fill=on_virtual_fill,
+            on_virtual_pnl=on_virtual_pnl,
+            live_fill_handler=on_live,
+        )
+
+        mint = "Mint1111111111111111111111111111111111"
+        await pipeline.submit_discovery(DiscoveryCandidate(mint=mint, asof=time.time()))
+
+        depth = DepthSnapshot(
+            mint=mint,
+            venue="aggregated",
+            mid_usd=1.5,
+            spread_bps=20.0,
+            depth_pct={"1": 10_000.0, "2": 15_000.0, "5": 25_000.0},
+            asof=time.time(),
+        )
+        await pipeline.submit_depth(depth)
+
+        now = time.time() - 600.0
+        event = TapeEvent(
+            mint_base=mint,
+            mint_quote="USD",
+            amount_base=1_000.0,
+            amount_quote=1_500.0,
+            route="test",
+            program_id="prog",
+            pool="pool",
+            signer="signer",
+            signature="sig",
+            slot=0,
+            ts=now,
+            fees_base=0.0,
+            price_usd=1.5,
+            fees_usd=0.0,
+            is_self=False,
+            buyer="trader",
+        )
+        await pipeline.submit_market_event(event)
+        await pipeline.flush_market()
+
+        await asyncio.sleep(0.2)
+
+        assert len(goldens) == 1
+        golden = goldens[0]
+        assert golden.mint == mint
+        assert golden.hash
+
+        assert len(suggestions) == 2
+        for suggestion in suggestions:
+            assert suggestion.inputs_hash == golden.hash
+
+        await asyncio.sleep(0.5)
+        assert len(decisions) == 1
+        decision = decisions[0]
+        assert decision.snapshot_hash == golden.hash
+        assert decision.agents == ["alpha", "beta"]
+        assert decision.notional_usd > 0
+
+        await asyncio.sleep(0.2)
+        assert len(virtual_fills) == 1
+        assert len(virtual_pnls) == 1
+        assert len(live_fills) == 1
+        virtual_fill = virtual_fills[0]
+        assert virtual_fill.snapshot_hash == golden.hash
+        assert pytest.approx(virtual_fill.qty_base, rel=1e-6) == pytest.approx(
+            decision.notional_usd / depth.mid_usd, rel=1e-6
+        )
 
     asyncio.run(runner())
