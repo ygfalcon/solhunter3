@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import List, Dict, Any, Iterable
 
 import os
+import logging
 import numpy as np
 
 from .. import models
@@ -27,6 +28,10 @@ def predict_token_activity(token: str, *, model_path: str | None = None) -> floa
 
 from . import BaseAgent
 from ..portfolio import Portfolio
+from .price_utils import resolve_price
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConvictionAgent(BaseAgent):
@@ -89,10 +94,23 @@ class ConvictionAgent(BaseAgent):
             avg_roi += activity
         if imbalance is not None:
             avg_roi += imbalance * 0.05
+
+        price, price_context = await resolve_price(token, portfolio)
+        context = {
+            "avg_roi": avg_roi,
+            "prediction": pred,
+            "activity": activity,
+            "imbalance": imbalance,
+        }
+        context.update(price_context)
+        if price <= 0:
+            logger.info("conviction: no price for token %s; context=%s", token, context)
+            return []
+
         if avg_roi > self.threshold:
-            return [{"token": token, "side": "buy", "amount": 1.0, "price": 0.0}]
+            return [{"token": token, "side": "buy", "amount": 1.0, "price": price}]
         if avg_roi < -self.threshold:
             pos = portfolio.balances.get(token)
             if pos:
-                return [{"token": token, "side": "sell", "amount": pos.amount, "price": 0.0}]
+                return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
         return []

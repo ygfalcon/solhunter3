@@ -1,6 +1,7 @@
 from __future__ import annotations
 from .jsonutil import loads, dumps
 import os
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Mapping
 
@@ -13,6 +14,8 @@ except ImportError:  # pragma: no cover - fallback when aiofiles is missing
 
 from .event_bus import publish
 from .schemas import PortfolioUpdated
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -233,6 +236,10 @@ class Portfolio:
             if len(hist) > limit:
                 del hist[0]
 
+        if prices:
+            self.update_highs(prices)
+            self.update_drawdown(prices)
+
     def correlations(self) -> Dict[tuple[str, str], float]:
         """Return pairwise correlations between tracked tokens."""
 
@@ -282,6 +289,9 @@ class Portfolio:
         hist = {t: self.price_history.get(t, []) for t in weights}
         cov_matrix = compute_live_covariance(hist)
         corr_matrix = compute_live_correlation(hist)
+        if cov_matrix.size == 0 or not getattr(cov_matrix, "shape", None):
+            logger.debug("Risk metrics skipped: insufficient covariance data")
+            return
         cov = portfolio_variance(cov_matrix, weights.values())
         cvar = portfolio_cvar(hist, weights)
         evar = portfolio_evar(hist, weights)

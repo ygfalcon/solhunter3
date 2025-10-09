@@ -1,23 +1,29 @@
-solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
-dex_base_url = "https://quote-api.jup.ag/"
+solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
+dex_base_url = "https://swap.helius.dev/"
 agents = [
     "simulation",
+    "memory",
+    "smart_discovery",
     "conviction",
+    "momentum",
+    "trend",
     "arbitrage",
     "exit",
-    "smart_discovery",
-    "trend",
-    "momentum",
-    "vanta",
-    "inferna",
+    "opportunity_cost",
     "portfolio_optimizer",
     "crossdex_rebalancer",
     "mev_sandwich",
     "flashloan_sandwich",
     "sac",
     "artifact_math",
+    "vanta",
+    "inferna",
+    "mempool_sniper",
+    "meta_conviction",
+    "ramanujan",
+    "alien_cipher",
 ]
-solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
 jupiter_ws_url = "wss://stats.jup.ag/ws"
 priority_rpc = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 dex_testnet_url = "https://quote-api.jup.ag"
@@ -42,16 +48,16 @@ weights_path = "weights.json"
 discovery_method = "websocket"
 token_suffix = "bonk"
 token_exclude_keywords = "scam,rug"
-discovery_min_volume_usd = "50000.0"
-discovery_min_liquidity_usd = "75000.0"
-discovery_max_tokens = "50"
-discovery_overfetch_factor = "1.6"
+discovery_min_volume_usd = "150000"
+discovery_min_liquidity_usd = "150000"
+discovery_max_tokens = "40"
+discovery_overfetch_factor = "1.0"
 discovery_cache_ttl = "0"
 discovery_mempool_limit = "12"
 discovery_volume_weight = "0.45"
 discovery_liquidity_weight = "0.55"
 discovery_mempool_bonus = "5.0"
-live_discovery = "0"
+live_discovery = "False"
 risk_tolerance = "0.1"
 max_allocation = "0.2"
 risk_multiplier = "1.0"
@@ -70,7 +76,7 @@ offline_data_interval = "3600"
 volume_threshold = "0"
 dex_latency_refresh_interval = "60"
 priority_fees = "0,1,2"
-dex_priorities = "phoenix,meteora,orca,raydium,jupiter"
+dex_priorities = "helius,phoenix,meteora,orca,raydium,jupiter"
 event_bus_url = "ws://127.0.0.1:8779"
 event_bus_peers = []
 broker_urls = "redis://localhost:6379"
@@ -91,10 +97,13 @@ use_service_route = "True"
 use_flash_loans = "True"
 max_flash_amount = "0.02"
 flash_loan_ratio = "0.1"
-use_mev_bundles = "True"
-mempool_score_threshold = "0.0"
-mempool_stats_window = "5"
-mempool_threshold = "0.0"
+use_mev_bundles = "False"
+mempool_score_threshold = "35"
+mempool_stats_window = "15"
+mempool_threshold = "35.0"
+smart_discovery_mempool_threshold = 35.0
+smart_discovery_volume_threshold = 150000
+smart_discovery_liquidity_threshold = 150000
 bundle_size = "1"
 depth_threshold = "0.0"
 cpu_low_threshold = "30.0"
@@ -121,10 +130,12 @@ jito_rpc_url = "https://mainnet.block-engine.jito.wtf"
 
 [agent_weights]
 simulation = 1.0
+memory = 0.75
+smart_discovery = 1.0
 conviction = 1.0
 arbitrage = 1.0
 exit = 1.0
-smart_discovery = 1.0
+opportunity_cost = 0.85
 trend = 1.0
 momentum = 1.0
 vanta = 1.0
@@ -135,6 +146,13 @@ flashloan_sandwich = 1.0
 sac = 1.0
 mev_sandwich = 1.0
 artifact_math = 1.0
+mempool_sniper = 0.9
+meta_conviction = 1.0
+ramanujan = 0.8
+alien_cipher = 0.75
+
+[dex_partner_urls]
+jupiter = "https://quote-api.jup.ag"
 
 [dex_fees]
 

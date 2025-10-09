@@ -111,6 +111,23 @@ def test_portfolio_drawdown():
     assert p.current_drawdown({"tok": 1.0}) == pytest.approx(0.5)
 
 
+def test_trailing_stop_refreshes_highs():
+    p = Portfolio(path=None)
+    p.add("tok", 1.0, 100.0)
+
+    # Rally updates the tracked high water mark via recorded prices.
+    p.record_prices({"tok": 120.0})
+    p.record_prices({"tok": 150.0})
+
+    assert p.balances["tok"].high_price == pytest.approx(150.0)
+    assert p.max_value == pytest.approx(150.0)
+
+    # Pullback should only trip the stop once price crosses the refreshed high.
+    p.record_prices({"tok": 140.0})
+    assert not p.trailing_stop_triggered("tok", 140.0, 0.1)
+    assert p.trailing_stop_triggered("tok", 134.0, 0.1)
+
+
 def test_calculate_order_size_with_gas():
     size = calculate_order_size(
         100.0,
@@ -343,5 +360,3 @@ def test_calculate_order_size_risk_manager_metrics():
         max_risk_per_token=rm.max_risk_per_token,
     )
     assert dynamic < base
-
-

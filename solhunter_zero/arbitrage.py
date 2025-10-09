@@ -3,6 +3,10 @@
 Latency measurements now run concurrently using :func:`asyncio.gather`. With
 dynamic concurrency enabled this refreshes endpoint latency around 30-50% faster
 when multiple URLs are checked.
+
+The concrete :class:`ArbitrageAgent` lives in this module so that both
+``solhunter_zero.arbitrage`` and ``solhunter_zero.agents.arbitrage`` resolve to
+the same implementation without relying on import-time path manipulation.
 """
 
 import asyncio
@@ -16,13 +20,17 @@ set_rayon_threads()
 from .http import get_session, loads, dumps
 import heapq
 import time
-from typing import List
+from typing import List, Dict, Any
 import numpy as np
 import contextlib
 
 from .dynamic_limit import _target_concurrency, _step_limit
 from . import resource_monitor
 from .util import parse_bool_env
+from .onchain_metrics import _helius_price_overview, _birdeye_price_overview
+from .agents import BaseAgent
+from .event_bus import subscribe
+from .portfolio import Portfolio
 
 try:  # pragma: no cover - optional dependency
     from numba import njit as _numba_njit
@@ -91,12 +99,12 @@ from .exchange import (
     RAYDIUM_DEX_URL,
     DEX_BASE_URL,
     VENUE_URLS,
-    SWAP_PATH,
+    resolve_swap_endpoint,
 )
 from .config import load_dex_config
 from . import order_book_ws
 from . import depth_client
-from .depth_client import stream_depth, prepare_signed_tx
+from .depth_client import stream_depth, prepare_signed_tx, snapshot as depth_snapshot
 from .execution import EventExecutor
 from .flash_loans import borrow_flash, repay_flash
 from solders.instruction import Instruction
@@ -109,6 +117,169 @@ DEPTH_RATE_LIMIT = 0.1
 DEPTH_SERVICE_SOCKET = os.getenv("DEPTH_SERVICE_SOCKET", "/tmp/depth_service.sock")
 
 PriceFeed = Callable[[str], Awaitable[float]]
+
+
+class ArbitrageAgent(BaseAgent):
+    """Detect arbitrage opportunities between DEX price feeds."""
+
+    name = "arbitrage"
+
+    def __init__(
+        self,
+        threshold: float = 0.0,
+        amount: float = 1.0,
+        feeds: Mapping[str, PriceFeed] | Sequence[PriceFeed] | None = None,
+        backup_feeds: Mapping[str, PriceFeed] | Sequence[PriceFeed] | None = None,
+        *,
+        fees: Mapping[str, float] | None = None,
+        gas: Mapping[str, float] | None = None,
+        latency: Mapping[str, float] | None = None,
+        gas_multiplier: float | None = None,
+    ):
+        self.threshold = threshold
+        self.amount = amount
+        if feeds is None:
+            self.feeds: Dict[str, PriceFeed] = {
+                "orca": fetch_orca_price_async,
+                "raydium": fetch_raydium_price_async,
+                "jupiter": fetch_jupiter_price_async,
+            }
+        elif isinstance(feeds, Mapping):
+            self.feeds = dict(feeds)
+        else:
+            self.feeds = {
+                getattr(f, "__name__", f"feed{i}"): f for i, f in enumerate(feeds)
+            }
+        env_fees, env_gas, env_lat = refresh_costs()
+        self.fees = dict(env_fees)
+        if fees:
+            self.fees.update(fees)
+        self.gas = dict(env_gas)
+        if gas:
+            self.gas.update(gas)
+        self.latency = dict(env_lat)
+        if latency:
+            self.latency.update(latency)
+        if gas_multiplier is not None:
+            self.gas_multiplier = float(gas_multiplier)
+        else:
+            self.gas_multiplier = float(os.getenv("GAS_MULTIPLIER", "1.0"))
+        if backup_feeds is None:
+            self.backup_feeds: Dict[str, PriceFeed] | None = None
+        elif isinstance(backup_feeds, Mapping):
+            self.backup_feeds = dict(backup_feeds)
+        else:
+            self.backup_feeds = {
+                getattr(f, "__name__", f"backup{i}"): f
+                for i, f in enumerate(backup_feeds)
+            }
+        # Cache of latest known prices per token and feed
+        self.price_cache: Dict[str, Dict[str, float]] = {}
+        self._unsub_price = subscribe("price_update", self._handle_price)
+
+    # ------------------------------------------------------------------
+    def _handle_price(self, payload: Mapping[str, Any]) -> None:
+        token = payload.get("token")
+        venue = payload.get("venue")
+        price = payload.get("price")
+        if not token or not venue:
+            return
+        try:
+            value = float(price)
+        except Exception:
+            return
+        self.price_cache.setdefault(str(token), {})[str(venue)] = value
+
+    def close(self) -> None:
+        if self._unsub_price:
+            self._unsub_price()
+
+    async def propose_trade(
+        self,
+        token: str,
+        portfolio: Portfolio,
+        *,
+        depth: float | None = None,
+        imbalance: float | None = None,
+    ) -> List[Dict[str, Any]]:
+        if depth is not None and depth <= 0:
+            return []
+        token_cache = self.price_cache.setdefault(token, {})
+
+        valid: Dict[str, float] = {
+            n: p for n, p in token_cache.items() if isinstance(p, (int, float)) and p > 0
+        }
+
+        if len(valid) < 2 and self.feeds:
+            names = list(self.feeds.keys())
+            prices = await asyncio.gather(*(f(token) for f in self.feeds.values()))
+            for name, price in zip(names, prices):
+                if price > 0:
+                    token_cache[name] = price
+                    valid[name] = price
+                elif name in token_cache:
+                    valid[name] = token_cache[name]
+
+        # If not enough data, try backup feeds
+        if len(valid) < 2 and self.backup_feeds:
+            b_names = list(self.backup_feeds.keys())
+            b_prices = await asyncio.gather(
+                *(f(token) for f in self.backup_feeds.values())
+            )
+            for b_name, b_price in zip(b_names, b_prices):
+                if b_price > 0:
+                    token_cache[b_name] = b_price
+                    valid[b_name] = b_price
+                elif b_name in token_cache:
+                    valid[b_name] = token_cache[b_name]
+
+        # If still not enough data, give up
+        if len(valid) < 2:
+            return []
+
+        env_fees, env_gas, env_lat = refresh_costs()
+        self.fees.update(env_fees)
+        self.gas.update(env_gas)
+        self.latency.update(env_lat)
+
+        gas_costs = {k: v * self.gas_multiplier for k, v in self.gas.items()}
+        depth_map, _ = depth_snapshot(token)
+        path, profit = _best_route(
+            valid,
+            self.amount,
+            token=token,
+            fees=self.fees,
+            gas=gas_costs,
+            latency=self.latency,
+            depth=depth_map,
+        )
+
+        if not path or profit <= 0:
+            return []
+
+        actions = []
+        for i in range(len(path) - 1):
+            buy = path[i]
+            sell = path[i + 1]
+            actions.append(
+                {
+                    "token": token,
+                    "side": "buy",
+                    "amount": self.amount,
+                    "price": valid[buy],
+                    "venue": buy,
+                }
+            )
+            actions.append(
+                {
+                    "token": token,
+                    "side": "sell",
+                    "amount": self.amount,
+                    "price": valid[sell],
+                    "venue": sell,
+                }
+            )
+        return actions
 
 
 # Default API endpoints for direct price queries
@@ -143,6 +314,16 @@ else:
         USE_FFI_ROUTE = _routeffi.is_routeffi_available()
     except Exception:
         USE_FFI_ROUTE = False
+
+
+def __getattr__(name: str):
+    if name == "ArbitrageAgent":  # pragma: no cover - import guard
+        return ArbitrageAgent
+    raise AttributeError(name)
+
+
+def __dir__() -> List[str]:  # pragma: no cover - convenience for REPLs
+    return sorted({*globals(), "ArbitrageAgent"})
 
 
 def _parse_mapping_env(env: str) -> dict:
@@ -713,10 +894,9 @@ async def _prepare_service_tx(
         "cluster": "mainnet-beta",
     }
     session = await get_session()
+    endpoint = resolve_swap_endpoint(base_url)
     try:
-        async with session.post(
-            f"{base_url}{SWAP_PATH}", json=payload, timeout=10
-        ) as resp:
+        async with session.post(endpoint, json=payload, timeout=10) as resp:
             resp.raise_for_status()
             data = await resp.json()
     except aiohttp.ClientError:
@@ -844,7 +1024,83 @@ async def fetch_meteora_price_async(token: str) -> float:
     return value
 
 
-JUPITER_API_URL = os.getenv("JUPITER_API_URL", "https://price.jup.ag/v4/price")
+ENABLE_BIRDEYE_FALLBACK = parse_bool_env("ENABLE_BIRDEYE_FALLBACK", True)
+ENABLE_DEXSCREENER_FALLBACK = parse_bool_env("ENABLE_DEXSCREENER_FALLBACK", True)
+DEXSCREENER_API_URL = os.getenv(
+    "DEXSCREENER_API_URL", "https://api.dexscreener.com/latest/dex/tokens"
+)
+
+
+async def _fetch_price_from_helius(session: aiohttp.ClientSession, token: str) -> float:
+    try:
+        price, *_ = await _helius_price_overview(session, token)
+    except Exception as exc:  # pragma: no cover - caching/optional failures
+        logger.debug("Helius price helper failed for %s: %s", token, exc)
+        return 0.0
+    try:
+        value = float(price)
+    except Exception:
+        value = 0.0
+    return value if value > 0 else 0.0
+
+
+async def _fetch_price_from_birdeye(session: aiohttp.ClientSession, token: str) -> float:
+    try:
+        price, *_ = await _birdeye_price_overview(session, token)
+    except Exception as exc:  # pragma: no cover - optional dependency failures
+        logger.debug("Birdeye price helper failed for %s: %s", token, exc)
+        return 0.0
+    try:
+        value = float(price)
+    except Exception:
+        value = 0.0
+    return value if value > 0 else 0.0
+
+
+async def _fetch_price_from_dexscreener(
+    session: aiohttp.ClientSession, token: str
+) -> float:
+    """Return price from DexScreener's token endpoint."""
+
+    url = f"{DEXSCREENER_API_URL.rstrip('/')}/{token}"
+    try:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status >= 400:
+                return 0.0
+            payload = await resp.json(content_type=None)
+    except aiohttp.ClientError as exc:  # pragma: no cover - network failures
+        logger.debug("DexScreener price request failed for %s: %s", token, exc)
+        return 0.0
+    except Exception:
+        return 0.0
+
+    best_price = 0.0
+    best_liquidity = -1.0
+
+    pairs = payload.get("pairs") if isinstance(payload, dict) else None
+    if isinstance(pairs, list):
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            price_val = pair.get("priceUsd") or pair.get("price")
+            try:
+                price_float = float(price_val)
+            except Exception:
+                continue
+            liquidity_info = pair.get("liquidity")
+            liquidity = 0.0
+            if isinstance(liquidity_info, dict):
+                for key in ("usd", "base", "quote"):
+                    cand = liquidity_info.get(key)
+                    if isinstance(cand, (int, float)):
+                        liquidity = max(liquidity, float(cand))
+            elif isinstance(liquidity_info, (int, float)):
+                liquidity = float(liquidity_info)
+            if liquidity > best_liquidity and price_float > 0:
+                best_price = price_float
+                best_liquidity = liquidity
+
+    return best_price if best_price > 0 else 0.0
 
 
 async def fetch_jupiter_price_async(token: str) -> float:
@@ -860,25 +1116,25 @@ async def fetch_jupiter_price_async(token: str) -> float:
         update_price_cache(token, cached)
         return cached
 
-    url = f"{JUPITER_API_URL}?ids={token}"
     session = await get_session()
-    try:
-        async with session.get(url, timeout=10) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            info = data.get("data", {}).get(token)
-            if info and isinstance(info, dict):
-                price = info.get("price")
-                value = float(price) if isinstance(price, (int, float)) else 0.0
-            else:
-                value = 0.0
-    except aiohttp.ClientError as exc:  # pragma: no cover - network errors
-        logger.warning("Failed to fetch price from Jupiter: %s", exc)
-        return 0.0
+    value = await _fetch_price_from_helius(session, token)
+    if value <= 0 and ENABLE_BIRDEYE_FALLBACK:
+        value = await _fetch_price_from_birdeye(session, token)
+    if value <= 0 and ENABLE_DEXSCREENER_FALLBACK:
+        value = await _fetch_price_from_dexscreener(session, token)
 
     PRICE_CACHE.set(("jupiter", token), value)
     update_price_cache(token, value)
     return value
+
+
+async def fetch_helius_price_async(token: str) -> float:
+    """Compatibility wrapper exposing the Helius-backed price helper."""
+
+    return await fetch_jupiter_price_async(token)
+
+
+fetch_helius_price_async.__name__ = "fetch_helius_price_async"
 
 
 def make_api_price_fetch(url: str, name: str | None = None) -> PriceFeed:

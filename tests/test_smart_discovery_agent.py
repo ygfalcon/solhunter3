@@ -1,84 +1,117 @@
 import asyncio
-import types
-import sys
 import pytest
-trans = pytest.importorskip("transformers")
-pytest.importorskip("sklearn")
-if not hasattr(trans, "pipeline"):
-    trans.pipeline = lambda *a, **k: lambda x: []
-
-# provide minimal solana.publickey stub
-mod = types.ModuleType("solana.publickey")
-class _Pub:
-    def __init__(self, *a, **k):
-        pass
-mod.PublicKey = _Pub
-sys.modules.setdefault("solana.publickey", mod)
 
 from solhunter_zero.agents.smart_discovery import SmartDiscoveryAgent
+from solhunter_zero.portfolio import Portfolio
 
 
-class DummyGBR:
-    def fit(self, X, y):
-        return self
-
-    def predict(self, X):
-        return [sum(x) for x in X]
-
-
-def fake_mempool_gen(url, **_):
-    async def gen():
-        yield {"address": "a", "score": 1.0}
-        yield {"address": "b", "score": 2.0}
-    return gen()
+class DummyPortfolio(Portfolio):
+    def __init__(self) -> None:
+        super().__init__(path=None)
+        self.balances = {}
+        self.price_history = {}
 
 
-def test_ranking(monkeypatch):
-    monkeypatch.setattr(
-        "solhunter_zero.agents.smart_discovery.stream_ranked_mempool_tokens",
-        lambda url, **_: fake_mempool_gen(url),
+def test_high_scoring_token_produces_priced_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = SmartDiscoveryAgent(
+        trade_volume_threshold=100.0,
+        trade_liquidity_threshold=50.0,
     )
-    monkeypatch.setattr(
-        "solhunter_zero.agents.smart_discovery.onchain_metrics.fetch_volume_onchain",
-        lambda t, u: 10.0 if t == "a" else 1.0,
-    )
-    monkeypatch.setattr(
-        "solhunter_zero.agents.smart_discovery.onchain_metrics.fetch_liquidity_onchain",
-        lambda t, u: 5.0 if t == "a" else 1.0,
-    )
-    monkeypatch.setattr(
-        "solhunter_zero.agents.smart_discovery.news.fetch_sentiment", lambda *a, **k: 0.5
-    )
-    sklearn = types.SimpleNamespace(GradientBoostingRegressor=lambda: DummyGBR())
-    monkeypatch.setitem(sys.modules, "sklearn.ensemble", sklearn)
+    agent.metrics = {
+        "high": {
+            "predicted_score": 2.5,
+            "sentiment": 0.3,
+            "rank": 1,
+            "volume": 150.0,
+            "liquidity": 80.0,
+            "mempool_score": 1.4,
+        }
+    }
 
-    agent = SmartDiscoveryAgent()
+    async def fake_resolve_price(token: str, portfolio: Portfolio):
+        assert token == "high"
+        return 1.23, {"source": "test"}
 
-    tokens = asyncio.run(agent.discover_tokens("ws://node", limit=2))
-    assert tokens == ["a", "b"]
-    assert agent.metrics["a"]["predicted_score"] > agent.metrics["b"]["predicted_score"]
-
-
-def test_volume_filter(monkeypatch):
     monkeypatch.setattr(
-        "solhunter_zero.agents.smart_discovery.stream_ranked_mempool_tokens",
-        lambda url, **_: fake_mempool_gen(url),
+        "solhunter_zero.agents.smart_discovery.resolve_price",
+        fake_resolve_price,
     )
-    monkeypatch.setattr(
-        "solhunter_zero.agents.smart_discovery.onchain_metrics.fetch_volume_onchain",
-        lambda t, u: 1.0,
-    )
-    monkeypatch.setattr(
-        "solhunter_zero.agents.smart_discovery.onchain_metrics.fetch_liquidity_onchain",
-        lambda t, u: 1.0,
-    )
-    monkeypatch.setattr(
-        "solhunter_zero.agents.smart_discovery.news.fetch_sentiment", lambda *a, **k: 0.0
-    )
-    sklearn = types.SimpleNamespace(GradientBoostingRegressor=lambda: DummyGBR())
-    monkeypatch.setitem(sys.modules, "sklearn.ensemble", sklearn)
 
-    agent = SmartDiscoveryAgent(trend_volume_threshold=5.0)
+    actions = asyncio.run(agent.propose_trade("high", DummyPortfolio()))
 
-    tokens = asyncio.run(agent.discover_tokens("ws://node", limit=2))
-    assert tokens == []
+    assert actions and actions[0]["side"] == "buy"
+    assert actions[0]["price"] == pytest.approx(1.23)
+    metadata = actions[0]["metadata"]
+    assert metadata["predicted_score"] == pytest.approx(2.5)
+    assert metadata["sentiment"] == pytest.approx(0.3)
+    assert metadata["price_context"] == {"source": "test"}
+
+
+def test_low_scoring_token_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = SmartDiscoveryAgent(
+        trade_volume_threshold=10.0,
+        trade_liquidity_threshold=5.0,
+    )
+    agent.metrics = {
+        "low": {
+            "predicted_score": -0.1,
+            "sentiment": -0.2,
+            "rank": 2,
+            "volume": 100.0,
+            "liquidity": 50.0,
+            "mempool_score": 0.8,
+        }
+    }
+
+    async def fail_resolve_price(token: str, portfolio: Portfolio):
+        raise AssertionError("price helper should not be called for low scoring tokens")
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.smart_discovery.resolve_price",
+        fail_resolve_price,
+    )
+
+    actions = asyncio.run(agent.propose_trade("low", DummyPortfolio()))
+
+    assert actions == []
+
+
+def test_token_below_volume_or_liquidity_threshold_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = SmartDiscoveryAgent(
+        trade_volume_threshold=200.0,
+        trade_liquidity_threshold=150.0,
+    )
+    agent.metrics = {
+        "thin": {
+            "predicted_score": 3.0,
+            "sentiment": 0.1,
+            "rank": 1,
+            "volume": 199.0,
+            "liquidity": 150.0,
+            "mempool_score": 1.0,
+        },
+        "illiquid": {
+            "predicted_score": 3.0,
+            "sentiment": 0.1,
+            "rank": 2,
+            "volume": 250.0,
+            "liquidity": 149.0,
+            "mempool_score": 1.0,
+        },
+    }
+
+    async def fail_resolve_price(token: str, portfolio: Portfolio):
+        raise AssertionError("price helper should not be called for filtered tokens")
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.smart_discovery.resolve_price",
+        fail_resolve_price,
+    )
+
+    thin_actions = asyncio.run(agent.propose_trade("thin", DummyPortfolio()))
+    illiquid_actions = asyncio.run(agent.propose_trade("illiquid", DummyPortfolio()))
+
+    assert thin_actions == []
+    assert illiquid_actions == []

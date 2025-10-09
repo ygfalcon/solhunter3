@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import logging
+
 from typing import List, Dict, Any
 
 from . import BaseAgent
 from ..portfolio import Portfolio
-from ..prices import fetch_token_prices_async
+from .price_utils import resolve_price
+from ..decision import should_sell
+
+
+logger = logging.getLogger(__name__)
 
 
 class ExitAgent(BaseAgent):
@@ -27,17 +33,32 @@ class ExitAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         if token not in portfolio.balances:
             return []
-        prices = await fetch_token_prices_async({token})
-        price = prices.get(token, 0.0)
+        price, price_context = await resolve_price(token, portfolio)
+        if price <= 0:
+            logger.warning(
+                "exit agent could not obtain a valid price for %s; aborting proposal",
+                token,
+                extra={"price_context": price_context},
+            )
+            return []
         pos = portfolio.balances[token]
 
-        if price:
-            roi = portfolio.position_roi(token, price)
-            if self.stop_loss and roi <= -self.stop_loss:
-                return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
-            if self.take_profit and roi >= self.take_profit:
-                return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
+        roi = portfolio.position_roi(token, price)
 
-        if self.trailing and portfolio.trailing_stop_triggered(token, price, self.trailing):
+        trailing = self.trailing if self.trailing else None
+        if trailing and price > 0:
+            # Update the high watermark before evaluating the trailing stop via
+            # ``should_sell`` so the comparison uses the freshest price data.
+            portfolio.trailing_stop_triggered(token, price, trailing)
+
+        if should_sell(
+            [],
+            trailing_stop=trailing,
+            current_price=price if price > 0 else None,
+            high_price=pos.high_price,
+            realized_roi=roi,
+            take_profit=self.take_profit or None,
+            stop_loss=self.stop_loss or None,
+        ):
             return [{"token": token, "side": "sell", "amount": pos.amount, "price": price}]
         return []

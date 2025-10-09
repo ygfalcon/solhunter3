@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import os
 import logging
+import socket
+from typing import Any
 import aiohttp
+from aiohttp.abc import AbstractResolver
+from aiohttp.resolver import DefaultResolver
 import json as _json_std  # type: ignore
 
 from .optional_imports import try_import
@@ -90,12 +94,66 @@ def check_endpoint(url: str, retries: int = 3) -> None:
 
 # Maintain a session per event loop to avoid cross-loop usage errors when
 # running multiple asyncio loops in different threads.
-import asyncio, weakref, socket
+import asyncio, weakref
 _SESSIONS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, aiohttp.ClientSession]" = weakref.WeakKeyDictionary()
 
 # Connector limits are configurable via environment variables.
 CONNECTOR_LIMIT = int(os.getenv("HTTP_CONNECTOR_LIMIT", "0") or 0)
 CONNECTOR_LIMIT_PER_HOST = int(os.getenv("HTTP_CONNECTOR_LIMIT_PER_HOST", "0") or 0)
+def _parse_static_dns(value: str | None) -> dict[str, list[str]]:
+    mapping: dict[str, list[str]] = {}
+    if not value:
+        return mapping
+    for entry in value.split(";"):
+        chunk = entry.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        host, _, ips = chunk.partition("=")
+        host = host.strip().lower()
+        if not host or not ips:
+            continue
+        addr_list = [ip.strip() for ip in ips.split(",") if ip.strip()]
+        if addr_list:
+            mapping[host] = addr_list
+    return mapping
+
+
+STATIC_DNS_DEFAULT = (
+    "quote-api.jup.ag=172.64.144.197,104.18.43.59;"
+    "api.helius.xyz=104.18.36.169,172.64.151.87;"
+    "mainnet.helius-rpc.com=104.18.36.169,172.64.151.87;"
+    "pumpportal.fun=35.194.64.63;"
+    "api.dexscreener.com=104.18.38.143,172.64.149.113"
+)
+STATIC_DNS_MAP = _parse_static_dns(os.getenv("HTTP_STATIC_DNS", STATIC_DNS_DEFAULT))
+
+
+class StaticResolver(AbstractResolver):
+    def __init__(self, mapping: dict[str, list[str]], fallback: AbstractResolver | None = None) -> None:
+        self._mapping = {host: list(ips) for host, ips in mapping.items() if ips}
+        self._fallback = fallback or DefaultResolver()
+
+    async def resolve(self, host: str, port: int = 0, family: int = 0) -> list[dict[str, Any]]:  # type: ignore[name-defined]
+        host_lower = host.lower()
+        ips = self._mapping.get(host_lower)
+        if ips:
+            resolved = []
+            for ip in ips:
+                resolved.append(
+                    {
+                        "hostname": host,
+                        "host": ip,
+                        "port": port,
+                        "family": socket.AF_INET,
+                        "proto": 0,
+                        "flags": 0,
+                    }
+                )
+            return resolved
+        return await self._fallback.resolve(host, port, family)
+
+    async def close(self) -> None:
+        await self._fallback.close()
 
 async def get_session() -> aiohttp.ClientSession:
     """Return an aiohttp session bound to the current event loop."""
@@ -105,14 +163,15 @@ async def get_session() -> aiohttp.ClientSession:
         conn_cls = getattr(aiohttp, "TCPConnector", None)
         connector = None
         if conn_cls is not object and conn_cls is not None:
-            # Optional IPv4-only connector for environments with broken IPv6 DNS/routes
             force_ipv4 = str(os.getenv("HTTP_FORCE_IPV4", "")).lower() in {"1", "true", "yes"}
             family = socket.AF_INET if force_ipv4 else getattr(socket, "AF_UNSPEC", 0)
             try:
+                resolver: AbstractResolver | None = StaticResolver(STATIC_DNS_MAP) if STATIC_DNS_MAP else None
                 connector = conn_cls(
                     limit=CONNECTOR_LIMIT,
                     limit_per_host=CONNECTOR_LIMIT_PER_HOST,
                     family=family,
+                    resolver=resolver,
                 )
             except TypeError:
                 connector = None

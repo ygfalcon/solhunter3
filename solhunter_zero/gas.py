@@ -3,7 +3,10 @@ from solana.rpc.api import Client
 from solana.rpc.async_api import AsyncClient
 
 RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
-RPC_TESTNET_URL = os.getenv("SOLANA_TESTNET_RPC_URL", "https://api.devnet.solana.com")
+RPC_TESTNET_URL = os.getenv(
+    "SOLANA_TESTNET_RPC_URL",
+    "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+)
 
 LAMPORTS_PER_SOL = 1_000_000_000
 
@@ -27,19 +30,30 @@ def _extract_lamports(resp: object) -> int:
         return 0
 
 
+_FALLBACK_LAMPORTS = 5000  # network base fee per signature
+
+
 def get_current_fee(testnet: bool = False) -> float:
     """Return current fee per signature in SOL."""
     client = Client(RPC_TESTNET_URL if testnet else RPC_URL)
-    resp = client.get_fees()
-    lamports = _extract_lamports(resp)
+    try:
+        resp = client.get_latest_blockhash()
+    except Exception:
+        lamports = _FALLBACK_LAMPORTS
+    else:
+        lamports = _extract_lamports(resp) or _FALLBACK_LAMPORTS
     return lamports / LAMPORTS_PER_SOL
 
 
 async def get_current_fee_async(testnet: bool = False) -> float:
     """Asynchronously return current fee per signature in SOL."""
     async with AsyncClient(RPC_TESTNET_URL if testnet else RPC_URL) as client:
-        resp = await client.get_fees()
-    lamports = _extract_lamports(resp)
+        try:
+            resp = await client.get_latest_blockhash()
+        except Exception:
+            lamports = _FALLBACK_LAMPORTS
+        else:
+            lamports = _extract_lamports(resp) or _FALLBACK_LAMPORTS
     return lamports / LAMPORTS_PER_SOL
 
 

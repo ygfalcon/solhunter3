@@ -29,6 +29,7 @@ from solhunter_zero.config import (
     set_env_from_config,
 )
 from solhunter_zero.redis_util import ensure_local_redis_if_needed
+from solhunter_zero.logging_utils import configure_runtime_logging
 
 
 log = logging.getLogger(__name__)
@@ -117,7 +118,8 @@ def launch_foreground(args: argparse.Namespace, cfg_path: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    configure_runtime_logging(force=True)
+    logging.getLogger(__name__).info("Runtime logging configured")
 
     if not args.skip_clean:
         kill_lingering_processes()

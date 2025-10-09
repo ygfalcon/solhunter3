@@ -8,11 +8,12 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from .event_bus import publish
-from .schemas import RuntimeLog, WeightsUpdated
+from .schemas import Heartbeat, RuntimeLog, WeightsUpdated
 from .agents.execution import ExecutionAgent
 from .agent_manager import EvaluationContext
 from .strategy_manager import StrategyManager
 from .swarm_pipeline import SwarmPipeline
+from .util import parse_bool_env
 
 log = logging.getLogger(__name__)
 
@@ -94,15 +95,27 @@ class FirstTradeTimeoutError(TimeoutError):
 # ---------------------------------------------------------------------
 async def _init_rl_training(
     cfg: Dict[str, Any] | None,
-    rl_daemon: bool = False,
+    rl_daemon: bool | None = None,
     rl_interval: float = 3600.0,
 ) -> Optional[asyncio.Task]:
     """
     Start a tiny periodic task that *could* be swapped with a real RL loop.
-    It just publishes a weights heartbeat so downstream listeners don't break.
-    Return the asyncio.Task so the runtime can cancel it on shutdown.
+    The daemon honours ``rl_auto_train`` from the loaded configuration and the
+    ``RL_DAEMON`` environment variable.  When either toggle is enabled it
+    publishes periodic weight updates and heartbeats so downstream listeners
+    don't break.  Return the asyncio.Task so the runtime can cancel it on
+    shutdown.
     """
-    if not rl_daemon:
+    cfg = cfg or {}
+    auto_flag = cfg.get("rl_auto_train")
+    if auto_flag is None:
+        auto_flag = cfg.get("use_rl_weights")
+    enabled = bool(auto_flag)
+    if rl_daemon is not None:
+        enabled = enabled or bool(rl_daemon)
+    enabled = enabled or parse_bool_env("RL_DAEMON", False)
+
+    if not enabled:
         return None
 
     async def _loop() -> None:
@@ -110,11 +123,13 @@ async def _init_rl_training(
         try:
             while True:
                 # In a real setup you'd compute new weights here.
+                publish("heartbeat", Heartbeat(service="rl_daemon"))
                 publish("weights_updated", WeightsUpdated(weights={}))
                 publish("runtime.log", RuntimeLog(stage="rl", detail="tick"))
                 await asyncio.sleep(max(5.0, float(rl_interval)))
         except asyncio.CancelledError:
             publish("runtime.log", RuntimeLog(stage="rl", detail="daemon-stop"))
+            publish("heartbeat", Heartbeat(service="rl_daemon"))
             raise
 
     return asyncio.create_task(_loop(), name="rl_daemon")

@@ -22,8 +22,24 @@ from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
 
 logger = logging.getLogger(__name__)
 
-_MIN_VOLUME = float(os.getenv("DISCOVERY_MIN_VOLUME_USD", "50000") or 0)
-_MIN_LIQUIDITY = float(os.getenv("DISCOVERY_MIN_LIQUIDITY_USD", "75000") or 0)
+_FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: str, *, fast_default: float | None = None) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        if _FAST_MODE and fast_default is not None:
+            return float(fast_default)
+        raw = default
+    try:
+        value = float(raw)
+    except Exception:
+        value = float(default)
+    return value
+
+
+_MIN_VOLUME = _env_float("DISCOVERY_MIN_VOLUME_USD", "50000", fast_default=0.0)
+_MIN_LIQUIDITY = _env_float("DISCOVERY_MIN_LIQUIDITY_USD", "75000", fast_default=0.0)
 _MAX_TOKENS = int(os.getenv("DISCOVERY_MAX_TOKENS", "50") or 50)
 _PAGE_LIMIT = max(1, min(int(os.getenv("DISCOVERY_PAGE_SIZE", "50") or 50), 50))
 _OVERFETCH_FACTOR = float(os.getenv("DISCOVERY_OVERFETCH_FACTOR", "1.0") or 1.0)

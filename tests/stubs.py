@@ -51,6 +51,7 @@ def stub_numpy() -> None:
     np.zeros = zeros
     np.ones = ones
     np.bool_ = bool
+    np.__version__ = "0.0"
     np.isscalar = lambda x: not isinstance(x, (list, tuple, dict))
     sys.modules.setdefault('numpy', np)
 
@@ -715,9 +716,13 @@ def stub_faiss() -> None:
     except Exception:  # pragma: no cover - safety net
         spec = None
     if spec is not None:
-        mod = importlib.import_module('faiss')
-        sys.modules.setdefault('faiss', mod)
-        return
+        try:
+            mod = importlib.import_module('faiss')
+        except Exception:
+            mod = None
+        else:
+            sys.modules.setdefault('faiss', mod)
+            return
     mod = types.ModuleType('faiss')
     mod.__spec__ = importlib.machinery.ModuleSpec('faiss', None)
     mod._STUB = True

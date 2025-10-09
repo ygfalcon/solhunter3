@@ -59,8 +59,10 @@ The helper wraps the dependency checks and keypair/setup logic used by
    ```yaml
 birdeye_api_key: b1e60d72780940d1bd929b9b2e9225e6
 solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
-dex_base_url: https://quote-api.jup.ag
+dex_base_url: https://swap.helius.dev
 dex_testnet_url: https://quote-api.jup.ag
+dex_partner_urls:
+  jupiter: https://quote-api.jup.ag
 orca_api_url: https://api.orca.so
 raydium_api_url: https://api.raydium.io
 orca_ws_url: ""
@@ -86,7 +88,7 @@ mempool_threshold: 0.0
 bundle_size: 1
 use_mev_bundles: true
 learning_rate: 0.1
-dex_priorities: "orca,raydium,jupiter"
+dex_priorities: "helius,orca,raydium,jupiter"
 dex_fees: "{}"
 dex_gas: "{}"
 dex_latency: "{}"
@@ -108,6 +110,38 @@ mutation_threshold: 0.0
 strategy_rotation_interval: 0
 weight_config_paths: []
 ```
+
+`load_dex_config()` seeds `dex_partner_urls` with known aggregators so the bot first
+queries the Helius swap gateway, then partners such as Birdeye before falling back to
+Jupiter. Add your own partners under `dex_partner_urls` and append their keys to
+`dex_priorities` instead of overriding `dex_base_url` so the default cascade remains in
+place.
+
+To adapt buy decisions to market regimes, define a `decision_thresholds` table
+with per-regime overrides. Each regime inherits the values from the
+`default` section, letting you tighten liquidity floors or increase gas cost
+deductions when markets turn bearish. When no table is provided the bot uses
+`min_success = 0.6`, `min_roi = 0.05` and `min_sharpe = 0.05` with other
+thresholds at zero:
+
+```toml
+[decision_thresholds.default]
+min_success = 0.6
+min_roi = 0.1
+min_sharpe = 0.1
+gas_cost = 0.02
+
+[decision_thresholds.bear]
+min_success = 0.8
+min_roi = 0.18
+min_sharpe = 0.15
+min_liquidity = 200000.0
+gas_cost = 0.08
+```
+
+`AgentManager` passes the active regime into the evaluation swarm so agents that
+support regime-aware tuning (such as the simulation agent) automatically pick up
+these profiles.
 
 Key discovery options:
 

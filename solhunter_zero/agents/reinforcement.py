@@ -5,9 +5,14 @@ import random
 from collections import defaultdict
 from typing import List, Dict, Any
 
+import logging
+
 from . import BaseAgent
 from .memory import MemoryAgent
+from .price_utils import resolve_price
 from ..portfolio import Portfolio
+
+logger = logging.getLogger(__name__)
 
 
 class ReinforcementAgent(BaseAgent):
@@ -69,9 +74,41 @@ class ReinforcementAgent(BaseAgent):
             action = "buy" if q["buy"] >= q["sell"] else "sell"
 
         if action == "buy":
-            return [{"token": token, "side": "buy", "amount": 1.0, "price": 0.0}]
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                logger.info(
+                    "%s agent skipping buy for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
+            return [
+                {
+                    "token": token,
+                    "side": "buy",
+                    "amount": 1.0,
+                    "price": price,
+                }
+            ]
 
         position = portfolio.balances.get(token)
         if position:
-            return [{"token": token, "side": "sell", "amount": position.amount, "price": 0.0}]
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                logger.info(
+                    "%s agent skipping sell for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
+            return [
+                {
+                    "token": token,
+                    "side": "sell",
+                    "amount": position.amount,
+                    "price": price,
+                }
+            ]
         return []

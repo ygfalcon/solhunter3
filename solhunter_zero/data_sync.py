@@ -11,7 +11,11 @@ from .http import get_session
 
 from .offline_data import OfflineData, MarketSnapshot
 from .data_pipeline import map_snapshot
-from .token_scanner import scan_tokens_async
+from .agents.discovery import (
+    DEFAULT_DISCOVERY_METHOD,
+    DiscoveryAgent,
+    resolve_discovery_method,
+)
 from .simulation import DEFAULT_METRICS_BASE_URL
 from .news import fetch_sentiment_async
 import threading
@@ -105,9 +109,11 @@ async def sync_snapshots(
 async def sync_recent(days: int = 3, db_path: str = "offline_data.db") -> None:
     """Discover tokens and sync recent snapshots."""
 
-    tokens = await scan_tokens_async(
-        offline=False, token_file=None, method=os.getenv("DISCOVERY_METHOD", "websocket")
-    )
+    method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+    if method is None:
+        method = DEFAULT_DISCOVERY_METHOD
+    agent = DiscoveryAgent()
+    tokens = await agent.discover_tokens(method=method)
     if tokens:
         await sync_snapshots(tokens, days=days, db_path=db_path)
 
@@ -161,4 +167,3 @@ def stop_scheduler() -> None:
     if _sched_task is not None:
         _sched_task.cancel()
         _sched_task = None
-

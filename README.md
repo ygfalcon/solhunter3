@@ -176,17 +176,60 @@ The bot reads its settings from `config.toml`. Ensure the following keys are def
 - `dex_base_url` – base URL of the DEX API
 - `agents` – list of agent names to enable
 - `agent_weights` – table mapping each agent to a weight
+- `decision_thresholds` – optional table keyed by regime that tunes buy
+  thresholds (success probability, ROI, Sharpe, liquidity floor, gas cost).
+  When omitted the runtime falls back to `min_success = 0.6`,
+  `min_roi = 0.05`, `min_sharpe = 0.05`, with all other thresholds at zero.
 
 A minimal example looks like:
 
 ```toml
 solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
-dex_base_url = "https://quote-api.jup.ag"
+dex_base_url = "https://swap.helius.dev"
 agents = ["simulation"]
 
 [agent_weights]
 simulation = 1.0
 ```
+
+The default configuration prefers the [Helius swap gateway](https://swap.helius.dev) and
+falls back through any partner URLs defined under `dex_partner_urls` before returning to
+Jupiter's public API. To add an additional partner without breaking this cascade, extend
+`dex_partner_urls` instead of overriding `dex_base_url`:
+
+```toml
+[dex_partner_urls]
+my_partner = "https://example.swap.partner"
+```
+
+The partner key (for example, `my_partner`) is used in `dex_priorities`. When you append a
+partner, keep the Helius entry first so that `load_dex_config()` can fall back to
+`jupiter` as the last resort automatically. If you supply `dex_priorities`, include the
+new partner alongside `helius` and `jupiter` to preserve the cascade.
+
+You can optionally tailor buy criteria for each detected market regime by
+defining a `decision_thresholds` table. Provide a `default` section for shared
+values and override individual fields such as `min_success`, `min_roi`,
+`min_liquidity`, or `gas_cost` per regime:
+
+```toml
+[decision_thresholds.default]
+min_success = 0.6
+min_roi = 0.1
+min_sharpe = 0.1
+min_liquidity = 50000.0
+gas_cost = 0.02
+
+[decision_thresholds.bear]
+min_success = 0.75
+min_roi = 0.18
+min_sharpe = 0.15
+gas_cost = 0.06
+min_liquidity = 150000.0
+```
+
+`AgentManager` forwards the detected regime to agents like the simulation
+module so their buy decisions automatically adapt to these profiles.
 
 The `scripts/setup_one_click.py` helper validates these fields after writing `config.toml` and exits with guidance if any are missing.
 
@@ -316,7 +359,7 @@ profit calculation so routes are ranked based on the borrowed size.
 10. **Priority RPC endpoints**
     Specify one or more RPC URLs used for high-priority submission:
     ```bash
-export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.ankr.com/solana
+export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
     ```
 11. **Priority fee multipliers**
     Configure compute unit price multipliers used when the mempool is busy:
@@ -494,7 +537,7 @@ endpoints using ``priority_rpc`` (or the ``PRIORITY_RPC`` environment
 variable):
 
 ```bash
-export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.ankr.com/solana
+export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
 ```
 ### Running in a Cluster
 
@@ -515,7 +558,7 @@ solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3f
 solana_keypair = "keypairs/node1.json"
 
 [[nodes]]
-solana_rpc_url = "https://rpc.ankr.com/solana"
+solana_rpc_url = "https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 solana_keypair = "keypairs/node2.json"
 ```
 
@@ -709,6 +752,8 @@ Set `USE_TORCH_COMPILE=0` to disable this optimization.
 
 Set `rl_auto_train = true` in `config.toml` to enable automatic hyperparameter
 tuning. When enabled the RL daemon starts automatically with the trading loop.
+You can also toggle the lightweight daemon ad-hoc by exporting
+`RL_DAEMON=true`, which is useful for testing without touching configuration.
 It spawns `scripts/auto_train_rl.py` which periodically retrains the PPO model
 from `offline_data.db`. Control how often tuning runs via `rl_tune_interval`
 (seconds).

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from typing import List, Dict, Any, Iterable
 
+import logging
+
 from . import BaseAgent
 from ..portfolio import Portfolio
 from ..scanner_common import fetch_trending_tokens_async
 from ..simulation import fetch_token_metrics_async
 from ..news import fetch_sentiment_async
+from .price_utils import resolve_price
+
+logger = logging.getLogger(__name__)
 
 
 class TrendAgent(BaseAgent):
@@ -56,12 +61,21 @@ class TrendAgent(BaseAgent):
         sentiment = await self._current_sentiment()
         if volume >= self.volume_threshold and sentiment >= self.sentiment_threshold:
             strength = sentiment * 2
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                logger.info(
+                    "%s agent skipping buy for %s due to missing price: %s",
+                    self.name,
+                    token,
+                    context,
+                )
+                return []
             return [
                 {
                     "token": token,
                     "side": "buy",
                     "amount": 1.0,
-                    "price": 0.0,
+                    "price": price,
                     "volume": volume,
                     "sentiment": strength,
                 }

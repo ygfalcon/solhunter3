@@ -122,6 +122,10 @@ async def stream_mempool_tokens(
             yield None
         return
 
+    ws_env = (os.getenv("SOLANA_WS_URL") or "").strip()
+    if ws_env:
+        rpc_url = ws_env
+
     rpc_url = _to_ws_url(rpc_url)
 
     async with connect(rpc_url) as ws:
@@ -197,10 +201,18 @@ async def stream_mempool_tokens(
                         volume = await asyncio.to_thread(
                             onchain_metrics.fetch_volume_onchain, tok, rpc_url
                         )
-                        liquidity = await asyncio.to_thread(
+                        liquidity_snapshot = await asyncio.to_thread(
                             onchain_metrics.fetch_liquidity_onchain, tok, rpc_url
                         )
-                        yield {"address": tok, "volume": volume, "liquidity": liquidity}
+                        liquidity_value = float(liquidity_snapshot)
+                        payload: Dict[str, Any] = {
+                            "address": tok,
+                            "volume": float(volume),
+                            "liquidity": liquidity_value,
+                        }
+                        if isinstance(liquidity_snapshot, dict):
+                            payload["liquidity_snapshot"] = dict(liquidity_snapshot)
+                        yield payload
                     else:
                         yield tok
 
@@ -212,6 +224,9 @@ async def rank_token(token: str, rpc_url: str) -> tuple[float, Dict[str, float]]
         onchain_metrics.fetch_liquidity_onchain_async(token, rpc_url),
         onchain_metrics.collect_onchain_insights_async(token, rpc_url),
     )
+    liquidity_value = float(liquidity)
+    liquidity_snapshot = dict(liquidity) if isinstance(liquidity, dict) else None
+    volume_value = float(volume)
     tx_rate = insights.get("tx_rate", 0.0)
     whale_activity = insights.get("whale_activity", 0.0)
     avg_swap = insights.get("avg_swap_size", 0.0)
@@ -240,16 +255,16 @@ async def rank_token(token: str, rpc_url: str) -> tuple[float, Dict[str, float]]
             anomaly = (tx_hist[-1] - mean) / stdev
 
     score = (
-        float(volume)
-        + float(liquidity)
+        volume_value
+        + liquidity_value
         + float(tx_rate)
         + momentum
         + anomaly
         - float(whale_activity)
     )
     metrics = {
-        "volume": float(volume),
-        "liquidity": float(liquidity),
+        "volume": volume_value,
+        "liquidity": liquidity_value,
         "tx_rate": float(tx_rate),
         "whale_activity": float(whale_activity),
         "wallet_concentration": wallet_conc,
@@ -258,6 +273,8 @@ async def rank_token(token: str, rpc_url: str) -> tuple[float, Dict[str, float]]
         "anomaly": anomaly,
         "score": score,
     }
+    if liquidity_snapshot is not None:
+        metrics["liquidity_snapshot"] = liquidity_snapshot
     return score, metrics
 
 

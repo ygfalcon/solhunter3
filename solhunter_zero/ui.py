@@ -26,11 +26,18 @@ front of it if richer dashboards are required.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from flask import Flask, jsonify, render_template_string, request
+
+from .agents.discovery import (
+    DEFAULT_DISCOVERY_METHOD,
+    DISCOVERY_METHODS,
+    resolve_discovery_method,
+)
 
 
 log = logging.getLogger(__name__)
@@ -140,8 +147,11 @@ class UIState:
             return []
 
 
-def create_app(state: UIState) -> Flask:
+def create_app(state: UIState | None = None) -> Flask:
     """Return a configured Flask application bound to *state*."""
+
+    if state is None:
+        state = UIState()
 
     app = Flask(__name__)  # type: ignore[arg-type]
 
@@ -186,24 +196,359 @@ def create_app(state: UIState) -> Flask:
             )
 
         status = state.snapshot_status()
-        summary = state.snapshot_summary()
+        summary_snapshot = state.snapshot_summary()
         discovery = state.snapshot_discovery()
         activity = state.snapshot_activity()
         trades = state.snapshot_trades()
         logs = state.snapshot_logs()
-        weights = state.snapshot_weights()
+        weights_raw = state.snapshot_weights()
+        weights = weights_raw if isinstance(weights_raw, dict) else {}
         actions = state.snapshot_actions()
         config_summary = state.snapshot_config()
         history = state.snapshot_history()
+
+        if isinstance(summary_snapshot, dict):
+            iteration_summary = dict(summary_snapshot.get("iteration") or {})
+            evaluation_summary = dict(summary_snapshot.get("evaluation") or {})
+            execution_summary = dict(summary_snapshot.get("execution") or {})
+            queue_snapshot = dict(summary_snapshot.get("queues") or {})
+            tuning = list(summary_snapshot.get("tuning") or [])
+        else:
+            iteration_summary = dict(summary_snapshot or {})
+            evaluation_summary = {}
+            execution_summary = {}
+            queue_snapshot = {}
+            tuning = []
+        summary = iteration_summary
+
+        agents_map = weights.get("agents") if isinstance(weights.get("agents"), dict) else {}
+        roles_map = weights.get("roles") if isinstance(weights.get("roles"), dict) else {}
+
+        simple_weights: Dict[str, float] = {}
+        if agents_map:
+            for name, detail in agents_map.items():
+                try:
+                    simple_weights[str(name)] = float(detail.get("weight", 0.0))
+                except (TypeError, ValueError):
+                    continue
+        else:
+            for name, value in weights.items():
+                if isinstance(value, (int, float)):
+                    simple_weights[str(name)] = float(value)
+
+        weight_items: List[tuple[str, float]] = []
+        for name, value in simple_weights.items():
+            weight_items.append((name, value))
+        weight_items.sort(key=lambda item: item[1], reverse=True)
+
+        weights_roles: List[Dict[str, Any]] = []
+        roles_source: Dict[str, Any] = roles_map if roles_map else {}
+        if not roles_source and agents_map:
+            temp_roles: Dict[str, Dict[str, Any]] = {}
+            for name, detail in agents_map.items():
+                role_name = str(detail.get("role") or "buyer").lower()
+                bucket = temp_roles.setdefault(
+                    role_name,
+                    {"agents": [], "inactive": [], "weight": 0.0},
+                )
+                bucket["agents"].append(dict(detail))
+                try:
+                    bucket["weight"] += max(0.0, float(detail.get("weight", 0.0)))
+                except (TypeError, ValueError):
+                    continue
+            roles_source = temp_roles
+
+        total_active_weight = 0.0
+        for role_name, payload in roles_source.items():
+            payload = dict(payload)
+            label = role_name.replace("_", " ").title()
+            raw_share = payload.get("share")
+            try:
+                share_value = float(raw_share) if raw_share is not None else None
+            except (TypeError, ValueError):
+                share_value = None
+            weight_value = payload.get("active_weight", payload.get("weight", 0.0))
+            try:
+                weight_float = float(weight_value)
+            except (TypeError, ValueError):
+                weight_float = 0.0
+            total_active_weight += max(0.0, weight_float)
+            agents_list: List[Dict[str, Any]] = []
+            raw_agents = payload.get("agents") if isinstance(payload.get("agents"), list) else []
+            for detail in raw_agents:
+                if not isinstance(detail, dict):
+                    continue
+                agent_name = str(detail.get("agent") or "").strip()
+                metrics_raw = detail.get("metrics") or {}
+                metrics: Dict[str, Any] = {}
+                for key in ("avg_roi", "max_roi", "min_roi", "avg_success", "avg_amount", "avg_price"):
+                    val = metrics_raw.get(key)
+                    metrics[key] = float(val) if isinstance(val, (int, float)) else None
+                try:
+                    agent_weight = float(detail.get("weight", 0.0))
+                except (TypeError, ValueError):
+                    agent_weight = 0.0
+                role_share = detail.get("role_share")
+                global_share = detail.get("global_share")
+                try:
+                    role_share_val = float(role_share) if role_share is not None else None
+                except (TypeError, ValueError):
+                    role_share_val = None
+                try:
+                    global_share_val = float(global_share) if global_share is not None else None
+                except (TypeError, ValueError):
+                    global_share_val = None
+                agents_list.append(
+                    {
+                        "agent": agent_name or "unknown",
+                        "weight": agent_weight,
+                        "role_share": role_share_val,
+                        "global_share": global_share_val,
+                        "proposals": int(detail.get("proposals", 0) or 0),
+                        "metrics": metrics,
+                        "sides": detail.get("sides") or [],
+                        "requirements": detail.get("requirements") or [],
+                        "blocked_reason": detail.get("blocked_reason"),
+                        "simulation": detail.get("simulation") or {},
+                    }
+                )
+            inactive_list: List[Dict[str, Any]] = []
+            raw_inactive = payload.get("inactive") if isinstance(payload.get("inactive"), list) else []
+            for detail in raw_inactive:
+                if not isinstance(detail, dict):
+                    continue
+                agent_name = str(detail.get("agent") or "").strip()
+                try:
+                    inactive_weight = float(detail.get("weight", 0.0))
+                except (TypeError, ValueError):
+                    inactive_weight = 0.0
+                inactive_list.append(
+                    {
+                        "agent": agent_name or "unknown",
+                        "weight": inactive_weight,
+                        "requirements": detail.get("requirements") or [],
+                        "blocked_reason": detail.get("blocked_reason"),
+                    }
+                )
+            role_entry = {
+                "name": role_name,
+                "label": label,
+                "share": share_value,
+                "weight": weight_float,
+                "agents": agents_list,
+                "inactive": inactive_list,
+            }
+            weights_roles.append(role_entry)
+
+        normalised_roles: List[Dict[str, Any]] = []
+        for entry in weights_roles:
+            if isinstance(entry, dict):
+                normalised_roles.append(entry)
+            elif isinstance(entry, (list, tuple)) and entry:
+                name = str(entry[0])
+                try:
+                    share_val = float(entry[1]) if len(entry) > 1 else 0.0
+                except (TypeError, ValueError):
+                    share_val = 0.0
+                normalised_roles.append(
+                    {
+                        "name": name,
+                        "label": name.replace("_", " ").title(),
+                        "share": share_val,
+                        "weight": share_val,
+                        "agents": [],
+                        "inactive": [],
+                    }
+                )
+        weights_roles = normalised_roles
+
+        if weights_roles:
+            for entry in weights_roles:
+                role_weight = max(0.0, float(entry.get("weight", 0.0)))
+                agents_list = entry.get("agents", [])
+                role_total = sum(max(0.0, float(agent.get("weight", 0.0))) for agent in agents_list) or role_weight
+                if entry.get("share") is None:
+                    entry["share"] = (role_weight / total_active_weight) if total_active_weight > 0 else 0.0
+                for agent in agents_list:
+                    if agent.get("role_share") is None:
+                        agent["role_share"] = (
+                            (agent.get("weight", 0.0) / role_total) if role_total > 0 else 0.0
+                        )
+                    if agent.get("global_share") is None:
+                        entry_share = entry.get("share", 0.0)
+                        if entry_share:
+                            agent["global_share"] = agent["role_share"] * entry_share
+                        elif total_active_weight > 0:
+                            agent["global_share"] = agent.get("weight", 0.0) / total_active_weight
+                        else:
+                            agent["global_share"] = 0.0
+                agents_list.sort(
+                    key=lambda item: item.get("global_share", item.get("weight", 0.0)),
+                    reverse=True,
+                )
+            weights_roles.sort(key=lambda item: item.get("share", item.get("weight", 0.0)), reverse=True)
+            for entry in weights_roles:
+                share_val = entry.get("share", 0.0)
+                try:
+                    entry["share"] = float(share_val)
+                except (TypeError, ValueError):
+                    entry["share"] = 0.0
+        elif weight_items:
+            total_simple_weight = sum(max(0.0, value) for _, value in weight_items)
+            for name, value in weight_items:
+                share = (value / total_simple_weight) if total_simple_weight > 0 else 0.0
+                weights_roles.append(
+                    {
+                        "name": name,
+                        "label": name,
+                        "share": share,
+                        "weight": value,
+                        "agents": [
+                            {
+                                "agent": name,
+                                "weight": value,
+                                "role_share": 1.0,
+                                "global_share": share,
+                                "proposals": 0,
+                                "metrics": {},
+                                "sides": [],
+                            }
+                        ],
+                        "inactive": [],
+                    }
+                )
+
+        weights_labels = [entry["label"] for entry in weights_roles]
+        weights_values = [
+            float(entry.get("share", 0.0))
+            if isinstance(entry.get("share"), (int, float))
+            else float(entry.get("weight", 0.0))
+            for entry in weights_roles
+        ]
+        weights_sorted = [
+            {
+                "label": entry["label"],
+                "share": float(entry.get("share", 0.0)),
+                "weight": float(entry.get("weight", 0.0)),
+            }
+            for entry in weights_roles
+        ]
+        if weights_roles:
+            weights_aria_label = "Role weight distribution: " + ", ".join(
+                f"{entry['label']} {entry['share'] * 100:.1f}%"
+                for entry in weights_roles
+            )
+            weights_sample = {
+                entry["label"]: entry["share"] for entry in weights_roles[:5]
+            }
+        elif weight_items:
+            weights_aria_label = "Agent weights distribution: " + ", ".join(
+                f"{name} weight {value}" for name, value in weight_items
+            )
+            weights_sample = dict(weight_items[:5])
+        else:
+            weights_labels = []
+            weights_values = []
+            weights_sorted = []
+            weights_aria_label = "Agent weights unavailable"
+            weights_sample = {}
+
+        weights_count = len(agents_map) if agents_map else len(weight_items)
 
         counts = {
             "activity": len(activity),
             "trades": len(trades),
             "logs": len(logs),
-            "weights": len(weights),
+            "weights": weights_count,
             "actions": len(actions),
         }
-        weights_sample = dict(list(weights.items())[:10]) if isinstance(weights, dict) else {}
+        heartbeat_value = status.get("heartbeat") or "n/a"
+        iterations_completed_raw = (
+            status.get("iterations_completed")
+            or status.get("iterations")
+            or status.get("iterations_complete")
+        )
+        try:
+            iterations_completed = int(iterations_completed_raw)
+        except (TypeError, ValueError):
+            iterations_completed = 0
+        trade_count_raw = status.get("trade_count")
+        if trade_count_raw is None:
+            trade_count_raw = len(trades)
+        try:
+            trade_count = int(trade_count_raw)
+        except (TypeError, ValueError):
+            trade_count = len(trades)
+        last_elapsed = None
+        if summary:
+            elapsed_val = summary.get("elapsed_s")
+            try:
+                last_elapsed = float(elapsed_val) if elapsed_val is not None else None
+            except (TypeError, ValueError):
+                last_elapsed = None
+        trades_per_iteration = (
+            trade_count / iterations_completed if iterations_completed else 0.0
+        )
+        iteration_caption: str
+        if iterations_completed:
+            if last_elapsed is not None:
+                iteration_caption = f"Last run {last_elapsed:.1f}s"
+            else:
+                iteration_caption = "Tracking iterations"
+        else:
+            iteration_caption = "Awaiting first iteration"
+        trades_caption = (
+            f"{trades_per_iteration:.2f} per iteration"
+            if iterations_completed
+            else "No iterations yet"
+        )
+        heartbeat_caption = (
+            "Trading loop online"
+            if status.get("trading_loop") or status.get("event_bus")
+            else "Loop offline"
+        )
+        stat_tiles = [
+            {
+                "title": "Heartbeat",
+                "value": heartbeat_value,
+                "caption": heartbeat_caption,
+                "icon": """
+                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
+                        <path d=\"M4.318 6.318c-1.756 1.756-1.756 4.604 0 6.36L12 20.36l7.682-7.682c1.756-1.756 1.756-4.604 0-6.36-1.756-1.756-4.604-1.756-6.36 0L12 4.64l-1.322-1.322c-1.756-1.756-4.604-1.756-6.36 0z\" />
+                        <polyline points=\"9 11.5 11 14 13 10 15 12\" />
+                    </svg>
+                """,
+                "css_class": "heartbeat",
+            },
+            {
+                "title": "Iterations",
+                "value": f"{iterations_completed:,}",
+                "caption": iteration_caption,
+                "icon": """
+                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
+                        <path d=\"M3 12a9 9 0 1 1 9 9\" />
+                        <polyline points=\"3 3 3 9 9 9\" />
+                        <path d=\"M12 7v5l3 2\" />
+                    </svg>
+                """,
+                "css_class": "iterations",
+            },
+            {
+                "title": "Trades",
+                "value": f"{trade_count:,}",
+                "caption": trades_caption,
+                "icon": """
+                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
+                        <path d=\"M3 6h18\" />
+                        <path d=\"M5 6v14h14V6\" />
+                        <path d=\"M9 10h6\" />
+                        <path d=\"M9 14h4\" />
+                    </svg>
+                """,
+                "css_class": "trades",
+            },
+        ]
+        weights_sample = dict(weight_items[:10]) if weight_items else {}
         samples = {
             "activity": activity[-5:],
             "trades": trades[-5:],
@@ -211,7 +556,18 @@ def create_app(state: UIState) -> Flask:
             "weights": weights_sample,
             "actions": actions[-5:],
         }
-        discovery_recent = discovery.get("recent", [])
+        discovery_recent_all = list(discovery.get("recent", []))
+        discovery_recent_total = len(discovery_recent_all)
+        discovery_recent_summary = list(
+            reversed(discovery_recent_all[-3:])
+        )
+        discovery_recent_display = list(
+            reversed(discovery_recent_all[-120:])
+        )
+        logs_all = list(logs)
+        logs_total = len(logs_all)
+        logs_summary = list(reversed(logs_all[-3:]))
+        logs_display = list(reversed(logs_all[-200:]))
         config_overview = {
             "config_path": config_summary.get("config_path"),
             "agents": config_summary.get("agents"),
@@ -292,6 +648,8 @@ def create_app(state: UIState) -> Flask:
                 }
                 .badge.danger { color: var(--danger); background: rgba(255, 123, 114, 0.12); }
                 .badge.success { color: var(--success); background: rgba(63, 185, 80, 0.12); }
+                .badge.disabled { color: var(--muted); background: rgba(139, 148, 158, 0.18); }
+                .badge.attention { color: #ffdf5d; background: rgba(255, 223, 93, 0.14); }
                 ul { padding-left: 18px; margin: 0; }
                 li { margin-bottom: 6px; }
                 .muted { color: var(--muted); font-size: 0.88rem; }
@@ -315,14 +673,90 @@ def create_app(state: UIState) -> Flask:
                     overflow: auto;
                     max-height: 360px;
                 }
+                .agent-row.needs-attention {
+                    background: linear-gradient(90deg, rgba(255, 123, 114, 0.08), rgba(255, 123, 114, 0.0));
+                }
+                .agent-row.needs-attention td {
+                    border-bottom-color: rgba(255, 123, 114, 0.25);
+                }
+                .agent-row:hover td {
+                    background: rgba(88, 166, 255, 0.05);
+                }
+                @keyframes pulseGlow {
+                    0% { text-shadow: 0 0 0 rgba(88, 166, 255, 0.0); }
+                    40% { text-shadow: 0 0 12px rgba(88, 166, 255, 0.7); }
+                    70% { text-shadow: 0 0 8px rgba(88, 166, 255, 0.4); }
+                    100% { text-shadow: 0 0 0 rgba(88, 166, 255, 0.0); }
+                }
                 header {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
+                    display: grid;
+                    grid-template-columns: 1fr auto;
+                    align-items: start;
+                    gap: 20px;
                     margin-bottom: 24px;
                 }
-                header h1 { font-size: 1.8rem; }
+                header h1 { font-size: 1.8rem; margin-bottom: 12px; }
                 header .meta { text-align: right; font-size: 0.9rem; color: var(--muted); }
+                header .headline { display: flex; flex-direction: column; gap: 12px; }
+                header .stat-tiles {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                    gap: 14px;
+                }
+                .stat-tile {
+                    position: relative;
+                    overflow: hidden;
+                    border-radius: 16px;
+                    padding: 14px 16px;
+                    border: 1px solid rgba(88, 166, 255, 0.15);
+                    background: linear-gradient(135deg, rgba(13, 17, 23, 0.9), rgba(23, 32, 45, 0.8));
+                    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+                    display: grid;
+                    grid-template-columns: auto 1fr;
+                    gap: 12px;
+                    align-items: center;
+                }
+                .stat-tile::before {
+                    content: "";
+                    position: absolute;
+                    inset: -40% -60% auto -60%;
+                    height: 140%;
+                    background: radial-gradient(circle at top, rgba(88, 166, 255, 0.45), transparent 65%);
+                    transform: rotate(12deg);
+                    pointer-events: none;
+                }
+                .stat-tile.heartbeat::before {
+                    background: radial-gradient(circle at top, rgba(255, 123, 114, 0.55), transparent 65%);
+                }
+                .stat-icon {
+                    width: 44px;
+                    height: 44px;
+                    border-radius: 12px;
+                    background: linear-gradient(160deg, rgba(88, 166, 255, 0.18), rgba(88, 166, 255, 0));
+                    display: grid;
+                    place-items: center;
+                    color: var(--accent);
+                    box-shadow: inset 0 0 12px rgba(88, 166, 255, 0.25);
+                }
+                .stat-icon svg { width: 26px; height: 26px; }
+                .stat-content { position: relative; z-index: 1; }
+                .stat-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+                .stat-value { font-size: 1.5rem; font-weight: 600; margin-top: 4px; }
+                .stat-caption { font-size: 0.85rem; color: rgba(230, 237, 243, 0.75); margin-top: 4px; }
+                .heartbeat-value { animation: pulseGlow 2.8s ease-in-out infinite; color: var(--accent); }
+                @media (max-width: 900px) {
+                    header { grid-template-columns: 1fr; }
+                    header .meta { text-align: left; }
+                }
+                @media (max-width: 540px) {
+                    body { padding: 18px 16px; }
+                    header .stat-tiles { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+                }
+                @media (max-width: 360px) {
+                    header .stat-tiles { grid-template-columns: 1fr; }
+                    .stat-tile { grid-template-columns: 1fr; }
+                    .stat-icon { width: 38px; height: 38px; }
+                }
                 .status-grid {
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -335,14 +769,187 @@ def create_app(state: UIState) -> Flask:
                     border-radius: 14px;
                     padding: 12px;
                 }
+                details.collapsible {
+                    border: 1px solid rgba(88, 166, 255, 0.18);
+                    border-radius: 14px;
+                    background: rgba(13, 17, 23, 0.6);
+                    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+                    position: relative;
+                }
+                details.collapsible:hover,
+                details.collapsible:focus-within {
+                    border-color: rgba(88, 166, 255, 0.45);
+                    box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.15), 0 12px 40px rgba(45, 104, 255, 0.18);
+                }
+                details.collapsible summary {
+                    list-style: none;
+                    cursor: pointer;
+                    padding: 14px 18px;
+                    display: flex;
+                    align-items: center;
+                    gap: 16px;
+                    user-select: none;
+                }
+                .weights-chart-container {
+                    position: relative;
+                    min-height: 220px;
+                }
+                .weights-chart-container canvas {
+                    display: block;
+                    max-width: 420px;
+                    margin: 0 auto;
+                }
+                .weights-legend {
+                    margin-top: 18px;
+                    display: flex;
+                    flex-wrap: wrap;
+                    justify-content: center;
+                    gap: 10px;
+                }
+                .weights-legend span {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 6px 12px;
+                    border-radius: 999px;
+                    background: rgba(88, 166, 255, 0.12);
+                    border: 1px solid rgba(88, 166, 255, 0.25);
+                    color: var(--text);
+                    font-size: 0.85rem;
+                }
+                .weights-legend .legend-dot {
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 50%;
+                    background: var(--accent);
+                }
+                .weights-legend .legend-value {
+                    color: var(--muted);
+                    font-variant-numeric: tabular-nums;
+                }
+                .sr-only {
+                    position: absolute;
+                    width: 1px;
+                    height: 1px;
+                    padding: 0;
+                    margin: -1px;
+                    overflow: hidden;
+                    clip: rect(0, 0, 0, 0);
+                    white-space: nowrap;
+                    border: 0;
+                }
+                details.collapsible summary::-webkit-details-marker { display: none; }
+                details.collapsible summary:focus-visible {
+                    outline: 2px solid var(--accent);
+                    outline-offset: 4px;
+                }
+                .collapsible-summary {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 12px;
+                    flex: 1;
+                    align-items: center;
+                }
+                .summary-stack {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 4px;
+                    min-width: 160px;
+                }
+                .summary-title {
+                    font-size: 0.75rem;
+                    letter-spacing: 0.08em;
+                    text-transform: uppercase;
+                    color: var(--muted);
+                }
+                .summary-count {
+                    font-size: 0.95rem;
+                    color: var(--accent);
+                    font-weight: 600;
+                }
+                details.collapsible[open] .summary-count {
+                    color: #8dbbff;
+                }
+                .summary-peek {
+                    display: flex;
+                    align-items: center;
+                    flex-wrap: wrap;
+                    gap: 8px;
+                    font-size: 0.85rem;
+                    color: rgba(230, 237, 243, 0.8);
+                }
+                .peek-chip {
+                    padding: 4px 8px;
+                    border-radius: 999px;
+                    background: rgba(88, 166, 255, 0.12);
+                    border: 1px solid rgba(88, 166, 255, 0.2);
+                    box-shadow: 0 0 8px rgba(88, 166, 255, 0.2);
+                    white-space: nowrap;
+                }
+                .caret {
+                    margin-left: auto;
+                    width: 14px;
+                    height: 14px;
+                    position: relative;
+                }
+                .caret::before {
+                    content: "";
+                    position: absolute;
+                    inset: 0;
+                    border-right: 2px solid var(--accent);
+                    border-bottom: 2px solid var(--accent);
+                    transform: rotate(-45deg);
+                    transform-origin: center;
+                    transition: transform 0.35s ease, box-shadow 0.35s ease;
+                    box-shadow: 0 0 10px rgba(88, 166, 255, 0.6);
+                }
+                details.collapsible[open] .caret::before {
+                    transform: rotate(45deg);
+                    box-shadow: 0 0 14px rgba(88, 166, 255, 0.85);
+                }
+                .collapsible-body {
+                    max-height: 0;
+                    opacity: 0;
+                    overflow: hidden;
+                    transition: max-height 0.4s ease, opacity 0.4s ease, padding 0.4s ease;
+                    padding: 0 18px;
+                }
+                details.collapsible[open] .collapsible-body {
+                    max-height: 520px;
+                    opacity: 1;
+                    padding: 12px 18px 18px;
+                }
+                .collapsible-scroll {
+                    max-height: 320px;
+                    overflow-y: auto;
+                    padding-right: 6px;
+                    margin-top: 10px;
+                }
+                .chip-group {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 8px;
+                    margin-top: 10px;
+                }
             </style>
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         </head>
         <body>
             <header>
-                <div>
+                <div class="headline">
                     <h1>SolHunter Zero Dashboard</h1>
-                    <div class="muted">Heartbeat: {{ status.get('heartbeat') or 'n/a' }} · Iterations: {{ status.get('iterations_completed', 0) }} · Trades: {{ status.get('trade_count', 0) }}</div>
+                    <div class="stat-tiles">
+                        {% for tile in stat_tiles %}
+                            <div class="stat-tile {{ tile.css_class }}">
+                                <div class="stat-icon" aria-hidden="true">{{ tile.icon | safe }}</div>
+                                <div class="stat-content">
+                                    <div class="stat-label">{{ tile.title }}</div>
+                                    <div class="stat-value {% if tile.css_class == 'heartbeat' %}heartbeat-value{% endif %}">{{ tile.value }}</div>
+                                    <div class="stat-caption">{{ tile.caption }}</div>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
                 </div>
                 <div class="meta">
                     <div>Auto-refreshing every 5s</div>
@@ -355,16 +962,34 @@ def create_app(state: UIState) -> Flask:
                     <h2>Status</h2>
                     <div class="status-grid">
                         {% for key, value in status.items() %}
-                            {% if key not in ('recent_tokens', 'last_iteration', 'iterations_completed', 'trade_count', 'activity_count', 'heartbeat', 'pipeline_tokens', 'pipeline_size') %}
+                            {% if key not in ('recent_tokens', 'last_iteration', 'iterations_completed', 'trade_count', 'activity_count', 'heartbeat', 'pipeline_tokens', 'pipeline_size', 'rl_daemon_status') %}
                                 <div class="status-card">
                                     <div class="muted">{{ key }}</div>
                                     <div style="font-size:1.2rem; font-weight:600; margin-top:4px;">
-                                        {% if value in (True, False) %}
+                                        {% if key == 'rl_daemon' and status.get('rl_daemon_status') %}
+                                            {% set rl = status.get('rl_daemon_status') %}
+                                            {% if not rl.get('enabled', False) %}
+                                                <span class="badge disabled">DISABLED</span>
+                                            {% else %}
+                                                <span class="badge {{ 'success' if rl.get('running') else 'danger' }}">{{ 'ONLINE' if rl.get('running') else 'OFFLINE' }}</span>
+                                            {% endif %}
+                                        {% elif value in (True, False) %}
                                             <span class="badge {{ 'success' if value else 'danger' }}">{{ 'ONLINE' if value else 'OFFLINE' }}</span>
                                         {% else %}
                                             {{ value if value is not none else '—' }}
                                         {% endif %}
                                     </div>
+                                    {% if key == 'rl_daemon' and status.get('rl_daemon_status') %}
+                                        {% set rl = status.get('rl_daemon_status') %}
+                                        {% if rl.get('source') or rl.get('error') %}
+                                            <div class="muted" style="font-size:0.75rem; margin-top:4px;">
+                                                {% if rl.get('source') %}{{ rl.get('source').capitalize() }} daemon{% endif %}
+                                                {% if rl.get('error') %}
+                                                    {% if rl.get('source') %} · {% endif %}{{ rl.get('error') }}
+                                                {% endif %}
+                                            </div>
+                                        {% endif %}
+                                    {% endif %}
                                 </div>
                             {% endif %}
                         {% endfor %}
@@ -449,24 +1074,48 @@ def create_app(state: UIState) -> Flask:
 
                 <div class="panel">
                     <h2>Discovery</h2>
-                    <div>Recent tokens ({{ discovery.get('recent_count', 0) }}):</div>
-                    {% if discovery_recent %}
-                        <ul>
-                            {% for token in discovery_recent[:20] %}
-                                <li>{{ token }}</li>
-                            {% endfor %}
-                        </ul>
-                    {% else %}
-                        <div class="muted">Waiting for discovery results…</div>
-                    {% endif %}
-                    {% if discovery.get('latest_iteration_tokens') %}
-                        <div style="margin-top:12px;" class="muted">Latest iteration tokens:</div>
-                        <ul>
-                            {% for token in discovery.get('latest_iteration_tokens')[:20] %}
-                                <li>{{ token }}</li>
-                            {% endfor %}
-                        </ul>
-                    {% endif %}
+                    <details class="collapsible">
+                        <summary>
+                            <div class="collapsible-summary">
+                                <div class="summary-stack">
+                                    <div class="summary-title">Recent Tokens</div>
+                                    <div class="summary-count">{{ discovery_recent_total }} tracked</div>
+                                </div>
+                                <div class="summary-peek" aria-hidden="true">
+                                    {% if discovery_recent_summary %}
+                                        {% for token in discovery_recent_summary %}
+                                            <span class="peek-chip">{{ token }}</span>
+                                        {% endfor %}
+                                    {% else %}
+                                        <span class="muted">Waiting for discovery results…</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <span class="caret" aria-hidden="true"></span>
+                        </summary>
+                        <div class="collapsible-body">
+                            {% if discovery_recent_display %}
+                                <div class="muted">Newest {{ discovery_recent_display|length }} tokens shown below.</div>
+                                <div class="collapsible-scroll">
+                                    <ul>
+                                        {% for token in discovery_recent_display %}
+                                            <li>{{ token }}</li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                            {% else %}
+                                <div class="muted">Waiting for discovery results…</div>
+                            {% endif %}
+                            {% if discovery.get('latest_iteration_tokens') %}
+                                <div class="muted" style="margin-top:14px;">Latest iteration tokens ({{ discovery.get('latest_iteration_tokens')|length }}):</div>
+                                <div class="chip-group" role="list">
+                                    {% for token in discovery.get('latest_iteration_tokens')[:20] %}
+                                        <span class="peek-chip" role="listitem">{{ token }}</span>
+                                    {% endfor %}
+                                </div>
+                            {% endif %}
+                        </div>
+                    </details>
                 </div>
 
                 <div class="panel">
@@ -482,6 +1131,152 @@ def create_app(state: UIState) -> Flask:
                             <a href="/{{ link }}">/{{ link }}</a>
                         {% endfor %}
                     </div>
+                </div>
+
+                <div class="panel">
+                    <h2>Agent Diagnostics</h2>
+                    {% if evaluation_summary %}
+                        <table>
+                            <tr><th>Token</th><td>{{ evaluation_summary.get('token') }}</td></tr>
+                            <tr><th>Latency</th><td>{{ '%.2f'|format(evaluation_summary.get('latency', 0)) }}s</td></tr>
+                            <tr><th>Actions</th><td>{{ evaluation_summary.get('actions') }}</td></tr>
+                            <tr><th>Cached</th><td>{{ 'Yes' if evaluation_summary.get('cached') else 'No' }}</td></tr>
+                            {% if evaluation_summary.get('errors') %}
+                                <tr><th>Errors</th><td>{{ evaluation_summary.get('errors') }}</td></tr>
+                            {% endif %}
+                        </table>
+                    {% else %}
+                        <div class="muted">Waiting for evaluation telemetry…</div>
+                    {% endif %}
+
+                    {% if tuning %}
+                        <div class="muted" style="margin-top:14px;">Per-agent suggestions</div>
+                        <table style="margin-top:6px;">
+                            <tr>
+                                <th>Agent</th>
+                                <th>Status</th>
+                                <th>Weight</th>
+                                <th>Global Share</th>
+                                <th>Proposals</th>
+                                <th>Avg ROI</th>
+                                <th>Avg Success</th>
+                                <th>Requirements</th>
+                                <th>Details</th>
+                            </tr>
+                            {% for entry in tuning %}
+                                <tr class="agent-row{% if entry.needs_attention %} needs-attention{% endif %}">
+                                    <td>{{ entry.agent }}</td>
+                                    <td>
+                                        {% if entry.status == 'proposed' %}
+                                            <span class="badge success">proposed</span>
+                                        {% elif entry.status == 'error' %}
+                                            <span class="badge danger">error</span>
+                                        {% elif entry.needs_attention %}
+                                            <span class="badge attention">needs input</span>
+                                        {% else %}
+                                            <span class="badge disabled">no-trade</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if entry.weight is not none %}
+                                            {{ '%.4f'|format(entry.weight) }}
+                                        {% else %}
+                                            —
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if entry.global_share is not none %}
+                                            {{ '%.1f'|format(entry.global_share * 100) }}%
+                                        {% else %}
+                                            —
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ entry.proposals }}</td>
+                                    <td>
+                                        {% if entry.metrics and entry.metrics.avg_roi is not none %}
+                                            {{ '%.3f'|format(entry.metrics.avg_roi) }}
+                                        {% else %}
+                                            <span class="muted">n/a</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if entry.metrics and entry.metrics.avg_success is not none %}
+                                            {{ '%.1f'|format(entry.metrics.avg_success * 100) }}%
+                                        {% else %}
+                                            <span class="muted">n/a</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if entry.requirements %}
+                                            <ul style="list-style:none; padding-left:0; margin:0;">
+                                                {% for req in entry.requirements[:3] %}
+                                                    <li>
+                                                        <span class="muted">{{ req.parameter }}</span>:
+                                                        {% if req.current is not none %}
+                                                            <div class="req-values">
+                                                                <span class="req-current">current {{ '%.3f'|format(req.current) }}</span>
+                                                                <span class="muted">→</span>
+                                                                <span class="req-target">target {{ '%.3f'|format(req.target) }}</span>
+                                                            </div>
+                                                            {% set delta = req.get('delta') %}
+                                                            {% if delta is none %}
+                                                                {% set delta = req.target - req.current %}
+                                                            {% endif %}
+                                                            {% if req.met is not none %}
+                                                                {% if req.met %}
+                                                                    <span class="badge success">met</span>
+                                                                {% else %}
+                                                                    <span class="badge danger">
+                                                                        {% if req.kind == 'max' %}
+                                                                            lower {{ '%.3f'|format(delta|abs) }}
+                                                                        {% else %}
+                                                                            raise {{ '%.3f'|format(delta|abs) }}
+                                                                        {% endif %}
+                                                                    </span>
+                                                                {% endif %}
+                                                            {% endif %}
+                                                        {% else %}
+                                                            <div class="req-values">
+                                                                <span class="req-target">target {{ '%.3f'|format(req.target) }}</span>
+                                                            </div>
+                                                        {% endif %}
+                                                    </li>
+                                                {% endfor %}
+                                                {% if entry.requirements|length > 3 %}
+                                                    <li class="muted">…</li>
+                                                {% endif %}
+                                            </ul>
+                                        {% else %}
+                                            <span class="muted">—</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {{ entry.message }}
+                                        {% if entry.sample %}
+                                            <div class="muted" style="margin-top:4px; font-size:0.8rem;">sample: {{ entry.sample }}</div>
+                                        {% endif %}
+                                        {% if entry.blocked_reason %}
+                                            <div class="muted" style="margin-top:4px; font-size:0.8rem;">reason: {{ entry.blocked_reason }}</div>
+                                        {% endif %}
+                                        {% if entry.simulation is defined and entry.simulation and entry.simulation.avg_multiplier is not none %}
+                                            <div class="muted" style="margin-top:4px; font-size:0.75rem;">sim boost {{ '%.2f'|format(entry.simulation.avg_multiplier) }}× (ΔROI {{ '%.3f'|format(entry.simulation.avg_delta_roi) }})</div>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </table>
+                    {% else %}
+                        <div class="muted" style="margin-top:12px;">No agent diagnostics available yet.</div>
+                    {% endif %}
+
+                    {% if queue_snapshot %}
+                        <div class="muted" style="margin-top:14px;">Queue health</div>
+                        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px;">
+                            {% for key, val in queue_snapshot.items() %}
+                                <span class="badge">{{ key }}: {{ val }}</span>
+                            {% endfor %}
+                        </div>
+                    {% endif %}
                 </div>
             </section>
 
@@ -541,28 +1336,167 @@ def create_app(state: UIState) -> Flask:
 
                 <div class="panel">
                     <h2>Event Log</h2>
-                    {% if logs %}
-                        <ul>
-                            {% for entry in logs[-10:]|reverse %}
-                                <li><span class="muted">{{ entry.get('timestamp') }}</span> · <strong>{{ entry.get('payload', {}).get('stage', entry.get('topic')) }}</strong> — {{ entry.get('payload', {}).get('detail') or entry }}</li>
-                            {% endfor %}
-                        </ul>
-                    {% else %}
-                        <div class="muted">No log entries yet.</div>
-                    {% endif %}
+                    <details class="collapsible">
+                        <summary>
+                            <div class="collapsible-summary">
+                                <div class="summary-stack">
+                                    <div class="summary-title">Latest Events</div>
+                                    <div class="summary-count">{{ logs_total }} recorded</div>
+                                </div>
+                                <div class="summary-peek" aria-hidden="true">
+                                    {% if logs_summary %}
+                                        {% for entry in logs_summary %}
+                                            {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
+                                            <span class="peek-chip">{{ stage }}</span>
+                                        {% endfor %}
+                                    {% else %}
+                                        <span class="muted">No log entries yet.</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <span class="caret" aria-hidden="true"></span>
+                        </summary>
+                        <div class="collapsible-body">
+                            {% if logs_display %}
+                                <div class="muted">Showing the freshest {{ logs_display|length }} entries.</div>
+                                <div class="collapsible-scroll">
+                                    <ul>
+                                        {% for entry in logs_display %}
+                                            {% set detail = entry.get('payload', {}).get('detail') or entry %}
+                                            {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
+                                            <li><span class="muted">{{ entry.get('timestamp') }}</span> · <strong>{{ stage }}</strong> — {{ detail }}</li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                            {% else %}
+                                <div class="muted">No log entries yet.</div>
+                            {% endif %}
+                        </div>
+                    </details>
                 </div>
 
                 <div class="panel">
                     <h2>Weights</h2>
-                    {% if weights %}
-                        <table>
-                            <tr><th>Agent</th><th>Weight</th></tr>
-                            {% for name, weight in weights.items()|list|sort %}
-                                <tr><td>{{ name }}</td><td>{{ weight }}</td></tr>
+                    {% if weights_roles %}
+                        <div class="weights-chart-container">
+                            <canvas id="weightsChart" role="img" aria-label="{{ weights_aria_label }}" data-summary="{{ weights_aria_label }}"></canvas>
+                        </div>
+                        <div class="weights-legend" id="weightsLegend" role="list">
+                            {% for entry in weights_sorted %}
+                                <span role="listitem" aria-label="{{ entry.label }} share {{ '%.2f'|format(entry.share * 100) }} percent" data-index="{{ loop.index0 }}">
+                                    <span class="legend-dot" aria-hidden="true"></span>
+                                    <span class="legend-label">{{ entry.label }}</span>
+                                    <span class="legend-value" aria-hidden="true">{{ '%.1f'|format(entry.share * 100) }}%</span>
+                                </span>
                             {% endfor %}
-                        </table>
+                        </div>
+                        <div class="role-buckets" style="margin-top:18px; display:flex; flex-direction:column; gap:18px;">
+                            {% for role in weights_roles %}
+                                <div class="role-card">
+                                    <div class="muted">{{ role.label }} · {{ '%.1f'|format(role.share * 100) }}% of active weight</div>
+                                    {% if role.agents %}
+                                        <table style="margin-top:8px;">
+                                            <tr>
+                                                <th>Agent</th>
+                                                <th>Weight</th>
+                                                <th>Global Share</th>
+                                                <th>Role Share</th>
+                                                <th>Proposals</th>
+                                                <th>Avg ROI</th>
+                                                <th>Avg Success</th>
+                                                <th>Avg Amount</th>
+                                                <th>Sides</th>
+                                                <th>Requirements</th>
+                                            </tr>
+                                            {% for agent in role.agents %}
+                                                <tr>
+                                                    <td>{{ agent.agent }}</td>
+                                                    <td>{{ '%.4f'|format(agent.weight) }}</td>
+                                                    <td>{{ '%.1f'|format(agent.global_share * 100) }}%</td>
+                                                    <td>{{ '%.1f'|format(agent.role_share * 100) }}%</td>
+                                                    <td>{{ agent.proposals }}</td>
+                                                    <td>
+                                                        {% if agent.metrics.avg_roi is not none %}
+                                                            {{ '%.3f'|format(agent.metrics.avg_roi) }}
+                                                        {% else %}
+                                                            —
+                                                        {% endif %}
+                                                    </td>
+                                                    <td>
+                                                        {% if agent.metrics.avg_success is not none %}
+                                                            {{ '%.1f'|format(agent.metrics.avg_success * 100) }}%
+                                                        {% else %}
+                                                            —
+                                                        {% endif %}
+                                                    </td>
+                                                    <td>
+                                                        {% if agent.metrics.avg_amount is not none %}
+                                                            {{ '%.3f'|format(agent.metrics.avg_amount) }}
+                                                        {% else %}
+                                                            —
+                                                        {% endif %}
+                                                    </td>
+                                                    <td>{{ agent.sides|join(', ') if agent.sides else '—' }}</td>
+                                                    <td>
+                                                        {% set reqs = agent.requirements if agent.requirements is defined else [] %}
+                                                        {% if reqs %}
+                                                            <ul style="list-style:none; padding-left:0; margin:0;">
+                                                                {% for req in reqs[:3] %}
+                                                                    <li>
+                                                                        <span class="muted">{{ req.parameter }}</span>:
+                                                                        {% if req.current is not none %}
+                                                                            {{ '%.3f'|format(req.current) }} / {{ '%.3f'|format(req.target) }}
+                                                                            {% if req.met is not none %}
+                                                                                {% if req.met %}
+                                                                                    <span class="badge success">met</span>
+                                                                                {% else %}
+                                                                                    <span class="badge danger">needs +{{ '%.3f'|format(req.target - req.current) }}</span>
+                                                                                {% endif %}
+                                                                            {% endif %}
+                                                                        {% else %}
+                                                                            target {{ '%.3f'|format(req.target) }}
+                                                                        {% endif %}
+                                                                    </li>
+                                                                {% endfor %}
+                                                                {% if reqs|length > 3 %}
+                                                                    <li class="muted">…</li>
+                                                                {% endif %}
+                                                            </ul>
+                                                            {% if agent.blocked_reason %}
+                                                                <div class="muted" style="margin-top:4px; font-size:0.75rem;">{{ agent.blocked_reason }}</div>
+                                                            {% endif %}
+                                                            {% if agent.simulation is defined and agent.simulation and agent.simulation.avg_multiplier is not none %}
+                                                                <div class="muted" style="margin-top:4px; font-size:0.75rem;">sim boost {{ '%.2f'|format(agent.simulation.avg_multiplier) }}× (ΔROI {{ '%.3f'|format(agent.simulation.avg_delta_roi) }})</div>
+                                                            {% endif %}
+                                                        {% else %}
+                                                            <span class="muted">—</span>
+                                                        {% endif %}
+                                                    </td>
+                                                </tr>
+                                            {% endfor %}
+                                        </table>
+                                    {% else %}
+                                        <div class="muted" style="margin-top:8px;">No active agents in this bucket.</div>
+                                    {% endif %}
+                                    {% if role.inactive %}
+                                        <div class="muted" style="margin-top:10px;">Inactive agents</div>
+                                        <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;">
+                                            {% for inactive in role.inactive %}
+                                                {% set inactive_reqs = inactive.requirements if inactive.requirements is defined else [] %}
+                                                {% set tooltip_ns = namespace(parts=[]) %}
+                                                {% for req in inactive_reqs[:3] %}
+                                                    {% set tooltip_ns.parts = tooltip_ns.parts + [req.parameter ~ ' → ' ~ ('%.3f'|format(req.target))] %}
+                                                {% endfor %}
+                                                <span class="badge muted" title="{{ tooltip_ns.parts|join(', ') }}">{{ inactive.agent }} ({{ '%.3f'|format(inactive.weight) }})</span>
+                                            {% endfor %}
+                                        </div>
+                                    {% endif %}
+                                </div>
+                            {% endfor %}
+                        </div>
+                        <div class="sr-only" id="weightsTextSummary">{{ weights_aria_label }}</div>
                     {% else %}
-                        <div class="muted">Weights unavailable.</div>
+                        <div class="muted">Weights unavailable. The coordinator has not provided agent weights yet.</div>
                     {% endif %}
                 </div>
 
@@ -602,107 +1536,158 @@ def create_app(state: UIState) -> Flask:
             <script>
             (function() {
                 const history = {{ history | tojson | safe }};
-                if (!history || !history.length) {
-                    return;
+                const weightLabels = {{ weights_labels | tojson | safe }};
+                const weightValues = {{ weights_values | tojson | safe }};
+                if (history && history.length) {
+                    const labels = history.map(h => (h.timestamp || '').slice(11, 19));
+                    const actionsData = history.map(h => h.actions_count || 0);
+                    const discoveredData = history.map(h => h.discovered_count || 0);
+                    const committedData = history.map(h => (h.committed ? 1 : 0));
+                    const latencyData = history.map(h => (h.elapsed_s || 0));
+                    let budgetData = history.map(h => {
+                        const telemetry = h.telemetry || {};
+                        const pipeline = telemetry.pipeline || {};
+                        return pipeline.budget || null;
+                    });
+                    const wantsBudget = budgetData.some(v => typeof v === 'number');
+                    const ctxA = document.getElementById('actionsChart');
+                    if (ctxA && window.Chart) {
+                        new Chart(ctxA.getContext('2d'), {
+                            type: 'line',
+                            data: {
+                                labels,
+                                datasets: [
+                                    {
+                                        label: 'Actions',
+                                        data: actionsData,
+                                        borderColor: '#58a6ff',
+                                        backgroundColor: 'rgba(88,166,255,0.2)',
+                                        tension: 0.3,
+                                    },
+                                    {
+                                        label: 'Discovered',
+                                        data: discoveredData,
+                                        borderColor: '#3fb950',
+                                        backgroundColor: 'rgba(63,185,80,0.2)',
+                                        tension: 0.3,
+                                    },
+                                    {
+                                        label: 'Committed',
+                                        data: committedData,
+                                        borderColor: '#ffdf5d',
+                                        backgroundColor: 'rgba(255,223,93,0.2)',
+                                        tension: 0.1,
+                                        yAxisID: 'y2',
+                                        stepped: true,
+                                    },
+                                ],
+                            },
+                            options: {
+                                plugins: {
+                                    legend: { labels: { color: '#e6edf3' } },
+                                },
+                                scales: {
+                                    x: {
+                                        ticks: { color: '#8b949e' },
+                                        grid: { color: 'rgba(48,54,61,0.4)' },
+                                    },
+                                    y: {
+                                        ticks: { color: '#8b949e' },
+                                        grid: { color: 'rgba(48,54,61,0.4)' },
+                                    },
+                                    y2: {
+                                        position: 'right',
+                                        ticks: { color: '#8b949e', callback: value => (value ? 'Yes' : 'No') },
+                                        grid: { display: false },
+                                        suggestedMax: 1,
+                                        suggestedMin: 0,
+                                    },
+                                },
+                            },
+                        });
+                    }
+                    const ctxL = document.getElementById('latencyChart');
+                    if (ctxL && window.Chart) {
+                        const datasets = [
+                            {
+                                label: 'Iteration Seconds',
+                                data: latencyData,
+                                borderColor: '#ff7b72',
+                                backgroundColor: 'rgba(255,123,114,0.25)',
+                                tension: 0.2,
+                            },
+                        ];
+                        if (wantsBudget) {
+                            datasets.push({
+                                label: 'Budget',
+                                data: budgetData,
+                                borderColor: '#8b949e',
+                                borderDash: [6, 6],
+                                fill: false,
+                            });
+                        }
+                        new Chart(ctxL.getContext('2d'), {
+                            type: 'line',
+                            data: { labels, datasets },
+                            options: {
+                                plugins: { legend: { labels: { color: '#e6edf3' } } },
+                                scales: {
+                                    x: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
+                                    y: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
+                                },
+                            },
+                        });
+                    }
                 }
-                const labels = history.map(h => (h.timestamp || '').slice(11, 19));
-                const actionsData = history.map(h => h.actions_count || 0);
-                const discoveredData = history.map(h => h.discovered_count || 0);
-                const committedData = history.map(h => (h.committed ? 1 : 0));
-                const latencyData = history.map(h => (h.elapsed_s || 0));
-                let budgetData = history.map(h => {
-                    const telemetry = h.telemetry || {};
-                    const pipeline = telemetry.pipeline || {};
-                    return pipeline.budget || null;
-                });
-                const wantsBudget = budgetData.some(v => typeof v === 'number');
-                const ctxA = document.getElementById('actionsChart');
-                if (ctxA && window.Chart) {
-                    new Chart(ctxA.getContext('2d'), {
-                        type: 'line',
+                const weightsCanvas = document.getElementById('weightsChart');
+                if (weightsCanvas && window.Chart && weightLabels.length) {
+                    const palette = ['#7afcff', '#f6a6ff', '#9effa9', '#ffe29a', '#b5b0ff', '#ffb8a5', '#aff8db', '#f3c4fb'];
+                    const backgroundColors = weightLabels.map((_, index) => palette[index % palette.length]);
+                    const totalWeight = weightValues.reduce((acc, value) => acc + value, 0);
+                    new Chart(weightsCanvas.getContext('2d'), {
+                        type: 'doughnut',
                         data: {
-                            labels,
+                            labels: weightLabels,
                             datasets: [
                                 {
-                                    label: 'Actions',
-                                    data: actionsData,
-                                    borderColor: '#58a6ff',
-                                    backgroundColor: 'rgba(88,166,255,0.2)',
-                                    tension: 0.3,
-                                },
-                                {
-                                    label: 'Discovered',
-                                    data: discoveredData,
-                                    borderColor: '#3fb950',
-                                    backgroundColor: 'rgba(63,185,80,0.2)',
-                                    tension: 0.3,
-                                },
-                                {
-                                    label: 'Committed',
-                                    data: committedData,
-                                    borderColor: '#ffdf5d',
-                                    backgroundColor: 'rgba(255,223,93,0.2)',
-                                    tension: 0.1,
-                                    yAxisID: 'y2',
-                                    stepped: true,
+                                    data: weightValues,
+                                    backgroundColor: backgroundColors,
+                                    borderColor: '#0d1117',
+                                    borderWidth: 2,
                                 },
                             ],
                         },
                         options: {
+                            cutout: '55%',
                             plugins: {
-                                legend: { labels: { color: '#e6edf3' } },
-                            },
-                            scales: {
-                                x: {
-                                    ticks: { color: '#8b949e' },
-                                    grid: { color: 'rgba(48,54,61,0.4)' },
-                                },
-                                y: {
-                                    ticks: { color: '#8b949e' },
-                                    grid: { color: 'rgba(48,54,61,0.4)' },
-                                },
-                                y2: {
-                                    position: 'right',
-                                    ticks: { color: '#8b949e', callback: value => (value ? 'Yes' : 'No') },
-                                    grid: { display: false },
-                                    suggestedMax: 1,
-                                    suggestedMin: 0,
+                                legend: { display: false },
+                                tooltip: {
+                                    callbacks: {
+                                        label(context) {
+                                            const value = context.parsed || 0;
+                                            const percent = totalWeight ? ((value / totalWeight) * 100).toFixed(1) : '0.0';
+                                            return `${context.label}: ${value} (${percent}%)`;
+                                        },
+                                    },
                                 },
                             },
                         },
                     });
-                }
-                const ctxL = document.getElementById('latencyChart');
-                if (ctxL && window.Chart) {
-                    const datasets = [
-                        {
-                            label: 'Iteration Seconds',
-                            data: latencyData,
-                            borderColor: '#ff7b72',
-                            backgroundColor: 'rgba(255,123,114,0.25)',
-                            tension: 0.2,
-                        },
-                    ];
-                    if (wantsBudget) {
-                        datasets.push({
-                            label: 'Budget',
-                            data: budgetData,
-                            borderColor: '#8b949e',
-                            borderDash: [6, 6],
-                            fill: false,
+                    const legendEl = document.getElementById('weightsLegend');
+                    if (legendEl) {
+                        legendEl.querySelectorAll('[data-index]').forEach((pill, index) => {
+                            const color = backgroundColors[index % backgroundColors.length];
+                            pill.style.borderColor = `${color}55`;
+                            const dot = pill.querySelector('.legend-dot');
+                            if (dot) {
+                                dot.style.background = color;
+                            }
                         });
                     }
-                    new Chart(ctxL.getContext('2d'), {
-                        type: 'line',
-                        data: { labels, datasets },
-                        options: {
-                            plugins: { legend: { labels: { color: '#e6edf3' } } },
-                            scales: {
-                                x: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
-                                y: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
-                            },
-                        },
-                    });
+                    const summary = weightsCanvas.getAttribute('data-summary');
+                    if (summary) {
+                        weightsCanvas.setAttribute('aria-label', summary);
+                    }
                 }
             })();
             </script>
@@ -715,13 +1700,28 @@ def create_app(state: UIState) -> Flask:
             status=status,
             summary=summary,
             discovery=discovery,
-            discovery_recent=discovery_recent,
+            discovery_recent_display=discovery_recent_display,
+            discovery_recent_summary=discovery_recent_summary,
+            discovery_recent_total=discovery_recent_total,
             counts=counts,
+            evaluation_summary=evaluation_summary,
+            execution_summary=execution_summary,
+            tuning=tuning,
+            queue_snapshot=queue_snapshot,
             samples=samples,
             config_overview=config_overview,
             actions=actions,
-            logs=logs,
+            logs_display=logs_display,
+            logs_summary=logs_summary,
+            logs_total=logs_total,
             history=history,
+            weights=weights,
+            weights_sorted=weights_sorted,
+            weights_labels=weights_labels,
+            weights_values=weights_values,
+            weights_roles=weights_roles,
+            weights_aria_label=weights_aria_label,
+            stat_tiles=stat_tiles,
         )
 
     @app.get("/health")
@@ -780,6 +1780,52 @@ def create_app(state: UIState) -> Flask:
     @app.get("/logs")
     def logs() -> Any:
         return jsonify({"entries": state.snapshot_logs()})
+
+    @app.get("/discovery")
+    def discovery_settings() -> Any:
+        method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if method is None:
+            method = DEFAULT_DISCOVERY_METHOD
+        return jsonify(
+            {
+                "method": method,
+                "allowed_methods": sorted(DISCOVERY_METHODS),
+            }
+        )
+
+    @app.post("/discovery")
+    def update_discovery() -> Any:
+        payload = request.get_json(silent=True) or {}
+        raw_method = payload.get("method")
+        if not isinstance(raw_method, str) or not raw_method.strip():
+            return (
+                jsonify(
+                    {
+                        "error": "method must be a non-empty string",
+                        "allowed_methods": sorted(DISCOVERY_METHODS),
+                    }
+                ),
+                400,
+            )
+        method = resolve_discovery_method(raw_method)
+        if method is None:
+            return (
+                jsonify(
+                    {
+                        "error": f"Invalid discovery method: {raw_method}",
+                        "allowed_methods": sorted(DISCOVERY_METHODS),
+                    }
+                ),
+                400,
+            )
+        os.environ["DISCOVERY_METHOD"] = method
+        return jsonify(
+            {
+                "status": "ok",
+                "method": method,
+                "allowed_methods": sorted(DISCOVERY_METHODS),
+            }
+        )
 
     @app.get("/__shutdown__")
     def _shutdown() -> Any:  # pragma: no cover - invoked via HTTP

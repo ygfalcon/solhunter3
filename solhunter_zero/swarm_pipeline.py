@@ -11,6 +11,7 @@ consistent action normalisation, and explicit asset feedback to the portfolio.
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 import asyncio
+import contextlib
 import logging
 import math
 import os
@@ -24,6 +25,9 @@ from .simulation import SimulationResult, run_simulations_async
 from .portfolio import Portfolio
 from .lru import TTLCache
 from .execution import EventExecutor
+from .agents.price_utils import resolve_price
+from .prices import update_price_cache
+from .token_aliases import canonical_mint
 
 log = logging.getLogger(__name__)
 
@@ -219,6 +223,7 @@ class ExecutionStage:
     executed: List[ExecutionRecord] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     lane_metrics: Dict[str, int] = field(default_factory=dict)
+    skipped: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -308,6 +313,10 @@ class ExecutionDispatcher:
         try:
             result = await self.agent_manager.executor.execute(action)
             request.record["result"] = _stringify(result)
+            metrics = _extract_realized_metrics(action, result)
+            if metrics:
+                request.record.update(metrics)
+                action.update(metrics)
             if getattr(self.agent_manager, "emotion_agent", None):
                 try:
                     emotion = self.agent_manager.emotion_agent.evaluate(action, result)
@@ -356,6 +365,217 @@ def _stringify(value: Any) -> Any:
     return str(value)
 
 
+def _extract_realized_metrics(
+    action: Dict[str, Any], result: Any
+) -> Dict[str, float | None]:
+    """Return realized execution metrics derived from ``result``."""
+
+    def _as_float(val: Any) -> Optional[float]:
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    def _lookup(container: Dict[str, Any], keys: tuple[str, ...]) -> Optional[float]:
+        for key in keys:
+            if key in container:
+                value = _as_float(container[key])
+                if value is not None:
+                    return value
+        data = container.get("data")
+        if isinstance(data, dict):
+            return _lookup(data, keys)
+        return None
+
+    def _iter_fills(container: Dict[str, Any]) -> Iterable[tuple[float, float]]:
+        for key in ("fills", "orders", "executions", "trades"):
+            entries = container.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                price = _lookup(entry, (
+                    "price",
+                    "avg_price",
+                    "average_price",
+                    "execution_price",
+                    "executionPrice",
+                    "rate",
+                    "limit_price",
+                ))
+                amount = _lookup(entry, (
+                    "filled_amount",
+                    "filledAmount",
+                    "amount",
+                    "qty",
+                    "quantity",
+                    "size",
+                ))
+                if price is not None and amount is not None:
+                    yield price, amount
+        data = container.get("data")
+        if isinstance(data, dict):
+            yield from _iter_fills(data)
+
+    def _realized_roi(
+        realized_price: Optional[float], realized_amount: Optional[float]
+    ) -> Optional[float]:
+        entry_price = _as_float(action.get("entry_price"))
+        if entry_price in (None, 0.0):
+            return None
+        if realized_price is None:
+            return None
+        if realized_amount is None or realized_amount <= 0:
+            return None
+        side = str(action.get("side") or "").strip().lower()
+        if side == "sell":
+            return (realized_price - entry_price) / entry_price
+        if side == "buy":
+            return (entry_price - realized_price) / entry_price
+        return None
+
+    metrics: Dict[str, float | None] = {}
+    if not isinstance(result, dict):
+        metrics["realized_roi"] = _realized_roi(None, None)
+        return metrics
+
+    realized_amount: Optional[float] = None
+    realized_notional: Optional[float] = None
+    realized_price: Optional[float] = None
+
+    fills = list(_iter_fills(result))
+    if fills:
+        total_amount = sum(amount for _, amount in fills)
+        total_notional = sum(price * amount for price, amount in fills)
+        if total_amount > 0:
+            realized_amount = total_amount
+            realized_notional = total_notional
+            realized_price = total_notional / total_amount
+
+    amount = _lookup(
+        result,
+        (
+            "filled_amount",
+            "filledAmount",
+            "executed_amount",
+            "executedAmount",
+            "amount",
+            "trade_amount",
+            "tradeAmount",
+            "qty",
+            "quantity",
+            "size",
+            "realized_amount",
+        ),
+    )
+    price = _lookup(
+        result,
+        (
+            "execution_price",
+            "executionPrice",
+            "avg_price",
+            "average_price",
+            "price",
+            "fill_price",
+            "realized_price",
+        ),
+    )
+    notional = _lookup(
+        result,
+        (
+            "notional",
+            "trade_value",
+            "tradeValue",
+            "value",
+            "gross_notional",
+            "realized_notional",
+        ),
+    )
+
+    if realized_amount is None and amount is not None:
+        realized_amount = amount
+    if realized_notional is None and notional is not None:
+        realized_notional = notional
+    if realized_price is None and price is not None:
+        realized_price = price
+
+    if (
+        realized_amount is not None
+        and realized_price is not None
+        and realized_notional is None
+    ):
+        realized_notional = realized_amount * realized_price
+    elif (
+        realized_notional is not None
+        and realized_amount is not None
+        and realized_price is None
+        and realized_amount
+    ):
+        realized_price = realized_notional / realized_amount
+    elif (
+        realized_notional is not None
+        and realized_price is not None
+        and realized_amount is None
+        and realized_price
+    ):
+        realized_amount = realized_notional / realized_price
+
+    if realized_amount is not None:
+        metrics["realized_amount"] = realized_amount
+    if realized_notional is not None:
+        metrics["realized_notional"] = realized_notional
+    if realized_price is not None:
+        metrics["realized_price"] = realized_price
+
+    metrics["realized_roi"] = _realized_roi(realized_price, realized_amount)
+
+    return metrics
+
+
+def _iter_container_keys(container: Any) -> Iterable[str]:
+    if container is None:
+        return []
+    if isinstance(container, dict):
+        return (str(k) for k in container.keys())
+    if isinstance(container, (set, list, tuple)):
+        return (str(v) for v in container)
+    keys = getattr(container, "keys", None)
+    if callable(keys):
+        try:
+            return (str(k) for k in keys())
+        except TypeError:
+            try:
+                return (str(k) for k in container.keys())
+            except Exception:
+                return []
+    return []
+
+
+def _available_executor_names(agent_manager: AgentManager) -> set[str]:
+    names: set[str] = set()
+    sources = [
+        getattr(agent_manager, "available_executors", None),
+        getattr(agent_manager, "executors", None),
+        getattr(agent_manager, "_event_executors", None),
+    ]
+    executor = getattr(agent_manager, "executor", None)
+    if executor is not None:
+        sources.extend(
+            [
+                getattr(executor, "available_executors", None),
+                getattr(executor, "executors", None),
+                getattr(executor, "_executors", None),
+            ]
+        )
+    for source in sources:
+        for key in _iter_container_keys(source):
+            names.add(key)
+    return names
+
+
 def _resolve_lane(action: Dict[str, Any]) -> str:
     venues = action.get("venues")
     if isinstance(venues, list) and venues:
@@ -385,8 +605,29 @@ def _score_token(token: str, portfolio: Portfolio) -> float:
             var = sum((x - mean) ** 2 for x in window) / len(window)
             if mean:
                 score += math.sqrt(var) / (abs(mean) or 1.0)
+    else:
+        score -= 2.0
+    prefix = token[:3]
+    if prefix == "111" and token != "11111111111111111111111111111111":
+        score -= 3.0
     score += os.urandom(2)[0] / 65535.0
     return score
+
+
+def _score_priority(score: float) -> float:
+    """Map the discovery score to a bounded priority multiplier."""
+
+    try:
+        value = float(score)
+    except Exception:
+        return 0.5
+    if not math.isfinite(value):
+        return 0.5
+    try:
+        logistic = 1.0 / (1.0 + math.exp(-value))
+    except OverflowError:
+        logistic = 1.0 if value > 0 else 0.0
+    return min(1.0, max(0.25, logistic))
 
 
 async def _ensure_depth_executor(agent_manager: AgentManager, token: str) -> None:
@@ -456,6 +697,22 @@ class SwarmPipeline:
         self.no_action_ttl = self._get_float_env("NO_ACTION_CACHE_TTL", default=(10.0 if self.fast_mode else 0.0))
         if self.no_action_ttl:
             self._no_action_cache.ttl = float(self.no_action_ttl)
+        cache_ttl_default = 60.0 if self.fast_mode else 45.0
+        self.discovery_cache_ttl = self._get_float_env(
+            "SWARM_DISCOVERY_CACHE_TTL", default=cache_ttl_default
+        )
+        cache_limit_env = os.getenv("SWARM_DISCOVERY_CACHE_LIMIT")
+        try:
+            cache_limit = int(cache_limit_env) if cache_limit_env else 0
+        except Exception:
+            cache_limit = 0
+        if cache_limit <= 0:
+            cache_limit = max(self.chunk_size * 8, 96)
+        self.discovery_cache_limit = max(1, cache_limit)
+        self._discovery_cache_tokens: list[str] = []
+        self._discovery_cache_scores: dict[str, float] = {}
+        self._discovery_cache_expiry: float = 0.0
+        self._discovery_agent: DiscoveryAgent | None = None
         self.min_expected_roi = self._get_float_env("SWARM_MIN_EXPECTED_ROI", default=0.0)
         self.min_success_prob = self._get_float_env("SWARM_MIN_SUCCESS_PROB", default=0.0)
         self.min_score = self._get_float_env("SWARM_MIN_SCORE", default=0.0)
@@ -493,13 +750,205 @@ class SwarmPipeline:
         remaining = self.time_budget - elapsed
         return remaining if remaining > 0 else 0.0
 
+    def _ensure_discovery_agent(self) -> DiscoveryAgent:
+        if self._discovery_agent is None:
+            self._discovery_agent = DiscoveryAgent()
+        return self._discovery_agent
+
+    def _update_discovery_cache(
+        self,
+        tokens: Iterable[str],
+        *,
+        scores: Optional[Dict[str, float]] = None,
+        ttl: Optional[float] = None,
+        refresh_ttl: bool = True,
+        now: Optional[float] = None,
+    ) -> None:
+        if self.discovery_cache_limit <= 0:
+            return
+
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for token in tokens:
+            if not isinstance(token, str):
+                continue
+            candidate = token.strip()
+            if not candidate or candidate in seen:
+                continue
+            ordered.append(candidate)
+            seen.add(candidate)
+
+        if not ordered:
+            return
+
+        for token in self._discovery_cache_tokens:
+            if token not in seen:
+                ordered.append(token)
+                seen.add(token)
+            if len(ordered) >= self.discovery_cache_limit:
+                break
+
+        if len(ordered) > self.discovery_cache_limit:
+            ordered = ordered[: self.discovery_cache_limit]
+
+        merged_scores = dict(self._discovery_cache_scores)
+        if scores:
+            for tok, value in scores.items():
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    merged_scores[tok] = float(value)
+
+        for tok in ordered:
+            if tok not in merged_scores:
+                merged_scores[tok] = _score_token(tok, self.portfolio)
+
+        self._discovery_cache_tokens = ordered
+        self._discovery_cache_scores = {tok: merged_scores[tok] for tok in ordered}
+
+        if refresh_ttl:
+            ttl_value = self.discovery_cache_ttl if ttl is None else float(ttl)
+            if ttl_value and ttl_value > 0:
+                ts = time.time() if now is None else float(now)
+                self._discovery_cache_expiry = ts + ttl_value
+            else:
+                self._discovery_cache_expiry = 0.0
+
+    async def _ensure_action_price(self, action: SwarmAction) -> None:
+        """Ensure ``action`` carries a positive price using the shared cache."""
+
+        if action.price and action.price > 0 and math.isfinite(action.price):
+            return
+        token = action.token
+        if not token:
+            return
+
+        metadata = action.metadata
+        nested_meta = metadata.get("metadata") if isinstance(metadata.get("metadata"), dict) else None
+
+        def _meta_get(key: str) -> Any:
+            if key != "metadata" and key in metadata:
+                return metadata[key]
+            if nested_meta and key in nested_meta:
+                return nested_meta[key]
+            return None
+
+        def _meta_set(key: str, value: Any) -> None:
+            if key != "metadata":
+                metadata[key] = value
+            if nested_meta is not None:
+                nested_meta[key] = value
+
+        def _meta_setdefault(key: str, value: Any) -> Any:
+            existing = _meta_get(key)
+            if existing is None:
+                _meta_set(key, value)
+                return value
+            return existing
+
+        def _meta_pop(key: str) -> None:
+            if key != "metadata":
+                metadata.pop(key, None)
+            if nested_meta is not None:
+                nested_meta.pop(key, None)
+
+        existing_context: Dict[str, Any] = {}
+        for container in (metadata, nested_meta):
+            if isinstance(container, dict):
+                ctx = container.get("price_context")
+                if isinstance(ctx, dict):
+                    existing_context.update(ctx)
+
+        needs_price_agents_raw = _meta_get("needs_price_agents")
+        hydrated_agents: list[str] = []
+        if isinstance(needs_price_agents_raw, (list, tuple, set)):
+            hydrated_agents = sorted(
+                {
+                    str(agent).strip()
+                    for agent in needs_price_agents_raw
+                    if str(agent).strip()
+                }
+            )
+        elif isinstance(needs_price_agents_raw, str):
+            agent = needs_price_agents_raw.strip()
+            if agent:
+                hydrated_agents = [agent]
+
+        needs_price_flag = bool(_meta_get("needs_price"))
+
+        try:
+            resolved_price, price_context = await resolve_price(token, self.portfolio)
+        except Exception as exc:  # pragma: no cover - unexpected resolve failures
+            log.debug("resolve_price failed for %s: %s", token, exc)
+            _meta_setdefault("price_missing", True)
+            return
+
+        merged_context = {**existing_context, **price_context}
+        price_value = float(resolved_price)
+
+        if (price_value <= 0 or not math.isfinite(price_value)) and action.side == "sell":
+            position = self.portfolio.balances.get(token)
+            entry_price = getattr(position, "entry_price", 0.0) if position else 0.0
+            if isinstance(entry_price, (int, float)) and entry_price > 0:
+                price_value = float(entry_price)
+                merged_context.setdefault("entry_price", price_value)
+                merged_context.setdefault("source", "entry_price")
+                _meta_setdefault("price_fallback", "entry_price")
+
+        if price_value <= 0 or not math.isfinite(price_value):
+            if merged_context:
+                _meta_set("price_context", merged_context)
+            _meta_setdefault("price_missing", True)
+            return
+
+        source = merged_context.get("source")
+        if source in {"history", "cache"}:
+            _meta_setdefault("price_fallback", source)
+
+        if needs_price_flag:
+            _meta_pop("needs_price")
+        if needs_price_agents_raw is not None:
+            _meta_pop("needs_price_agents")
+        if hydrated_agents:
+            merged_context.setdefault("hydrated_agents", hydrated_agents)
+        merged_context.setdefault("hydrated_by", "pipeline")
+
+        if merged_context:
+            _meta_set("price_context", merged_context)
+
+        action.price = price_value
+        try:
+            update_price_cache(token, price_value)
+        except Exception:  # pragma: no cover - cache errors shouldn't break pipeline
+            log.debug("price cache update failed for %s", token, exc_info=True)
+
+        if nested_meta is not None and not nested_meta:
+            metadata.pop("metadata", None)
+
     async def run(self) -> Dict[str, Any]:
         start_ts = time.perf_counter()
         self._iteration_start = start_ts
         publish("runtime.log", RuntimeLog(stage="loop", detail="begin"))
 
         try:
-            discovery = await self._run_discovery()
+            token_queue: asyncio.Queue[tuple[str, float] | None] = asyncio.Queue()
+            discovery_task = asyncio.create_task(
+                self._run_discovery(token_queue=token_queue),
+                name="pipeline.discovery",
+            )
+            evaluation_task = asyncio.create_task(
+                self._run_evaluation_stream(token_queue),
+                name="pipeline.evaluation",
+            )
+
+            try:
+                discovery = await discovery_task
+            except Exception:
+                await token_queue.put(None)
+                with contextlib.suppress(Exception):
+                    await evaluation_task
+                raise
+            else:
+                await token_queue.put(None)
+                evaluation = await evaluation_task
             if not discovery.tokens:
                 elapsed = time.perf_counter() - start_ts
                 publish("runtime.log", RuntimeLog(stage="loop", detail=f"end:{elapsed:.3f}s"))
@@ -525,7 +974,6 @@ class SwarmPipeline:
                     },
                 }
 
-            evaluation = await self._run_evaluation(discovery)
             if discovery.tokens and not evaluation.records and evaluation.budget_hit:
                 simulation = SimulationStage(records=[])
                 execution = ExecutionStage()
@@ -571,6 +1019,7 @@ class SwarmPipeline:
                     "submitted": len(execution.executed),
                     "lane_workers": self.lane_workers,
                     "errors": len(execution.errors),
+                    "skipped": execution.skipped,
                 },
                 "pipeline": {
                     "queued": len(discovery.tokens),
@@ -601,6 +1050,7 @@ class SwarmPipeline:
                 "token_results": [
                     {
                         "token": rec.token,
+                        "score": rec.score,
                         "actions": [
                             {
                                 "token": act.token,
@@ -611,6 +1061,7 @@ class SwarmPipeline:
                                 "score": act.score,
                                 "expected_roi": act.expected_roi,
                                 "success_prob": act.success_prob,
+                                "evaluation_score": rec.score,
                             }
                             for act in rec.actions
                         ],
@@ -625,34 +1076,95 @@ class SwarmPipeline:
         finally:
             self._iteration_start = None
 
-    async def _run_discovery(self) -> DiscoveryStage:
+    async def _run_discovery(
+        self, *, token_queue: asyncio.Queue[tuple[str, float] | None] | None = None
+    ) -> DiscoveryStage:
         stage = DiscoveryStage()
-        try:
-            disc = DiscoveryAgent()
-            tokens = await disc.discover_tokens(
-                offline=self.offline,
-                token_file=self.token_file,
-                method=self.discovery_method,
+        now = time.time()
+        cached_tokens = list(self._discovery_cache_tokens)
+        cache_hit = False
+        cache_refreshed = False
+
+        if (
+            self.discovery_cache_ttl > 0
+            and cached_tokens
+            and now < self._discovery_cache_expiry
+        ):
+            stage.discovered = list(cached_tokens)
+            cache_hit = True
+            publish(
+                "runtime.log",
+                RuntimeLog(
+                    stage="discovery",
+                    detail=f"cache-hit:{len(stage.discovered)}",
+                ),
             )
-            stage.discovered = list(tokens)
-        except Exception as exc:
-            publish("runtime.log", RuntimeLog(stage="discovery", detail=f"error:{exc}"))
-            log.exception("Discovery failed")
-            stage.discovered = []
+        else:
+            tokens: list[str] = []
+            try:
+                disc = self._ensure_discovery_agent()
+                tokens = await disc.discover_tokens(
+                    offline=self.offline,
+                    token_file=self.token_file,
+                    method=self.discovery_method,
+                )
+            except Exception as exc:
+                publish("runtime.log", RuntimeLog(stage="discovery", detail=f"error:{exc}"))
+                log.exception("Discovery failed")
+                tokens = []
+
+            if tokens:
+                stage.discovered = list(tokens)
+                self._update_discovery_cache(tokens, refresh_ttl=True, now=now)
+                cache_refreshed = True
+                cached_tokens = list(self._discovery_cache_tokens)
+            elif cached_tokens:
+                stage.discovered = list(cached_tokens)
+            else:
+                stage.discovered = []
+
+        if not stage.discovered and hasattr(self.state, "last_tokens"):
+            try:
+                last_tokens = list(getattr(self.state, "last_tokens", []) or [])
+            except Exception:
+                last_tokens = []
+            if last_tokens:
+                stage.discovered = [
+                    canonical_mint(str(tok))
+                    for tok in last_tokens
+                    if isinstance(tok, str) and tok
+                ]
 
         if not stage.discovered:
             stage.tokens = [
                 "So11111111111111111111111111111111111111112",
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
                 "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-                "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",
+                "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
             ]
+            stage.tokens = [canonical_mint(tok) for tok in stage.tokens]
             stage.fallback_used = True
             publish("runtime.log", RuntimeLog(stage="discovery", detail="fallback"))
         else:
-            stage.tokens = list(stage.discovered)
+            stage.tokens = [canonical_mint(tok) for tok in stage.discovered]
 
-        limit = max(self.chunk_size * 4, self.chunk_size)
+        if cached_tokens and stage.tokens:
+            for tok in cached_tokens:
+                canonical_tok = canonical_mint(tok)
+                if canonical_tok not in stage.tokens:
+                    stage.tokens.append(canonical_tok)
+                    if 0 < self.discovery_cache_limit <= len(stage.tokens):
+                        break
+
+        if getattr(self.portfolio, "balances", None):
+            for tok in getattr(self.portfolio, "balances").keys():
+                canonical_tok = canonical_mint(tok)
+                if canonical_tok not in stage.tokens:
+                    stage.tokens.append(canonical_tok)
+                    if 0 < self.discovery_cache_limit <= len(stage.tokens):
+                        break
+
+        limit = max(int(self.chunk_size * 6), 12)
         fast_limit = os.getenv("PIPELINE_TOKEN_LIMIT")
         if fast_limit:
             try:
@@ -661,25 +1173,181 @@ class SwarmPipeline:
             except Exception:
                 pass
         elif self.fast_mode:
-            default_cap = max(4, self.chunk_size * 2)
+            default_cap = max(10, int(self.chunk_size * 3))
             limit = min(limit, default_cap)
         if self.time_budget:
-            limit = min(limit, max(4, int(self.time_budget / 4)))
+            limit = min(limit, max(6, int(self.time_budget / 3)))
+        if self.discovery_cache_limit:
+            limit = min(limit, self.discovery_cache_limit)
+        limit = max(limit, 1)
         stage.limit = limit
+
+        deduped: list[str] = []
+        seen_tokens: set[str] = set()
+        for tok in stage.tokens:
+            if tok not in seen_tokens:
+                deduped.append(tok)
+                seen_tokens.add(tok)
+        stage.tokens = deduped
 
         scores = {mint: _score_token(mint, self.portfolio) for mint in stage.tokens}
         stage.scores = scores
         ranked = sorted(stage.tokens, key=lambda t: scores.get(t, 0.0), reverse=True)
         stage.tokens = ranked[:limit]
+        if token_queue is not None and stage.tokens:
+            for tok in stage.tokens:
+                await token_queue.put((tok, stage.scores.get(tok, 0.0)))
         publish(
             "runtime.log",
             RuntimeLog(stage="pipeline", detail=f"queue:{len(stage.tokens)}/{len(scores)}"),
+        )
+        refresh_ttl = not cache_hit and not cache_refreshed
+        ttl_override = None
+        if refresh_ttl and not stage.discovered:
+            ttl_override = min(5.0, self.discovery_cache_ttl or 5.0)
+        self._update_discovery_cache(
+            stage.tokens,
+            scores=stage.scores,
+            refresh_ttl=refresh_ttl,
+            ttl=ttl_override,
         )
         if hasattr(self.state, "last_tokens"):
             try:
                 self.state.last_tokens = list(stage.tokens)
             except Exception:
                 self.state.last_tokens = list(stage.tokens)
+        return stage
+
+    async def _run_evaluation_stream(
+        self, token_queue: asyncio.Queue[tuple[str, float] | None]
+    ) -> EvaluationStage:
+        stage = EvaluationStage()
+        start_time = time.perf_counter()
+        sem = asyncio.Semaphore(self.chunk_size)
+        records: List[EvaluationRecord] = []
+        errors: List[str] = []
+        active: set[asyncio.Task[None]] = set()
+
+        async def evaluate_token(token: str, score: float) -> None:
+            remaining_before = self._remaining_budget()
+            if remaining_before is not None and remaining_before <= 0:
+                stage.budget_hit = True
+                return
+            async with sem:
+                remaining_total = self._remaining_budget()
+                if remaining_total is not None and remaining_total <= 0:
+                    stage.budget_hit = True
+                    return
+                if self.time_budget and time.perf_counter() - start_time > self.time_budget:
+                    stage.budget_hit = True
+                    return
+                cached_expiry = (
+                    self._no_action_cache.get(token) if self.no_action_ttl else None
+                )
+                if cached_expiry is not None:
+                    publish(
+                        "runtime.log",
+                        RuntimeLog(stage="evaluation", detail=f"cached-skip:{token}"),
+                    )
+                    records.append(
+                        EvaluationRecord(
+                            token=token,
+                            score=score,
+                            latency=0.0,
+                            actions=[],
+                            context=None,
+                            errors=["cached:no-action"],
+                        )
+                    )
+                    return
+                publish(
+                    "runtime.log",
+                    RuntimeLog(stage="evaluation", detail=f"start:{token} score={score:.3f}"),
+                )
+                t0 = time.perf_counter()
+                ctx: EvaluationContext | None = None
+                actions: List[SwarmAction] = []
+                token_errors: List[str] = []
+                try:
+                    eval_coro = self.agent_manager.evaluate_with_swarm(
+                        token, self.portfolio
+                    )
+                    eval_timeout = self.token_timeout
+                    if remaining_total is not None:
+                        budget_slice = max(0.1, remaining_total * 0.4)
+                        if eval_timeout > 0:
+                            eval_timeout = min(eval_timeout, budget_slice)
+                        else:
+                            eval_timeout = budget_slice
+                    if eval_timeout and eval_timeout > 0:
+                        ctx = await asyncio.wait_for(eval_coro, timeout=eval_timeout)
+                    else:
+                        ctx = await eval_coro
+                    raw_actions = list(ctx.actions)
+                    for raw in raw_actions:
+                        if not isinstance(raw, dict):
+                            continue
+                        act = SwarmAction.from_raw(raw)
+                        if act is not None:
+                            actions.append(act)
+                    if actions:
+                        await asyncio.gather(
+                            *(self._ensure_action_price(act) for act in actions)
+                        )
+                    if not actions and self.no_action_ttl:
+                        self._no_action_cache[token] = time.time() + self.no_action_ttl
+                except asyncio.TimeoutError:
+                    token_errors.append("evaluation:timeout")
+                    publish(
+                        "runtime.log",
+                        RuntimeLog(stage="evaluation", detail=f"timeout:{token}"),
+                    )
+                except Exception as exc:
+                    token_errors.append(f"evaluation:{exc}")
+                    publish(
+                        "runtime.log",
+                        RuntimeLog(stage="evaluation", detail=f"error:{token}:{exc}"),
+                    )
+                    log.exception("Evaluation failed for %s", token)
+                latency = time.perf_counter() - t0
+                stage.latencies.append(latency)
+                publish(
+                    "runtime.log",
+                    RuntimeLog(
+                        stage="evaluation",
+                        detail=f"done:{token} actions={len(actions)} latency={latency:.2f}s",
+                    ),
+                )
+                records.append(
+                    EvaluationRecord(
+                        token=token,
+                        score=score,
+                        latency=latency,
+                        actions=actions,
+                        context=ctx,
+                        errors=token_errors,
+                    )
+                )
+                errors.extend(token_errors)
+
+        while True:
+            item = await token_queue.get()
+            if item is None:
+                break
+            token, score = item
+            task = asyncio.create_task(evaluate_token(token, score))
+            active.add(task)
+            task.add_done_callback(active.discard)
+
+        if active:
+            await asyncio.gather(*active)
+
+        stage.records = records
+        if errors:
+            publish(
+                "runtime.log",
+                RuntimeLog(stage="evaluation", detail=f"errors:{len(errors)}"),
+            )
         return stage
 
     async def _run_evaluation(self, discovery: DiscoveryStage) -> EvaluationStage:
@@ -751,6 +1419,10 @@ class SwarmPipeline:
                         act = SwarmAction.from_raw(raw)
                         if act is not None:
                             actions.append(act)
+                    if actions:
+                        await asyncio.gather(
+                            *(self._ensure_action_price(act) for act in actions)
+                        )
                     if not actions and self.no_action_ttl:
                         self._no_action_cache[token] = time.time() + self.no_action_ttl
                 except asyncio.TimeoutError:
@@ -859,7 +1531,18 @@ class SwarmPipeline:
                     log.exception("Simulation failed for %s", record.token)
             avg_roi = sum(sim.expected_roi for sim in sims) / len(sims) if sims else 0.0
             avg_prob = sum(sim.success_prob for sim in sims) / len(sims) if sims else 0.0
+            pre_stats: list[tuple[float, float, float]] = []
             for act in actions:
+                pre_stats.append(
+                    (
+                        float(act.expected_roi),
+                        float(act.success_prob),
+                        float(act.weight),
+                    )
+                )
+            effects_by_agent: Dict[str, Dict[str, float]] = {}
+            for index, act in enumerate(actions):
+                original_roi, original_success, original_weight = pre_stats[index]
                 for sim in sims:
                     act.apply_simulation(sim)
                 if act.expected_roi <= 0 and avg_roi > 0:
@@ -868,6 +1551,48 @@ class SwarmPipeline:
                     act.success_prob = avg_prob
                 act.metadata.setdefault("simulation_avg_roi", avg_roi)
                 act.metadata.setdefault("simulation_avg_success", avg_prob)
+                act.metadata.setdefault("evaluation_score", record.score)
+                post_roi = float(act.expected_roi)
+                post_success = float(act.success_prob)
+                multiplier = 1.0
+                if original_roi <= 0.0 and post_roi > 0.0:
+                    multiplier = min(2.0, 1.2 + max(0.0, post_roi))
+                elif post_roi <= 0.0:
+                    multiplier = 0.0
+                elif original_roi > 0.0:
+                    try:
+                        ratio = post_roi / original_roi
+                    except ZeroDivisionError:
+                        ratio = 1.0
+                    multiplier = max(0.25, min(2.5, ratio))
+                if original_success > 0.0 and post_success > 0.0:
+                    success_ratio = post_success / original_success
+                    multiplier *= max(0.5, min(1.5, success_ratio))
+                elif post_success <= 0.0:
+                    multiplier *= 0.25
+                multiplier = max(0.0, min(3.0, multiplier))
+                act.metadata.setdefault("simulation", {})
+                act.metadata["simulation"].update(
+                    {
+                        "delta_roi": post_roi - original_roi,
+                        "avg_roi": avg_roi,
+                        "avg_success": avg_prob,
+                        "multiplier": multiplier,
+                        "pre_roi": original_roi,
+                        "pre_success": original_success,
+                    }
+                )
+                act.weight = max(0.0, original_weight * multiplier)
+                contributors = act.metadata.get("contributors")
+                if isinstance(contributors, list):
+                    for contributor in contributors:
+                        stats = effects_by_agent.setdefault(
+                            contributor,
+                            {"delta_roi": 0.0, "multiplier": 0.0, "count": 0},
+                        )
+                        stats["delta_roi"] += post_roi - original_roi
+                        stats["multiplier"] += multiplier
+                        stats["count"] += 1
             filtered: List[SwarmAction] = []
             for act in actions:
                 if min_roi and act.expected_roi < min_roi:
@@ -879,10 +1604,26 @@ class SwarmPipeline:
                 filtered.append(act)
             if max_actions and len(filtered) > max_actions:
                 filtered.sort(key=lambda a: a.score, reverse=True)
-                rejected = len(filtered) - max_actions
-                stage.rejected[record.token] = rejected
-                filtered = filtered[:max_actions]
+                priority = _score_priority(record.score)
+                allowed = int(math.ceil(max_actions * priority))
+                allowed = max(1, min(len(filtered), allowed))
+                rejected = len(filtered) - allowed
+                if rejected > 0:
+                    stage.rejected[record.token] = rejected
+                    filtered = filtered[:allowed]
+                else:
+                    stage.rejected.pop(record.token, None)
             record.actions = filtered
+            if effects_by_agent and getattr(record.context, "metadata", None) is not None:
+                sim_meta = record.context.metadata.setdefault("simulation_effects", {})
+                for agent_name, stats in effects_by_agent.items():
+                    count = stats.get("count", 1) or 1
+                    sim_meta[agent_name] = {
+                        "avg_delta_roi": stats["delta_roi"] / count,
+                        "avg_multiplier": stats["multiplier"] / count,
+                        "samples": count,
+                        "token": record.token,
+                    }
 
         await asyncio.gather(*(simulate(rec) for rec in evaluation.records))
         return stage
@@ -896,18 +1637,59 @@ class SwarmPipeline:
         futures: List[asyncio.Future] = []
         raw_results_by_token: Dict[str, List[Any]] = {}
 
+        if not self.dry_run:
+            unique_tokens = {
+                record.token
+                for record in simulation.records
+                if getattr(record, "token", None)
+            }
+            depth_tasks = [
+                _ensure_depth_executor(self.agent_manager, token)
+                for token in unique_tokens
+            ]
+            if depth_tasks:
+                await asyncio.gather(*depth_tasks)
+
         for record in simulation.records:
             actions = record.actions
             token_payload = {
                 "token": record.token,
                 "actions": [],
                 "errors": record.errors,
+                "score": record.score,
             }
             raw_results_by_token[record.token] = []
-            if not self.dry_run:
-                await _ensure_depth_executor(self.agent_manager, record.token)
             for act in actions:
                 order = act.to_order()
+                side = str(order.get("side") or "").strip().lower()
+                price_value_raw = order.get("price", 0.0)
+                try:
+                    price_value = float(price_value_raw)
+                except Exception:
+                    price_value = 0.0
+                balances = getattr(self.portfolio, "balances", {}) or {}
+                entry_price: float | None = None
+                if (
+                    self.portfolio
+                    and side in {"buy", "sell"}
+                ):
+                    position = None
+                    token_key = str(order.get("token") or act.token or "")
+                    if token_key and isinstance(balances, dict):
+                        position = balances.get(token_key)
+                    if position is not None:
+                        raw_entry = getattr(position, "entry_price", None)
+                        if raw_entry is None and isinstance(position, dict):
+                            raw_entry = position.get("entry_price")
+                        try:
+                            value = float(raw_entry)
+                        except (TypeError, ValueError):
+                            value = None
+                        if value is not None and math.isfinite(value) and value > 0:
+                            if side == "sell" or (side == "buy" and position is not None):
+                                entry_price = value
+                if entry_price is not None and "entry_price" not in order:
+                    order["entry_price"] = entry_price
                 risk = dict(order.get("risk", {}))
                 if self.stop_loss is not None:
                     risk["stop_loss"] = float(self.stop_loss)
@@ -919,12 +1701,194 @@ class SwarmPipeline:
                     risk.setdefault("max_drawdown", float(self.max_drawdown))
                 if self.volatility_factor is not None:
                     risk.setdefault("volatility_factor", float(self.volatility_factor))
+                current_drawdown_metric: float | None = None
+                if (
+                    self.portfolio is not None
+                    and price_value > 0
+                    and isinstance(balances, dict)
+                ):
+                    try:
+                        snapshot: Dict[str, float] = {}
+                        for tok, pos in balances.items():
+                            base_price = getattr(pos, "entry_price", None)
+                            if base_price is None and isinstance(pos, dict):
+                                base_price = pos.get("entry_price")
+                            try:
+                                snapshot[tok] = float(base_price) if base_price is not None else 0.0
+                            except (TypeError, ValueError):
+                                snapshot[tok] = 0.0
+                        snapshot[record.token] = price_value
+                        self.portfolio.update_drawdown(snapshot)
+                        current_drawdown_metric = self.portfolio.current_drawdown(snapshot)
+                    except Exception:
+                        current_drawdown_metric = None
+                if current_drawdown_metric is not None:
+                    try:
+                        risk.setdefault("current_drawdown", float(current_drawdown_metric))
+                    except (TypeError, ValueError):
+                        pass
                 if risk:
                     order["risk"] = risk
                 else:
                     order.pop("risk", None)
-                token_payload["actions"].append(order)
+
+                if price_value <= 0 or not math.isfinite(price_value):
+                    if "missing_price" not in token_payload["errors"]:
+                        token_payload["errors"].append("missing_price")
+                    if "execution:missing_price" not in stage.errors:
+                        stage.errors.append("execution:missing_price")
+                    stage.skipped["missing_price"] = stage.skipped.get("missing_price", 0) + 1
+                    log.warning(
+                        "Skipping execution for %s due to missing price (value=%s)",
+                        record.token,
+                        order.get("price"),
+                    )
+                    continue
+
                 lane = _resolve_lane(order)
+
+                def _skip(reason: str, stage_reason: str, message: str) -> None:
+                    if reason not in token_payload["errors"]:
+                        token_payload["errors"].append(reason)
+                    if stage_reason not in stage.errors:
+                        stage.errors.append(stage_reason)
+                    stage.skipped[reason] = stage.skipped.get(reason, 0) + 1
+                    log.warning(message)
+
+                requires_keypair = bool(
+                    order.get("requires_keypair")
+                    or order.get("require_keypair")
+                    or order.get("needs_keypair")
+                )
+                if requires_keypair:
+                    has_keypair = bool(order.get("keypair"))
+                    if not has_keypair:
+                        exec_keypair = getattr(self.agent_manager.executor, "keypair", None)
+                        manager_keypair = getattr(self.agent_manager, "keypair", None)
+                        keypair_path = getattr(self.agent_manager, "keypair_path", None)
+                        has_keypair = bool(exec_keypair or manager_keypair or keypair_path)
+                    if not has_keypair:
+                        _skip(
+                            "missing_keypair",
+                            "execution:missing_keypair",
+                            f"Skipping execution for {record.token} due to missing keypair",
+                        )
+                        continue
+
+                lane_budget_spec = order.get("lane_budget")
+                lane_budget_key: str | None = None
+                required_budget: float | None = None
+                if isinstance(lane_budget_spec, dict):
+                    value = lane_budget_spec.get(lane)
+                    if value is not None:
+                        lane_budget_key = lane
+                        try:
+                            required_budget = float(value)
+                        except Exception:
+                            required_budget = None
+                elif isinstance(lane_budget_spec, (int, float)):
+                    required_budget = float(lane_budget_spec)
+                    lane_budget_key = lane
+                elif isinstance(lane_budget_spec, str) and lane_budget_spec.strip():
+                    lane_budget_key = lane_budget_spec.strip()
+
+                extra_budget = order.get("lane_budgets")
+                if isinstance(extra_budget, dict):
+                    value = extra_budget.get(lane)
+                    if value is not None:
+                        try:
+                            required_budget = float(value)
+                        except Exception:
+                            required_budget = None
+                        if lane_budget_key is None:
+                            lane_budget_key = lane
+
+                if lane_budget_key is None:
+                    lane_budget_key = (
+                        order.get("lane_budget_key")
+                        or order.get("lane_budget_name")
+                        or order.get("required_lane_budget")
+                    )
+                    if isinstance(lane_budget_key, str) and lane_budget_key.strip():
+                        lane_budget_key = lane_budget_key.strip()
+                    else:
+                        lane_budget_key = None
+
+                if required_budget is None:
+                    raw_required = (
+                        order.get("lane_budget_amount")
+                        or order.get("lane_budget_required")
+                        or order.get("required_lane_budget_amount")
+                    )
+                    if isinstance(raw_required, dict):
+                        raw_required = raw_required.get(lane)
+                    if raw_required is not None:
+                        try:
+                            required_budget = float(raw_required)
+                        except Exception:
+                            required_budget = None
+                        if lane_budget_key is None:
+                            lane_budget_key = lane
+
+                if required_budget is not None and required_budget <= 0:
+                    required_budget = None
+
+                requires_lane_budget = bool(
+                    order.get("requires_lane_budget")
+                    or lane_budget_key is not None
+                    or required_budget is not None
+                )
+                if requires_lane_budget:
+                    budgets = getattr(self.agent_manager.executor, "lane_budgets", None)
+                    available_budget = None
+                    if budgets:
+                        keys_to_try = []
+                        if lane_budget_key:
+                            keys_to_try.append(str(lane_budget_key))
+                        keys_to_try.append(str(lane))
+                        for key in keys_to_try:
+                            if key in budgets:
+                                available_budget = budgets.get(key)
+                                break
+                    missing_budget = False
+                    if available_budget is None:
+                        missing_budget = True
+                    elif required_budget is not None:
+                        try:
+                            missing_budget = float(available_budget or 0.0) < float(required_budget)
+                        except Exception:
+                            missing_budget = not bool(available_budget)
+                    else:
+                        missing_budget = not bool(available_budget)
+                    if missing_budget:
+                        budget_name = lane_budget_key or lane
+                        _skip(
+                            "missing_lane_budget",
+                            "execution:missing_lane_budget",
+                            f"Skipping execution for {record.token} due to missing lane budget {budget_name}",
+                        )
+                        continue
+
+                required_execs = order.get("requires_executor") or order.get("requires_executors")
+                if isinstance(required_execs, str):
+                    required_execs = [required_execs]
+                elif isinstance(required_execs, Iterable):
+                    required_execs = [str(item) for item in required_execs if item]
+                else:
+                    required_execs = []
+
+                if required_execs:
+                    available_execs = _available_executor_names(self.agent_manager)
+                    missing = [name for name in required_execs if name not in available_execs]
+                    if missing:
+                        _skip(
+                            "missing_executor",
+                            "execution:missing_executor",
+                            f"Skipping execution for {record.token} due to missing executors: {', '.join(missing)}",
+                        )
+                        continue
+
+                token_payload["actions"].append(order)
                 record_entry = {
                     "token": act.token,
                     "side": act.side,
@@ -933,7 +1897,10 @@ class SwarmPipeline:
                     "agent": act.agent,
                     "expected_roi": act.expected_roi,
                     "success_prob": act.success_prob,
+                    "evaluation_score": record.score,
                 }
+                if "entry_price" in order:
+                    record_entry["entry_price"] = order["entry_price"]
                 if risk:
                     record_entry["risk"] = risk
                 if self.dry_run:

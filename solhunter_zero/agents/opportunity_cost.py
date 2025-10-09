@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from typing import Sequence, Dict, List, Any
 
+import asyncio
+import logging
+
 from . import BaseAgent
 from .memory import MemoryAgent
 from ..portfolio import Portfolio
-from ..simulation import run_simulations
+from ..simulation import run_simulations_async
+from .price_utils import resolve_price
+
+logger = logging.getLogger(__name__)
 
 
 class OpportunityCostAgent(BaseAgent):
@@ -53,8 +59,8 @@ class OpportunityCostAgent(BaseAgent):
         return streak
 
     # ------------------------------------------------------------------
-    def _score(self, token: str) -> float:
-        sims = run_simulations(token, count=1)
+    async def _score(self, token: str) -> float:
+        sims = await run_simulations_async(token, count=1)
         roi = sims[0].expected_roi if sims else 0.0
         mem = getattr(self.memory_agent, "memory", None) if self.memory_agent else None
         if mem and hasattr(mem, "list_trades") and mem.list_trades(token=token, limit=1):
@@ -76,7 +82,9 @@ class OpportunityCostAgent(BaseAgent):
         tokens = set(self.candidates)
         tokens.add(token)
 
-        scores = {tok: self._score(tok) for tok in tokens}
+        token_list = list(tokens)
+        score_values = await asyncio.gather(*(self._score(tok) for tok in token_list))
+        scores = dict(zip(token_list, score_values))
         ranked = sorted(scores, key=scores.get, reverse=True)
         rank = ranked.index(token) + 1
 
@@ -88,5 +96,21 @@ class OpportunityCostAgent(BaseAgent):
         if self._misses.get(token, 0) >= 2:
             pos = portfolio.balances.get(token)
             if pos:
-                return [{"token": token, "side": "sell", "amount": pos.amount, "price": 0.0}]
+                price, context = await resolve_price(token, portfolio)
+                if price <= 0:
+                    logger.info(
+                        "%s agent skipping sell for %s due to missing price: %s",
+                        self.name,
+                        token,
+                        context,
+                    )
+                    return []
+                return [
+                    {
+                        "token": token,
+                        "side": "sell",
+                        "amount": pos.amount,
+                        "price": price,
+                    }
+                ]
         return []

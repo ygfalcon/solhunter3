@@ -24,7 +24,7 @@ def test_load_config_yaml(tmp_path):
     path.write_text(
         "birdeye_api_key: KEY\n"
         "solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\n"
-        "dex_base_url: https://quote-api.jup.ag\n"
+        "dex_base_url: https://swap.helius.dev\n"
         "agents: [sim]\n"
         "agent_weights:\n  sim: 1.0\n"
         "event_bus_url: ws://bus\n"
@@ -32,7 +32,7 @@ def test_load_config_yaml(tmp_path):
     cfg = load_config(str(path))
     assert cfg["birdeye_api_key"] == "KEY"
     assert str(cfg["solana_rpc_url"]).rstrip("/") == "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
-    assert str(cfg["dex_base_url"]).rstrip("/") == "https://quote-api.jup.ag"
+    assert str(cfg["dex_base_url"]).rstrip("/") == "https://swap.helius.dev"
     assert cfg["agents"] == ["sim"]
     assert cfg["agent_weights"] == {"sim": 1.0}
     assert cfg["event_bus_url"] == "ws://bus"
@@ -43,7 +43,7 @@ def test_load_config_toml(tmp_path):
     path.write_text(
         'birdeye_api_key="KEY"\n'
         'solana_rpc_url="https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"\n'
-        'dex_base_url="https://quote-api.jup.ag"\n'
+        'dex_base_url="https://swap.helius.dev"\n'
         'event_bus_url="ws://bus"\n'
         'agents=["sim"]\n'
         '[agent_weights]\n'
@@ -52,7 +52,7 @@ def test_load_config_toml(tmp_path):
     cfg = load_config(str(path))
     assert cfg["birdeye_api_key"] == "KEY"
     assert str(cfg["solana_rpc_url"]).rstrip("/") == "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
-    assert str(cfg["dex_base_url"]).rstrip("/") == "https://quote-api.jup.ag"
+    assert str(cfg["dex_base_url"]).rstrip("/") == "https://swap.helius.dev"
     assert cfg["agents"] == ["sim"]
     assert cfg["event_bus_url"] == "ws://bus"
     assert cfg["agent_weights"] == {"sim": 1.0}
@@ -62,7 +62,7 @@ def test_load_config_agents(tmp_path):
     path = tmp_path / "agents.toml"
     path.write_text(
         'solana_rpc_url="https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"\n'
-        'dex_base_url="https://quote-api.jup.ag"\n'
+        'dex_base_url="https://swap.helius.dev"\n'
         'agents=["sim","exit"]\n[agent_weights]\nsim=0.5\nexit=1.0\n'
     )
     cfg = load_config(str(path))
@@ -75,7 +75,7 @@ def test_env_var_overrides_default_search(tmp_path, monkeypatch):
     default.write_text(
         "birdeye_api_key: DEFAULT\n"
         "solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\n"
-        "dex_base_url: https://quote-api.jup.ag\n"
+        "dex_base_url: https://swap.helius.dev\n"
         "agents: [sim]\n"
         "agent_weights:\n  sim: 1.0\n"
     )
@@ -83,7 +83,7 @@ def test_env_var_overrides_default_search(tmp_path, monkeypatch):
     override.write_text(
         'birdeye_api_key="OVR"\n'
         'solana_rpc_url="https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"\n'
-        'dex_base_url="https://quote-api.jup.ag"\n'
+        'dex_base_url="https://swap.helius.dev"\n'
         'agents=["sim"]\n'
         '[agent_weights]\n'
         'sim=1.0\n'
@@ -137,7 +137,7 @@ def test_apply_env_overrides(monkeypatch):
     cfg = {
         "birdeye_api_key": "a",
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
         "risk_tolerance": 0.1,
         "token_suffix": "",
         "agents": ["a"],
@@ -164,7 +164,7 @@ def test_apply_env_overrides(monkeypatch):
 def test_apply_env_overrides_invalid_values(monkeypatch):
     cfg = {
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
         "agents": ["a"],
         "agent_weights": {"a": 1.0},
     }
@@ -177,7 +177,7 @@ def test_apply_env_overrides_invalid_values(monkeypatch):
 def test_llm_env_overrides(monkeypatch):
     cfg = {
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
         "agents": ["a"],
         "agent_weights": {"a": 1.0},
         "llm_model": "orig",
@@ -193,7 +193,7 @@ def test_llm_env_overrides(monkeypatch):
 def test_jito_env_overrides(monkeypatch):
     cfg = {
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
         "agents": ["a"],
         "agent_weights": {"a": 1.0},
         "jito_rpc_url": "a",
@@ -219,7 +219,7 @@ def test_agents_env_round_trip(monkeypatch):
     monkeypatch.setenv("AGENT_WEIGHTS", dumps(weights))
     cfg = {
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
     }
     result = apply_env_overrides(cfg)
     assert result["agents"] == agents
@@ -230,7 +230,7 @@ def test_set_env_from_config(monkeypatch):
     cfg = {
         "birdeye_api_key": "A",
         "solana_rpc_url": "RPC",
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
         "risk_tolerance": 0.3,
         "token_suffix": "xyz",
         "agents": ["sim"],
@@ -293,6 +293,14 @@ def test_load_dex_config_env(monkeypatch):
     assert cfg.fees["jupiter"] == 0.1
 
 
+def test_default_helius_priority():
+    cfg = load_dex_config()
+    assert cfg.swap_priorities, "Expected at least one swap priority"
+    first = cfg.swap_priorities[0]
+    assert first == "helius"
+    assert cfg.swap_urls[first].rstrip("/") == "https://swap.helius.dev"
+
+
 def test_save_config_emits_event(tmp_path):
     events = []
 
@@ -322,7 +330,7 @@ def test_get_event_bus_peers(monkeypatch):
 def test_validate_config_ok():
     cfg = {
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
         "agents": ["a", "b"],
         "agent_weights": {"a": 1.0, "b": 2.0},
     }
@@ -331,7 +339,7 @@ def test_validate_config_ok():
 
 def test_validate_config_missing():
     cfg = {
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
         "agents": ["a"],
         "agent_weights": {"a": 1.0},
     }
@@ -339,4 +347,3 @@ def test_validate_config_missing():
 
     with pytest.raises(ValueError):
         validate_config(cfg)
-

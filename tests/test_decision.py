@@ -1,7 +1,17 @@
 import pytest
+
 pytest.importorskip("torch.nn.utils.rnn")
+
+from solhunter_zero import decision
 from solhunter_zero.decision import should_buy, should_sell
 from solhunter_zero.simulation import SimulationResult
+
+
+@pytest.fixture(autouse=True)
+def reset_thresholds():
+    previous = decision.set_global_threshold_profile(None)
+    yield
+    decision.set_global_threshold_profile(previous)
 
 
 def test_should_buy_empty():
@@ -10,27 +20,38 @@ def test_should_buy_empty():
 
 def test_should_buy_positive():
     sims = [
-        SimulationResult(success_prob=0.7, expected_roi=1.2, volume=200.0, liquidity=500.0),
-        SimulationResult(success_prob=0.65, expected_roi=1.5, volume=200.0, liquidity=500.0),
+        SimulationResult(success_prob=0.64, expected_roi=0.12, volume=200.0, liquidity=500.0),
+        SimulationResult(success_prob=0.61, expected_roi=0.08, volume=200.0, liquidity=500.0),
     ]
     assert should_buy(sims) is True
 
 
 def test_should_buy_negative():
     sims = [
-        SimulationResult(success_prob=0.5, expected_roi=0.8, volume=200.0, liquidity=500.0),
-        SimulationResult(success_prob=0.6, expected_roi=0.9, volume=200.0, liquidity=500.0),
+        SimulationResult(success_prob=0.53, expected_roi=0.02, volume=200.0, liquidity=500.0),
+        SimulationResult(success_prob=0.55, expected_roi=0.03, volume=200.0, liquidity=500.0),
     ]
     assert should_buy(sims) is False
 
 
 def test_should_buy_high_thresholds():
     sims = [
-        SimulationResult(success_prob=0.7, expected_roi=1.2, volume=200.0, liquidity=500.0),
-        SimulationResult(success_prob=0.65, expected_roi=1.5, volume=200.0, liquidity=500.0),
+        SimulationResult(success_prob=0.64, expected_roi=0.12, volume=200.0, liquidity=500.0),
+        SimulationResult(success_prob=0.61, expected_roi=0.08, volume=200.0, liquidity=500.0),
     ]
     # require very high sharpe ratio
     assert should_buy(sims, min_sharpe=10.0) is False
+
+
+def test_should_buy_respects_global_defaults():
+    sims = [
+        SimulationResult(success_prob=0.64, expected_roi=0.12, volume=200.0, liquidity=500.0),
+        SimulationResult(success_prob=0.61, expected_roi=0.08, volume=200.0, liquidity=500.0),
+    ]
+    decision.set_global_threshold_profile({"default": {"min_roi": 0.2}})
+    assert should_buy(sims) is False
+    decision.set_global_threshold_profile(None)
+    assert should_buy(sims) is True
 
 
 def test_should_buy_volume_threshold():
@@ -97,6 +118,52 @@ def test_should_buy_sentiment_and_order_book():
     assert should_buy(sims, min_sharpe=0.0, min_sentiment=0.5, min_order_strength=0.6) is True
     assert (
         should_buy(sims, min_sharpe=0.0, min_sentiment=0.7, min_order_strength=0.6)
+        is False
+    )
+
+
+def test_should_buy_regime_threshold_profile():
+    sims = [
+        SimulationResult(
+            success_prob=0.7,
+            expected_roi=1.2,
+            volume=200.0,
+            liquidity=220.0,
+        ),
+        SimulationResult(
+            success_prob=0.72,
+            expected_roi=1.25,
+            volume=180.0,
+            liquidity=210.0,
+        ),
+    ]
+    thresholds = {
+        "default": {
+            "min_success": 0.6,
+            "min_roi": 1.0,
+            "min_liquidity": 150.0,
+            "gas_cost": 0.05,
+        },
+        "bull": {"min_success": 0.55, "gas_cost": 0.0},
+        "bear": {"min_success": 0.78, "min_roi": 1.35, "gas_cost": 0.3},
+    }
+
+    assert (
+        should_buy(
+            sims,
+            regime="bull",
+            threshold_profile=thresholds,
+            min_sharpe=0.0,
+        )
+        is True
+    )
+    assert (
+        should_buy(
+            sims,
+            regime="bear",
+            threshold_profile=thresholds,
+            min_sharpe=0.0,
+        )
         is False
     )
 

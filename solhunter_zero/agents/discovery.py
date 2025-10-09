@@ -1,46 +1,174 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 import time
-from typing import List, Optional
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
+from .. import config
+from ..token_aliases import canonical_mint
+from ..discovery import merge_sources
 from ..event_bus import publish
+from ..mempool_scanner import stream_ranked_mempool_tokens_with_depth
+from ..scanner_common import (
+    DEFAULT_SOLANA_RPC,
+    DEFAULT_SOLANA_WS,
+    scan_tokens_from_file,
+)
+from ..scanner_onchain import scan_tokens_onchain
 from ..schemas import RuntimeLog
-from ..token_scanner import scan_tokens_async, enrich_tokens_async
+from ..token_scanner import enrich_tokens_async, scan_tokens_async
 
 logger = logging.getLogger(__name__)
 
+_CACHE: dict[str, object] = {"tokens": [], "ts": 0.0, "limit": 0, "method": ""}
+_STATIC_FALLBACK = [
+    "So11111111111111111111111111111111111111112",  # SOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
+    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",  # JUP
+]
 
-_CACHE: dict[str, object] = {"tokens": [], "ts": 0.0, "limit": 0}
+DEFAULT_DISCOVERY_METHOD = "helius"
+
+_DISCOVERY_METHOD_ALIASES: dict[str, str] = {
+    "helius": "helius",
+    "api": "helius",
+    "rest": "helius",
+    "http": "helius",
+    "websocket": "websocket",
+    "ws": "websocket",
+    "merge": "websocket",
+    "mempool": "mempool",
+    "onchain": "onchain",
+    "file": "file",
+}
+
+DISCOVERY_METHODS: frozenset[str] = frozenset(
+    {"helius", "websocket", "mempool", "onchain", "file"}
+)
+
+# Tokens that must never be filtered out even if they match a generic rule
+_FILTER_WHITELIST = {
+    "So11111111111111111111111111111111111111112",  # SOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "11111111111111111111111111111111",  # System program
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # SPL Token program
+}
+
+
+def resolve_discovery_method(value: Any) -> Optional[str]:
+    """Return a canonical discovery method or ``None`` if ``value`` is invalid."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    method = value.strip().lower()
+    if not method:
+        return None
+    canonical = _DISCOVERY_METHOD_ALIASES.get(method, method)
+    if canonical in DISCOVERY_METHODS:
+        return canonical
+    return None
 
 
 class DiscoveryAgent:
-    """
-    Agent-first discovery:
-      1) pull trending/new from Birdeye (with your API key)
-      2) enrich via RPC (decimals/account existence)
-      3) return a sane, non-empty list
-    """
+    """Token discovery orchestrator supporting multiple discovery methods."""
 
     def __init__(self) -> None:
-        # Hard-code Helius defaults (you asked for this)
-        self.rpc_url = os.getenv(
-            "SOLANA_RPC_URL",
-            "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        )
-        self.ws_url = os.getenv(
-            "SOLANA_WS_URL",
-            "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        )
+        rpc_env = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
+        os.environ.setdefault("SOLANA_RPC_URL", rpc_env)
+        self.rpc_url = rpc_env
+
+        ws_env = self._resolve_ws_url()
+        ws_resolved = self._as_websocket_url(ws_env) or DEFAULT_SOLANA_WS
+        os.environ.setdefault("SOLANA_WS_URL", ws_resolved)
+        self.ws_url = ws_resolved
         self.birdeye_api_key = os.getenv(
             "BIRDEYE_API_KEY",
             "b1e60d72780940d1bd929b9b2e9225e6",
         )
         if not self.birdeye_api_key:
-            logger.warning("BIRDEYE_API_KEY missing; discovery will fall back to static tokens")
+            logger.warning(
+                "BIRDEYE_API_KEY missing; discovery will fall back to static tokens"
+            )
         self.limit = int(os.getenv("DISCOVERY_LIMIT", "60") or 60)
+        self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
+        self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
+        self.max_attempts = max(1, int(os.getenv("TOKEN_DISCOVERY_RETRIES", "2") or 2))
+        self.mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
+        env_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        self.default_method = env_method or DEFAULT_DISCOVERY_METHOD
+        self.last_details: Dict[str, Dict[str, Any]] = {}
+        self.last_tokens: List[str] = []
+        self.last_method: str | None = None
+        self.filter_prefix_11 = (
+            os.getenv("DISCOVERY_FILTER_PREFIX_11", "1").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
 
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+    def stream_mempool_events(
+        self,
+        rpc_url: Optional[str] = None,
+        *,
+        threshold: Optional[float] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Expose the ranked mempool stream for tests and advanced callers."""
+
+        url = rpc_url or self.ws_url or self.rpc_url
+        url = self._as_websocket_url(url) or self.ws_url or self.rpc_url
+        thresh = self.mempool_threshold if threshold is None else float(threshold)
+        return stream_ranked_mempool_tokens_with_depth(url, threshold=thresh)
+
+    # ------------------------------------------------------------------
+    # Internal wiring helpers
+    # ------------------------------------------------------------------
+    def _resolve_ws_url(self) -> Optional[str]:
+        """Derive and cache a websocket RPC endpoint."""
+
+        ws_url: Optional[str]
+        try:
+            ws_url = config.get_solana_ws_url()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("get_solana_ws_url failed: %s", exc)
+            ws_url = None
+
+        ws_url = self._as_websocket_url(ws_url) or self._as_websocket_url(
+            os.getenv("SOLANA_WS_URL")
+        )
+
+        if not ws_url:
+            ws_url = self._as_websocket_url(self.rpc_url)
+
+        if ws_url:
+            os.environ.setdefault("SOLANA_WS_URL", ws_url)
+
+        return ws_url
+
+    @staticmethod
+    def _as_websocket_url(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        text = url.strip()
+        if not text:
+            return None
+        if text.startswith("wss://") or text.startswith("ws://"):
+            return text
+        if text.startswith("https://"):
+            return "wss://" + text[len("https://") :]
+        if text.startswith("http://"):
+            return "ws://" + text[len("http://") :]
+        return text
+
+    # ------------------------------------------------------------------
+    # Core discovery API
+    # ------------------------------------------------------------------
     async def discover_tokens(
         self,
         *,
@@ -48,45 +176,298 @@ class DiscoveryAgent:
         token_file: Optional[str] = None,
         method: Optional[str] = None,
     ) -> List[str]:
-        ttl = float(os.getenv("DISCOVERY_CACHE_TTL", "20") or 20.0)
         now = time.time()
-        cached = list(_CACHE.get("tokens", [])) if isinstance(_CACHE.get("tokens"), list) else []
+        ttl = self.cache_ttl
+        method_override = method is not None
+        requested_method = resolve_discovery_method(method)
+        if requested_method is None and offline and not method_override:
+            requested_method = "helius"
+        if requested_method is None:
+            active_method = self.default_method or DEFAULT_DISCOVERY_METHOD
+            if method_override and isinstance(method, str) and method.strip():
+                logger.warning(
+                    "Unsupported discovery method %r; falling back to %s",
+                    method,
+                    active_method,
+                )
+        else:
+            active_method = requested_method
+        cached_tokens = (
+            list(_CACHE.get("tokens", []))
+            if isinstance(_CACHE.get("tokens"), list)
+            else []
+        )
         cache_limit = int(_CACHE.get("limit", 0))
-        if ttl > 0 and cached and now - float(_CACHE.get("ts", 0.0)) < ttl:
+        cached_method = (_CACHE.get("method") or "").lower()
+        if (
+            ttl > 0
+            and cached_tokens
+            and now - float(_CACHE.get("ts", 0.0)) < ttl
+            and (not method_override or cached_method == active_method or not cached_method)
+        ):
             if cache_limit and cache_limit >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
-                return cached[: self.limit]
-            if len(cached) >= self.limit:
+                return cached_tokens[: self.limit]
+            if len(cached_tokens) >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (limit=%s)", self.limit)
-                return cached[: self.limit]
-        # File mode (offline)
-        if offline and token_file:
-            try:
-                with open(token_file, "r", encoding="utf-8") as fh:
-                    rows = [ln.strip() for ln in fh if ln.strip()]
-                rows = rows[: self.limit]
-                publish("runtime.log", RuntimeLog(stage="discovery", detail=f"loaded {len(rows)} from file"))
-                return rows
-            except Exception as exc:
-                logger.warning("Failed to read token_file %s: %s", token_file, exc)
+                return cached_tokens[: self.limit]
 
-        # Online: Birdeye + RPC enrichment
-        mints = await scan_tokens_async(
-            rpc_url=self.rpc_url,
-            limit=self.limit,
-            enrich=True,                  # extra flag kept for compat; enrichment is below
-            api_key=self.birdeye_api_key, # matches token_scanner signature
+        attempts = self.max_attempts
+        details: Dict[str, Dict[str, Any]] = {}
+        tokens: List[str] = []
+
+        for attempt in range(attempts):
+            tokens, details = await self._discover_once(
+                method=active_method,
+                offline=offline,
+                token_file=token_file,
+            )
+            tokens = self._normalise(tokens)
+            if tokens:
+                break
+            if attempt < attempts - 1:
+                logger.warning(
+                    "No tokens discovered (method=%s, attempt=%d/%d)",
+                    active_method,
+                    attempt + 1,
+                    attempts,
+                )
+                await asyncio.sleep(self.backoff)
+
+        if not tokens:
+            tokens = self._fallback_tokens()
+            details = {}
+
+        self.last_tokens = tokens
+        self.last_details = details
+        self.last_method = active_method
+
+        detail = f"yield={len(tokens)}"
+        if self.limit:
+            detail = f"{detail}/{self.limit}"
+        detail = f"{detail} method={active_method}"
+        if self.limit and len(tokens) < self.limit:
+            detail = f"{detail} partial"
+        publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
+        logger.info(
+            "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
         )
-        try:
-            mints = await enrich_tokens_async(mints, rpc_url=self.rpc_url)
-        except Exception as exc:
-            logger.warning("enrich_tokens_async failed: %s", exc)
 
-        mints = [m for m in mints if isinstance(m, str) and len(m) > 10]
-        publish("runtime.log", RuntimeLog(stage="discovery", detail=f"yield={len(mints)}"))
-        logger.info("DiscoveryAgent pulled %d tokens (limit=%d, enrich=True)", len(mints), self.limit)
-        if ttl > 0 and mints:
-            _CACHE["tokens"] = list(mints)
+        if ttl > 0 and tokens:
+            _CACHE["tokens"] = list(tokens)
             _CACHE["ts"] = now
             _CACHE["limit"] = self.limit
-        return mints
+            _CACHE["method"] = active_method
+
+        return tokens
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    async def _discover_once(
+        self,
+        *,
+        method: str,
+        offline: bool,
+        token_file: Optional[str],
+    ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
+        if (offline or method == "file") and token_file:
+            try:
+                tokens = scan_tokens_from_file(token_file, limit=self.limit)
+                return tokens, {}
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Failed to read token_file %s: %s", token_file, exc)
+                return [], {}
+
+        if method == "websocket":
+            kwargs: Dict[str, Any] = {
+                "mempool_threshold": self.mempool_threshold,
+            }
+            if self.limit:
+                kwargs["limit"] = self.limit
+            if self.ws_url:
+                kwargs["ws_url"] = self.ws_url
+            call_kwargs = dict(kwargs)
+            while True:
+                try:
+                    results = await merge_sources(self.rpc_url, **call_kwargs)
+                    break
+                except TypeError as exc:
+                    message = str(exc)
+                    handled = False
+                    for key in ("ws_url", "limit"):
+                        if key in call_kwargs and key in message:
+                            call_kwargs.pop(key, None)
+                            handled = True
+                            break
+                    if not handled:
+                        raise
+            if isinstance(results, list) and len(results) > self.limit:
+                results = results[: self.limit]
+            details = {}
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                address = item.get("address")
+                if not isinstance(address, str):
+                    continue
+                address = canonical_mint(address)
+                details[address] = item
+            details = {
+                mint: info
+                for mint, info in details.items()
+                if not self._should_skip_token(mint)
+            }
+            return list(details.keys()), details
+
+        if method == "mempool":
+            tokens, details = await self._collect_mempool()
+            filtered = [tok for tok in tokens if not self._should_skip_token(tok)]
+            details = {k: v for k, v in details.items() if not self._should_skip_token(k)}
+            return filtered, details
+
+        if method == "onchain":
+            try:
+                found = await scan_tokens_onchain(
+                    self.rpc_url,
+                    return_metrics=True,
+                    max_tokens=self.limit,
+                )
+            except Exception as exc:
+                logger.warning("On-chain discovery failed: %s", exc)
+                return [], {}
+            tokens: List[str] = []
+            details: Dict[str, Dict[str, Any]] = {}
+            for item in found:
+                if isinstance(item, dict):
+                    mint = canonical_mint(item.get("address"))
+                    if not isinstance(mint, str):
+                        continue
+                    entry = dict(item)
+                    entry.setdefault("sources", {"onchain"})
+                    details[mint] = entry
+                    tokens.append(mint)
+                elif isinstance(item, str):
+                    tokens.append(canonical_mint(item))
+            tokens = [tok for tok in tokens if not self._should_skip_token(tok)]
+            details = {k: v for k, v in details.items() if not self._should_skip_token(k)}
+            return tokens, details
+
+        # Default: BirdEye/Helius trending via REST
+        raw_tokens = await scan_tokens_async(
+            rpc_url=self.rpc_url,
+            limit=self.limit,
+            enrich=False,
+            api_key=self.birdeye_api_key,
+        )
+        tokens: List[str]
+        try:
+            tokens = await enrich_tokens_async(raw_tokens, rpc_url=self.rpc_url)
+        except Exception as exc:  # pragma: no cover - enrichment best effort
+            logger.warning("enrich_tokens_async failed: %s", exc)
+            tokens = [tok for tok in raw_tokens if isinstance(tok, str)]
+        else:
+            if not tokens and raw_tokens:
+                tokens = [tok for tok in raw_tokens if isinstance(tok, str)]
+        if tokens:
+            tokens = [tok for tok in tokens if not self._should_skip_token(tok)]
+            return tokens, {}
+
+        logger.warning(
+            "Helius/BirdEye discovery returned no tokens; falling back to websocket merge"
+        )
+        try:
+            merged = await merge_sources(
+                self.rpc_url,
+                limit=self.limit,
+                mempool_threshold=self.mempool_threshold,
+                ws_url=self.ws_url,
+            )
+        except Exception as exc:
+            logger.warning("Websocket fallback failed: %s", exc)
+            merged = []
+        details = {
+            item.get("address"): dict(item)
+            for item in merged
+            if isinstance(item, dict) and isinstance(item.get("address"), str)
+        }
+        if details:
+            details = {k: v for k, v in details.items() if not self._should_skip_token(k)}
+            if details:
+                return list(details.keys()), details
+
+        logger.warning("Websocket merge yielded no tokens; trying mempool fallback")
+        mem_tokens, mem_details = await self._collect_mempool()
+        if mem_tokens:
+            return mem_tokens, mem_details
+
+        logger.warning("All discovery sources empty; returning static fallback")
+        fallback = [tok for tok in self._fallback_tokens() if not self._should_skip_token(tok)]
+        return fallback, {}
+
+    async def _collect_mempool(self) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
+        gen = self.stream_mempool_events(threshold=self.mempool_threshold)
+        tokens: List[str] = []
+        details: Dict[str, Dict[str, Any]] = {}
+        try:
+            async for item in gen:
+                if not isinstance(item, dict):
+                    continue
+                address = canonical_mint(item.get("address"))
+                if not isinstance(address, str):
+                    continue
+                if address not in details:
+                    tokens.append(address)
+                details[address] = dict(item)
+                if len(tokens) >= self.limit:
+                    break
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Mempool stream failed: %s", exc)
+        finally:
+            if hasattr(gen, "aclose"):
+                with contextlib.suppress(Exception):
+                    await gen.aclose()  # type: ignore[attr-defined]
+        return tokens, details
+
+    def _normalise(self, tokens: Iterable[Any]) -> List[str]:
+        seen: set[str] = set()
+        filtered: List[str] = []
+        for token in tokens:
+            if not isinstance(token, str):
+                continue
+            candidate = canonical_mint(token.strip())
+            if not candidate:
+                continue
+            if self._should_skip_token(candidate):
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            filtered.append(candidate)
+            if len(filtered) >= self.limit:
+                break
+        return filtered
+
+    def _fallback_tokens(self) -> List[str]:
+        cached = list(_CACHE.get("tokens", [])) if isinstance(_CACHE.get("tokens"), list) else []
+        if cached:
+            logger.warning("DiscoveryAgent falling back to cached tokens (%d)", len(cached))
+            return [canonical_mint(tok) for tok in cached[: self.limit]]
+        logger.warning("DiscoveryAgent using static discovery fallback")
+        return [canonical_mint(tok) for tok in _STATIC_FALLBACK[: self.limit]]
+
+    def _should_skip_token(self, token: str) -> bool:
+        if not self.filter_prefix_11:
+            return False
+        if token in _FILTER_WHITELIST:
+            return False
+        return token.startswith("11") and len(token) >= 8
+
+
+__all__ = [
+    "DISCOVERY_METHODS",
+    "DEFAULT_DISCOVERY_METHOD",
+    "DiscoveryAgent",
+    "merge_sources",
+    "resolve_discovery_method",
+]

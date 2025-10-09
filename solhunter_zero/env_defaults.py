@@ -19,8 +19,8 @@ DEFAULTS: dict[str, str] = {
 
     # Solana RPC endpoints
     "SOLANA_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-    "SOLANA_TESTNET_RPC_URL": "https://api.devnet.solana.com",
-    "DEX_BASE_URL": "https://quote-api.jup.ag",
+    "SOLANA_TESTNET_RPC_URL": "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "DEX_BASE_URL": "https://swap.helius.dev",
     "AGENTS": "['sim']",
     "AGENT_WEIGHTS": "{'sim': 1.0}",
 
@@ -28,7 +28,7 @@ DEFAULTS: dict[str, str] = {
     "DEPTH_SERVICE_SOCKET": "/tmp/depth_service.sock",
     "DEPTH_MMAP_PATH": "/tmp/depth_service.mmap",
     "DEPTH_MMAP_POLL_INTERVAL": "1",
-    "DEPTH_START_TIMEOUT": "5",
+    "DEPTH_START_TIMEOUT": "10",
     "DEPTH_MAX_RESTARTS": "1",
     "DEPTH_CACHE_TTL": "0.5",
 
@@ -124,4 +124,5 @@ DEFAULTS: dict[str, str] = {
     "FORCE_CPU_INDEX": "",
     "PYTORCH_ENABLE_MPS_FALLBACK": "1",
     "COLLECT_OFFLINE_DATA": "false",
+    "LOG_AGENT_INPUTS": "1",
 }

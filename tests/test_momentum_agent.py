@@ -1,40 +1,36 @@
 import asyncio
-import sys
-import types
-
-dummy_trans = types.ModuleType("transformers")
-dummy_trans.pipeline = lambda *a, **k: lambda x: [{"label": "POSITIVE", "score": 0.5}]
-sys.modules.setdefault("transformers", dummy_trans)
-sys.modules["transformers"].pipeline = dummy_trans.pipeline
+import pytest
 
 from solhunter_zero.agents.momentum import MomentumAgent
 from solhunter_zero.portfolio import Portfolio, Position
 
 
 class DummyPortfolio(Portfolio):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(path=None)
         self.balances = {}
 
 
-def test_momentum_agent_buy(monkeypatch):
-    monkeypatch.setattr(
-        "solhunter_zero.agents.momentum.fetch_sentiment", lambda *a, **k: 0.5
-    )
-    agent = MomentumAgent(threshold=1.0, feeds=["f"])
+def test_momentum_agent_buy_uses_positive_price():
+    agent = MomentumAgent(threshold=1.0, price_helper=lambda _: 2.5)
     agent.scores["tok"] = 2.0
+
     actions = asyncio.run(agent.propose_trade("tok", DummyPortfolio()))
+
     assert actions and actions[0]["side"] == "buy"
-    assert actions[0]["amount"] > 1.0
+    assert actions[0]["price"] > 0
+    assert actions[0]["price"] == pytest.approx(2.5)
 
 
-def test_momentum_agent_sell(monkeypatch):
-    monkeypatch.setattr(
-        "solhunter_zero.agents.momentum.fetch_sentiment", lambda *a, **k: 0.0
-    )
-    pf = DummyPortfolio()
-    pf.balances["tok"] = Position("tok", 5.0, 1.0)
-    agent = MomentumAgent(threshold=1.0)
+def test_momentum_agent_sell_uses_positive_price():
+    portfolio = DummyPortfolio()
+    portfolio.balances["tok"] = Position("tok", 5.0, 1.0)
+
+    agent = MomentumAgent(threshold=1.0, price_helper=lambda _: 3.75)
     agent.scores["tok"] = 0.0
-    actions = asyncio.run(agent.propose_trade("tok", pf))
+
+    actions = asyncio.run(agent.propose_trade("tok", portfolio))
+
     assert actions and actions[0]["side"] == "sell"
+    assert actions[0]["price"] > 0
+    assert actions[0]["price"] == pytest.approx(3.75)

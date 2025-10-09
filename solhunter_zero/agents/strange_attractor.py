@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import List, Dict, Any
 
+import logging
+
 import numpy as np
 
 try:  # optional dependency
@@ -17,6 +19,9 @@ except Exception:  # pragma: no cover - optional dependency
 
 from . import BaseAgent
 from ..portfolio import Portfolio
+from .price_utils import resolve_price
+
+logger = logging.getLogger(__name__)
 
 
 class StrangeAttractorAgent(BaseAgent):
@@ -112,11 +117,21 @@ class StrangeAttractorAgent(BaseAgent):
         vec = self._compute_attractor(depth, entropy, velocity)
         res = self._query_manifold(vec)
         if res is not None:
+            price, context = await resolve_price(token, portfolio)
+            if price <= 0:
+                logger.info(
+                    "%s agent skipping %s for %s due to missing price: %s",
+                    self.name,
+                    res.get("side", "trade"),
+                    token,
+                    context,
+                )
+                return []
             action = {
                 "token": token,
                 "amount": 1.0,
-                "price": 0.0,
                 **res,
             }
+            action["price"] = price
             return [action]
         return []

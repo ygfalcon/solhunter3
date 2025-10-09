@@ -48,7 +48,7 @@ DEFAULT_AGENTS = ["simulation"]
 AUTO_DEFAULTS = {
     "birdeye_api_key": "",
     "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-    "dex_base_url": "https://quote-api.jup.ag",
+    "dex_base_url": "https://swap.helius.dev",
     "dex_testnet_url": "https://quote-api.jup.ag",
     "orca_dex_url": "",
     "raydium_dex_url": "",

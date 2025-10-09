@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Iterable, List, Dict, Any
 
+import logging
+
 from ..optional_imports import try_import
 
 
@@ -25,8 +27,11 @@ _transformers = try_import("transformers", stub=_TransformersStub())
 AutoTokenizer = _transformers.AutoTokenizer  # type: ignore[attr-defined]
 AutoModelForCausalLM = _transformers.AutoModelForCausalLM  # type: ignore[attr-defined]
 from . import BaseAgent
+from .price_utils import resolve_price
 from ..portfolio import Portfolio
 from ..news import fetch_headlines_async, compute_sentiment
+
+logger = logging.getLogger(__name__)
 
 
 class LLMReasoner(BaseAgent):
@@ -96,12 +101,22 @@ class LLMReasoner(BaseAgent):
         bias = compute_sentiment(summary) if summary else 0.0
         side = "buy" if bias >= 0 else "sell"
         amount = abs(bias)
+        price, context = await resolve_price(token, portfolio)
+        if price <= 0:
+            logger.info(
+                "%s agent skipping %s for %s due to missing price: %s",
+                self.name,
+                side,
+                token,
+                context,
+            )
+            return []
         return [
             {
                 "token": token,
                 "side": side,
                 "amount": amount,
-                "price": 0.0,
+                "price": price,
                 "bias": bias,
             }
         ]

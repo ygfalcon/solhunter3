@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import signal
 import threading
 import time
+import urllib.request
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,18 +31,84 @@ from ..event_bus import (
     stop_ws_server,
     verify_broker_connection,
 )
+from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
 from ..loop import FirstTradeTimeoutError, run_iteration, _init_rl_training
 from ..pipeline import PipelineCoordinator
 from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory
 from ..portfolio import Portfolio
+from ..paths import ROOT
 from ..redis_util import ensure_local_redis_if_needed
 from ..ui import UIState, UIServer
 from ..util import parse_bool_env
+from .tuning import analyse_evaluation
 
 
 log = logging.getLogger(__name__)
+
+_RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
+_RL_HEALTH_INITIAL_INTERVAL = 5.0
+_RL_HEALTH_MAX_INTERVAL = 60.0
+
+
+def _probe_rl_daemon_health(timeout: float = 0.5) -> Dict[str, Any]:
+    """Return information about an externally managed RL daemon.
+
+    The probe inspects ``rl_daemon.health.json`` written by ``run_rl_daemon``
+    and, when available, performs a lightweight HTTP request against the
+    reported ``/health`` endpoint.  It returns a dictionary with the
+    following keys:
+
+    ``detected``
+        Whether the health file was found.
+    ``running``
+        ``True`` when the health endpoint responds successfully.
+    ``url``
+        The health endpoint URL if one was recorded.
+    ``error``
+        A short description of the most recent error, if any.
+    """
+
+    result: Dict[str, Any] = {
+        "detected": False,
+        "running": False,
+        "url": None,
+        "error": None,
+    }
+
+    path = _RL_HEALTH_PATH
+    if not path.exists():
+        return result
+
+    result["detected"] = True
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        result["error"] = f"invalid health file: {exc}"  # pragma: no cover - rare
+        return result
+
+    url = payload.get("url")
+    if url:
+        result["url"] = str(url)
+    else:
+        result["error"] = "missing url"
+        return result
+
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            status = getattr(response, "status", None)
+            if status is None and hasattr(response, "getcode"):
+                try:
+                    status = response.getcode()
+                except Exception:  # pragma: no cover - urllib variations
+                    status = None
+            if status is None or 200 <= int(status) < 400:
+                result["running"] = True
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result
 
 
 @dataclass
@@ -135,6 +203,17 @@ class TradingRuntime:
         )
         self.pipeline: Optional[PipelineCoordinator] = None
         self._pending_tokens: Dict[str, Dict[str, Any]] = {}
+        self._last_eval_summary: Dict[str, Any] = {}
+        self._last_execution_summary: Dict[str, Any] = {}
+        self._rl_status_info: Dict[str, Any] = {
+            "enabled": False,
+            "running": False,
+            "source": None,
+            "url": None,
+            "error": None,
+            "detected": False,
+            "configured": False,
+        }
 
     # ------------------------------------------------------------------
     # Public API
@@ -167,6 +246,7 @@ class TradingRuntime:
         await self._start_event_bus()
         await self._start_ui()
         await self._start_agents()
+        self._start_rl_status_watcher()
         await self._start_loop()
         self.activity.add("runtime", "started")
 
@@ -176,12 +256,17 @@ class TradingRuntime:
         self.stop_event.set()
         self.activity.add("runtime", "stopping")
 
-        for task in list(self._tasks):
+        tasks_to_cancel = list(self._tasks)
+        if self.rl_task is not None and self.rl_task not in tasks_to_cancel:
+            tasks_to_cancel.append(self.rl_task)
+
+        for task in tasks_to_cancel:
             task.cancel()
-        for task in list(self._tasks):
+        for task in tasks_to_cancel:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        self._tasks.clear()
+
+        self._tasks = [t for t in self._tasks if t not in tasks_to_cancel]
 
         for topic, handler in list(self._subscriptions):
             with contextlib.suppress(Exception):
@@ -198,10 +283,13 @@ class TradingRuntime:
             self.ui_server = None
 
         if self.rl_task is not None:
-            self.rl_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.rl_task
-            self.rl_task = None
+            if self.rl_task in tasks_to_cancel:
+                self.rl_task = None
+            else:
+                self.rl_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.rl_task
+                self.rl_task = None
 
         if self.depth_proc is not None:
             with contextlib.suppress(Exception):
@@ -338,7 +426,7 @@ class TradingRuntime:
         self.ui_state.weights_provider = self._collect_weights
         self.ui_state.rl_status_provider = self._collect_rl_status
         self.ui_state.logs_provider = lambda: list(self._ui_logs)
-        self.ui_state.summary_provider = self._collect_iteration
+        self.ui_state.summary_provider = self._collect_summary
         self.ui_state.discovery_provider = self._collect_discovery
         self.ui_state.config_provider = self._collect_config
         self.ui_state.actions_provider = self._collect_actions
@@ -364,23 +452,74 @@ class TradingRuntime:
         self.agent_manager = manager
 
         fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
-        fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
         if self._use_new_pipeline:
+            log.info(
+                "TradingRuntime: initialising staged pipeline (fast_mode=%s)",
+                fast_mode,
+            )
+            discovery_interval_cfg = float(self.cfg.get("discovery_interval", 5.0) or 5.0)
+            if fast_mode:
+                fast_interval = float(os.getenv("FAST_DISCOVERY_INTERVAL", "0.75") or 0.75)
+                discovery_interval_cfg = min(discovery_interval_cfg, fast_interval)
+                min_interval = float(os.getenv("FAST_DISCOVERY_MIN_INTERVAL", "0.25") or 0.25)
+            else:
+                min_interval = 5.0
+            discovery_interval_cfg = max(discovery_interval_cfg, min_interval)
+
+            cache_env = os.getenv("DISCOVERY_CACHE_TTL")
+            if cache_env:
+                try:
+                    discovery_cache_ttl = float(cache_env)
+                except ValueError:
+                    log.warning("Invalid DISCOVERY_CACHE_TTL=%r; defaulting to 45s", cache_env)
+                    discovery_cache_ttl = 45.0
+            else:
+                discovery_cache_ttl = float(self.cfg.get("discovery_cache_ttl", 45.0) or 45.0)
+
+            discovery_cache_ttl = max(discovery_cache_ttl, discovery_interval_cfg)
+
+            eval_cache_cfg = self.cfg.get("evaluation_cache_ttl")
+            evaluation_cache_ttl = None
+            if eval_cache_cfg is not None:
+                try:
+                    evaluation_cache_ttl = float(eval_cache_cfg)
+                except (TypeError, ValueError):
+                    log.warning(
+                        "Invalid evaluation_cache_ttl=%r in config; falling back to defaults",
+                        eval_cache_cfg,
+                    )
+                    evaluation_cache_ttl = None
+
             self.pipeline = PipelineCoordinator(
                 self.agent_manager,
                 self.portfolio,
-                discovery_interval=float(self.cfg.get("discovery_interval", 3.0) or 3.0),
-                discovery_cache_ttl=float(os.getenv("DISCOVERY_CACHE_TTL", "20") or 20.0),
+                discovery_interval=discovery_interval_cfg,
+                discovery_cache_ttl=discovery_cache_ttl,
                 scoring_batch=self._determine_scoring_batch(fast_mode),
-                evaluation_cache_ttl=float(os.getenv("EVALUATION_CACHE_TTL", "10") or 10.0),
+                evaluation_cache_ttl=evaluation_cache_ttl,
                 evaluation_workers=self._determine_eval_workers(fast_mode),
                 execution_lanes=self._determine_execution_lanes(fast_mode),
                 on_evaluation=self._pipeline_on_evaluation,
                 on_execution=self._pipeline_on_execution,
             )
+            log.info(
+                "TradingRuntime: pipeline created; evaluations will run through AgentManager swarm"
+            )
 
         rl_enabled = bool(self.cfg.get("rl_auto_train", False)) or parse_bool_env(
             "RL_DAEMON", False
+        )
+        external_probe = _probe_rl_daemon_health()
+        self._rl_status_info.update(
+            {
+                "enabled": bool(rl_enabled or external_probe.get("detected")),
+                "configured": bool(rl_enabled),
+                "running": False,
+                "source": None,
+                "url": external_probe.get("url"),
+                "error": external_probe.get("error"),
+                "detected": external_probe.get("detected"),
+            }
         )
         rl_interval = float(self.cfg.get("rl_interval", 3600.0) or 3600.0)
         if fast_mode and self.cfg.get("rl_interval") is None:
@@ -391,9 +530,95 @@ class TradingRuntime:
         )
         if self.rl_task is not None:
             self._tasks.append(self.rl_task)
-            self.status.rl_daemon = True
+            running = not self.rl_task.done()
+            self._rl_status_info.update(
+                {
+                    "enabled": True,
+                    "running": running,
+                    "source": "internal",
+                    "url": None,
+                    "error": None,
+                }
+            )
+        elif external_probe.get("detected"):
+            running = bool(external_probe.get("running"))
+            self._rl_status_info.update(
+                {
+                    "running": running,
+                    "source": "external",
+                    "error": external_probe.get("error"),
+                }
+            )
         else:
-            self.status.rl_daemon = False
+            running = False
+            self._rl_status_info.update(
+                {
+                    "running": False,
+                    "source": None,
+                }
+            )
+        self.status.rl_daemon = bool(self._rl_status_info.get("running"))
+
+    def _start_rl_status_watcher(self) -> None:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._rl_status_watcher(), name="rl_status_watcher")
+        self._tasks.append(task)
+
+    async def _rl_status_watcher(self) -> None:
+        delay = float(_RL_HEALTH_INITIAL_INTERVAL)
+        failures = 0
+        while not self.stop_event.is_set():
+            info = _probe_rl_daemon_health()
+            detected = bool(info.get("detected"))
+            running = bool(info.get("running"))
+            configured = bool(self._rl_status_info.get("configured"))
+            internal_running = self.rl_task is not None and not self.rl_task.done()
+
+            updates = {
+                "detected": detected,
+                "url": info.get("url"),
+                "error": info.get("error"),
+                "enabled": bool(configured or detected),
+            }
+
+            if internal_running:
+                updates.update({
+                    "running": True,
+                    "source": "internal",
+                })
+                failures = 0
+                delay = float(_RL_HEALTH_INITIAL_INTERVAL)
+            elif detected:
+                updates.update({
+                    "running": running,
+                    "source": "external",
+                })
+                failures = 0
+                delay = float(_RL_HEALTH_INITIAL_INTERVAL)
+            else:
+                updates.update({
+                    "running": False,
+                    "source": None,
+                })
+                failures += 1
+                backoff_factor = max(failures - 1, 0)
+                delay = min(
+                    float(_RL_HEALTH_INITIAL_INTERVAL) * (2 ** backoff_factor),
+                    float(_RL_HEALTH_MAX_INTERVAL),
+                )
+
+            if not detected:
+                updates.setdefault("url", None)
+
+            self._rl_status_info.update(updates)
+            self.status.rl_daemon = bool(self._rl_status_info.get("running"))
+
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                continue
+            else:
+                break
 
     async def _start_loop(self) -> None:
         if self._use_new_pipeline and self.pipeline is not None:
@@ -427,9 +652,11 @@ class TradingRuntime:
                 min_delay = min(min_delay, 1.0)
             if self.explicit_max_delay is None and self.cfg.get("max_delay") is None:
                 max_delay = min(max_delay, 15.0)
-        discovery_method = self.cfg.get("discovery_method") or os.getenv(
-            "DISCOVERY_METHOD", "websocket"
-        )
+        discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
+        if discovery_method is None:
+            discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if discovery_method is None:
+            discovery_method = DEFAULT_DISCOVERY_METHOD
         stop_loss = _maybe_float(self.cfg.get("stop_loss"))
         take_profit = _maybe_float(self.cfg.get("take_profit"))
         trailing_stop = _maybe_float(self.cfg.get("trailing_stop"))
@@ -488,11 +715,15 @@ class TradingRuntime:
 
     def _collect_status(self) -> Dict[str, Any]:
         depth_ok = bool(self.depth_proc and self.depth_proc.poll() is None)
+        rl_snapshot = self._collect_rl_status()
+        rl_running = bool(rl_snapshot.get("running")) if rl_snapshot else False
+        self.status.rl_daemon = rl_running
         status = {
             "event_bus": self.status.event_bus,
             "trading_loop": self.status.trading_loop,
             "depth_service": depth_ok,
-            "rl_daemon": self.status.rl_daemon,
+            "rl_daemon": rl_running,
+            "rl_daemon_status": rl_snapshot,
             "heartbeat": self.status.heartbeat_ts,
             "iterations_completed": self._iteration_count,
             "trade_count": len(self._trades),
@@ -519,12 +750,33 @@ class TradingRuntime:
     def _collect_weights(self) -> Dict[str, Any]:
         if self.agent_manager is None:
             return {}
+        snapshot = getattr(self.agent_manager, "weight_snapshot", None)
+        if callable(snapshot):
+            try:
+                return snapshot()
+            except Exception:
+                pass
         return dict(self.agent_manager.weights)
 
     def _collect_rl_status(self) -> Dict[str, Any]:
-        if self.rl_task is None:
-            return {"enabled": False}
-        return {"enabled": True, "running": not self.rl_task.done()}
+        if self.rl_task is not None:
+            running = not self.rl_task.done()
+            self._rl_status_info.update(
+                {
+                    "enabled": True,
+                    "running": running,
+                    "source": "internal",
+                    "configured": True,
+                    "error": None,
+                    "url": None,
+                }
+            )
+        snapshot = dict(self._rl_status_info)
+        snapshot.setdefault("enabled", False)
+        snapshot.setdefault("running", False)
+        snapshot.setdefault("configured", False)
+        snapshot.setdefault("detected", False)
+        return snapshot
 
     def _collect_iteration(self) -> Dict[str, Any]:
         with self._iteration_lock:
@@ -549,6 +801,32 @@ class TradingRuntime:
         if elapsed is not None:
             data.setdefault("elapsed_s", elapsed)
         return data
+
+    def _collect_summary(self) -> Dict[str, Any]:
+        iteration = self._collect_iteration()
+        evaluation = dict(self._last_eval_summary)
+        execution = dict(self._last_execution_summary)
+        queues: Dict[str, Any] = {}
+        if self.pipeline is not None:
+            try:
+                queues = self.pipeline.queue_snapshot()
+            except Exception:
+                queues = {}
+        tuning: List[Dict[str, Any]] = []
+        if evaluation:
+            meta = evaluation.get("metadata")
+            if isinstance(meta, dict):
+                try:
+                    tuning = analyse_evaluation(meta)
+                except Exception:
+                    tuning = []
+        return {
+            "iteration": iteration,
+            "evaluation": evaluation,
+            "execution": execution,
+            "queues": queues,
+            "tuning": tuning,
+        }
 
     def _collect_discovery(self) -> Dict[str, Any]:
         with self._discovery_lock:
@@ -581,11 +859,20 @@ class TradingRuntime:
                 env_summary[env_key] = (val[:4] + "…" + val[-2:]) if len(val) > 6 else "***"
             else:
                 env_summary[env_key] = val
-        agents = (
-            list(self.agent_manager.weights.keys())
-            if self.agent_manager is not None
-            else []
-        )
+        if self.agent_manager is not None:
+            weights_snapshot = self._collect_weights()
+            if isinstance(weights_snapshot, dict):
+                agent_map = weights_snapshot.get("agents", {})
+                if isinstance(agent_map, dict):
+                    agents = sorted(agent_map.keys())
+                else:
+                    agents = []
+            else:
+                agents = []
+            if not agents:
+                agents = [agent.name for agent in getattr(self.agent_manager, "agents", [])]
+        else:
+            agents = []
         iteration = self._collect_iteration()
         return {
             "config_path": self.config_path,
@@ -619,6 +906,69 @@ class TradingRuntime:
     def _collect_actions(self) -> List[Dict[str, Any]]:
         with self._iteration_lock:
             return list(self._last_actions)
+
+    def _emit_action_decisions(self, actions: Iterable[Dict[str, Any]]) -> int:
+        count = 0
+        for action in actions:
+            payload = self._prepare_action_decision(action)
+            if not payload:
+                continue
+            try:
+                publish("action_decision", payload)
+            except Exception:  # pragma: no cover - defensive logging
+                log.exception("Failed to publish action_decision")
+                continue
+            count += 1
+        return count
+
+    def _prepare_action_decision(self, action: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(action, dict):
+            return None
+        token = action.get("token") or action.get("mint")
+        if not token:
+            return None
+        side = str(action.get("side", "")).lower()
+        if side not in {"buy", "sell"}:
+            return None
+        price = _maybe_float(action.get("price"))
+        if price is None or price <= 0:
+            price = _maybe_float(action.get("entry_price")) or _maybe_float(
+                action.get("target_price")
+            )
+        if price is None or price <= 0:
+            return None
+        amount = _maybe_float(action.get("amount"))
+        if amount is None or amount <= 0:
+            amount = _maybe_float(action.get("size"))
+        if amount is None or amount <= 0:
+            amount = _maybe_float(action.get("quantity"))
+        if (amount is None or amount <= 0) and price:
+            notional = _maybe_float(action.get("notional_usd"))
+            if notional is None or notional <= 0:
+                notional = _maybe_float(action.get("notional"))
+            if notional is not None and notional > 0:
+                amount = notional / price
+        if amount is None or amount <= 0:
+            return None
+        payload: Dict[str, Any] = {
+            "token": str(token),
+            "side": side,
+            "size": float(amount),
+            "price": float(price),
+        }
+        rationale: Dict[str, Any] = {}
+        agent = action.get("agent")
+        if agent:
+            rationale["agent"] = str(agent)
+        conv = _maybe_float(action.get("conviction_delta"))
+        if conv is not None:
+            rationale["conviction_delta"] = conv
+        metadata = action.get("metadata")
+        if isinstance(metadata, dict) and metadata:
+            rationale["metadata"] = metadata
+        if rationale:
+            payload["rationale"] = rationale
+        return payload
 
     def _determine_scoring_batch(self, fast_mode: bool) -> Optional[int]:
         raw = int(os.getenv("PIPELINE_TOKEN_LIMIT", "0") or 0)
@@ -739,7 +1089,24 @@ class TradingRuntime:
             },
             "committed": False,
         }
+        log.info(
+            "Evaluation tick token=%s actions=%d cached=%s latency=%.2fs errors=%s",
+            result.token,
+            len(result.actions),
+            result.cached,
+            result.latency,
+            result.errors or None,
+        )
         self._pending_tokens[result.token] = summary
+        self._last_eval_summary = {
+            "token": result.token,
+            "actions": len(result.actions),
+            "latency": result.latency,
+            "cached": result.cached,
+            "errors": list(result.errors),
+            "metadata": _serialize(result.metadata),
+            "timestamp": timestamp,
+        }
         await self._apply_iteration_summary(summary, stage="pipeline")
 
     async def _pipeline_on_execution(self, receipt) -> None:
@@ -748,14 +1115,36 @@ class TradingRuntime:
         summary = self._pending_tokens.get(receipt.token)
         timestamp = datetime.utcnow().isoformat() + "Z"
         actions = []
+        real_trades = 0
+        simulated_trades = 0
         if summary:
             actions = summary.get("actions_executed", [])
         if receipt.success and actions:
             for action, result in zip(actions, receipt.results):
                 action["result"] = result
+                sim_flag = False
+                if isinstance(result, dict):
+                    sim_flag = bool(result.get("simulated"))
+                    action["simulated"] = sim_flag
+                    mode = result.get("mode")
+                    if mode is not None:
+                        action["execution_mode"] = mode
+                    endpoint = result.get("endpoint")
+                    if endpoint is not None:
+                        action["execution_endpoint"] = endpoint
+                    signature = result.get("signature")
+                    if signature is not None:
+                        action["tx_signature"] = signature
+                else:
+                    action["simulated"] = None
+                if sim_flag:
+                    simulated_trades += 1
+                else:
+                    real_trades += 1
         elif actions:
             for action in actions:
                 action["result"] = receipt.errors[0] if receipt.errors else "error"
+                action["simulated"] = None
 
         updated = summary or {
             "timestamp": timestamp,
@@ -766,7 +1155,9 @@ class TradingRuntime:
         }
         updated["actions_executed"] = actions
         updated["actions_count"] = len(actions)
-        updated["any_trade"] = receipt.success and bool(actions)
+        updated["real_trades"] = real_trades
+        updated["simulated_trades"] = simulated_trades
+        updated["any_trade"] = receipt.success and real_trades > 0
         updated.setdefault("errors", [])
         if receipt.errors:
             updated["errors"] = list(set(updated.get("errors", [])) | set(receipt.errors))
@@ -777,13 +1168,37 @@ class TradingRuntime:
                 "latency": receipt.finished_at - receipt.started_at,
                 "success": receipt.success,
                 "errors": receipt.errors,
+                "real_trades": real_trades,
+                "simulated_trades": simulated_trades,
             }
         )
+        log.log(
+            logging.INFO if receipt.success else logging.WARNING,
+            "Execution tick token=%s success=%s latency=%.2fs actions=%d real=%d simulated=%d errors=%s",
+            receipt.token,
+            receipt.success,
+            receipt.finished_at - receipt.started_at,
+            len(actions),
+            real_trades,
+            simulated_trades,
+            receipt.errors or None,
+        )
+        emitted = self._emit_action_decisions(actions)
+        if emitted:
+            updated["telemetry"]["execution"]["decisions_emitted"] = emitted
         updated["committed"] = receipt.success
         updated.setdefault("timestamp", timestamp)
         updated.setdefault("timestamp_epoch", time.time())
         await self._apply_iteration_summary(updated, stage="execution")
         self._pending_tokens.pop(receipt.token, None)
+        self._last_execution_summary = {
+            "token": receipt.token,
+            "success": receipt.success,
+            "errors": list(receipt.errors),
+            "results": _serialize(receipt.results),
+            "latency": updated.get("elapsed_s"),
+            "timestamp": timestamp,
+        }
 
     async def _pipeline_telemetry_poller(self) -> None:
         index = 0
@@ -794,6 +1209,21 @@ class TradingRuntime:
                 samples = await self.pipeline.snapshot_telemetry()
             except Exception:
                 samples = []
+            try:
+                queue_stats = self.pipeline.queue_snapshot()
+            except Exception:
+                queue_stats = {}
+            if queue_stats:
+                entry = {
+                    "topic": "pipeline",
+                    "payload": {
+                        "timestamp": time.time(),
+                        "stage": "queues",
+                        **queue_stats,
+                    },
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+                self._ui_logs.append(entry)
             if samples and index < len(samples):
                 for sample in samples[index:]:
                     entry = {

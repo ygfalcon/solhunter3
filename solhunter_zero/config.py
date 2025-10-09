@@ -18,6 +18,9 @@ from .dex_config import DEXConfig
 from .paths import ROOT
 from .config_schema import ConfigModel
 
+DEFAULT_HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+DEFAULT_HELIUS_WS_URL = "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -115,6 +118,8 @@ ENV_VARS = {
     "agent_weights": "AGENT_WEIGHTS",
     "weights_path": "WEIGHTS_PATH",
     "dex_priorities": "DEX_PRIORITIES",
+    "dex_partner_urls": "DEX_PARTNER_URLS",
+    "dex_swap_paths": "DEX_SWAP_PATHS",
     "dex_fees": "DEX_FEES",
     "dex_gas": "DEX_GAS",
     "dex_latency": "DEX_LATENCY",
@@ -200,7 +205,7 @@ def get_solana_ws_url() -> str | None:
     url = os.getenv("SOLANA_WS_URL")
 
     if not url:
-        rpc = os.getenv("SOLANA_RPC_URL")
+        rpc = os.getenv("SOLANA_RPC_URL") or DEFAULT_HELIUS_RPC_URL
         if rpc:
             # preserve host/path/query while flipping scheme
             parsed = urllib.parse.urlparse(rpc)
@@ -220,8 +225,13 @@ def get_solana_ws_url() -> str | None:
             logger.error(str(exc))
             return None
 
-    logger.error("SOLANA_WS_URL or SOLANA_RPC_URL must be set to a valid URL")
-    return None
+    try:
+        return _validate_and_store_url(
+            "SOLANA_WS_URL", DEFAULT_HELIUS_WS_URL, {"ws", "wss"}
+        )
+    except ValueError as exc:  # pragma: no cover - defaults are static
+        logger.error(str(exc))
+        return None
 
 
 # Commonly required environment variables
@@ -504,7 +514,17 @@ def load_dex_config(config: Mapping[str, Any] | None = None) -> DEXConfig:
     """Return `DEXConfig` populated from `config` + env overrides."""
     base_cfg: dict[str, Any] = {
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-        "dex_base_url": "https://quote-api.jup.ag",
+        "dex_base_url": "https://swap.helius.dev",
+        "dex_partner_urls": {
+            "birdeye": "https://public-api.birdeye.so",
+            "jupiter": "https://quote-api.jup.ag",
+        },
+        "dex_swap_paths": {
+            "helius": "/v1/swap",
+            "birdeye": "/defi/swap/v1",
+            "jupiter": "/v6/swap",
+        },
+        "dex_priorities": "jupiter,helius,birdeye",
         "agents": ["sim"],
         "agent_weights": {"sim": 1.0},
     }
@@ -512,14 +532,77 @@ def load_dex_config(config: Mapping[str, Any] | None = None) -> DEXConfig:
         base_cfg.update(dict(config))
     cfg = apply_env_overrides(base_cfg)
 
-    base = str(cfg.get("dex_base_url", "https://quote-api.jup.ag"))
+    base = str(cfg.get("dex_base_url", base_cfg["dex_base_url"]))
     testnet = str(cfg.get("dex_testnet_url", base))
 
     def _url(name: str) -> str:
         return str(cfg.get(name, base))
 
+    def _parse_str_map(val: Any) -> dict[str, str]:
+        if not val:
+            return {}
+        if isinstance(val, Mapping):
+            data = val
+        elif isinstance(val, str):
+            try:
+                data = loads(val)
+            except Exception:
+                logger.exception("Failed to parse JSON mapping: %s", val)
+                try:
+                    data = ast.literal_eval(val)
+                except Exception:
+                    logger.exception("Failed to parse literal mapping: %s", val)
+                    return {}
+        else:
+            return {}
+        return {str(k): str(v) for k, v in data.items()}
+
+    partner_urls = {
+        **base_cfg["dex_partner_urls"],
+        **_parse_str_map(cfg.get("dex_partner_urls")),
+    }
+    swap_paths = {
+        **base_cfg["dex_swap_paths"],
+        **_parse_str_map(cfg.get("dex_swap_paths")),
+    }
+
+    aggregator_urls = {"helius": base, **partner_urls}
+
+    raw_priorities = cfg.get("dex_priorities")
+    priorities: list[str]
+    if isinstance(raw_priorities, str):
+        priorities = [
+            p.strip()
+            for p in raw_priorities.replace(";", ",").split(",")
+            if p.strip()
+        ]
+    elif isinstance(raw_priorities, Sequence):
+        priorities = [str(p).strip() for p in raw_priorities if str(p).strip()]
+    else:
+        priorities = []
+
+    default_order = [name for name in ("helius", "birdeye", "jupiter") if name in aggregator_urls]
+    if not priorities:
+        priorities = default_order
+    else:
+        seen = set()
+        normalized: list[str] = []
+        for name in priorities:
+            if name in aggregator_urls and name not in seen:
+                normalized.append(name)
+                seen.add(name)
+        for name in default_order:
+            if name not in seen:
+                normalized.append(name)
+                seen.add(name)
+        for name in aggregator_urls:
+            if name not in seen:
+                normalized.append(name)
+                seen.add(name)
+        priorities = normalized
+
     venue_urls = {
-        "jupiter": base,
+        **aggregator_urls,
         "raydium": _url("raydium_dex_url"),
         "orca": _url("orca_dex_url"),
         "phoenix": _url("phoenix_dex_url"),
@@ -556,6 +639,9 @@ def load_dex_config(config: Mapping[str, Any] | None = None) -> DEXConfig:
         fees=fees,
         gas=gas,
         latency=latency,
+        swap_urls=aggregator_urls,
+        swap_paths=swap_paths,
+        swap_priorities=priorities,
     )
 
 

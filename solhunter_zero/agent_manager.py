@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from .jsonutil import loads, dumps
+from .logging_utils import serialize_for_log
 from .util import run_coro
 import os
 import random
 import inspect
 import time
-from typing import Iterable, Dict, Any, List
+from typing import Iterable, Dict, Any, List, Mapping
 from dataclasses import dataclass, field
 from .paths import ROOT
 
@@ -40,6 +42,10 @@ from .agents.memory import MemoryAgent
 from .agents.emotion_agent import EmotionAgent
 from .agents.discovery import DiscoveryAgent
 from .swarm_coordinator import SwarmCoordinator
+from . import wallet
+from .synthetic_trades import ensure_synthetic_baseline
+from .oracles.helius import hydrate_from_trades
+from .token_aliases import canonical_mint
 
 try:  # optional torch-based swarm
     from .agents.attention_swarm import AttentionSwarm, load_model
@@ -51,20 +57,51 @@ except Exception:  # pragma: no cover - torch not available
 
 
 from .agents.rl_weight_agent import RLWeightAgent
-from .agents.hierarchical_rl_agent import HierarchicalRLAgent
+from .agents.roles import resolve_agent_role
+from .agents.diagnostics import collect_agent_requirements
+
+try:  # Optional hierarchical RL agent (requires torch stack)
+    from .agents.hierarchical_rl_agent import HierarchicalRLAgent
+except Exception as _hierarchical_import_error:  # pragma: no cover - import guard
+    HierarchicalRLAgent = None  # type: ignore[assignment]
+else:  # pragma: no cover - executed in environments with deps
+    _hierarchical_import_error = None
+
 from .device import get_default_device
-from .hierarchical_rl import SupervisorAgent
+
+try:  # Optional RL supervisor (torch dependency)
+    from .hierarchical_rl import SupervisorAgent
+except Exception as _supervisor_import_error:  # pragma: no cover
+    SupervisorAgent = None  # type: ignore[assignment]
+else:  # pragma: no cover
+    _supervisor_import_error = None
+
 from .regime import detect_regime
 from . import mutation
 from .event_bus import publish, subscription
 from .schemas import ActionExecuted, WeightsUpdated, RuntimeLog
-from .multi_rl import PopulationRL
-from .rl_training import MultiAgentRL
+
+try:
+    from .multi_rl import PopulationRL
+except Exception as _population_rl_import_error:  # pragma: no cover
+    PopulationRL = None  # type: ignore[assignment]
+else:  # pragma: no cover
+    _population_rl_import_error = None
+
+try:
+    from .rl_training import MultiAgentRL
+except Exception as _multi_agent_rl_import_error:  # pragma: no cover
+    MultiAgentRL = None  # type: ignore[assignment]
+else:  # pragma: no cover
+    _multi_agent_rl_import_error = None
+
 from .datasets.sample_ticks import load_sample_ticks, DEFAULT_PATH as _TICKS_PATH
 from .config import load_config
 
 
 logger = logging.getLogger(__name__)
+
+_LOG_AGENT_INPUTS = os.getenv("LOG_AGENT_INPUTS", "").lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -83,6 +120,7 @@ class AgentManagerConfig:
     depth_service: bool = False
     priority_rpc: list[str] | None = None
     regime_weights: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    decision_thresholds: Dict[str, Dict[str, float]] = field(default_factory=dict)
     evolve_interval: int = 1
     mutation_threshold: float = 0.0
     weight_config_paths: list[str] = field(default_factory=list)
@@ -94,6 +132,8 @@ class AgentManagerConfig:
     hierarchical_rl: MultiAgentRL | None = None
     use_supervisor: bool = False
     supervisor_checkpoint: str | None = None
+    keypair: Any | None = None
+    keypair_path: str | os.PathLike | None = None
 
 
 class StrategySelector:
@@ -199,9 +239,20 @@ class AgentManager:
     ):
         cfg = config or AgentManagerConfig()
         self.agents = list(agents)
-        self.executor = executor or ExecutionAgent(
-            depth_service=cfg.depth_service,
-            priority_rpc=cfg.priority_rpc,
+        exec_kwargs: dict[str, Any] = {
+            "depth_service": cfg.depth_service,
+            "priority_rpc": cfg.priority_rpc,
+        }
+        if cfg.keypair is not None:
+            exec_kwargs["keypair"] = cfg.keypair
+        self.executor = executor or ExecutionAgent(**exec_kwargs)
+        if executor is not None and cfg.keypair is not None:
+            setattr(self.executor, "keypair", cfg.keypair)
+        self.keypair = cfg.keypair
+        self.keypair_path = (
+            str(cfg.keypair_path)
+            if cfg.keypair_path is not None
+            else None
         )
         self.weights_path = (
             str(cfg.weights_path) if cfg.weights_path is not None else "weights.json"
@@ -213,6 +264,7 @@ class AgentManager:
         init_weights = cfg.weights or {}
         self.weights = {**file_weights, **init_weights}
         self.regime_weights = cfg.regime_weights or {}
+        self.decision_thresholds = copy.deepcopy(cfg.decision_thresholds or {})
 
         self.memory_agent = cfg.memory_agent or next(
             (a for a in self.agents if isinstance(a, MemoryAgent)),
@@ -258,11 +310,19 @@ class AgentManager:
         self.hierarchical_rl = cfg.hierarchical_rl
         self.hierarchical_agent: HierarchicalRLAgent | None = None
         if self.hierarchical_rl is not None:
+            if HierarchicalRLAgent is None:
+                raise ImportError(
+                    "HierarchicalRLAgent requires optional dependencies"
+                ) from _hierarchical_import_error
             self.hierarchical_agent = HierarchicalRLAgent(self.hierarchical_rl)
             self.agents.append(self.hierarchical_agent)
 
         self.supervisor: SupervisorAgent | None = None
         if cfg.use_supervisor:
+            if SupervisorAgent is None:
+                raise ImportError(
+                    "SupervisorAgent requires optional dependencies"
+                ) from _supervisor_import_error
             self.supervisor = SupervisorAgent(
                 checkpoint=cfg.supervisor_checkpoint or "supervisor.json",
             )
@@ -270,6 +330,9 @@ class AgentManager:
         self.coordinator = SwarmCoordinator(
             self.memory_agent, self.weights, self.regime_weights
         )
+
+        if self.decision_thresholds:
+            self._install_threshold_profile(self.decision_thresholds)
 
         self.mutation_path = (
             str(cfg.mutation_path)
@@ -312,6 +375,17 @@ class AgentManager:
         else:
             self._agent_timeout = None
 
+        sim_timeout_env = os.getenv("SIMULATION_TIMEOUT")
+        if sim_timeout_env:
+            try:
+                self._simulation_timeout = float(sim_timeout_env)
+            except Exception:
+                self._simulation_timeout = None
+        elif self._agent_timeout is not None:
+            self._simulation_timeout = max(self._agent_timeout * 3, 6.0)
+        else:
+            self._simulation_timeout = None
+
         def _merge_rl_weights(payload):
             data = (
                 payload.weights
@@ -338,6 +412,51 @@ class AgentManager:
         # Track active swarms keyed by token so concurrent evaluations can
         # feed back execution results without clobbering one another.
         self._active_swarms: Dict[str, AgentSwarm] = {}
+        self._weight_snapshot: Dict[str, Any] = {}
+
+    @staticmethod
+    def _resolve_keypair_from_config(
+        cfg: dict[str, Any] | None,
+    ) -> tuple[Any | None, str | None]:
+        """Resolve and load the active keypair from configuration/env."""
+
+        candidates: list[str] = []
+        if cfg is not None:
+            cfg_path = cfg.get("solana_keypair")
+            if cfg_path:
+                candidates.append(str(cfg_path))
+
+        env_path = os.getenv("SOLANA_KEYPAIR") or os.getenv("solana_keypair")
+        if env_path:
+            candidates.append(str(env_path))
+
+        keypair_env = os.getenv("KEYPAIR_PATH")
+        if keypair_env:
+            candidates.append(str(keypair_env))
+
+        if not candidates:
+            return None, None
+
+        last_path: str | None = None
+        for raw in candidates:
+            if not raw:
+                continue
+            path_obj = Path(str(raw)).expanduser()
+            if not path_obj.is_absolute():
+                path_obj = ROOT / path_obj
+            path_str = str(path_obj)
+            last_path = path_str
+            try:
+                keypair = wallet.load_keypair(path_str)
+            except FileNotFoundError:
+                logger.warning("Keypair file not found at %s", path_str)
+                continue
+            except Exception as exc:
+                logger.warning("Failed to load keypair from %s: %s", path_str, exc)
+                continue
+            return keypair, path_str
+
+        return None, last_path
 
     def _get_rl_policy_confidence(self) -> Dict[str, float]:
         """Return latest RL policy confidence scores if available."""
@@ -365,7 +484,11 @@ class AgentManager:
     async def evaluate_with_swarm(
         self, token: str, portfolio
     ) -> EvaluationContext:
+        token = canonical_mint(token)
         agents = self._select_agents()
+        logger.info(
+            "AgentManager: evaluating %s agents for token %s", len(agents), token
+        )
         publish(
             "runtime.log",
             RuntimeLog(
@@ -373,9 +496,31 @@ class AgentManager:
                 detail=f"agents:{token}:{','.join(a.name for a in agents)}",
             ),
         )
+        try:
+            await hydrate_from_trades(token, portfolio, self.memory_agent)
+        except Exception:
+            logger.debug("Helius oracle hydration failed for %s", token, exc_info=True)
+        try:
+            await ensure_synthetic_baseline(token, portfolio, self.memory_agent)
+        except Exception:
+            logger.debug("Synthetic baseline seeding failed for %s", token, exc_info=True)
+
         regime = detect_regime(portfolio.price_history.get(token, []))
         weights = await self.coordinator.compute_weights(agents, regime=regime)
         logger.info("AgentManager: weights computed for %s", token)
+        if weights:
+            sorted_weights = sorted(weights.items(), key=lambda item: item[1], reverse=True)
+            top_weights = ", ".join(
+                f"{name}={weight:.3f}" for name, weight in sorted_weights[:5]
+            )
+            logger.debug(
+                "AgentManager: top weights for %s -> %s%s",
+                token,
+                top_weights,
+                " ..." if len(sorted_weights) > 5 else "",
+            )
+        else:
+            logger.warning("AgentManager: no weights produced for %s", token)
         if self.selector:
             agents, weights = await self.selector.weight_agents(agents, weights)
             logger.info("AgentManager: selector adjusted weights for %s", token)
@@ -426,8 +571,11 @@ class AgentManager:
                 )
             except Exception:
                 rl_action = None
+            logger.debug(
+                "AgentManager: RL daemon action for %s -> %s", token, rl_action
+            )
         if self.use_attention_swarm and self.attention_swarm:
-            rois = await self.coordinator._roi_by_agent([a.name for a in agents])
+            rois, _ = await self.coordinator._roi_by_agent([a.name for a in agents])
             prices = portfolio.price_history.get(token, [])
             vol = (
                 float(np.std(prices) / (np.mean(prices) or 1.0))
@@ -454,16 +602,37 @@ class AgentManager:
         except Exception:
             adv_mem = None
 
-        swarm = AgentSwarm(agents, memory=adv_mem, agent_timeout=self._agent_timeout)
+        swarm = AgentSwarm(
+            agents,
+            memory=adv_mem,
+            agent_timeout=self._agent_timeout,
+            simulation_timeout=self._simulation_timeout,
+        )
         start = time.perf_counter()
         try:
             result = await swarm.propose(
-                token, portfolio, weights=weights, rl_action=rl_action
+                token,
+                portfolio,
+                weights=weights,
+                rl_action=rl_action,
+                regime=regime,
             )
         except asyncio.TimeoutError:
             logger.warning("Swarm evaluation timed out for %s", token)
             result = []
         latency = time.perf_counter() - start
+        proposal_counts: dict[str, int] = {}
+        total_proposals: int | None = None
+        if hasattr(swarm, "last_proposal_counts"):
+            try:
+                proposal_counts = dict(swarm.last_proposal_counts)  # type: ignore[attr-defined]
+            except Exception:
+                proposal_counts = {}
+        if hasattr(swarm, "last_total_proposals"):
+            try:
+                total_proposals = int(swarm.last_total_proposals)  # type: ignore[attr-defined]
+            except Exception:
+                total_proposals = None
         ctx = EvaluationContext(
             token=token,
             actions=result,
@@ -471,8 +640,42 @@ class AgentManager:
             agents=agents,
             weights=weights,
         )
-        ctx.metadata = {"latency": latency}
+        ctx.metadata = {
+            "latency": latency,
+            "regime": regime,
+            "proposals": proposal_counts,
+        }
+        if total_proposals is not None:
+            ctx.metadata["total_proposals"] = total_proposals
+        if getattr(swarm, "_last_agent_details", None):
+            try:
+                ctx.metadata["agents"] = list(swarm._last_agent_details)
+            except Exception:
+                ctx.metadata["agents"] = swarm._last_agent_details
+        self._update_weight_snapshot(agents, weights, proposal_counts, ctx.metadata)
+        if _LOG_AGENT_INPUTS:
+            try:
+                self._log_agent_inputs(ctx.metadata)
+            except Exception:
+                logger.debug("Failed to log agent inputs", exc_info=True)
         logger.info("AgentManager: swarm produced %s actions for %s", len(result), token)
+        if not result:
+            level = logging.WARNING
+            if total_proposals in (None, 0):
+                level = logging.INFO
+            logger.log(
+                level,
+                "AgentManager: no actions produced for %s (regime=%s, latency=%.2fs)",
+                token,
+                regime,
+                latency,
+            )
+            if level == logging.INFO:
+                logger.debug(
+                    "AgentManager: swarm returned zero proposals for %s; agents=%s",
+                    token,
+                    ", ".join(a.name for a in agents) if agents else "<none>",
+                )
         publish(
             "runtime.log",
             RuntimeLog(
@@ -488,12 +691,279 @@ class AgentManager:
         ctx = await self.evaluate_with_swarm(token, portfolio)
         return ctx.actions
 
+    def _update_weight_snapshot(
+        self,
+        active_agents: Iterable[BaseAgent],
+        weights: Dict[str, float],
+        proposal_counts: Mapping[str, int],
+        metadata: Dict[str, Any],
+    ) -> None:
+        """Capture enriched role-aware weight telemetry for UI consumption."""
+
+        if not isinstance(metadata, dict):
+            return
+        raw_details = metadata.get("agents")
+        sim_effects = metadata.get("simulation_effects")
+        if not isinstance(sim_effects, dict):
+            sim_effects = {}
+        detail_map: Dict[str, Dict[str, Any]] = {}
+        if isinstance(raw_details, list):
+            for entry in raw_details:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("agent") or "").strip()
+                if not name:
+                    continue
+                detail_map[name] = dict(entry)
+
+        enriched_agents: List[Dict[str, Any]] = []
+        role_snapshot: Dict[str, Dict[str, Any]] = {}
+        total_weight = 0.0
+        active_names: set[str] = set()
+
+        for agent in active_agents:
+            name = agent.name
+            active_names.add(name)
+            detail = detail_map.get(name, {})
+            detail = dict(detail) if detail else {}
+            detail["agent"] = name
+            detail["proposals"] = int(proposal_counts.get(name, detail.get("proposals", 0) or 0))
+            try:
+                weight = float(weights.get(name, self.weights.get(name, 1.0)))
+            except (TypeError, ValueError):
+                weight = float(self.weights.get(name, 1.0) or 0.0)
+            detail["weight"] = weight
+            detail["active"] = True
+            role = resolve_agent_role(agent)
+            detail["role"] = role
+            if "sample" in detail and isinstance(detail["sample"], list):
+                detail["sample"] = detail["sample"][:3]
+            metrics_map = detail.get("metrics")
+            if not isinstance(metrics_map, dict):
+                metrics_map = {}
+            requirements = collect_agent_requirements(agent, metrics_map)
+            if requirements:
+                detail["requirements"] = requirements
+                unmet = [req for req in requirements if req.get("met") is False]
+                if unmet:
+                    detail["needs_attention"] = True
+                    detail["blocked_reason"] = ", ".join(
+                        f"{req['parameter']} requires {req['target']}"
+                        for req in unmet[:3]
+                    )
+                else:
+                    detail["needs_attention"] = False
+            sim_effect = sim_effects.get(name)
+            if isinstance(sim_effect, dict):
+                detail["simulation"] = sim_effect
+                avg_mult = sim_effect.get("avg_multiplier")
+                if (
+                    isinstance(avg_mult, (int, float))
+                    and avg_mult < 0.75
+                ):
+                    if not detail.get("needs_attention"):
+                        detail["needs_attention"] = True
+                    detail.setdefault(
+                        "blocked_reason",
+                        "simulation dampening signal",
+                    )
+            if "needs_attention" not in detail:
+                detail["needs_attention"] = False
+            positive_weight = max(0.0, weight)
+            total_weight += positive_weight
+            bucket = role_snapshot.setdefault(
+                role,
+                {"weight": 0.0, "agents": [], "inactive": []},
+            )
+            bucket["weight"] += positive_weight
+            bucket["agents"].append(detail)
+            enriched_agents.append(detail)
+
+        for agent in self.agents:
+            if agent.name in active_names:
+                continue
+            role = resolve_agent_role(agent)
+            try:
+                base_weight = float(self.weights.get(agent.name, 0.0))
+            except (TypeError, ValueError):
+                base_weight = 0.0
+            inactive_entry = {
+                "agent": agent.name,
+                "role": role,
+                "weight": base_weight,
+                "active": False,
+            }
+            requirements = collect_agent_requirements(agent, {})
+            if requirements:
+                inactive_entry["requirements"] = requirements
+            bucket = role_snapshot.setdefault(
+                role,
+                {"weight": 0.0, "agents": [], "inactive": []},
+            )
+            bucket["inactive"].append(inactive_entry)
+
+        # Avoid division by zero while preserving original totals
+        total_weight = max(total_weight, 0.0)
+
+        for role, bucket in role_snapshot.items():
+            agents_in_role = bucket.get("agents", [])
+            role_total = sum(
+                max(0.0, float(entry.get("weight", 0.0))) for entry in agents_in_role
+            )
+            bucket["active_weight"] = role_total
+            bucket["share"] = (role_total / total_weight) if total_weight > 0 else 0.0
+            for entry in agents_in_role:
+                pos = max(0.0, float(entry.get("weight", 0.0)))
+                entry["role_share"] = (pos / role_total) if role_total > 0 else 0.0
+                entry["global_share"] = (pos / total_weight) if total_weight > 0 else 0.0
+            agents_in_role.sort(key=lambda item: item.get("global_share", item.get("weight", 0.0)), reverse=True)
+            bucket["agents"] = agents_in_role
+            bucket["inactive"] = sorted(
+                bucket.get("inactive", []),
+                key=lambda item: item.get("weight", 0.0),
+                reverse=True,
+            )
+
+        enriched_agents.sort(
+            key=lambda item: item.get("global_share", item.get("weight", 0.0)),
+            reverse=True,
+        )
+        metadata["agents"] = enriched_agents
+        metadata["roles"] = role_snapshot
+
+    def _log_agent_inputs(self, metadata: Mapping[str, Any]) -> None:
+        if not isinstance(metadata, Mapping):
+            return
+        agents = metadata.get("agents")
+        if not isinstance(agents, list):
+            return
+        token = metadata.get("token")
+        summary: Dict[str, Any] = {
+            "token": token,
+            "agents": [],
+        }
+        for entry in agents:
+            if not isinstance(entry, Mapping):
+                continue
+            summary["agents"].append(
+                {
+                    "agent": entry.get("agent"),
+                    "weight": entry.get("weight"),
+                    "proposals": entry.get("proposals"),
+                    "metrics": entry.get("metrics"),
+                    "requirements": entry.get("requirements"),
+                    "needs_attention": entry.get("needs_attention"),
+                    "blocked_reason": entry.get("blocked_reason"),
+                    "error": entry.get("error"),
+                }
+            )
+        if summary["agents"]:
+            logger.debug("Agent inputs snapshot: %s", serialize_for_log(summary))
+
+        snapshot_agents: Dict[str, Dict[str, Any]] = {}
+        for entry in enriched_agents:
+            name = entry.get("agent")
+            if not name:
+                continue
+            snapshot_agents[name] = {
+                "agent": name,
+                "role": entry.get("role"),
+                "weight": float(entry.get("weight", 0.0)),
+                "role_share": float(entry.get("role_share", 0.0)),
+                "global_share": float(entry.get("global_share", 0.0)),
+                "proposals": int(entry.get("proposals", 0)),
+                "metrics": entry.get("metrics") or {},
+                "sides": entry.get("sides") or [],
+                "active": True,
+                "requirements": entry.get("requirements") or [],
+                "needs_attention": entry.get("needs_attention"),
+                "blocked_reason": entry.get("blocked_reason"),
+                "simulation": entry.get("simulation") or {},
+            }
+        for role, bucket in role_snapshot.items():
+            for entry in bucket.get("inactive", []):
+                name = entry.get("agent")
+                if not name:
+                    continue
+                snapshot_agents.setdefault(
+                    name,
+                    {
+                        "agent": name,
+                        "role": role,
+                        "weight": float(entry.get("weight", 0.0)),
+                        "role_share": 0.0,
+                        "global_share": 0.0,
+                        "proposals": 0,
+                        "metrics": {},
+                        "sides": [],
+                        "active": False,
+                        "requirements": entry.get("requirements") or [],
+                        "needs_attention": True,
+                        "blocked_reason": "inactive",
+                        "simulation": {},
+                    },
+                )
+
+        self._weight_snapshot = {
+            "updated_at": time.time(),
+            "total_weight": total_weight,
+            "roles": copy.deepcopy(role_snapshot),
+            "agents": snapshot_agents,
+        }
+
+    def weight_snapshot(self) -> Dict[str, Any]:
+        """Return the latest computed weight telemetry."""
+
+        if self._weight_snapshot:
+            return copy.deepcopy(self._weight_snapshot)
+        fallback_agents: Dict[str, Dict[str, Any]] = {}
+        for agent in self.agents:
+            try:
+                base_weight = float(self.weights.get(agent.name, 0.0))
+            except (TypeError, ValueError):
+                base_weight = 0.0
+            fallback_agents[agent.name] = {
+                "agent": agent.name,
+                "role": resolve_agent_role(agent),
+                "weight": base_weight,
+                "role_share": 0.0,
+                "global_share": 0.0,
+                "proposals": 0,
+                "metrics": {},
+                "sides": [],
+                "active": False,
+                "requirements": collect_agent_requirements(agent, {}),
+                "needs_attention": True,
+                "blocked_reason": "inactive",
+                "simulation": {},
+            }
+        return {
+            "updated_at": None,
+            "total_weight": 0.0,
+            "roles": {},
+            "agents": fallback_agents,
+        }
+
     def consume_swarm(
         self, token: str, default: AgentSwarm | None = None
     ) -> AgentSwarm | None:
         """Return and remove the cached swarm associated with ``token``."""
 
         return self._active_swarms.pop(token, default)
+
+    def _install_threshold_profile(
+        self, profile: Mapping[str, Mapping[str, float]]
+    ) -> None:
+        """Propagate decision thresholds to agents that can consume them."""
+
+        for agent in self.agents:
+            try:
+                if hasattr(agent, "apply_threshold_profile"):
+                    agent.apply_threshold_profile(copy.deepcopy(profile))
+                elif hasattr(agent, "threshold_profile"):
+                    setattr(agent, "threshold_profile", copy.deepcopy(profile))
+            except Exception:
+                continue
 
     def _select_agents(self) -> list[BaseAgent]:
         agents = list(self.agents)
@@ -511,14 +981,17 @@ class AgentManager:
         exclude_set = _parse_list(exclude_env)
 
         if not include_set:
-            # Default fast-mode agent mix keeps the light, async-friendly set.
+            # Default fast-mode agent mix keeps a very small async-friendly core.
             include_set = {
                 "simulation",
-                "arbitrage",
                 "momentum",
                 "trend",
-                "exit",
+                "arbitrage",
                 "conviction",
+                "smart_discovery",
+                "meta_conviction",
+                "vanta",
+                "inferna",
             }
 
         if exclude_set:
@@ -530,7 +1003,6 @@ class AgentManager:
             "portfolio_optimizer",
             "portfolio_manager",
             "portfolio_agent",
-            "smart_discovery",
             "supervisor",
             "flashloan",
             "mev",
@@ -541,8 +1013,6 @@ class AgentManager:
             "sac",
             "buy_hold",
             "mean_revert",
-            "vanta",
-            "inferna",
         }
         if exclude_set:
             default_exclude.update(exclude_set)
@@ -562,12 +1032,57 @@ class AgentManager:
 
         filtered = [a for a in agents if keep(a)]
         if filtered:
-            return filtered
+            limit_env = os.getenv("FAST_AGENT_LIMIT")
+            try:
+                limit = int(limit_env) if limit_env is not None else 8
+            except ValueError:
+                limit = 8
+            if limit <= 0:
+                limit = 4
+
+            deduped: list[BaseAgent] = []
+            seen_keys: set[str] = set()
+
+            def _base_key(agent: BaseAgent) -> str:
+                name = agent.name.lower()
+                if "_m" in name:
+                    return name.split("_m", 1)[0]
+                return name
+
+            for agent in filtered:
+                key = _base_key(agent)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                deduped.append(agent)
+                if len(deduped) >= limit:
+                    break
+            if deduped:
+                return deduped
+            return filtered[:limit]
         return agents
 
     async def execute(self, token: str, portfolio) -> List[Any]:
         ctx = await self.evaluate_with_swarm(token, portfolio)
         actions = list(ctx.actions)
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "AgentManager: evaluation summary for %s metadata=%s weights=%s",
+                token,
+                serialize_for_log(getattr(ctx, "metadata", {})),
+                serialize_for_log(ctx.weights),
+            )
+            logger.info(
+                "AgentManager: merged swarm actions for %s -> %s",
+                token,
+                serialize_for_log(actions),
+            )
+        if not actions:
+            logger.warning(
+                "AgentManager: execute called for %s but no actions were produced (metadata=%s)",
+                token,
+                serialize_for_log(getattr(ctx, "metadata", {})),
+            )
         results = []
         if self.depth_service and token not in self._event_executors:
             execer = EventExecutor(
@@ -596,10 +1111,37 @@ class AgentManager:
                             explain = ""
             if explain:
                 action.setdefault("context", explain)
+            if logger.isEnabledFor(logging.INFO):
+                weight_val = ctx.weights.get(ag_name) if ag_name else None
+                logger.info(
+                    "AgentManager: dispatching action for %s agent=%s weight=%s payload=%s",
+                    token,
+                    ag_name or "<unknown>",
+                    (
+                        f"{float(weight_val):.3f}"
+                        if isinstance(weight_val, (int, float))
+                        else serialize_for_log(weight_val)
+                    ),
+                    serialize_for_log(action),
+                )
             result = await self.executor.execute(action)
             if self.emotion_agent:
                 emotion = self.emotion_agent.evaluate(action, result)
                 action["emotion"] = emotion
+                if logger.isEnabledFor(logging.INFO):
+                    logger.info(
+                        "AgentManager: emotion score for %s agent=%s -> %s",
+                        token,
+                        ag_name or "<unknown>",
+                        emotion,
+                    )
+            if logger.isEnabledFor(logging.INFO):
+                logger.info(
+                    "AgentManager: executor result for %s agent=%s -> %s",
+                    token,
+                    ag_name or "<unknown>",
+                    serialize_for_log(result),
+                )
             results.append(result)
             if self.memory_agent:
                 await self.memory_agent.log(action)
@@ -1148,6 +1690,18 @@ class AgentManager:
                     regime_weights = {}
             except Exception:
                 regime_weights = {}
+        decision_thresholds = cfg.get("decision_thresholds") or {}
+        if isinstance(decision_thresholds, str):
+            try:
+                import ast
+
+                parsed_dt = ast.literal_eval(decision_thresholds)
+                if isinstance(parsed_dt, dict):
+                    decision_thresholds = parsed_dt
+                else:
+                    decision_thresholds = {}
+            except Exception:
+                decision_thresholds = {}
         evolve_interval = int(cfg.get("evolve_interval", 1))
         mutation_threshold = float(cfg.get("mutation_threshold", 0.0))
         weight_config_paths = cfg.get("weight_config_paths") or []
@@ -1190,6 +1744,8 @@ class AgentManager:
         if jito_ws_auth and os.getenv("JITO_WS_AUTH") is None:
             os.environ["JITO_WS_AUTH"] = str(jito_ws_auth)
 
+        keypair, keypair_path = cls._resolve_keypair_from_config(cfg)
+
         if not agents:
             return None
         cfg_obj = AgentManagerConfig(
@@ -1202,6 +1758,7 @@ class AgentManager:
             depth_service=depth_service,
             priority_rpc=priority_rpc,
             regime_weights=regime_weights,
+            decision_thresholds=decision_thresholds,
             evolve_interval=evolve_interval,
             mutation_threshold=mutation_threshold,
             weight_config_paths=weight_config_paths,
@@ -1213,6 +1770,8 @@ class AgentManager:
             hierarchical_rl=hierarchical_rl,
             use_supervisor=use_supervisor,
             supervisor_checkpoint=supervisor_checkpoint,
+            keypair=keypair,
+            keypair_path=keypair_path,
         )
         return cls(agents, config=cfg_obj)
 

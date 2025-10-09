@@ -383,8 +383,10 @@ def portfolio_variance(cov: np.ndarray, weights: Sequence[float]) -> float:
         return float(total)
     if cov.size == 0:
         return 0.0
+    if getattr(cov, "ndim", 0) < 2:
+        return 0.0
     w = np.asarray(list(weights), dtype=float)
-    if cov.shape[0] != w.size:
+    if cov.shape[0] != w.size or cov.shape[1] != w.size:
         return 0.0
     return float(w @ cov @ w.T)
 

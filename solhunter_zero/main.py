@@ -16,6 +16,10 @@ from typing import Sequence
 import cProfile
 
 from .util import install_uvloop, parse_bool_env
+from .agents.discovery import (
+    DEFAULT_DISCOVERY_METHOD,
+    resolve_discovery_method,
+)
 from .paths import ROOT
 from .config import (
     load_config,
@@ -43,7 +47,7 @@ from .agents.discovery import DiscoveryAgent
 from .main_state import TradingState
 from .memory import Memory, load_snapshot
 from .portfolio import Portfolio
-from .prices import warm_cache
+from . import prices
 from .strategy_manager import StrategyManager
 from .agent_manager import AgentManager
 from .onchain_metrics import fetch_dex_metrics_async
@@ -66,6 +70,111 @@ except Exception:  # pragma: no cover - provide minimal stub
 install_uvloop()
 
 _DEFAULT_PRESET = Path(__file__).resolve().parent.parent / "config" / "default.toml"
+
+
+def _normalize_token(value: object) -> str | None:
+    if isinstance(value, str):
+        token = value.strip()
+        return token or None
+    if value is None:
+        return None
+    token = str(value).strip()
+    return token or None
+
+
+def _collect_warmup_tokens(
+    portfolio: Portfolio, snapshot_trades: Sequence[dict]
+) -> tuple[str, ...]:
+    ordered: dict[str, None] = {}
+    for token in portfolio.balances.keys():
+        normalized = _normalize_token(token)
+        if normalized:
+            ordered.setdefault(normalized, None)
+    for trade in snapshot_trades:
+        normalized = _normalize_token(trade.get("token"))
+        if normalized:
+            ordered.setdefault(normalized, None)
+    return tuple(ordered.keys())
+
+
+def _seed_price_cache_from_state(
+    portfolio: Portfolio, snapshot_trades: Sequence[dict]
+) -> set[str]:
+    seeded: set[str] = set()
+    for token, position in portfolio.balances.items():
+        normalized = _normalize_token(token)
+        if not normalized:
+            continue
+        entry_price = getattr(position, "entry_price", None)
+        if isinstance(entry_price, (int, float)) and entry_price > 0:
+            if prices.get_cached_price(normalized) is None:
+                prices.update_price_cache(normalized, float(entry_price))
+                seeded.add(normalized)
+    for trade in snapshot_trades:
+        normalized = _normalize_token(trade.get("token"))
+        if not normalized or prices.get_cached_price(normalized) is not None:
+            continue
+        price = trade.get("price")
+        if isinstance(price, (int, float)) and price > 0:
+            prices.update_price_cache(normalized, float(price))
+            seeded.add(normalized)
+    return seeded
+
+
+async def _warm_price_cache_background(
+    tokens: Sequence[str], *, delay: float, batch_size: int
+) -> None:
+    if not tokens:
+        return
+    try:
+        missing = [tok for tok in tokens if prices.get_cached_price(tok) is None]
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logging.debug("Price warm-up cache lookup failed: %s", exc)
+        return
+    if not missing:
+        return
+
+    batch = max(1, int(batch_size) if batch_size else 1)
+    sleep_delay = max(0.0, float(delay) if delay is not None else 0.0)
+
+    for start in range(0, len(missing), batch):
+        chunk = missing[start : start + batch]
+        try:
+            await prices.fetch_token_prices_async(chunk)
+        except Exception as exc:  # pragma: no cover - best effort warming
+            logging.debug("Price warm-up fetch failed for %s: %s", chunk, exc)
+        if start + batch >= len(missing) or sleep_delay <= 0:
+            continue
+        try:
+            await asyncio.sleep(sleep_delay)
+        except TypeError as exc:
+            logging.warning("Price warm-up sleep skipped: %s", exc)
+            break
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logging.debug("Price warm-up sleep failed: %s", exc)
+            break
+
+
+async def _run_trading_loop_with_warmup(
+    *,
+    warm_tokens: Sequence[str],
+    warmup_delay: float,
+    warmup_batch: int,
+    trading_kwargs: dict,
+) -> None:
+    warm_task: asyncio.Task | None = None
+    if warm_tokens:
+        warm_task = asyncio.create_task(
+            _warm_price_cache_background(
+                warm_tokens, delay=warmup_delay, batch_size=warmup_batch
+            )
+        )
+    try:
+        await trading_loop(**trading_kwargs)
+    finally:
+        if warm_task is not None:
+            with contextlib.suppress(Exception):
+                await warm_task
 
 
 async def perform_startup_async(
@@ -194,10 +303,15 @@ def main(
     if risk_multiplier is not None:
         os.environ["RISK_MULTIPLIER"] = str(risk_multiplier)
 
-    if discovery_method is None:
-        discovery_method = cfg.get("discovery_method")
-    if discovery_method is None:
-        discovery_method = os.getenv("DISCOVERY_METHOD", "websocket")
+    if discovery_method is not None:
+        resolved_method = resolve_discovery_method(discovery_method)
+    else:
+        resolved_method = resolve_discovery_method(cfg.get("discovery_method"))
+        if resolved_method is None:
+            resolved_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+    if resolved_method is None:
+        resolved_method = DEFAULT_DISCOVERY_METHOD
+    discovery_method = resolved_method
 
     if stop_loss is None:
         stop_loss = cfg.get("stop_loss")
@@ -274,12 +388,26 @@ def main(
         asyncio.run(_seed(memory, snapshot_trades))
     memory.start_writer()
     portfolio = Portfolio(path=portfolio_path)
+    warm_tokens = _collect_warmup_tokens(portfolio, snapshot_trades)
+    seeded_tokens = _seed_price_cache_from_state(portfolio, snapshot_trades)
+    if seeded_tokens:
+        logging.debug(
+            "Seeded price cache from snapshots: %s", ", ".join(sorted(seeded_tokens))
+        )
+    warmup_delay_env = os.getenv("PRICE_WARMUP_DELAY")
     try:
-        warm_cache(portfolio.balances.keys())
-    except TypeError as exc:
-        logging.warning("warm_cache skipped due to patched asyncio.sleep: %s", exc)
-    except Exception as exc:  # pragma: no cover - best effort warming
-        logging.debug("warm_cache failed: %s", exc)
+        warmup_delay = float(warmup_delay_env) if warmup_delay_env is not None else 0.25
+    except ValueError:
+        warmup_delay = 0.25
+    warmup_delay = max(0.0, warmup_delay)
+
+    warmup_batch_env = os.getenv("PRICE_WARMUP_BATCH")
+    try:
+        warmup_batch = int(warmup_batch_env) if warmup_batch_env is not None else 16
+    except ValueError:
+        warmup_batch = 16
+    if warmup_batch <= 0:
+        warmup_batch = 1
     state = TradingState()
 
     recent_window = float(os.getenv("RECENT_TRADE_WINDOW", "0") or 0)
@@ -374,44 +502,50 @@ def main(
                     live_discovery = parse_bool_env("LIVE_DISCOVERY", False)
                 if live_discovery is None:
                     live_discovery = parse_bool_env("LIVE_DISCOVERY", True)
+                trading_kwargs = dict(
+                    cfg=cfg,
+                    runtime_cfg=runtime_cfg,
+                    memory=memory,
+                    portfolio=portfolio,
+                    state=state,
+                    loop_delay=loop_delay,
+                    min_delay=min_delay,
+                    max_delay=max_delay,
+                    cpu_low_threshold=cpu_low_threshold,
+                    cpu_high_threshold=cpu_high_threshold,
+                    depth_freq_low=depth_freq_low,
+                    depth_freq_high=depth_freq_high,
+                    depth_rate_limit=depth_rate_limit,
+                    iterations=iterations,
+                    testnet=testnet,
+                    dry_run=dry_run,
+                    offline=offline,
+                    token_file=token_file,
+                    discovery_method=discovery_method,
+                    keypair=keypair,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    trailing_stop=trailing_stop,
+                    max_drawdown=max_drawdown,
+                    volatility_factor=volatility_factor,
+                    arbitrage_threshold=arbitrage_threshold,
+                    arbitrage_amount=arbitrage_amount,
+                    strategy_manager=strategy_manager,
+                    agent_manager=agent_manager,
+                    market_ws_url=market_ws_url,
+                    order_book_ws_url=order_book_ws_url,
+                    arbitrage_tokens=arbitrage_tokens,
+                    rl_daemon=rl_daemon,
+                    rl_interval=rl_interval,
+                    proc_ref=proc_ref,
+                    live_discovery=live_discovery,
+                )
                 asyncio.run(
-                    trading_loop(
-                        cfg,
-                        runtime_cfg,
-                        memory,
-                        portfolio,
-                        state,
-                        loop_delay=loop_delay,
-                        min_delay=min_delay,
-                        max_delay=max_delay,
-                        cpu_low_threshold=cpu_low_threshold,
-                        cpu_high_threshold=cpu_high_threshold,
-                        depth_freq_low=depth_freq_low,
-                        depth_freq_high=depth_freq_high,
-                        depth_rate_limit=depth_rate_limit,
-                        iterations=iterations,
-                        testnet=testnet,
-                        dry_run=dry_run,
-                        offline=offline,
-                        token_file=token_file,
-                        discovery_method=discovery_method,
-                        keypair=keypair,
-                        stop_loss=stop_loss,
-                        take_profit=take_profit,
-                        trailing_stop=trailing_stop,
-                        max_drawdown=max_drawdown,
-                        volatility_factor=volatility_factor,
-                        arbitrage_threshold=arbitrage_threshold,
-                        arbitrage_amount=arbitrage_amount,
-                        strategy_manager=strategy_manager,
-                        agent_manager=agent_manager,
-                        market_ws_url=market_ws_url,
-                        order_book_ws_url=order_book_ws_url,
-                        arbitrage_tokens=arbitrage_tokens,
-                        rl_daemon=rl_daemon,
-                        rl_interval=rl_interval,
-                        proc_ref=proc_ref,
-                        live_discovery=live_discovery,
+                    _run_trading_loop_with_warmup(
+                        warm_tokens=warm_tokens,
+                        warmup_delay=warmup_delay,
+                        warmup_batch=warmup_batch,
+                        trading_kwargs=trading_kwargs,
                     )
                 )
                 break

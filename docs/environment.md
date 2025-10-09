@@ -33,7 +33,7 @@ This document lists environment variables recognized by the project.
 | `DEPTH_MMAP_PATH` | `/tmp/depth_service.mmap` | Path to depth mmap |
 | `DEPTH_MMAP_POLL_INTERVAL` | `1` | Interval for depth mmap poll |
 | `DEPTH_SERVICE_SOCKET` | `/tmp/depth_service.sock` | Configures depth service socket |
-| `DEPTH_START_TIMEOUT` | `5` | Configures depth start timeout |
+| `DEPTH_START_TIMEOUT` | `10` | Configures depth start timeout |
 | `DEPTH_WS_ADDR` | `127.0.0.1` | Address for depth ws |
 | `DEPTH_WS_PORT` | `8766` | Port for depth ws |
 | `DEX_LATENCY_CACHE_TTL` | `30` | TTL for dex latency cache cache |
@@ -66,6 +66,10 @@ This document lists environment variables recognized by the project.
 | `GNN_MODEL_PATH` | `route_gnn.pt` | Path to gnn model |
 | `GPU_MEMORY_INDEX` | `` | Configures gpu memory index |
 | `GRAPH_MODEL_PATH` | `` | Path to graph model |
+| `HELIUS_API_KEY` | `af30888b-b79f-4b12-b3fd-c5375d5bad2d` | API key used for Helius price and asset requests |
+| `HELIUS_PRICE_REST_URL` | `` | Optional legacy REST price endpoint for Helius |
+| `HELIUS_PRICE_RPC_METHOD` | `getAssetBatch` | JSON-RPC method used when querying Helius prices |
+| `HELIUS_PRICE_RPC_URL` | `https://rpc.helius.xyz` | Helius RPC endpoint for token price lookups |
 | `HTTP_CONNECTOR_LIMIT` | `0` | Configures http connector limit |
 | `HTTP_CONNECTOR_LIMIT_PER_HOST` | `0` | Configures http connector limit per host |
 | `JITO_AUTH` | `` | Authentication token for Jito; fetched automatically on first run and stored in `.env`; override via environment variable or personal config |
@@ -150,7 +154,7 @@ This document lists environment variables recognized by the project.
 | `SIM_MODEL_CACHE_TTL` | `300` | TTL for sim model cache cache |
 | `SOLANA_KEYPAIR` | `` | Configures solana keypair |
 | `SOLANA_RPC_URL` | `https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d` | URL for Solana RPC and default endpoint for connectivity checks |
-| `SOLANA_TESTNET_RPC_URL` | `https://api.devnet.solana.com` | URL for solana testnet rpc |
+| `SOLANA_TESTNET_RPC_URL` | `https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d` | URL for solana testnet rpc |
 | `SOLHUNTER_CONFIG` | `` | Configures solhunter config |
 | `SOLHUNTER_FORCE_DEPS` | `` | Configures solhunter force deps |
 | `SOLHUNTER_GPU_AVAILABLE` | `` | Configures solhunter gpu available |

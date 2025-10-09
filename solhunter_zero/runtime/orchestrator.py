@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from ..util import install_uvloop, parse_bool_env
+from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
 from .. import event_bus
 from ..config import (
     initialize_event_bus,
@@ -24,7 +25,18 @@ from ..portfolio import Portfolio
 from ..strategy_manager import StrategyManager
 from ..agent_manager import AgentManager
 from ..loop import trading_loop as _trading_loop
-from ..ui import create_app as _create_ui_app, start_websockets as _start_ui_ws
+from .. import ui as _ui_module
+
+_create_ui_app = _ui_module.create_app  # type: ignore[attr-defined]
+
+if hasattr(_ui_module, "start_websockets"):
+    _start_ui_ws = getattr(_ui_module, "start_websockets")
+else:  # pragma: no cover - websockets optional in lightweight UI builds
+    def _start_ui_ws() -> dict[str, Any]:
+        logging.getLogger(__name__).warning(
+            "UI websockets not available; continuing with HTTP polling only"
+        )
+        return {}
 
 
 install_uvloop()
@@ -39,6 +51,7 @@ class RuntimeHandles:
     ui_server: Any | None = None
     bus_started: bool = False
     tasks: list[asyncio.Task] | None = None
+    ui_state: Any | None = None
     depth_proc: Any | None = None
 
 
@@ -110,10 +123,17 @@ class RuntimeOrchestrator:
 
     async def start_ui(self) -> None:
         await self._publish_stage("ui:init", True)
-        app = _create_ui_app(auto_start=False)
-        threads = _start_ui_ws()
+        state_obj = None
+        if hasattr(_ui_module, "UIState"):
+            try:
+                state_obj = _ui_module.UIState()
+            except Exception:
+                state_obj = None
+        app = _create_ui_app(state_obj)
+        threads = _start_ui_ws() if callable(_start_ui_ws) else {}
         self.handles.ui_app = app
         self.handles.ui_threads = threads
+        self.handles.ui_state = state_obj
         await self._publish_stage("ui:ws", True)
         if self.run_http and str(os.getenv("UI_DISABLE_HTTP_SERVER", "")).lower() not in {"1", "true", "yes"}:
             # Start Flask server in a background thread using werkzeug only if available.
@@ -190,7 +210,11 @@ class RuntimeOrchestrator:
         rl_interval = float(cfg.get("rl_interval", 3600.0))
 
         # Derive discovery & arbitrage
-        discovery_method = cfg.get("discovery_method") or os.getenv("DISCOVERY_METHOD", "websocket")
+        discovery_method = resolve_discovery_method(cfg.get("discovery_method"))
+        if discovery_method is None:
+            discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if discovery_method is None:
+            discovery_method = DEFAULT_DISCOVERY_METHOD
         arbitrage_threshold = float(cfg.get("arbitrage_threshold", 0.0))
         arbitrage_amount = float(cfg.get("arbitrage_amount", 0.0))
         arbitrage_tokens = None

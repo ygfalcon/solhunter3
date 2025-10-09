@@ -3,9 +3,14 @@ from __future__ import annotations
 import hashlib
 from typing import List, Dict, Any
 
+import logging
+
 from . import BaseAgent
 from ..portfolio import Portfolio
 from ..datasets.alien_cipher import load_alien_cipher, DEFAULT_PATH
+from .price_utils import resolve_price
+
+logger = logging.getLogger(__name__)
 
 
 class AlienCipherAgent(BaseAgent):
@@ -68,8 +73,53 @@ class AlienCipherAgent(BaseAgent):
             x = r * x * (1.0 - x)
 
         if x >= self.threshold:
-            return [{"token": token, "side": "buy", "amount": self.amount, "price": 0.0}]
+            price, context = await resolve_price(token, portfolio)
+            metadata = {"price_context": context}
+            if price <= 0:
+                fallback = None
+                for key in ("history_price", "cached_price", "fetched_price"):
+                    value = context.get(key)
+                    if isinstance(value, (int, float)) and value > 0:
+                        fallback = float(value)
+                        metadata["price_fallback"] = key
+                        break
+                if fallback is not None:
+                    price = fallback
+                else:
+                    metadata["price_missing"] = True
+                    logger.info(
+                        "%s agent proceeding without live price for %s", self.name, token
+                    )
+            return [
+                {
+                    "token": token,
+                    "side": "buy",
+                    "amount": self.amount,
+                    "price": price,
+                    "metadata": metadata,
+                }
+            ]
         if x <= 1.0 - self.threshold and token in portfolio.balances:
             pos = portfolio.balances[token]
-            return [{"token": token, "side": "sell", "amount": pos.amount, "price": 0.0}]
+            price, context = await resolve_price(token, portfolio)
+            metadata = {"price_context": context}
+            if price <= 0:
+                entry = getattr(pos, "entry_price", 0.0)
+                if isinstance(entry, (int, float)) and entry > 0:
+                    price = float(entry)
+                    metadata["price_fallback"] = "entry_price"
+                else:
+                    metadata["price_missing"] = True
+                    logger.info(
+                        "%s agent proceeding without live price for %s", self.name, token
+                    )
+            return [
+                {
+                    "token": token,
+                    "side": "sell",
+                    "amount": pos.amount,
+                    "price": price,
+                    "metadata": metadata,
+                }
+            ]
         return []
