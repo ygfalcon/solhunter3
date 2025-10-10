@@ -290,6 +290,75 @@ _PAGE_TEMPLATE = """
         .status-card.ok { border-color: rgba(63,185,80,0.32); }
         .status-card.fail { border-color: rgba(255,123,114,0.32); }
         .status-card.warn { border-color: rgba(242,204,96,0.35); }
+        .header-top {
+            display: flex;
+            justify-content: space-between;
+            gap: 18px;
+            flex-wrap: wrap;
+        }
+        .header-signals {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .signal-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            background: rgba(13,17,23,0.72);
+            border: 1px solid rgba(88,166,255,0.2);
+        }
+        .signal-pill.env-dev { border-color: rgba(88,166,255,0.45); color: #58a6ff; }
+        .signal-pill.env-STAGE, .signal-pill.env-stage { border-color: rgba(242,204,96,0.45); color: var(--warning); }
+        .signal-pill.env-PROD, .signal-pill.env-prod { border-color: rgba(63,185,80,0.5); color: var(--success); }
+        .signal-pill.toggle-on { border-color: rgba(63,185,80,0.5); color: var(--success); }
+        .signal-pill.toggle-off { border-color: rgba(88,166,255,0.2); color: var(--muted); }
+        .signal-pill.toggle-paused { border-color: rgba(255,123,114,0.55); color: var(--danger); }
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .header-actions button {
+            background: rgba(88,166,255,0.12);
+            color: #e6edf3;
+            border: 1px solid rgba(88,166,255,0.35);
+            border-radius: 999px;
+            padding: 8px 16px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+        .header-actions button:hover { background: rgba(88,166,255,0.22); }
+        .signal-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+        }
+        .signal-metric {
+            background: rgba(13,17,23,0.6);
+            border-radius: 12px;
+            padding: 10px 12px;
+            border: 1px solid rgba(88,166,255,0.12);
+        }
+        .color-chip {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 6px;
+        }
+        .color-chip.ok { background: rgba(63,185,80,0.85); }
+        .color-chip.warn { background: rgba(242,204,96,0.85); }
+        .color-chip.danger { background: rgba(255,123,114,0.9); }
+        .color-chip.idle { background: rgba(88,166,255,0.65); }
         .pill {
             display: inline-flex;
             align-items: center;
@@ -315,6 +384,20 @@ _PAGE_TEMPLATE = """
             border: 1px solid var(--border);
             padding: 18px 20px 22px;
             box-shadow: 0 14px 38px rgba(0,0,0,0.35);
+        }
+        .panel.skeleton::after {
+            content: "";
+            display: block;
+            height: 4px;
+            margin-top: 12px;
+            background: linear-gradient(90deg, rgba(88,166,255,0.1), rgba(88,166,255,0.35), rgba(88,166,255,0.1));
+            background-size: 200% 100%;
+            animation: shimmer 1.4s infinite;
+            border-radius: 4px;
+        }
+        @keyframes shimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
         }
         .panel h2 {
             margin-top: 0;
@@ -355,6 +438,64 @@ _PAGE_TEMPLATE = """
             min-width: 140px;
         }
         .metric strong { display: block; font-size: 1.1rem; }
+        .badge-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .filter-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 12px;
+        }
+        .filter-bar input,
+        .filter-bar select {
+            background: rgba(13,17,23,0.6);
+            border: 1px solid rgba(88,166,255,0.18);
+            border-radius: 8px;
+            padding: 6px 10px;
+            color: #e6edf3;
+        }
+        .mint-chip {
+            color: var(--accent);
+            font-weight: 600;
+            text-decoration: none;
+        }
+        .mint-chip:hover { text-decoration: underline; }
+        .decision-card {
+            position: relative;
+        }
+        .decision-card .badge {
+            position: absolute;
+            top: 8px;
+            right: 10px;
+            font-size: 0.7rem;
+            padding: 3px 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(88,166,255,0.25);
+        }
+        .badge.ok { color: var(--success); border-color: rgba(63,185,80,0.35); }
+        .badge.warn { color: var(--warning); border-color: rgba(242,204,96,0.35); }
+        .badge.danger { color: var(--danger); border-color: rgba(255,123,114,0.45); }
+        .test-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: rgba(13,17,23,0.72);
+            border: 1px solid rgba(88,166,255,0.2);
+            font-size: 0.78rem;
+        }
+        .test-indicator.ok { border-color: rgba(63,185,80,0.45); color: var(--success); }
+        .test-indicator.waiting { color: var(--warning); border-color: rgba(242,204,96,0.45); }
+        .preflight-result {
+            font-size: 0.82rem;
+            color: var(--muted);
+        }
+        .preflight-result.ok { color: var(--success); }
+        .preflight-result.fail { color: var(--danger); }
         .control-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -390,33 +531,83 @@ _PAGE_TEMPLATE = """
             header { padding: 18px; }
             .panel { padding: 16px; }
         }
+        .highlight {
+            outline: 2px solid var(--accent);
+            transition: outline 0.4s ease;
+        }
     </style>
 </head>
 <body>
     <div class=\"layout\">
         <header>
-            <div class=\"section-title\">
-                <h1>SolHunter Swarm Lifecycle</h1>
-                <span class=\"pill {{ 'fresh' if not swarm_overall.get('stale') else 'stale' }}\">
-                    Updated {{ swarm_overall.get('age_label', 'n/a') }}
-                </span>
+            <div class=\"header-top\">
+                <div class=\"section-title\">
+                    <h1>SolHunter Swarm Lifecycle</h1>
+                    <span class=\"pill {{ 'fresh' if not swarm_overall.get('stale') else 'stale' }}\">
+                        Updated {{ swarm_overall.get('age_label', 'n/a') }}
+                    </span>
+                </div>
+                <div class=\"header-actions\">
+                    <div id=\"test-indicator\" class=\"test-indicator waiting\">
+                        <span>Test Mode</span>
+                        <strong id=\"test-status-label\">Waiting</strong>
+                    </div>
+                    <button id=\"test-mode-toggle\" type=\"button\">Toggle Test Mode</button>
+                    <button id=\"preflight-button\" type=\"button\">Run Pre-flight</button>
+                </div>
+            </div>
+            <div class=\"header-signals\">
+                <span class=\"signal-pill env-{{ header_signals.environment|lower() }}\">🌎 Env {{ header_signals.environment }}</span>
+                <span class=\"signal-pill {{ 'toggle-on' if header_signals.paper_mode else 'toggle-off' }}\">📝 Paper {{ 'ON' if header_signals.paper_mode else 'OFF' }}</span>
+                <span class=\"signal-pill {{ 'toggle-paused' if header_signals.paused else 'toggle-on' }}\">⏸ Pause {{ 'ON' if header_signals.paused else 'OFF' }}</span>
+                <span class=\"signal-pill {{ 'toggle-on' if header_signals.rl_mode == 'applied' else 'toggle-off' }}\">🤖 RL {{ header_signals.rl_mode|title }}</span>
+            </div>
+            <div class=\"signal-metrics\">
+                <div class=\"signal-metric\">
+                    <span class=\"muted\">Bus Latency</span>
+                    <strong>{{ header_signals.bus_latency_ms | round(1) if header_signals.bus_latency_ms is not none else '—' }} ms</strong>
+                </div>
+                <div class=\"signal-metric\">
+                    <span class=\"muted\">OHLCV Lag</span>
+                    <strong>{{ header_signals.stream_lag.ohlcv | round(1) if header_signals.stream_lag.ohlcv is not none else '—' }} ms</strong>
+                </div>
+                <div class=\"signal-metric\">
+                    <span class=\"muted\">Depth Lag</span>
+                    <strong>{{ header_signals.stream_lag.depth | round(1) if header_signals.stream_lag.depth is not none else '—' }} ms</strong>
+                </div>
+                <div class=\"signal-metric\">
+                    <span class=\"muted\">Golden Lag</span>
+                    <strong>{{ header_signals.stream_lag.golden | round(1) if header_signals.stream_lag.golden is not none else '—' }} ms</strong>
+                </div>
             </div>
             <div class=\"metrics\">
                 <div class=\"metric\">
                     <span class=\"muted\">Suggestions / 5m</span>
-                    <strong>{{ suggestion_metrics.get('rate_per_min', 0) | round(2) }}</strong>
+                    <strong>{{ kpis.suggestions_per_5m | round(2) }}</strong>
                 </div>
                 <div class=\"metric\">
                     <span class=\"muted\">Acceptance</span>
-                    <strong>{{ (suggestion_metrics.get('acceptance_rate', 0) * 100) | round(1) }}%</strong>
+                    <strong>{{ (kpis.acceptance_rate * 100) | round(1) }}%</strong>
                 </div>
                 <div class=\"metric\">
-                    <span class=\"muted\">Golden Hash</span>
-                    <strong>{{ golden_summary.get('count', 0) }} tracked</strong>
+                    <span class=\"muted\">Golden Hashes</span>
+                    <strong>{{ kpis.golden_hashes }}</strong>
                 </div>
                 <div class=\"metric\">
-                    <span class=\"muted\">RL Windows</span>
-                    <strong>{{ rl_summary.get('weights_applied', 0) }}</strong>
+                    <span class=\"muted\">Open Vote Windows</span>
+                    <strong>{{ kpis.open_windows }}</strong>
+                </div>
+                <div class=\"metric\">
+                    <span class=\"muted\">Paper PnL (1D)</span>
+                    <strong>{{ kpis.paper_pnl | round(2) if kpis.paper_pnl is not none else '—' }}</strong>
+                </div>
+                <div class=\"metric\">
+                    <span class=\"muted\">Drawdown</span>
+                    <strong>{{ (kpis.drawdown * 100) | round(2) if kpis.drawdown is not none else '—' }}%</strong>
+                </div>
+                <div class=\"metric\">
+                    <span class=\"muted\">Turnover</span>
+                    <strong>{{ kpis.turnover | round(2) if kpis.turnover is not none else '—' }}</strong>
                 </div>
             </div>
             <div class=\"status-grid\">
@@ -430,10 +621,22 @@ _PAGE_TEMPLATE = """
         </header>
 
         <section class=\"grid-two\">
-            <article class=\"panel\">
+            <article class=\"panel\" id=\"discovery-panel\">
+                {% set discovery_stale = discovery_console.candidates | selectattr('stale') | list %}
+                {% set discovery_state = 'idle' %}
+                {% if discovery_console.candidates %}
+                    {% if discovery_stale|length == discovery_console.candidates|length %}
+                        {% set discovery_state = 'danger' %}
+                    {% elif discovery_stale %}
+                        {% set discovery_state = 'warn' %}
+                    {% else %}
+                        {% set discovery_state = 'ok' %}
+                    {% endif %}
+                {% endif %}
                 <div class=\"section-title\">
-                    <h2>Discovery Console</h2>
+                    <h2><span class=\"color-chip {{ discovery_state }}\"></span>Discovery Console</h2>
                     <span class=\"muted\">{{ discovery_console.stats.total }} candidates</span>
+                    <span class=\"preflight-result\" data-preflight-panel=\"discovery\">⏳</span>
                 </div>
                 <table>
                     <thead>
@@ -446,7 +649,7 @@ _PAGE_TEMPLATE = """
                     </thead>
                     <tbody>
                         {% for row in discovery_console.candidates %}
-                        <tr class=\"{{ 'stale' if row.stale else '' }}\">
+                        <tr class=\"{{ 'stale' if row.stale else '' }}\" data-mint=\"{{ row.mint }}\">
                             <td>{{ row.mint }}</td>
                             <td>{{ row.score if row.score is not none else '—' }}</td>
                             <td>{{ row.source or '—' }}</td>
@@ -462,10 +665,22 @@ _PAGE_TEMPLATE = """
                 </table>
             </article>
 
-            <article class=\"panel\">
+            <article class=\"panel\" id=\"token-facts-panel\">
+                {% set token_stale = token_facts.tokens.values() | selectattr('stale') | list %}
+                {% set token_state = 'idle' %}
+                {% if token_facts.tokens %}
+                    {% if token_stale|length == token_facts.tokens|length %}
+                        {% set token_state = 'danger' %}
+                    {% elif token_stale %}
+                        {% set token_state = 'warn' %}
+                    {% else %}
+                        {% set token_state = 'ok' %}
+                    {% endif %}
+                {% endif %}
                 <div class=\"section-title\">
-                    <h2>Token Facts Drawer</h2>
+                    <h2><span class=\"color-chip {{ token_state }}\"></span>Token Facts Drawer</h2>
                     <span class=\"muted\">{{ token_facts.tokens | length }} loaded</span>
+                    <span class=\"preflight-result\" data-preflight-panel=\"token-facts\">⏳</span>
                 </div>
                 <table>
                     <thead>
@@ -478,7 +693,7 @@ _PAGE_TEMPLATE = """
                     </thead>
                     <tbody>
                         {% for mint, info in token_facts.tokens.items() %}
-                        <tr class=\"{{ 'stale' if info.stale else '' }}\">
+                        <tr class=\"{{ 'stale' if info.stale else '' }}\" data-mint=\"{{ mint }}\">
                             <td>{{ mint }}</td>
                             <td>{{ info.symbol or '—' }}</td>
                             <td>{{ info.venues | join(', ') if info.venues else '—' }}</td>
@@ -493,10 +708,22 @@ _PAGE_TEMPLATE = """
         </section>
 
         <section class=\"grid-two\">
-            <article class=\"panel\">
+            <article class=\"panel\" id=\"market-panel\">
+                {% set market_stale = market_state.markets | selectattr('stale') | list %}
+                {% set market_state_flag = 'idle' %}
+                {% if market_state.markets %}
+                    {% if market_stale|length == market_state.markets|length %}
+                        {% set market_state_flag = 'danger' %}
+                    {% elif market_stale %}
+                        {% set market_state_flag = 'warn' %}
+                    {% else %}
+                        {% set market_state_flag = 'ok' %}
+                    {% endif %}
+                {% endif %}
                 <div class=\"section-title\">
-                    <h2>Market · OHLCV & Depth</h2>
+                    <h2><span class=\"color-chip {{ market_state_flag }}\"></span>Market · OHLCV & Depth</h2>
                     <span class=\"muted\">{{ market_state.markets | length }} tracked</span>
+                    <span class=\"preflight-result\" data-preflight-panel=\"market\">⏳</span>
                 </div>
                 <table>
                     <thead>
@@ -506,30 +733,47 @@ _PAGE_TEMPLATE = """
                             <th>Volume</th>
                             <th>Spread</th>
                             <th>Depth 1%</th>
+                            <th>Lag (ms)</th>
                             <th>Updated</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for market in market_state.markets %}
-                        <tr class=\"{{ 'stale' if market.stale else '' }}\">
+                        <tr class=\"{{ 'stale' if market.stale else '' }}\" data-mint=\"{{ market.mint }}\">
                             <td>{{ market.mint }}</td>
                             <td>{{ market.close or '—' }}</td>
                             <td>{{ market.volume or '—' }}</td>
                             <td>{{ market.spread_bps or '—' }}</td>
                             <td>{{ market.depth_pct.get('1') if market.depth_pct else '—' }}</td>
+                            <td>
+                                <span class=\"pill {{ 'stale' if market.stale else 'fresh' }}\">OHLCV {{ market.lag_close_ms | round(0) if market.lag_close_ms is not none else '—' }}</span>
+                                <span class=\"pill {{ 'stale' if market.stale else 'fresh' }}\">Depth {{ market.lag_depth_ms | round(0) if market.lag_depth_ms is not none else '—' }}</span>
+                            </td>
                             <td>{{ market.updated_label }}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan=\"6\" class=\"muted\">Waiting for market state…</td></tr>
+                        <tr class=\"skeleton-row\"><td colspan=\"7\" class=\"muted\">Waiting for market state…</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </article>
 
-            <article class=\"panel\">
+            <article class=\"panel\" id=\"golden-panel\">
+                {% set golden_stale = golden_snapshots | selectattr('stale') | list %}
+                {% set golden_state = 'idle' %}
+                {% if golden_snapshots %}
+                    {% if golden_stale|length == golden_snapshots|length %}
+                        {% set golden_state = 'danger' %}
+                    {% elif golden_stale %}
+                        {% set golden_state = 'warn' %}
+                    {% else %}
+                        {% set golden_state = 'ok' %}
+                    {% endif %}
+                {% endif %}
                 <div class=\"section-title\">
-                    <h2>Golden Snapshot Inspector</h2>
+                    <h2><span class=\"color-chip {{ golden_state }}\"></span>Golden Snapshot Inspector</h2>
                     <span class=\"muted\">{{ golden_summary.count }} hashes</span>
+                    <span class=\"preflight-result\" data-preflight-panel=\"golden\">⏳</span>
                 </div>
                 <table>
                     <thead>
@@ -538,20 +782,24 @@ _PAGE_TEMPLATE = """
                             <th>Hash</th>
                             <th>Price</th>
                             <th>Liquidity</th>
+                            <th>Lag (ms)</th>
                             <th>Published</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for snap in golden_snapshots %}
-                        <tr class=\"{{ 'stale' if snap.stale else '' }}\">
+                        <tr class=\"{{ 'stale' if snap.stale else '' }}\" data-mint=\"{{ snap.mint }}\">
                             <td>{{ snap.mint }}</td>
                             <td class=\"muted\">{{ snap.hash_short }}</td>
                             <td>{{ snap.px or '—' }}</td>
                             <td>{{ snap.liq or '—' }}</td>
+                            <td>
+                                <span class=\"pill {{ 'stale' if snap.stale else 'fresh' }}\">{{ snap.lag_ms | round(0) if snap.lag_ms is not none else '—' }}</span>
+                            </td>
                             <td>{{ snap.age_label }}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan=\"5\" class=\"muted\">Golden pipeline idle.</td></tr>
+                        <tr class=\"skeleton-row\"><td colspan=\"6\" class=\"muted\">Golden pipeline idle.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -559,10 +807,35 @@ _PAGE_TEMPLATE = """
         </section>
 
         <section class=\"grid-two\">
-            <article class=\"panel\">
+            <article class=\"panel\" id=\"suggestions-panel\">
+                {% set suggestion_stale = suggestions.suggestions | selectattr('stale') | list %}
+                {% set mismatch = suggestions.suggestions | selectattr('hash_mismatch') | list %}
+                {% set suggestions_state = 'idle' %}
+                {% if suggestions.suggestions %}
+                    {% if suggestion_stale|length == suggestions.suggestions|length %}
+                        {% set suggestions_state = 'danger' %}
+                    {% elif suggestion_stale %}
+                        {% set suggestions_state = 'warn' %}
+                    {% else %}
+                        {% set suggestions_state = 'ok' %}
+                    {% endif %}
+                {% endif %}
                 <div class=\"section-title\">
-                    <h2>Agent Suggestions</h2>
+                    <h2><span class=\"color-chip {{ suggestions_state }}\"></span>Agent Suggestions</h2>
                     <span class=\"muted\">{{ suggestions.suggestions | length }} live</span>
+                    <span class=\"preflight-result\" data-preflight-panel=\"suggestions\">⏳</span>
+                </div>
+                <div class=\"filter-bar\">
+                    <input type=\"search\" id=\"suggestion-filter-mint\" placeholder=\"Filter mint…\" aria-label=\"Filter by mint\" />
+                    <select id=\"suggestion-filter-agent\" aria-label=\"Filter by agent\">
+                        <option value=\"\">All agents</option>
+                    </select>
+                    <select id=\"suggestion-filter-side\" aria-label=\"Filter by side\">
+                        <option value=\"\">Any side</option>
+                        <option value=\"buy\">Buy</option>
+                        <option value=\"sell\">Sell</option>
+                    </select>
+                    <label><input type=\"checkbox\" id=\"suggestion-filter-mismatch\" /> Hash mismatch only</label>
                 </div>
                 <table>
                     <thead>
@@ -572,49 +845,37 @@ _PAGE_TEMPLATE = """
                             <th>Side</th>
                             <th>Notional</th>
                             <th>Edge</th>
-                            <th>Slippage</th>
-                            <th>Inputs Hash</th>
                             <th>TTL</th>
-                            <th>Must Exit</th>
-                            <th>Hot Watch</th>
-                            <th>Exit Notes</th>
+                            <th>Age</th>
+                            <th>Inputs Hash</th>
+                            <th>Golden Hash</th>
+                            <th>Integrity</th>
+                            <th>Must</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for entry in suggestions.suggestions %}
-                        <tr class=\"{{ 'stale' if entry.stale else '' }}\">
-                            <td>{{ entry.agent }}</td>
-                            <td>{{ entry.mint }}</td>
-                            <td>{{ entry.side }}</td>
-                            <td>{{ entry.notional_usd or '—' }}</td>
-                            <td>{{ entry.edge or '—' }}</td>
-                            <td>{{ entry.max_slippage_bps or '—' }}</td>
-                            <td>
-                                <span class=\"muted\">{{ entry.inputs_hash_short }}</span>
-                                {% if entry.hash_mismatch %}<span class=\"pill stale\">mismatch</span>{% endif %}
-                            </td>
+                        <tr class=\"{{ 'stale' if entry.stale else '' }}\" data-agent=\"{{ entry.agent or '' }}\" data-side=\"{{ entry.side or '' }}\" data-mint=\"{{ entry.mint }}\" data-mismatch=\"{{ '1' if entry.hash_mismatch else '0' }}\">
+                            <td>{{ entry.agent or '—' }}</td>
+                            <td><a href=\"#market-panel\" class=\"mint-chip\" data-mint=\"{{ entry.mint }}\">{{ entry.mint }}</a></td>
+                            <td>{{ entry.side or '—' }}</td>
+                            <td>{{ entry.notional_usd | round(2) if entry.notional_usd is not none else '—' }}</td>
+                            <td>{{ entry.edge | round(4) if entry.edge is not none else '—' }}</td>
                             <td>{{ entry.ttl_label }}</td>
-                            <td>{{ 'yes' if entry.must_exit else 'no' }}</td>
-                            <td>{{ 'yes' if entry.hot_watch else 'no' }}</td>
-                            <td class=\"muted\">
-                                {% set diag = entry.exit_diagnostics %}
-                                {% if diag %}
-                                    {% if diag.reason is defined and diag.reason %}
-                                        {{ diag.reason }}
-                                    {% elif diag is mapping and diag.get('reason') %}
-                                        {{ diag.get('reason') }}
-                                    {% elif diag.summary is defined and diag.summary %}
-                                        {{ diag.summary }}
-                                    {% else %}
-                                        {{ diag }}
-                                    {% endif %}
+                            <td>{{ entry.age_label }}</td>
+                            <td class=\"muted\">{{ entry.inputs_hash_short or '—' }}</td>
+                            <td class=\"muted\">{{ entry.golden_hash_short or '—' }}</td>
+                            <td>
+                                {% if entry.hash_mismatch %}
+                                    <span class=\"pill stale\">Mismatch</span>
                                 {% else %}
-                                    —
+                                    <span class=\"pill fresh\">Aligned</span>
                                 {% endif %}
                             </td>
+                            <td>{{ 'yes' if entry.must else 'no' }}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan=\"11\" class=\"muted\">No active suggestions.</td></tr>
+                        <tr class=\"skeleton-row\"><td colspan=\"11\" class=\"muted\">No active suggestions.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -622,13 +883,32 @@ _PAGE_TEMPLATE = """
                 <div class=\"exit-hot-watch\">
                     <h3>Hot Watch</h3>
                     {% if exit_panel.hot_watch %}
-                    <div class=\"badge-grid\">
-                        {% for watch in exit_panel.hot_watch %}
-                        <span class=\"pill {{ 'must' if watch.reason == 'must_exit' else 'monitor' }}\">
-                            {{ watch.token }} · {{ watch.reason }} · {{ watch.remaining | round(4) if watch.remaining is not none else '—' }}
-                        </span>
-                        {% endfor %}
-                    </div>
+                    <table class=\"compact\">
+                        <thead>
+                            <tr>
+                                <th>Mint</th>
+                                <th>Reason</th>
+                                <th>Breakeven</th>
+                                <th>Trail</th>
+                                <th>Time Left</th>
+                                <th>Progress</th>
+                                <th>Remaining</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for watch in exit_panel.hot_watch %}
+                            <tr>
+                                <td>{{ watch.token }}</td>
+                                <td>{{ watch.reason }}</td>
+                                <td>{{ watch.breakeven_bps | round(2) if watch.breakeven_bps is not none else '—' }} bps</td>
+                                <td>{{ watch.trail_status }}</td>
+                                <td>{{ watch.window_remaining | round(1) if watch.window_remaining is not none else '—' }}s</td>
+                                <td>{{ (watch.progress * 100) | round(1) if watch.progress is not none else '—' }}%</td>
+                                <td>{{ watch.remaining | round(4) if watch.remaining is not none else '—' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
                     {% else %}
                     <div class=\"muted\">No tokens flagged for exit.</div>
                     {% endif %}
@@ -643,6 +923,7 @@ _PAGE_TEMPLATE = """
                                 <th>Notional</th>
                                 <th>Progress</th>
                                 <th>Slices</th>
+                                <th>Post-fill Qty</th>
                                 <th>Age (s)</th>
                             </tr>
                         </thead>
@@ -668,6 +949,7 @@ _PAGE_TEMPLATE = """
                                         —
                                     {% endif %}
                                 </td>
+                                <td>{{ item.post_fill_qty_preview | round(4) if item.post_fill_qty_preview is not none else '—' }}</td>
                                 <td>{{ item.age_sec | round(1) if item.age_sec is not none else '—' }}</td>
                             </tr>
                             {% endfor %}
@@ -770,10 +1052,19 @@ _PAGE_TEMPLATE = """
                 </div>
             </article>
 
-            <article class=\"panel\">
+            <article class=\"panel\" id=\"vote-panel\">
+                {% set vote_state = 'idle' %}
+                {% if vote_windows.windows %}
+                    {% if vote_windows.windows | selectattr('expired') | list %}
+                        {% set vote_state = 'warn' %}
+                    {% else %}
+                        {% set vote_state = 'ok' %}
+                    {% endif %}
+                {% endif %}
                 <div class=\"section-title\">
-                    <h2>Vote Window Visualiser</h2>
+                    <h2><span class=\"color-chip {{ vote_state }}\"></span>Vote Window Visualiser</h2>
                     <span class=\"muted\">{{ vote_windows.windows | length }} open</span>
+                    <span class=\"preflight-result\" data-preflight-panel=\"vote\">⏳</span>
                 </div>
                 <table>
                     <thead>
@@ -783,6 +1074,7 @@ _PAGE_TEMPLATE = """
                             <th>Quorum</th>
                             <th>Score</th>
                             <th>Countdown</th>
+                            <th>Idempotency</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -793,19 +1085,21 @@ _PAGE_TEMPLATE = """
                             <td>{{ window.quorum }}</td>
                             <td>{{ window.score | round(3) if window.score is not none else '—' }}</td>
                             <td>{{ window.countdown_label }}</td>
+                            <td><span class=\"pill {{ 'fresh' if window.idempotent else 'stale' }}\">{{ window.idempotency_label }}</span></td>
                         </tr>
                         {% else %}
-                        <tr><td colspan=\"5\" class=\"muted\">No open vote windows.</td></tr>
+                        <tr class=\"skeleton-row\"><td colspan=\"6\" class=\"muted\">No open vote windows.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
                 <div class=\"decision-tape\">
                     {% for decision in vote_windows.decisions %}
                     <div class=\"decision-card {{ 'duplicate' if decision.duplicate else '' }}\">
+                        <span class=\"badge {{ 'danger' if not decision.idempotent else 'ok' }}\">{{ decision.idempotency_label }}</span>
                         <strong>{{ decision.mint }} · {{ decision.side }}</strong>
                         <div class=\"muted\">clientOrderId {{ decision.client_order_id }}</div>
                         <div>Score {{ decision.score | round(3) if decision.score is not none else '—' }} · Notional {{ decision.notional_usd or '—' }}</div>
-                        <div class=\"muted\">{{ decision.age_label }}</div>
+                        <div class=\"muted\">{{ decision.age_label }} · First seen {{ decision.first_seen_label or 'n/a' }}</div>
                     </div>
                     {% else %}
                     <div class=\"muted\">No decisions in tape.</div>
@@ -815,10 +1109,19 @@ _PAGE_TEMPLATE = """
         </section>
 
         <section class=\"grid-two\">
-            <article class=\"panel\">
+            <article class=\"panel\" id=\"shadow-panel\">
+                {% set shadow_state = 'idle' %}
+                {% if shadow.virtual_fills %}
+                    {% if shadow.virtual_fills | selectattr('stale') | list %}
+                        {% set shadow_state = 'warn' %}
+                    {% else %}
+                        {% set shadow_state = 'ok' %}
+                    {% endif %}
+                {% endif %}
                 <div class=\"section-title\">
-                    <h2>Shadow Execution</h2>
+                    <h2><span class=\"color-chip {{ shadow_state }}\"></span>Shadow Execution</h2>
                     <span class=\"muted\">{{ shadow.virtual_fills | length }} fills</span>
+                    <span class=\"preflight-result\" data-preflight-panel=\"shadow\">⏳</span>
                 </div>
                 <table>
                     <thead>
@@ -877,10 +1180,19 @@ _PAGE_TEMPLATE = """
                 </table>
             </article>
 
-            <article class=\"panel\">
+            <article class=\"panel\" id=\"rl-panel\">
+                {% set rl_state = 'idle' %}
+                {% if rl_panel.weights %}
+                    {% if rl_panel.weights | selectattr('stale') | list %}
+                        {% set rl_state = 'warn' %}
+                    {% else %}
+                        {% set rl_state = 'ok' %}
+                    {% endif %}
+                {% endif %}
                 <div class=\"section-title\">
-                    <h2>RL Weights & Uplift</h2>
+                    <h2><span class=\"color-chip {{ rl_state }}\"></span>RL Weights & Uplift</h2>
                     <span class=\"muted\">{{ rl_summary.weights_applied }} windows</span>
+                    <span class=\"preflight-result\" data-preflight-panel=\"rl\">⏳</span>
                 </div>
                 <table>
                     <thead>
@@ -888,7 +1200,7 @@ _PAGE_TEMPLATE = """
                             <th>Mint</th>
                             <th>Window Hash</th>
                             <th>Multiplier</th>
-                            <th>Updated</th>
+                            <th>Age</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -900,7 +1212,7 @@ _PAGE_TEMPLATE = """
                             <td>{{ entry.age_label }}</td>
                         </tr>
                         {% else %}
-                        <tr><td colspan=\"4\" class=\"muted\">RL stream idle.</td></tr>
+                        <tr class=\"skeleton-row\"><td colspan=\"4\" class=\"muted\">RL stream idle.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -913,13 +1225,25 @@ _PAGE_TEMPLATE = """
                         <span class=\"muted\">Last Decision Delta</span>
                         <strong>{{ rl_panel.uplift.get('last_decision_delta', 0) | round(4) }}</strong>
                     </div>
+                    <div class=\"metric\">
+                        <span class=\"muted\">Score Plain</span>
+                        <strong>{{ rl_panel.uplift.get('score_plain', 0) | round(4) }}</strong>
+                    </div>
+                    <div class=\"metric\">
+                        <span class=\"muted\">Score RL</span>
+                        <strong>{{ rl_panel.uplift.get('score_rl', 0) | round(4) }}</strong>
+                    </div>
+                    <div class=\"metric\">
+                        <span class=\"muted\">Uplift % (5m)</span>
+                        <strong>{{ rl_panel.uplift.get('uplift_pct', 0) | round(2) }}%</strong>
+                    </div>
                 </div>
             </article>
         </section>
 
-        <section class=\"panel\">
+        <section class=\"panel\" id=\"settings-panel\">
             <div class=\"section-title\">
-                <h2>Settings & Controls</h2>
+                <h2><span class=\"color-chip idle\"></span>Settings & Controls</h2>
                 <span class=\"muted\">{{ settings.controls | length }} controls</span>
             </div>
             <div class=\"control-grid\">
@@ -937,22 +1261,266 @@ _PAGE_TEMPLATE = """
         </section>
 
         <script>
-            document.addEventListener('click', function (event) {
-                const btn = event.target.closest('.flatten-btn');
-                if (!btn) {
-                    return;
+            (function () {
+                const suggestionRows = Array.from(document.querySelectorAll('#suggestions-panel tbody tr'));
+                const agentSelect = document.getElementById('suggestion-filter-agent');
+                const sideSelect = document.getElementById('suggestion-filter-side');
+                const mintInput = document.getElementById('suggestion-filter-mint');
+                const mismatchOnly = document.getElementById('suggestion-filter-mismatch');
+                const preflightButton = document.getElementById('preflight-button');
+                const preflightBadges = Array.from(document.querySelectorAll('.preflight-result'));
+                const testToggle = document.getElementById('test-mode-toggle');
+                const testIndicator = document.getElementById('test-indicator');
+                const testLabel = document.getElementById('test-status-label');
+                let testTimer = null;
+                let testActive = false;
+
+                function populateAgentOptions() {
+                    if (!agentSelect) {
+                        return;
+                    }
+                    const agents = new Set();
+                    suggestionRows.forEach((row) => {
+                        const agent = row.dataset.agent;
+                        if (agent) {
+                            agents.add(agent);
+                        }
+                    });
+                    agents.forEach((agent) => {
+                        const option = document.createElement('option');
+                        option.value = agent;
+                        option.textContent = agent;
+                        agentSelect.appendChild(option);
+                    });
                 }
-                event.preventDefault();
-                const mint = btn.dataset.mint;
-                if (!mint) {
-                    return;
+
+                function applySuggestionFilters() {
+                    suggestionRows.forEach((row) => {
+                        if (row.classList.contains('skeleton-row')) {
+                            return;
+                        }
+                        const agent = row.dataset.agent || '';
+                        const side = row.dataset.side || '';
+                        const mint = row.dataset.mint || '';
+                        const mismatch = row.dataset.mismatch === '1';
+                        let visible = true;
+                        if (agentSelect && agentSelect.value && agent !== agentSelect.value) {
+                            visible = false;
+                        }
+                        if (visible && sideSelect && sideSelect.value && side !== sideSelect.value) {
+                            visible = false;
+                        }
+                        if (visible && mintInput && mintInput.value) {
+                            const needle = mintInput.value.toLowerCase();
+                            if (!mint.toLowerCase().includes(needle)) {
+                                visible = false;
+                            }
+                        }
+                        if (visible && mismatchOnly && mismatchOnly.checked && !mismatch) {
+                            visible = false;
+                        }
+                        row.style.display = visible ? '' : 'none';
+                    });
                 }
-                fetch('/actions/flatten', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({mint: mint, must_exit: true})
-                }).catch(() => {});
-            });
+
+                function highlightMint(mint) {
+                    if (!mint) {
+                        return;
+                    }
+                    const panels = ['#token-facts-panel', '#market-panel', '#golden-panel'];
+                    panels.forEach((selector) => {
+                        const row = document.querySelector(selector + ' tr[data-mint="' + mint + '"]');
+                        if (row) {
+                            row.classList.add('highlight');
+                            row.scrollIntoView({behavior: 'smooth', block: 'center'});
+                            window.setTimeout(() => row.classList.remove('highlight'), 1500);
+                        }
+                    });
+                }
+
+                function setPreflightStatus(panel, status, symbol) {
+                    const badge = preflightBadges.find((el) => el.dataset.preflightPanel === panel);
+                    if (!badge) {
+                        return;
+                    }
+                    badge.textContent = symbol;
+                    badge.classList.remove('ok', 'fail');
+                    if (status === 'ok') {
+                        badge.classList.add('ok');
+                    } else if (status === 'fail') {
+                        badge.classList.add('fail');
+                    }
+                }
+
+                async function runPreflight() {
+                    if (!preflightButton) {
+                        return;
+                    }
+                    preflightButton.disabled = true;
+                    preflightButton.textContent = 'Running…';
+                    preflightBadges.forEach((badge) => {
+                        badge.textContent = '⏳';
+                        badge.classList.remove('ok', 'fail');
+                    });
+                    const steps = [
+                        {panel: 'discovery', url: '/swarm/discovery'},
+                        {panel: 'token-facts', url: '/tokens'},
+                        {panel: 'market', url: '/swarm/market'},
+                        {panel: 'golden', url: '/swarm/golden'},
+                        {panel: 'suggestions', url: '/swarm/suggestions'},
+                        {panel: 'vote', url: '/swarm/votes'},
+                        {panel: 'shadow', url: '/swarm/shadow'},
+                        {panel: 'rl', url: '/swarm/rl'}
+                    ];
+                    for (const step of steps) {
+                        try {
+                            const response = await fetch(step.url, {cache: 'no-store'});
+                            if (response.ok) {
+                                setPreflightStatus(step.panel, 'ok', '✅');
+                            } else {
+                                setPreflightStatus(step.panel, 'fail', '❌');
+                            }
+                        } catch (err) {
+                            setPreflightStatus(step.panel, 'fail', '❌');
+                        }
+                    }
+                    preflightButton.disabled = false;
+                    preflightButton.textContent = 'Run Pre-flight';
+                }
+
+                const panelsToCheck = [
+                    'discovery-panel',
+                    'token-facts-panel',
+                    'market-panel',
+                    'golden-panel',
+                    'suggestions-panel',
+                    'vote-panel',
+                    'shadow-panel',
+                    'rl-panel'
+                ];
+
+                function panelHasData(panelId) {
+                    const panel = document.getElementById(panelId);
+                    if (!panel) {
+                        return false;
+                    }
+                    const rows = panel.querySelectorAll('tbody tr');
+                    for (const row of rows) {
+                        if (row.classList.contains('skeleton-row')) {
+                            continue;
+                        }
+                        if (row.style.display === 'none') {
+                            continue;
+                        }
+                        if (row.dataset && row.dataset.mint) {
+                            return true;
+                        }
+                        if (row.textContent && row.textContent.trim() && !row.classList.contains('muted')) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                function updateTestIndicator() {
+                    if (!testIndicator || !testLabel) {
+                        return;
+                    }
+                    const ready = panelsToCheck.every((panelId) => panelHasData(panelId));
+                    if (ready) {
+                        testIndicator.classList.remove('waiting');
+                        testIndicator.classList.add('ok');
+                        testLabel.textContent = 'UI OK';
+                    } else {
+                        testIndicator.classList.remove('ok');
+                        testIndicator.classList.add('waiting');
+                        testLabel.textContent = 'Waiting…';
+                    }
+                }
+
+                function setTestMode(active) {
+                    testActive = active;
+                    if (!testIndicator || !testLabel) {
+                        return;
+                    }
+                    if (testActive) {
+                        testIndicator.classList.add('waiting');
+                        testIndicator.classList.remove('ok');
+                        testLabel.textContent = 'Checking…';
+                        updateTestIndicator();
+                        if (testTimer) {
+                            window.clearInterval(testTimer);
+                        }
+                        testTimer = window.setInterval(updateTestIndicator, 2000);
+                    } else {
+                        if (testTimer) {
+                            window.clearInterval(testTimer);
+                            testTimer = null;
+                        }
+                        testIndicator.classList.remove('ok');
+                        testIndicator.classList.add('waiting');
+                        testLabel.textContent = 'Off';
+                    }
+                }
+
+                populateAgentOptions();
+                applySuggestionFilters();
+
+                if (agentSelect) {
+                    agentSelect.addEventListener('change', applySuggestionFilters);
+                }
+                if (sideSelect) {
+                    sideSelect.addEventListener('change', applySuggestionFilters);
+                }
+                if (mintInput) {
+                    mintInput.addEventListener('input', applySuggestionFilters);
+                }
+                if (mismatchOnly) {
+                    mismatchOnly.addEventListener('change', applySuggestionFilters);
+                }
+
+                if (preflightButton) {
+                    preflightButton.addEventListener('click', runPreflight);
+                }
+                if (testToggle) {
+                    testToggle.addEventListener('click', function () {
+                        setTestMode(!testActive);
+                    });
+                }
+
+                document.addEventListener('click', function (event) {
+                    const btn = event.target.closest('.flatten-btn');
+                    if (btn) {
+                        event.preventDefault();
+                        const mint = btn.dataset.mint;
+                        if (!mint) {
+                            return;
+                        }
+                        fetch('/actions/flatten', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({mint: mint, must: true, must_exit: true})
+                        }).catch(() => {});
+                        return;
+                    }
+                    const mintChip = event.target.closest('.mint-chip');
+                    if (mintChip) {
+                        event.preventDefault();
+                        highlightMint(mintChip.dataset.mint || '');
+                        return;
+                    }
+                    const discoveryRow = event.target.closest('#discovery-panel tbody tr[data-mint]');
+                    if (discoveryRow) {
+                        const mint = discoveryRow.dataset.mint;
+                        if (mint) {
+                            highlightMint(mint);
+                        }
+                    }
+                });
+
+                // Initialise indicator state
+                setTestMode(false);
+            })();
         </script>
     </div>
 </body>
@@ -1058,6 +1626,7 @@ def create_app(state: UIState | None = None) -> Flask:
         shadow = state.snapshot_shadow()
         rl_panel = state.snapshot_rl_panel()
         settings = state.snapshot_settings()
+        summary = state.snapshot_summary()
 
         golden_snapshots = golden_detail.get("snapshots", [])
         golden_summary = {
@@ -1070,6 +1639,29 @@ def create_app(state: UIState | None = None) -> Flask:
         swarm_overall = {
             "stale": suggestions.get("metrics", {}).get("stale", False),
             "age_label": suggestions.get("metrics", {}).get("updated_label", "n/a"),
+        }
+        stream_lag = {
+            "ohlcv": (market_state.get("lag_ms") or {}).get("ohlcv_ms"),
+            "depth": (market_state.get("lag_ms") or {}).get("depth_ms"),
+            "golden": golden_detail.get("lag_ms"),
+        }
+        header_signals = {
+            "environment": (status.get("environment") or "dev").upper(),
+            "paper_mode": bool(status.get("paper_mode")),
+            "paused": bool(status.get("paused")),
+            "rl_mode": status.get("rl_mode", "shadow"),
+            "bus_latency_ms": status.get("bus_latency_ms"),
+            "stream_lag": stream_lag,
+        }
+        kpis = {
+            "suggestions_per_5m": suggestions.get("metrics", {}).get("rate_per_min", 0)
+            * 5.0,
+            "acceptance_rate": suggestions.get("metrics", {}).get("acceptance_rate", 0),
+            "golden_hashes": golden_summary.get("count", 0),
+            "open_windows": len(vote_windows.get("windows", [])),
+            "paper_pnl": summary.get("execution", {}).get("pnl_1d"),
+            "drawdown": summary.get("execution", {}).get("drawdown"),
+            "turnover": summary.get("execution", {}).get("turnover"),
         }
 
         return render_template_string(
@@ -1089,6 +1681,8 @@ def create_app(state: UIState | None = None) -> Flask:
             rl_summary=rl_summary,
             settings=settings,
             swarm_overall=swarm_overall,
+            header_signals=header_signals,
+            kpis=kpis,
         )
 
     @app.get("/health")

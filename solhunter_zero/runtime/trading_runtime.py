@@ -208,6 +208,8 @@ class TradingRuntime:
         self._agent_suggestions: Deque[Dict[str, Any]] = deque(maxlen=600)
         self._vote_decisions: Deque[Dict[str, Any]] = deque(maxlen=400)
         self._decision_counts: Dict[str, int] = {}
+        self._decision_recent: Deque[tuple[str, float]] = deque()
+        self._decision_first_seen: Dict[str, float] = {}
         self._virtual_fills: Deque[Dict[str, Any]] = deque(maxlen=400)
         self._live_fills: Deque[Dict[str, Any]] = deque(maxlen=400)
         self._paper_positions_cache: List[Dict[str, Any]] = []
@@ -520,9 +522,24 @@ class TradingRuntime:
             client_id = payload.get("clientOrderId") or payload.get("client_order_id")
             if client_id:
                 with self._swarm_lock:
-                    count = self._decision_counts.get(str(client_id), 0) + 1
-                    self._decision_counts[str(client_id)] = count
+                    now_ts = time.time()
+                    client_id_str = str(client_id)
+                    self._decision_recent.append((client_id_str, now_ts))
+                    cutoff = now_ts - 300.0
+                    while self._decision_recent and self._decision_recent[0][1] < cutoff:
+                        old_id, _old_ts = self._decision_recent.popleft()
+                        current = self._decision_counts.get(old_id, 0)
+                        if current <= 1:
+                            self._decision_counts.pop(old_id, None)
+                            self._decision_first_seen.pop(old_id, None)
+                        else:
+                            self._decision_counts[old_id] = current - 1
+                    count = self._decision_counts.get(client_id_str, 0) + 1
+                    self._decision_counts[client_id_str] = count
+                    self._decision_first_seen.setdefault(client_id_str, now_ts)
                     payload["_duplicate_count"] = count
+                    payload["_idempotent"] = count <= 1
+                    payload["_first_seen"] = self._decision_first_seen.get(client_id_str)
                     self._vote_decisions.appendleft(payload)
             else:
                 with self._swarm_lock:
@@ -903,6 +920,31 @@ class TradingRuntime:
             "trade_count": len(self._trades),
             "activity_count": len(self.activity.snapshot()),
         }
+        now_ts = time.time()
+        heartbeat_ts = self.status.heartbeat_ts
+        if heartbeat_ts:
+            try:
+                latency = max(0.0, now_ts - float(heartbeat_ts)) * 1000.0
+            except Exception:
+                latency = None
+            if latency is not None:
+                status["bus_latency_ms"] = latency
+        env_label = (
+            os.getenv("SOLHUNTER_ENV")
+            or os.getenv("DEPLOY_ENV")
+            or os.getenv("RUNTIME_ENV")
+            or os.getenv("APP_ENV")
+            or os.getenv("ENVIRONMENT")
+            or os.getenv("ENV")
+        )
+        if env_label:
+            status["environment"] = str(env_label)
+        pause_state = self._control_states.get("control:execution:paused", {})
+        paper_state = self._control_states.get("control:execution:paper_only", {})
+        rl_toggle = self._control_states.get("RL_WEIGHTS_DISABLED", {})
+        status["paused"] = _control_active(pause_state)
+        status["paper_mode"] = _control_active(paper_state)
+        status["rl_mode"] = "shadow" if _control_active(rl_toggle) else "applied"
         if hasattr(self.state, "last_tokens"):
             tokens = list(getattr(self.state, "last_tokens", []) or [])
             status["pipeline_tokens"] = tokens[:10]
@@ -1074,6 +1116,8 @@ class TradingRuntime:
             ohlcv = dict(self._market_ohlcv)
             depth = dict(self._market_depth)
         markets: List[Dict[str, Any]] = []
+        ohlcv_lags: List[float] = []
+        depth_lags: List[float] = []
         for mint in sorted(set(list(ohlcv.keys()) + list(depth.keys()))):
             candle = dict(ohlcv.get(mint) or {})
             depth_entry = dict(depth.get(mint) or {})
@@ -1103,9 +1147,13 @@ class TradingRuntime:
                 if combined_age is None or value < combined_age:
                     combined_age = value
             stale = False
+            if age_close is not None:
+                ohlcv_lags.append(age_close * 1000.0)
+            if age_depth is not None:
+                depth_lags.append(age_depth * 1000.0)
             if age_close is not None and age_close > 120.0:
                 stale = True
-            if age_depth is not None and age_depth > 30.0:
+            if age_depth is not None and age_depth > 6.0:
                 stale = True
             markets.append(
                 {
@@ -1116,11 +1164,17 @@ class TradingRuntime:
                     "depth_pct": depth_pct,
                     "age_close": age_close,
                     "age_depth": age_depth,
+                    "lag_close_ms": age_close * 1000.0 if age_close is not None else None,
+                    "lag_depth_ms": age_depth * 1000.0 if age_depth is not None else None,
                     "stale": stale,
                     "updated_label": _format_age(combined_age),
                 }
             )
-        return {"markets": markets, "updated_at": None}
+        summary = {
+            "ohlcv_ms": max(ohlcv_lags) if ohlcv_lags else None,
+            "depth_ms": max(depth_lags) if depth_lags else None,
+        }
+        return {"markets": markets, "updated_at": None, "lag_ms": summary}
 
     def _collect_golden_panel(self) -> Dict[str, Any]:
         now = time.time()
@@ -1128,6 +1182,7 @@ class TradingRuntime:
             golden = dict(self._golden_snapshots)
             hash_map = dict(self._latest_golden_hash)
         snapshots: List[Dict[str, Any]] = []
+        lag_samples: List[float] = []
         for mint in sorted(golden.keys()):
             payload = dict(golden[mint])
             timestamp = _entry_timestamp(payload, "asof")
@@ -1139,6 +1194,35 @@ class TradingRuntime:
                     age = None
             hash_value = payload.get("hash")
             hash_text = str(hash_value) if hash_value is not None else None
+            if age is not None:
+                lag_samples.append(age * 1000.0)
+            coalesce = payload.get("coalesce_window_s")
+            if coalesce is None:
+                coalesce = payload.get("coalesce_s")
+            if coalesce is None:
+                window_ms = payload.get("coalesce_ms")
+                if window_ms is not None:
+                    try:
+                        coalesce = float(window_ms) / 1000.0
+                    except Exception:
+                        coalesce = None
+            if coalesce is None:
+                try:
+                    coalesce = float(payload.get("coalesce"))
+                except Exception:
+                    coalesce = None
+            stale_threshold = None
+            if coalesce is not None:
+                try:
+                    stale_threshold = max(0.0, float(coalesce) * 2.0 + 5.0)
+                except Exception:
+                    stale_threshold = None
+            stale_flag = False
+            if age is not None:
+                if stale_threshold is not None:
+                    stale_flag = age > stale_threshold
+                else:
+                    stale_flag = age > 60.0
             snapshots.append(
                 {
                     "mint": mint,
@@ -1148,10 +1232,17 @@ class TradingRuntime:
                     "liq": _maybe_float(payload.get("liq")),
                     "age_seconds": age,
                     "age_label": _format_age(age),
-                    "stale": age is not None and age > 60.0,
+                    "stale": stale_flag,
+                    "coalesce_window_s": coalesce,
+                    "lag_ms": age * 1000.0 if age is not None else None,
+                    "stale_threshold_s": stale_threshold,
                 }
             )
-        return {"snapshots": snapshots, "hash_map": hash_map}
+        return {
+            "snapshots": snapshots,
+            "hash_map": hash_map,
+            "lag_ms": max(lag_samples) if lag_samples else None,
+        }
 
     def _collect_suggestions_panel(self) -> Dict[str, Any]:
         now = time.time()
@@ -1196,8 +1287,13 @@ class TradingRuntime:
                     "max_slippage_bps": _maybe_float(payload.get("max_slippage_bps")),
                     "inputs_hash": inputs_hash,
                     "inputs_hash_short": _short_hash(inputs_hash),
+                    "golden_hash": golden_hash,
+                    "golden_hash_short": _short_hash(golden_hash),
                     "ttl_label": _format_ttl(remaining, ttl),
+                    "ttl_seconds": ttl,
+                    "age_label": _format_age(age),
                     "stale": stale,
+                    "must": bool(payload.get("must")),
                     "age_seconds": age,
                     "hash_mismatch": mismatch,
                 }
@@ -1231,6 +1327,7 @@ class TradingRuntime:
             "acceptance_rate": acceptance,
             "updated_label": _format_age(latest_age),
             "stale": latest_age is not None and latest_age > window,
+            "golden_tracked": len(golden_hashes),
         }
         return {"suggestions": items[:200], "metrics": metrics}
 
@@ -1301,6 +1398,9 @@ class TradingRuntime:
                 score_value = _maybe_float(decision.get("score"))
             else:
                 score_value = None
+            idempotent = True
+            if decision is not None:
+                idempotent = bool(decision.get("_idempotent", False))
             windows.append(
                 {
                     "mint": data["mint"],
@@ -1310,6 +1410,8 @@ class TradingRuntime:
                     "countdown": countdown,
                     "countdown_label": _format_countdown(countdown),
                     "expired": expired,
+                    "idempotent": idempotent,
+                    "idempotency_label": "unique ✔" if idempotent else "dup ⛔",
                 }
             )
         windows.sort(key=lambda item: item.get("countdown", 0.0))
@@ -1323,16 +1425,25 @@ class TradingRuntime:
                     age = max(0.0, now - float(decision["_received"]))
                 except Exception:
                     age = None
+            client_id = decision.get("clientOrderId") or decision.get("client_order_id")
+            seen_ts = decision.get("_first_seen")
+            seen_age = _age_seconds(
+                datetime.fromtimestamp(seen_ts, tz=timezone.utc) if seen_ts else None,
+                now,
+            )
+            idempotent = bool(decision.get("_idempotent", False))
             tape.append(
                 {
                     "mint": decision.get("mint"),
                     "side": (decision.get("side") or "").lower() or None,
-                    "client_order_id": decision.get("clientOrderId")
-                    or decision.get("client_order_id"),
+                    "client_order_id": client_id,
                     "notional_usd": _maybe_float(decision.get("notional_usd")),
                     "score": _maybe_float(decision.get("score")),
                     "age_label": _format_age(age),
                     "duplicate": bool(decision.get("_duplicate_count", 0) > 1),
+                    "idempotent": idempotent,
+                    "idempotency_label": "unique ✔" if idempotent else "dup ⛔",
+                    "first_seen_label": _format_age(seen_age),
                 }
             )
         return {"windows": windows[:60], "decisions": tape[:60]}
@@ -1449,9 +1560,11 @@ class TradingRuntime:
                 summary = ", ".join(parts)
                 if len(multipliers) > 3:
                     summary = summary + " …" if summary else "…"
+                multiplier_map = {str(k): _maybe_float(v) for k, v in multipliers.items()}
             else:
                 summary_val = _maybe_float(payload.get("multiplier"))
                 summary = f"{summary_val:.2f}" if summary_val is not None else "n/a"
+                multiplier_map = {"value": summary_val} if summary_val is not None else {}
             entries.append(
                 {
                     "mint": mint,
@@ -1462,6 +1575,8 @@ class TradingRuntime:
                     "multiplier": summary,
                     "age_label": _format_age(age),
                     "stale": age is not None and age > 600.0,
+                    "age_seconds": age,
+                    "multipliers": multiplier_map,
                 }
             )
         uplift = _compute_rl_uplift(decisions, suggestions, now)
@@ -2093,11 +2208,14 @@ def _compute_rl_uplift(
             if edge is not None:
                 suggestion_scores.append(edge)
     rolling = 0.0
+    rl_avg = sum(decision_scores) / len(decision_scores) if decision_scores else 0.0
+    plain_avg = (
+        sum(suggestion_scores) / len(suggestion_scores)
+        if suggestion_scores
+        else 0.0
+    )
     if decision_scores and suggestion_scores:
-        rolling = (
-            sum(decision_scores) / len(decision_scores)
-            - sum(suggestion_scores) / len(suggestion_scores)
-        )
+        rolling = rl_avg - plain_avg
     last_delta = 0.0
     if decisions:
         last_decision = decisions[0]
@@ -2116,7 +2234,16 @@ def _compute_rl_uplift(
             related = [value for value in related if value is not None]
             if related:
                 last_delta = score_val - (sum(related) / len(related))
-    return {"rolling_5m": rolling, "last_decision_delta": last_delta}
+    uplift_pct = 0.0
+    if plain_avg:
+        uplift_pct = (rl_avg - plain_avg) / abs(plain_avg) * 100.0
+    return {
+        "rolling_5m": rolling,
+        "last_decision_delta": last_delta,
+        "score_rl": rl_avg,
+        "score_plain": plain_avg,
+        "uplift_pct": uplift_pct,
+    }
 
 
 def _serialize(value: Any) -> Any:
@@ -2133,3 +2260,20 @@ def _serialize(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return {str(k): _serialize(v) for k, v in value.__dict__.items()}
     return str(value)
+
+
+def _control_active(entry: Dict[str, Any]) -> bool:
+    if not isinstance(entry, dict) or not entry:
+        return False
+    state = entry.get("state")
+    value = entry.get("value") if state is None else state
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"active", "on", "true", "yes", "enabled", "paused"}:
+            return True
+        if lowered in {"off", "false", "no", "disabled"}:
+            return False
+        return bool(lowered)
+    if isinstance(value, (int, float)):
+        return value != 0
+    return bool(value)
