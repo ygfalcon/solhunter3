@@ -134,6 +134,22 @@ python -m solhunter_zero.ui --selftest
 ```
 This runs the same checks the full orchestrator will rely on, but isolated—so failures are clean and actionable.
 
+### Paper preflight smoke (dual-mode gate)
+Run the Redis-backed smoke harness against the staging stack to prove latency SLOs, duplicate suppression, and micro-mode gating before you promote a build:
+
+```bash
+scripts/preflight/run_all.sh
+```
+
+The wrapper will:
+
+- Execute the environment doctor and bus smoke probes, producing machine-readable artifacts in `artifacts/preflight/`.
+- Run `preflight_smoke.sh` twice—once with `MICRO_MODE=1`, once with `MICRO_MODE=0`—saving console logs and JSON audits for each pass.
+- Append an entry to `artifacts/preflight/history.jsonl` with commit metadata, per-check status, and artifact paths.
+- Stamp `artifacts/preflight/READY` after two passing runs land at least `PREFLIGHT_READYNESS_SPACING_SEC` seconds apart (defaults to 10 minutes). Remove the marker or rerun the suite whenever a regression is detected.
+
+Every script cleans up its Redis writes so the bus stays tidy, and the audit JSON embeds the measured latencies, hashes, paper PnL snapshot, and gate decisions for downstream tooling.
+
 ### Full-stack smoke (paper-safe)
 Run the on-demand smoke locally:
 ```bash
