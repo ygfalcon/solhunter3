@@ -452,11 +452,19 @@ class ExitManager:
                         "reason": (state.queue_entry or {}).get("reason", "monitor"),
                         "remaining": max(state.size, 0.0),
                         "progress": self._queue_progress(state),
+                        "breakeven_bps": state.breakeven_bps,
+                        "trail_status": "armed" if state.trailing_armed else "idle",
+                        "window_remaining": max(
+                            0.0,
+                            getattr(state.monitor, "total_window_sec", 300.0)
+                            - (now - state.entered_at),
+                        ),
                     }
                 )
             if state.queue_entry:
                 snapshot = dict(state.queue_entry)
                 snapshot.update(self._queue_snapshot(state, now))
+                snapshot["post_fill_qty_preview"] = max(snapshot.get("remaining_qty", 0.0), 0.0)
                 queue.append(snapshot)
         return {
             "hot_watch": hot_watch,
