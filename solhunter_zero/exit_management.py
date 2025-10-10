@@ -43,7 +43,7 @@ class PostEntryMonitor:
 
     first_phase_sec: float = 30.0
     first_phase_cadence: float = 1.0
-    total_window_sec: float = 300.0
+    total_window_sec: float = 120.0
     late_cadence: float = 5.0
 
     def __init__(self, entry_ts: float) -> None:
@@ -203,6 +203,7 @@ class ExitManager:
 
         delta_bps = state.delta_bps(price)
         drawdown_bps = state.drawdown_bps(price)
+        time_in_position = max(0.0, now - state.entered_at)
         diagnostics = {
             "delta_bps": delta_bps,
             "drawdown_bps": drawdown_bps,
@@ -212,6 +213,7 @@ class ExitManager:
             "timestamp": now,
             "hash": snapshot.hash,
             "breakeven_bps": state.breakeven_bps,
+            "time_in_position_sec": time_in_position,
         }
         high_delta_bps = state.delta_bps(state.high_price)
         trail_line_bps = (
@@ -226,6 +228,8 @@ class ExitManager:
         rail_reason = None
         fast_adverse = False
         liquidity_gap = spread > MAX_SPREAD_BPS_EXIT and depth < MIN_DEPTH1PCT_USD_EXIT
+        profit_trigger_bps = 2.5 * state.breakeven_bps
+        diagnostics["profit_trigger_bps"] = profit_trigger_bps
         if delta_bps <= -1.2 * state.breakeven_bps:
             fast_adverse = True
             rail_reason = "price_drop"
@@ -244,11 +248,19 @@ class ExitManager:
             diagnostics["rail"] = "fast_adverse"
             diagnostics["fast_adverse_reason"] = rail_reason
         else:
-            if delta_bps >= 2.5 * state.breakeven_bps:
+            if delta_bps >= profit_trigger_bps:
                 state.trailing_armed = True
-            if state.trailing_armed and drawdown_bps >= 0.8 * state.breakeven_bps:
+            hold_limit = 120.0
+            if time_in_position >= hold_limit:
+                must_exit = True
+                diagnostics["rail"] = "time_stop"
+            elif not state.trailing_armed and time_in_position >= 90.0:
+                must_exit = True
+                diagnostics["rail"] = "time_stop"
+            elif state.trailing_armed and drawdown_bps >= 0.8 * state.breakeven_bps:
                 diagnostics["rail"] = "smart_trailing"
-            elif now - state.high_ts >= 300.0:
+            elif now - state.high_ts >= hold_limit:
+                must_exit = True
                 diagnostics["rail"] = "time_stop"
             elif strategy_reasons:
                 diagnostics["rail"] = "strategy"

@@ -7,7 +7,7 @@ import contextlib
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
 
 from ..agent_manager import AgentManager
 from ..event_bus import publish, subscribe
@@ -75,6 +75,11 @@ class AgentManagerAgent(BaseAgent):
         default_notional: float = 1_000.0,
         default_slippage_bps: float = 60.0,
         default_ttl: float = 1.5,
+        allowed_patterns: Sequence[str] | None = None,
+        min_burst_zscore: float = 2.0,
+        max_micro_spread_bps: float = 40.0,
+        min_depth_usd: float = 15_000.0,
+        buffer_bps: float = 20.0,
     ) -> None:
         super().__init__(name)
         self.manager = manager
@@ -82,6 +87,17 @@ class AgentManagerAgent(BaseAgent):
         self.default_notional = float(default_notional)
         self.default_slippage_bps = float(default_slippage_bps)
         self.default_ttl = float(default_ttl)
+        patterns = allowed_patterns or (
+            "first_pullback",
+            "first_pullback_breakout",
+            "breakout_pullback",
+        )
+        self._allowed_patterns = {str(p).lower() for p in patterns if str(p).strip()}
+        self._last_buyers: Dict[str, int] = {}
+        self._min_burst_zscore = float(min_burst_zscore)
+        self._max_micro_spread_bps = float(max_micro_spread_bps)
+        self._min_depth_usd = float(min_depth_usd)
+        self._edge_buffer_bps = float(buffer_bps)
 
     async def generate(self, snapshot: GoldenSnapshot) -> List[TradeSuggestion]:
         try:
@@ -98,14 +114,20 @@ class AgentManagerAgent(BaseAgent):
             action = self._normalise_action(snapshot, raw)
             if not action:
                 continue
+            gating_report = self._apply_entry_gates(snapshot, raw, action)
+            if not gating_report.get("ruthless_filter", {}).get("passed"):
+                continue
+            if not gating_report.get("edge_pass"):
+                continue
             suggestion = self.build_suggestion(
                 snapshot=snapshot,
                 side=action.side,
                 notional_usd=action.notional,
                 max_slippage_bps=action.max_slippage_bps,
-                risk=action.risk,
+                risk=self._augment_risk(action, gating_report),
                 confidence=action.confidence,
                 ttl_sec=action.ttl_sec,
+                gating=gating_report,
             )
             suggestions.append(suggestion)
         return suggestions
@@ -188,6 +210,115 @@ class AgentManagerAgent(BaseAgent):
             ttl_sec=float(ttl),
             risk=risk,
         )
+
+    def _augment_risk(
+        self, action: _AgentAction, gating: Dict[str, Any]
+    ) -> Dict[str, float]:
+        risk = dict(action.risk)
+        breakeven = gating.get("breakeven_bps")
+        if isinstance(breakeven, (int, float)) and breakeven > 0:
+            risk.setdefault("breakeven_bps", float(breakeven))
+        return risk
+
+    def _apply_entry_gates(
+        self,
+        snapshot: GoldenSnapshot,
+        raw_action: Dict[str, Any],
+        action: _AgentAction,
+    ) -> Dict[str, Any]:
+        ruthless_report = self._ruthless_filter(snapshot, raw_action)
+        friction_report = self._friction_floor(snapshot, raw_action, action)
+        gating: Dict[str, Any] = {
+            "ruthless_filter": ruthless_report,
+            "friction_floor": friction_report,
+            "breakeven_bps": friction_report.get("breakeven_bps"),
+            "expected_edge_bps": friction_report.get("expected_edge_bps"),
+            "edge_buffer_bps": friction_report.get("edge_buffer_bps"),
+            "edge_pass": friction_report.get("passed"),
+        }
+        return gating
+
+    def _ruthless_filter(
+        self, snapshot: GoldenSnapshot, action: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        ohlcv = snapshot.ohlcv5m or {}
+        px = snapshot.px or {}
+        liq = snapshot.liq or {}
+        zret = _coerce_float(ohlcv.get("zret")) or 0.0
+        zvol = _coerce_float(ohlcv.get("zvol")) or 0.0
+        buyers = int(_coerce_float(ohlcv.get("buyers")) or 0)
+        prev_buyers = self._last_buyers.get(snapshot.mint)
+        buyers_uptick = bool(prev_buyers is not None and buyers > prev_buyers)
+        spread_bps = _coerce_float(px.get("spread_bps")) or 0.0
+        depth = _coerce_float(liq.get("depth_pct", {}).get("1")) or 0.0
+        pattern = str(action.get("pattern") or "").strip().lower()
+        pattern_allowed = bool(pattern and pattern in self._allowed_patterns)
+        passed = (
+            zret > self._min_burst_zscore
+            and zvol > self._min_burst_zscore
+            and buyers_uptick
+            and spread_bps <= self._max_micro_spread_bps
+            and depth >= self._min_depth_usd
+            and pattern_allowed
+        )
+        report = {
+            "zret": float(zret),
+            "zvol": float(zvol),
+            "buyers": buyers,
+            "previous_buyers": prev_buyers,
+            "buyers_uptick": buyers_uptick,
+            "spread_bps": float(spread_bps),
+            "depth_1pct_usd": float(depth),
+            "pattern": pattern or None,
+            "pattern_allowed": pattern_allowed,
+            "passed": passed,
+        }
+        self._last_buyers[snapshot.mint] = buyers
+        return report
+
+    def _friction_floor(
+        self,
+        snapshot: GoldenSnapshot,
+        raw_action: Dict[str, Any],
+        action: _AgentAction,
+    ) -> Dict[str, Any]:
+        liq = snapshot.liq or {}
+        depth = _coerce_float(liq.get("depth_pct", {}).get("1")) or 0.0
+        notional = max(action.notional, 0.0)
+        depth = max(depth, 1e-9)
+        size_fraction = min(notional / depth, 1.0)
+        impact_bps = min(size_fraction * 50.0, 200.0)
+        fees_bps = (
+            _coerce_float(raw_action.get("fees_bps"))
+            or _coerce_float(raw_action.get("fee_bps"))
+            or 4.0
+        )
+        latency_bps = _coerce_float(raw_action.get("latency_bps")) or 2.0
+        breakeven = float(fees_bps + latency_bps + impact_bps)
+        expected_edge = _coerce_float(raw_action.get("expected_edge_bps"))
+        if expected_edge is None:
+            expected_edge = _coerce_float(raw_action.get("edge_bps"))
+        if expected_edge is None:
+            expected_roi = _coerce_float(raw_action.get("expected_roi"))
+            if expected_roi is not None:
+                expected_edge = expected_roi * 10_000.0
+        buffer_requirement = self._edge_buffer_bps
+        edge_pass = False
+        edge_buffer = None
+        if expected_edge is not None:
+            edge_buffer = float(expected_edge - breakeven)
+            edge_pass = expected_edge >= breakeven + buffer_requirement
+        report: Dict[str, Any] = {
+            "fees_bps": float(fees_bps),
+            "latency_bps": float(latency_bps),
+            "impact_bps": float(impact_bps),
+            "breakeven_bps": float(breakeven),
+            "expected_edge_bps": expected_edge,
+            "required_buffer_bps": float(buffer_requirement),
+            "edge_buffer_bps": edge_buffer,
+            "passed": edge_pass,
+        }
+        return report
 
 
 class GoldenPipelineService:

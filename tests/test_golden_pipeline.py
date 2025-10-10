@@ -1,6 +1,10 @@
 import asyncio
+import sys
 import time
+import types
 from collections import deque
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -23,6 +27,16 @@ from solhunter_zero.golden_pipeline.types import (
     VirtualFill,
     VirtualPnL,
 )
+
+_datasets_pkg = types.ModuleType("solhunter_zero.datasets")
+_sample_ticks = types.ModuleType("solhunter_zero.datasets.sample_ticks")
+_sample_ticks.load_sample_ticks = lambda *args, **kwargs: []
+_sample_ticks.DEFAULT_PATH = ""
+_datasets_pkg.sample_ticks = _sample_ticks
+sys.modules.setdefault("solhunter_zero.datasets", _datasets_pkg)
+sys.modules.setdefault("solhunter_zero.datasets.sample_ticks", _sample_ticks)
+
+from solhunter_zero.golden_pipeline.service import AgentManagerAgent
 
 
 def test_market_stage_computes_flow_and_excludes_self():
@@ -570,4 +584,103 @@ def test_golden_snapshot_metrics_and_determinism():
         assert result_a == result_b
 
     asyncio.run(runner())
+
+
+def _build_snapshot(
+    *,
+    mint: str = "MINT",
+    mid: float = 1.5,
+    spread_bps: float = 20.0,
+    depth_usd: float = 20_000.0,
+    buyers: int = 20,
+    zret: float = 3.0,
+    zvol: float = 2.5,
+) -> GoldenSnapshot:
+    now = time.time()
+    return GoldenSnapshot(
+        mint=mint,
+        asof=now,
+        meta={},
+        px={"mid_usd": mid, "spread_bps": spread_bps},
+        liq={"depth_pct": {"1": depth_usd}, "asof": now},
+        ohlcv5m={
+            "o": mid,
+            "h": mid,
+            "l": mid,
+            "c": mid,
+            "vol_usd": 0.0,
+            "trades": 10,
+            "buyers": buyers,
+            "flow_usd": 0.0,
+            "zret": zret,
+            "zvol": zvol,
+            "asof_close": now,
+        },
+        hash="snapshot-hash",
+        metrics={},
+    )
+
+
+class _DummyPortfolio:
+    pass
+
+
+class _StaticManager:
+    def __init__(self, actions: list[dict[str, Any]]):
+        self._actions = actions
+
+    async def evaluate_with_swarm(self, mint: str, portfolio: _DummyPortfolio) -> Any:
+        return SimpleNamespace(actions=list(self._actions))
+
+
+def test_agent_manager_agent_filters_entries() -> None:
+    raw_action = {
+        "side": "buy",
+        "notional_usd": 5_000.0,
+        "pattern": "first_pullback",
+        "expected_roi": 0.08,
+    }
+    manager = _StaticManager([raw_action])
+    agent = AgentManagerAgent(manager, _DummyPortfolio())
+    agent._last_buyers["MINT"] = 5
+
+    snapshot = _build_snapshot(buyers=18)
+
+    async def run() -> list[TradeSuggestion]:
+        return await agent.generate(snapshot)
+
+    suggestions = asyncio.run(run())
+    assert suggestions, "expected gating to pass"
+    suggestion = suggestions[0]
+    gating = suggestion.gating
+    assert gating["ruthless_filter"]["passed"] is True
+    assert gating["edge_pass"] is True
+    assert gating["breakeven_bps"] > 0.0
+    assert gating["friction_floor"]["edge_buffer_bps"] >= 20.0
+
+
+def test_agent_manager_agent_drops_when_edge_below_floor() -> None:
+    raw_action = {
+        "side": "buy",
+        "notional_usd": 12_000.0,
+        "pattern": "first_pullback",
+        "expected_roi": 0.001,
+        "fees_bps": 5.0,
+    }
+    manager = _StaticManager([raw_action])
+    agent = AgentManagerAgent(manager, _DummyPortfolio())
+    agent._last_buyers["MINT"] = 10
+
+    snapshot = _build_snapshot(depth_usd=18_000.0, buyers=25)
+    action = agent._normalise_action(snapshot, raw_action)
+    assert action is not None
+    gating = agent._apply_entry_gates(snapshot, raw_action, action)
+    assert gating["ruthless_filter"]["passed"] is True
+    assert gating["edge_pass"] is False
+
+    async def run() -> list[TradeSuggestion]:
+        return await agent.generate(snapshot)
+
+    suggestions = asyncio.run(run())
+    assert suggestions == []
 
