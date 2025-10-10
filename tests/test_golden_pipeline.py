@@ -163,13 +163,119 @@ def test_voting_stage_applies_rl_weights():
 
         await stage.submit(suggestion_a)
         await stage.submit(suggestion_b)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(stage.window_sec + 0.1)
 
         assert len(decisions) == 1
         decision = decisions[0]
         assert decision.agents == ["alpha", "beta"]
         assert pytest.approx(decision.notional_usd, rel=1e-6) == pytest.approx(833.3333, rel=1e-3)
         assert pytest.approx(decision.score, rel=1e-6) == pytest.approx(0.6, rel=1e-6)
+
+    asyncio.run(runner())
+
+
+def test_voting_stage_rl_staleness_gate():
+    async def runner() -> None:
+        decisions: deque[Decision] = deque()
+
+        async def collect(decision: Decision) -> None:
+            decisions.append(decision)
+
+        stage = VotingStage(collect, window_ms=80, rl_weights={"alpha": 2.0, "beta": 1.0})
+        stage.set_rl_weights(
+            {
+                "weights": {"alpha": 4.0, "beta": 0.25},
+                "asof": time.time() - stage.window_sec * 3.5,
+                "window_hash": "stale",
+            }
+        )
+
+        template = dict(
+            mint="STALE",
+            side="buy",
+            notional_usd=1_000.0,
+            max_slippage_bps=40.0,
+            risk={},
+            ttl_sec=1.0,
+        )
+
+        suggestion_a = TradeSuggestion(
+            agent="alpha",
+            confidence=0.55,
+            generated_at=time.time(),
+            inputs_hash="snap",
+            **template,
+        )
+        suggestion_b = TradeSuggestion(
+            agent="beta",
+            confidence=0.55,
+            generated_at=time.time(),
+            inputs_hash="snap",
+            notional_usd=500.0,
+            **{k: v for k, v in template.items() if k != "notional_usd"},
+        )
+
+        await stage.submit(suggestion_a)
+        await stage.submit(suggestion_b)
+        await asyncio.sleep(stage.window_sec + 0.1)
+
+        assert decisions, "decision should still be emitted"
+        decision = decisions[0]
+        assert decision.agents == ["alpha", "beta"]
+        assert pytest.approx(decision.notional_usd, rel=1e-3) == 750.0
+
+    asyncio.run(runner())
+
+
+def test_voting_stage_rl_disabled_override():
+    async def runner() -> None:
+        decisions: deque[Decision] = deque()
+
+        async def collect(decision: Decision) -> None:
+            decisions.append(decision)
+
+        stage = VotingStage(collect, window_ms=100, rl_weights={"alpha": 5.0, "beta": 0.1})
+        stage.set_rl_disabled(True)
+        stage.set_rl_weights(
+            {
+                "weights": {"alpha": 10.0, "beta": 0.01},
+                "asof": time.time(),
+            }
+        )
+
+        base_template = dict(
+            mint="DISABLED",
+            side="buy",
+            notional_usd=900.0,
+            max_slippage_bps=30.0,
+            risk={},
+            ttl_sec=1.0,
+        )
+
+        suggestion_a = TradeSuggestion(
+            agent="alpha",
+            confidence=0.6,
+            generated_at=time.time(),
+            inputs_hash="snap2",
+            **base_template,
+        )
+        suggestion_b = TradeSuggestion(
+            agent="beta",
+            confidence=0.6,
+            generated_at=time.time(),
+            inputs_hash="snap2",
+            notional_usd=300.0,
+            **{k: v for k, v in base_template.items() if k != "notional_usd"},
+        )
+
+        await stage.submit(suggestion_a)
+        await stage.submit(suggestion_b)
+        await asyncio.sleep(stage.window_sec + 0.1)
+
+        assert decisions
+        decision = decisions[0]
+        assert decision.agents == ["alpha", "beta"]
+        assert pytest.approx(decision.notional_usd, rel=1e-3) == 600.0
 
     asyncio.run(runner())
 

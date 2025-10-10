@@ -18,7 +18,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import time
 from dataclasses import dataclass, field
+import hashlib
+import random
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Dict, Iterable, List, Optional
@@ -29,6 +33,10 @@ from .offline_data import OfflineData
 from .rl_training import TrainingConfig, TrainingSummary, fit
 
 logger = logging.getLogger(__name__)
+
+
+_RL_SCHEMA = "solhunter.rlweights.v1"
+_RL_VERSION = 1
 
 
 @dataclass
@@ -157,11 +165,28 @@ class RLDaemon:
                 logger.debug("Health state update failed", exc_info=True)
 
         await self._notify_agents()
-        publish(
+        weights = {f"{self.algo}_mean_reward": float(summary.mean_reward)}
+        await self._publish_with_backoff(
             "rl_weights",
+            {"weights": weights, "risk": {"multiplier": float(self.current_risk)}},
+        )
+        now = asyncio.get_running_loop().time()
+        window_span = max(float(os.getenv("VOTE_WINDOW_MS", "400") or 400.0) / 1000.0, 0.1)
+        window_id = int(now / window_span)
+        weight_items = tuple(sorted((str(k), float(v)) for k, v in weights.items()))
+        window_hash = hashlib.sha256(repr(weight_items).encode("utf-8")).hexdigest()
+        await self._publish_with_backoff(
+            "rl:weights.applied",
             {
-                "weights": {f"{self.algo}_mean_reward": float(summary.mean_reward)},
+                "schema": _RL_SCHEMA,
+                "version": _RL_VERSION,
+                "weights": weights,
                 "risk": {"multiplier": float(self.current_risk)},
+                "asof": float(time.time()),
+                "window_id": window_id,
+                "window_hash": window_hash,
+                "source": self.algo,
+                "vote_window_ms": float(window_span * 1000.0),
             },
         )
         return summary
@@ -211,6 +236,37 @@ class RLDaemon:
             self._risk_unsub = None
         await self.offline.close()
         await self.memory.engine.dispose()  # type: ignore[attr-defined]
+
+    async def _publish_with_backoff(
+        self,
+        topic: str,
+        payload: Dict[str, Any],
+        *,
+        attempts: int = 4,
+        base_delay: float = 0.25,
+    ) -> bool:
+        """Publish ``payload`` with exponential backoff on transport failure."""
+
+        delay = max(0.05, float(base_delay))
+        for attempt in range(1, attempts + 1):
+            try:
+                publish(topic, payload)
+                return True
+            except Exception:  # pragma: no cover - network/backplane failure
+                jitter = random.uniform(0.0, delay * 0.3)
+                logger.warning(
+                    "RL daemon failed to publish %s on attempt %d; backing off %.2fs",
+                    topic,
+                    attempt,
+                    delay + jitter,
+                    exc_info=True,
+                )
+                await asyncio.sleep(min(delay + jitter, 5.0))
+                delay = min(delay * 2.0, 5.0)
+        logger.error(
+            "RL daemon dropped %s payload after %d attempts", topic, attempts
+        )
+        return False
 
 
 __all__ = ["RLDaemon"]

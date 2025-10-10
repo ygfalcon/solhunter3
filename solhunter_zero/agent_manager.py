@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from .jsonutil import loads, dumps
-from .logging_utils import serialize_for_log
-from .util import run_coro
+import hashlib
+import logging
 import os
 import random
 import inspect
 import time
-from typing import Iterable, Dict, Any, List, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, Dict, Any, List, Mapping, MutableMapping
+
+from .jsonutil import loads, dumps
+from .logging_utils import serialize_for_log
+from .util import run_coro
 from .paths import ROOT
 
 from .backtester import backtest_weighted, DEFAULT_STRATEGIES
@@ -27,9 +31,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
     torch = _TorchStub()  # type: ignore
 
-import logging
 import tomllib
-from pathlib import Path
 
 from .trade_analyzer import TradeAnalyzer
 import numpy as np
@@ -58,6 +60,49 @@ except Exception:  # pragma: no cover - torch not available
 
 from .agents.rl_weight_agent import RLWeightAgent
 from .agents.roles import resolve_agent_role
+
+
+_RL_SCHEMA = "solhunter.rlweights.v1"
+_RL_VERSION = 1
+_TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
+_FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    text = raw.strip().lower()
+    if text in _TRUE_VALUES:
+        return True
+    if text in _FALSE_VALUES:
+        return False
+    return default
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+    except Exception:
+        return None
+
+
+def _as_mapping(obj: Any) -> MutableMapping[str, Any]:
+    if isinstance(obj, MutableMapping):
+        return obj
+    if isinstance(obj, dict):
+        return obj
+    try:
+        return dict(obj)
+    except Exception:
+        return {}
 from .agents.diagnostics import collect_agent_requirements
 
 try:  # Optional hierarchical RL agent (requires torch stack)
@@ -298,7 +343,18 @@ class AgentManager:
             except Exception:
                 self.attention_swarm = None
 
-        self.use_rl_weights = bool(cfg.use_rl_weights)
+        vote_window_ms_env = os.getenv("VOTE_WINDOW_MS")
+        try:
+            vote_window_ms = float(vote_window_ms_env) if vote_window_ms_env else 400.0
+        except (TypeError, ValueError):
+            vote_window_ms = 400.0
+        vote_window_ms = max(vote_window_ms, 50.0)
+        self._rl_window_sec = max(vote_window_ms / 1000.0, 0.1)
+        self._rl_last_meta: Dict[str, Any] = {}
+        self._rl_last_hash: str | None = None
+        self._rl_disabled = _parse_bool_env("RL_WEIGHTS_DISABLED", True)
+
+        self.use_rl_weights = bool(cfg.use_rl_weights) and not self._rl_disabled
         self.rl_weight_agent: RLWeightAgent | None = None
         if self.use_rl_weights:
             self.rl_weight_agent = RLWeightAgent(
@@ -386,28 +442,16 @@ class AgentManager:
         else:
             self._simulation_timeout = None
 
-        def _merge_rl_weights(payload):
-            data = (
-                payload.weights
-                if hasattr(payload, "weights")
-                else payload.get("weights", {})
-            )
-            if isinstance(data, dict):
-                try:
-                    self.rl_policy = {str(k): float(v) for k, v in data.items()}
-                except Exception:
-                    self.rl_policy = {}
-                for k, v in data.items():
-                    try:
-                        self.weights[str(k)] = float(v)
-                    except Exception:
-                        continue
-                self.coordinator.base_weights = self.weights
-                self.save_weights()
+        async def _on_rl_event(payload):
+            try:
+                self._ingest_rl_weights(payload)
+            except Exception:
+                logger.exception("RL weight ingestion failed")
 
-        rl_sub = subscription("rl_weights", _merge_rl_weights)
-        rl_sub.__enter__()
-        self._subscriptions.append(rl_sub)
+        for topic in ("rl:weights.applied", "rl_weights"):
+            rl_sub = subscription(topic, _on_rl_event)
+            rl_sub.__enter__()
+            self._subscriptions.append(rl_sub)
 
         # Track active swarms keyed by token so concurrent evaluations can
         # feed back execution results without clobbering one another.
@@ -480,6 +524,130 @@ class AgentManager:
                     raw,
                 )
         return conf
+
+    def _ingest_rl_weights(self, payload: Any) -> None:
+        weights, meta = self._normalise_rl_payload(payload)
+        if not weights:
+            return
+
+        now = time.time()
+        schema = str(meta.get("schema") or "").strip() or None
+        version_raw = meta.get("version")
+        try:
+            version = int(version_raw) if version_raw is not None else None
+        except Exception:
+            version = None
+
+        if schema and schema != _RL_SCHEMA:
+            meta["ignored_reason"] = "schema"
+            logger.warning(
+                "Ignoring RL weights with unexpected schema %s", schema
+            )
+            self._rl_last_meta = meta
+            return
+
+        if version is not None and version != _RL_VERSION:
+            meta["ignored_reason"] = "version"
+            logger.warning(
+                "Ignoring RL weights with incompatible version %s", version
+            )
+            self._rl_last_meta = meta
+            return
+
+        if self._rl_disabled:
+            meta["ignored_reason"] = "disabled"
+            logger.info("RL weights skipped because RL_WEIGHTS_DISABLED=1")
+            self._rl_last_meta = meta
+            return
+
+        asof = meta.get("asof")
+        try:
+            asof_val = float(asof) if asof is not None else None
+        except Exception:
+            asof_val = None
+        if asof_val is None:
+            asof_val = now
+        meta["asof"] = asof_val
+        age = max(0.0, now - asof_val)
+        meta["age_seconds"] = age
+        if age > self._rl_window_sec * 2.0:
+            meta["ignored_reason"] = "stale"
+            logger.debug(
+                "RL weights stale (age %.3fs > gate %.3fs)",
+                age,
+                self._rl_window_sec * 2.0,
+            )
+            self._rl_last_meta = meta
+            return
+
+        hash_source = meta.get("window_hash")
+        if not hash_source:
+            hash_source = hashlib.sha256(
+                repr(tuple(sorted(weights.items()))).encode("utf-8")
+            ).hexdigest()
+        if hash_source == self._rl_last_hash:
+            meta["ignored_reason"] = "duplicate"
+            self._rl_last_meta = meta
+            return
+
+        self.rl_policy = {str(k): float(v) for k, v in weights.items()}
+        for key, value in weights.items():
+            try:
+                self.weights[str(key)] = float(value)
+            except Exception:
+                continue
+        self.coordinator.base_weights = self.weights
+        self.save_weights()
+
+        self._rl_last_hash = hash_source
+        meta["applied"] = True
+        meta["applied_at"] = now
+        meta["window_hash"] = hash_source
+        self._rl_last_meta = meta
+
+    def _normalise_rl_payload(self, payload: Any) -> tuple[Dict[str, float], Dict[str, Any]]:
+        weights: Dict[str, float] = {}
+        meta: Dict[str, Any] = {}
+        if payload is None:
+            return weights, meta
+
+        if isinstance(payload, Mapping):
+            raw_weights = payload.get("weights")
+            if isinstance(raw_weights, Mapping):
+                for key, value in raw_weights.items():
+                    val = _as_float(value)
+                    if val is not None:
+                        weights[str(key)] = val
+            else:
+                for key, value in payload.items():
+                    if key in {"schema", "version", "asof", "window_id", "window_hash", "source", "vote_window_ms"}:
+                        continue
+                    val = _as_float(value)
+                    if val is not None:
+                        weights[str(key)] = val
+            for key in ("schema", "version", "asof", "window_id", "window_hash", "source", "vote_window_ms"):
+                if key in payload:
+                    meta[key] = payload[key]
+            return weights, meta
+
+        raw_weights = getattr(payload, "weights", None)
+        raw_map = _as_mapping(raw_weights)
+        for key, value in raw_map.items():
+            val = _as_float(value)
+            if val is not None:
+                weights[str(key)] = val
+
+        risk = getattr(payload, "risk", None)
+        risk_map = _as_mapping(risk)
+        if risk_map:
+            for key, value in risk_map.items():
+                meta[key] = value
+
+        for attr in ("schema", "version", "asof", "window_id", "window_hash", "source"):
+            if hasattr(payload, attr):
+                meta[attr] = getattr(payload, attr)
+
+        return weights, meta
 
     async def evaluate_with_swarm(
         self, token: str, portfolio
