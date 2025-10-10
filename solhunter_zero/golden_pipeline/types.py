@@ -94,6 +94,7 @@ class GoldenSnapshot:
     liq: Dict[str, Any]
     ohlcv5m: Dict[str, Any]
     hash: str
+    metrics: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

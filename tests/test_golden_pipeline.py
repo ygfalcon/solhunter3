@@ -458,3 +458,116 @@ def test_pipeline_end_to_end_flow():
         )
 
     asyncio.run(runner())
+
+
+def test_golden_snapshot_metrics_and_determinism():
+    class DeterministicAgent(BaseAgent):
+        def __init__(self, name: str) -> None:
+            super().__init__(name)
+            self._invocations = 0
+
+        async def generate(self, snapshot: GoldenSnapshot):
+            self._invocations += 1
+            return [
+                self.build_suggestion(
+                    snapshot=snapshot,
+                    side="buy",
+                    notional_usd=2_500.0,
+                    max_slippage_bps=30.0,
+                    risk={"stop_bps": 40.0},
+                    confidence=0.8,
+                    ttl_sec=2.0,
+                )
+            ]
+
+    async def runner() -> None:
+        goldens: deque[GoldenSnapshot] = deque()
+        suggestions: deque[TradeSuggestion] = deque()
+
+        async def on_golden(snapshot: GoldenSnapshot) -> None:
+            goldens.append(snapshot)
+
+        async def on_suggestion(suggestion: TradeSuggestion) -> None:
+            suggestions.append(suggestion)
+
+        async def fetch_metadata(mints):
+            return {
+                mint: TokenSnapshot(
+                    mint=mint,
+                    symbol="DET",
+                    name="Deterministic",
+                    decimals=6,
+                    token_program="Tokenkeg",
+                    asof=time.time() - 0.2,
+                )
+                for mint in mints
+            }
+
+        pipeline = GoldenPipeline(
+            enrichment_fetcher=fetch_metadata,
+            agents=[DeterministicAgent("alpha")],
+            on_golden=on_golden,
+            on_suggestion=on_suggestion,
+        )
+
+        mint = "MintDeterministic11111111111111111111111111"
+        now = time.time()
+        bar = OHLCVBar(
+            mint=mint,
+            open=1.0,
+            high=1.2,
+            low=0.9,
+            close=1.1,
+            vol_usd=500.0,
+            trades=10,
+            buyers=5,
+            flow_usd=100.0,
+            zret=0.1,
+            zvol=0.2,
+            asof_close=now - 0.3,
+        )
+        depth = DepthSnapshot(
+            mint=mint,
+            venue="aggregated",
+            mid_usd=1.1,
+            spread_bps=25.0,
+            depth_pct={"1": 20_000.0},
+            asof=now - 0.1,
+        )
+
+        await pipeline.inject_token_snapshot(
+            TokenSnapshot(
+                mint=mint,
+                symbol="DET",
+                name="Deterministic",
+                decimals=6,
+                token_program="Tokenkeg",
+                asof=now - 0.2,
+            )
+        )
+        await pipeline.inject_bar(bar)
+        await pipeline.submit_depth(depth)
+
+        assert goldens, "expected a Golden Snapshot emission"
+        snapshot = goldens[-1]
+        assert snapshot.liq["asof"] == pytest.approx(depth.asof)
+        assert snapshot.metrics["depth_staleness_ms"] >= 0.0
+        assert snapshot.metrics["latency_ms"] >= 0.0
+        assert snapshot.metrics["candle_age_ms"] >= 0.0
+
+        summary = pipeline.metrics_snapshot()
+        assert summary["latency_ms"]["count"] >= 1.0
+        assert summary["depth_staleness_ms"]["max"] >= snapshot.metrics["depth_staleness_ms"]
+
+        assert suggestions, "agent should have emitted a suggestion"
+        first = suggestions[0]
+        assert first.generated_at == pytest.approx(snapshot.asof)
+
+        agent_a = DeterministicAgent("alpha")
+        agent_b = DeterministicAgent("alpha")
+        result_a = await agent_a.generate(snapshot)
+        result_b = await agent_b.generate(snapshot)
+        assert result_a == result_b
+
+    asyncio.run(runner())
+
