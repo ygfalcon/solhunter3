@@ -373,6 +373,9 @@ _PAGE_TEMPLATE = """
         }
         .pill.stale { color: var(--danger); border-color: rgba(255,123,114,0.45); }
         .pill.fresh { color: var(--success); border-color: rgba(63,185,80,0.35); }
+        .pill.pass { color: var(--success); border-color: rgba(63,185,80,0.35); }
+        .pill.blocked { color: var(--danger); border-color: rgba(255,123,114,0.45); }
+        .pill.neutral { color: var(--muted); border-color: rgba(110,118,129,0.35); }
         .grid-two {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
@@ -845,6 +848,9 @@ _PAGE_TEMPLATE = """
                             <th>Side</th>
                             <th>Notional</th>
                             <th>Edge</th>
+                            <th>Breakeven</th>
+                            <th>Edge Buffer</th>
+                            <th>Gate</th>
                             <th>TTL</th>
                             <th>Age</th>
                             <th>Inputs Hash</th>
@@ -861,6 +867,17 @@ _PAGE_TEMPLATE = """
                             <td>{{ entry.side or '—' }}</td>
                             <td>{{ entry.notional_usd | round(2) if entry.notional_usd is not none else '—' }}</td>
                             <td>{{ entry.edge | round(4) if entry.edge is not none else '—' }}</td>
+                            <td>{{ entry.breakeven_bps | round(2) if entry.breakeven_bps is not none else '—' }} bps</td>
+                            <td>{{ entry.edge_buffer_bps | round(2) if entry.edge_buffer_bps is not none else '—' }} bps</td>
+                            <td>
+                                {% if entry.edge_pass is none %}
+                                    <span class=\"pill neutral\">Unknown</span>
+                                {% elif entry.edge_pass %}
+                                    <span class=\"pill pass\">Pass</span>
+                                {% else %}
+                                    <span class=\"pill blocked\">Blocked</span>
+                                {% endif %}
+                            </td>
                             <td>{{ entry.ttl_label }}</td>
                             <td>{{ entry.age_label }}</td>
                             <td class=\"muted\">{{ entry.inputs_hash_short or '—' }}</td>
@@ -875,7 +892,7 @@ _PAGE_TEMPLATE = """
                             <td>{{ 'yes' if entry.must else 'no' }}</td>
                         </tr>
                         {% else %}
-                        <tr class=\"skeleton-row\"><td colspan=\"11\" class=\"muted\">No active suggestions.</td></tr>
+                        <tr class=\"skeleton-row\"><td colspan=\"14\" class=\"muted\">No active suggestions.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>

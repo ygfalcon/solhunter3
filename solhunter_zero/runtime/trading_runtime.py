@@ -1281,6 +1281,12 @@ class TradingRuntime:
             inputs_hash = payload.get("inputs_hash")
             golden_hash = golden_hashes.get(str(mint))
             mismatch = bool(inputs_hash and golden_hash and str(inputs_hash) != golden_hash)
+            gating = payload.get("gating") or {}
+            breakeven = _maybe_float(gating.get("breakeven_bps"))
+            edge_buffer = _maybe_float(gating.get("edge_buffer_bps"))
+            expected_edge = _maybe_float(gating.get("expected_edge_bps"))
+            raw_edge_pass = gating.get("edge_pass")
+            edge_pass = raw_edge_pass if isinstance(raw_edge_pass, bool) else None
             items.append(
                 {
                     "agent": payload.get("agent"),
@@ -1288,6 +1294,10 @@ class TradingRuntime:
                     "side": (payload.get("side") or "").lower() or None,
                     "notional_usd": _maybe_float(payload.get("notional_usd")),
                     "edge": _maybe_float(payload.get("edge")),
+                    "breakeven_bps": breakeven,
+                    "edge_buffer_bps": edge_buffer,
+                    "expected_edge_bps": expected_edge,
+                    "edge_pass": edge_pass,
                     "risk": payload.get("risk") or {},
                     "max_slippage_bps": _maybe_float(payload.get("max_slippage_bps")),
                     "inputs_hash": inputs_hash,
@@ -1301,6 +1311,7 @@ class TradingRuntime:
                     "must": bool(payload.get("must")),
                     "age_seconds": age,
                     "hash_mismatch": mismatch,
+                    "gating": gating,
                 }
             )
             if age is not None and age <= window:

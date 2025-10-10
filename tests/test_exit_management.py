@@ -127,9 +127,12 @@ def test_trailing_and_time_stop_behaviour() -> None:
         ts=0.0,
     )
     manager.evaluate_snapshot(_snapshot(207.0, hash_="xyz", ts=10.0, mint="XYZ"))
-    time_stop = manager.evaluate_snapshot(_snapshot(207.0, hash_="xyz", ts=400.0, mint="XYZ"))
+    time_stop = manager.evaluate_snapshot(
+        _snapshot(207.0, hash_="xyz", ts=140.0, mint="XYZ")
+    )
     assert time_stop is not None
     assert time_stop.exit_diagnostics["rail"] == "time_stop"
+    assert time_stop.must_exit is True
 
 
 def test_strategy_exit_routes_to_normal_suggestion() -> None:
