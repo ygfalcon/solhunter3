@@ -11,7 +11,7 @@ import time
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Optional
 
@@ -198,6 +198,21 @@ class TradingRuntime:
         history_limit = int(os.getenv("ITERATION_HISTORY_LIMIT", "120") or 120)
         self._iteration_history: Deque[Dict[str, Any]] = deque(maxlen=history_limit)
         self._history_lock = threading.Lock()
+        self._swarm_lock = threading.Lock()
+        self._discovery_candidates: Deque[Dict[str, Any]] = deque(maxlen=500)
+        self._token_facts: Dict[str, Dict[str, Any]] = {}
+        self._market_ohlcv: Dict[str, Dict[str, Any]] = {}
+        self._market_depth: Dict[str, Dict[str, Any]] = {}
+        self._golden_snapshots: Dict[str, Dict[str, Any]] = {}
+        self._latest_golden_hash: Dict[str, str] = {}
+        self._agent_suggestions: Deque[Dict[str, Any]] = deque(maxlen=600)
+        self._vote_decisions: Deque[Dict[str, Any]] = deque(maxlen=400)
+        self._decision_counts: Dict[str, int] = {}
+        self._virtual_fills: Deque[Dict[str, Any]] = deque(maxlen=400)
+        self._live_fills: Deque[Dict[str, Any]] = deque(maxlen=400)
+        self._paper_positions_cache: List[Dict[str, Any]] = []
+        self._rl_weights_windows: Deque[Dict[str, Any]] = deque(maxlen=240)
+        self._control_states: Dict[str, Dict[str, Any]] = {}
         pipeline_env = os.getenv("NEW_PIPELINE", "")
         fast_flag = os.getenv("FAST_PIPELINE_MODE", "")
         self._use_new_pipeline = (
@@ -412,6 +427,13 @@ class TradingRuntime:
         self._subscribe_to_events()
 
     def _subscribe_to_events(self) -> None:
+        def _normalize_event(event: Any) -> Dict[str, Any]:
+            payload = getattr(event, "payload", event)
+            data = _serialize(payload)
+            if isinstance(data, dict):
+                return {str(k): v for k, v in data.items()}
+            return {}
+
         async def _on_action(event: Any) -> None:
             payload = getattr(event, "action", None)
             result = getattr(event, "result", None)
@@ -432,10 +454,120 @@ class TradingRuntime:
             }
             self._ui_logs.append(entry)
 
+        async def _on_discovery_candidate(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not payload:
+                return
+            payload.setdefault("mint", payload.get("token") or payload.get("address"))
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._discovery_candidates.appendleft(payload)
+
+        async def _on_token_snapshot(event: Any) -> None:
+            payload = _normalize_event(event)
+            mint = payload.get("mint")
+            if not mint:
+                return
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._token_facts[str(mint)] = payload
+
+        async def _on_market_ohlcv(event: Any) -> None:
+            payload = _normalize_event(event)
+            mint = payload.get("mint")
+            if not mint:
+                return
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._market_ohlcv[str(mint)] = payload
+
+        async def _on_market_depth(event: Any) -> None:
+            payload = _normalize_event(event)
+            mint = payload.get("mint")
+            if not mint:
+                return
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._market_depth[str(mint)] = payload
+
+        async def _on_golden_snapshot(event: Any) -> None:
+            payload = _normalize_event(event)
+            mint = payload.get("mint")
+            if not mint:
+                return
+            payload["_received"] = time.time()
+            hash_value = payload.get("hash")
+            with self._swarm_lock:
+                self._golden_snapshots[str(mint)] = payload
+                if hash_value:
+                    self._latest_golden_hash[str(mint)] = str(hash_value)
+
+        async def _on_suggestion(event: Any) -> None:
+            payload = _normalize_event(event)
+            mint = payload.get("mint")
+            if not mint:
+                return
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._agent_suggestions.appendleft(payload)
+
+        async def _on_vote_decision(event: Any) -> None:
+            payload = _normalize_event(event)
+            mint = payload.get("mint")
+            if not mint:
+                return
+            payload["_received"] = time.time()
+            client_id = payload.get("clientOrderId") or payload.get("client_order_id")
+            if client_id:
+                with self._swarm_lock:
+                    count = self._decision_counts.get(str(client_id), 0) + 1
+                    self._decision_counts[str(client_id)] = count
+                    payload["_duplicate_count"] = count
+                    self._vote_decisions.appendleft(payload)
+            else:
+                with self._swarm_lock:
+                    self._vote_decisions.appendleft(payload)
+
+        async def _on_virtual_fill(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not payload.get("mint"):
+                return
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._virtual_fills.appendleft(payload)
+
+        async def _on_live_fill(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not payload.get("mint"):
+                return
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._live_fills.appendleft(payload)
+
+        async def _on_rl_weights(event: Any) -> None:
+            payload = _normalize_event(event)
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._rl_weights_windows.appendleft(payload)
+
         self._subscriptions.append(("action_executed", _on_action))
         subscribe("action_executed", _on_action)
         self._subscriptions.append(("runtime.log", _on_log))
         subscribe("runtime.log", _on_log)
+        for topic, handler in (
+            ("x:discovery.candidates", _on_discovery_candidate),
+            ("x:token.snap", _on_token_snapshot),
+            ("x:market.ohlcv.5m", _on_market_ohlcv),
+            ("x:market.depth", _on_market_depth),
+            ("x:mint.golden", _on_golden_snapshot),
+            ("x:trade.suggested", _on_suggestion),
+            ("x:vote.decisions", _on_vote_decision),
+            ("x:virt.fills", _on_virtual_fill),
+            ("x:live.fills", _on_live_fill),
+            ("rl:weights.applied", _on_rl_weights),
+        ):
+            self._subscriptions.append((topic, handler))
+            subscribe(topic, handler)
 
     async def _start_ui(self) -> None:
         self.ui_state.status_provider = self._collect_status
@@ -449,6 +581,15 @@ class TradingRuntime:
         self.ui_state.config_provider = self._collect_config
         self.ui_state.actions_provider = self._collect_actions
         self.ui_state.history_provider = self._collect_history
+        self.ui_state.discovery_console_provider = self._collect_discovery_console
+        self.ui_state.token_facts_provider = self._collect_token_facts_panel
+        self.ui_state.market_state_provider = self._collect_market_panel
+        self.ui_state.golden_snapshot_provider = self._collect_golden_panel
+        self.ui_state.suggestions_provider = self._collect_suggestions_panel
+        self.ui_state.vote_windows_provider = self._collect_vote_panel
+        self.ui_state.shadow_provider = self._collect_shadow_panel
+        self.ui_state.rl_provider = self._collect_rl_panel
+        self.ui_state.settings_provider = self._collect_settings_panel
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
@@ -860,6 +1001,519 @@ class TradingRuntime:
             "queues": queues,
             "tuning": tuning,
         }
+
+    def _collect_discovery_console(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            rows = list(self._discovery_candidates)
+        seen: set[str] = set()
+        candidates: List[Dict[str, Any]] = []
+        for row in rows:
+            mint_raw = row.get("mint") or row.get("token") or row.get("address")
+            mint = str(mint_raw).strip() if mint_raw else ""
+            if not mint or mint in seen:
+                continue
+            seen.add(mint)
+            timestamp = _entry_timestamp(row, "asof")
+            age = _age_seconds(timestamp, now)
+            if age is None and row.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(row["_received"]))
+                except Exception:
+                    age = None
+            stale = age is not None and age > 120.0
+            candidates.append(
+                {
+                    "mint": mint,
+                    "score": _maybe_float(row.get("score")),
+                    "source": row.get("source"),
+                    "asof": row.get("asof"),
+                    "age_seconds": age,
+                    "age_label": _format_age(age),
+                    "stale": stale,
+                }
+            )
+        return {
+            "candidates": candidates[:100],
+            "stats": {"total": len(rows)},
+        }
+
+    def _collect_token_facts_panel(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            facts = dict(self._token_facts)
+        ordered: Dict[str, Dict[str, Any]] = {}
+        for mint in sorted(facts.keys()):
+            payload = dict(facts[mint])
+            timestamp = _entry_timestamp(payload, "asof")
+            age = _age_seconds(timestamp, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            missing_meta = not payload.get("symbol") or not payload.get("name")
+            stale = (age is not None and age > 300.0) or missing_meta
+            ordered[mint] = {
+                "symbol": payload.get("symbol"),
+                "name": payload.get("name"),
+                "decimals": payload.get("decimals"),
+                "token_program": payload.get("token_program"),
+                "flags": payload.get("flags") or [],
+                "venues": payload.get("venues") or [],
+                "asof": payload.get("asof"),
+                "age_seconds": age,
+                "age_label": _format_age(age),
+                "stale": stale,
+            }
+        return {"tokens": ordered, "selected": None}
+
+    def _collect_market_panel(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            ohlcv = dict(self._market_ohlcv)
+            depth = dict(self._market_depth)
+        markets: List[Dict[str, Any]] = []
+        for mint in sorted(set(list(ohlcv.keys()) + list(depth.keys()))):
+            candle = dict(ohlcv.get(mint) or {})
+            depth_entry = dict(depth.get(mint) or {})
+            ts_close = _entry_timestamp(candle, "asof_close")
+            ts_depth = _entry_timestamp(depth_entry, "asof")
+            age_close = _age_seconds(ts_close, now)
+            age_depth = _age_seconds(ts_depth, now)
+            if age_close is None and candle.get("_received") is not None:
+                try:
+                    age_close = max(0.0, now - float(candle["_received"]))
+                except Exception:
+                    age_close = None
+            if age_depth is None and depth_entry.get("_received") is not None:
+                try:
+                    age_depth = max(0.0, now - float(depth_entry["_received"]))
+                except Exception:
+                    age_depth = None
+            depth_pct_raw = depth_entry.get("depth_pct") or depth_entry.get("depth") or {}
+            depth_pct: Dict[str, Optional[float]] = {}
+            if isinstance(depth_pct_raw, dict):
+                for key, value in depth_pct_raw.items():
+                    depth_pct[str(key).strip("% ")] = _maybe_float(value)
+            combined_age = None
+            for value in (age_close, age_depth):
+                if value is None:
+                    continue
+                if combined_age is None or value < combined_age:
+                    combined_age = value
+            stale = False
+            if age_close is not None and age_close > 120.0:
+                stale = True
+            if age_depth is not None and age_depth > 30.0:
+                stale = True
+            markets.append(
+                {
+                    "mint": mint,
+                    "close": _maybe_float(candle.get("close")),
+                    "volume": _maybe_float(candle.get("volume")),
+                    "spread_bps": _maybe_float(depth_entry.get("spread_bps")),
+                    "depth_pct": depth_pct,
+                    "age_close": age_close,
+                    "age_depth": age_depth,
+                    "stale": stale,
+                    "updated_label": _format_age(combined_age),
+                }
+            )
+        return {"markets": markets, "updated_at": None}
+
+    def _collect_golden_panel(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            golden = dict(self._golden_snapshots)
+            hash_map = dict(self._latest_golden_hash)
+        snapshots: List[Dict[str, Any]] = []
+        for mint in sorted(golden.keys()):
+            payload = dict(golden[mint])
+            timestamp = _entry_timestamp(payload, "asof")
+            age = _age_seconds(timestamp, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            hash_value = payload.get("hash")
+            hash_text = str(hash_value) if hash_value is not None else None
+            snapshots.append(
+                {
+                    "mint": mint,
+                    "hash": hash_text,
+                    "hash_short": _short_hash(hash_text),
+                    "px": _maybe_float(payload.get("px")),
+                    "liq": _maybe_float(payload.get("liq")),
+                    "age_seconds": age,
+                    "age_label": _format_age(age),
+                    "stale": age is not None and age > 60.0,
+                }
+            )
+        return {"snapshots": snapshots, "hash_map": hash_map}
+
+    def _collect_suggestions_panel(self) -> Dict[str, Any]:
+        now = time.time()
+        window = 300.0
+        with self._swarm_lock:
+            suggestions = list(self._agent_suggestions)
+            golden_hashes = dict(self._latest_golden_hash)
+            decisions = list(self._vote_decisions)
+        items: List[Dict[str, Any]] = []
+        recent_count = 0
+        for payload in suggestions:
+            mint = payload.get("mint")
+            if not mint:
+                continue
+            timestamp = _entry_timestamp(payload, "asof")
+            age = _age_seconds(timestamp, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            ttl = _maybe_float(payload.get("ttl_sec"))
+            remaining = None
+            if ttl is not None and age is not None:
+                remaining = max(0.0, ttl - age)
+            stale = False
+            if ttl is not None and age is not None:
+                stale = age > ttl
+            elif age is not None and age > window:
+                stale = True
+            inputs_hash = payload.get("inputs_hash")
+            golden_hash = golden_hashes.get(str(mint))
+            mismatch = bool(inputs_hash and golden_hash and str(inputs_hash) != golden_hash)
+            items.append(
+                {
+                    "agent": payload.get("agent"),
+                    "mint": mint,
+                    "side": (payload.get("side") or "").lower() or None,
+                    "notional_usd": _maybe_float(payload.get("notional_usd")),
+                    "edge": _maybe_float(payload.get("edge")),
+                    "risk": payload.get("risk") or {},
+                    "max_slippage_bps": _maybe_float(payload.get("max_slippage_bps")),
+                    "inputs_hash": inputs_hash,
+                    "inputs_hash_short": _short_hash(inputs_hash),
+                    "ttl_label": _format_ttl(remaining, ttl),
+                    "stale": stale,
+                    "age_seconds": age,
+                    "hash_mismatch": mismatch,
+                }
+            )
+            if age is not None and age <= window:
+                recent_count += 1
+        latest_age = None
+        for item in items:
+            age = item.get("age_seconds")
+            if age is None:
+                continue
+            if latest_age is None or age < latest_age:
+                latest_age = age
+        recent_decisions = 0
+        for decision in decisions:
+            ts = _entry_timestamp(decision, "ts")
+            age = _age_seconds(ts, now)
+            if age is None and decision.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(decision["_received"]))
+                except Exception:
+                    age = None
+            if age is not None and age <= window:
+                recent_decisions += 1
+        acceptance = 0.0
+        if recent_count:
+            acceptance = min(1.0, recent_decisions / max(recent_count, 1))
+        metrics = {
+            "count": len(items),
+            "rate_per_min": recent_count / max(window / 60.0, 1e-6),
+            "acceptance_rate": acceptance,
+            "updated_label": _format_age(latest_age),
+            "stale": latest_age is not None and latest_age > window,
+        }
+        return {"suggestions": items[:200], "metrics": metrics}
+
+    def _collect_vote_panel(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            suggestions = list(self._agent_suggestions)
+            decisions = list(self._vote_decisions)
+        window_ms = os.getenv("VOTE_WINDOW_MS", "15000")
+        try:
+            window_duration = float(window_ms) / 1000.0
+        except Exception:
+            window_duration = 15.0
+        windows_map: Dict[tuple[str, str, Any], Dict[str, Any]] = {}
+        for suggestion in suggestions:
+            mint = suggestion.get("mint")
+            if not mint:
+                continue
+            side = (suggestion.get("side") or "").lower()
+            key = (str(mint), side, suggestion.get("inputs_hash"))
+            bucket = windows_map.setdefault(
+                key,
+                {
+                    "mint": str(mint),
+                    "side": side or "buy",
+                    "quorum": 0,
+                    "scores": [],
+                    "first_ts": None,
+                    "hash": suggestion.get("inputs_hash"),
+                    "decision": None,
+                },
+            )
+            bucket["quorum"] += 1
+            score = _maybe_float(suggestion.get("edge"))
+            if score is not None:
+                bucket["scores"].append(score)
+            ts = _entry_timestamp(suggestion, "asof")
+            if ts is None and suggestion.get("_received") is not None:
+                try:
+                    ts = datetime.fromtimestamp(float(suggestion["_received"]), tz=timezone.utc)
+                except Exception:
+                    ts = None
+            if ts is not None:
+                current = bucket.get("first_ts")
+                if current is None or ts < current:
+                    bucket["first_ts"] = ts
+        for decision in decisions:
+            mint = decision.get("mint")
+            if not mint:
+                continue
+            side = (decision.get("side") or "").lower()
+            snapshot_hash = decision.get("snapshot_hash")
+            key = (str(mint), side, snapshot_hash)
+            if key in windows_map:
+                windows_map[key]["decision"] = decision
+        windows: List[Dict[str, Any]] = []
+        for data in windows_map.values():
+            first_ts = data.get("first_ts")
+            age = _age_seconds(first_ts, now)
+            if age is None:
+                age = 0.0
+            countdown = max(0.0, window_duration - age)
+            decision = data.get("decision")
+            expired = age > window_duration and not decision
+            if data["scores"]:
+                score_value = sum(data["scores"]) / max(len(data["scores"]), 1)
+            elif decision is not None:
+                score_value = _maybe_float(decision.get("score"))
+            else:
+                score_value = None
+            windows.append(
+                {
+                    "mint": data["mint"],
+                    "side": data["side"],
+                    "quorum": data["quorum"],
+                    "score": score_value,
+                    "countdown": countdown,
+                    "countdown_label": _format_countdown(countdown),
+                    "expired": expired,
+                }
+            )
+        windows.sort(key=lambda item: item.get("countdown", 0.0))
+
+        tape: List[Dict[str, Any]] = []
+        for decision in decisions:
+            ts = _entry_timestamp(decision, "ts")
+            age = _age_seconds(ts, now)
+            if age is None and decision.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(decision["_received"]))
+                except Exception:
+                    age = None
+            tape.append(
+                {
+                    "mint": decision.get("mint"),
+                    "side": (decision.get("side") or "").lower() or None,
+                    "client_order_id": decision.get("clientOrderId")
+                    or decision.get("client_order_id"),
+                    "notional_usd": _maybe_float(decision.get("notional_usd")),
+                    "score": _maybe_float(decision.get("score")),
+                    "age_label": _format_age(age),
+                    "duplicate": bool(decision.get("_duplicate_count", 0) > 1),
+                }
+            )
+        return {"windows": windows[:60], "decisions": tape[:60]}
+
+    def _collect_shadow_panel(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            fills = list(self._virtual_fills)
+            golden_hashes = dict(self._latest_golden_hash)
+            golden_prices = {
+                mint: _maybe_float(payload.get("px"))
+                for mint, payload in self._golden_snapshots.items()
+            }
+        items: List[Dict[str, Any]] = []
+        for payload in fills:
+            mint = payload.get("mint")
+            if not mint:
+                continue
+            ts = _entry_timestamp(payload, "ts")
+            age = _age_seconds(ts, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            snapshot_hash = payload.get("snapshot_hash")
+            mismatch = bool(
+                snapshot_hash
+                and golden_hashes.get(str(mint))
+                and str(snapshot_hash) != golden_hashes[str(mint)]
+            )
+            items.append(
+                {
+                    "order_id": payload.get("order_id"),
+                    "mint": mint,
+                    "side": (payload.get("side") or "").lower() or None,
+                    "qty_base": _maybe_float(payload.get("qty_base")),
+                    "price_usd": _maybe_float(payload.get("price_usd")),
+                    "fees_usd": _maybe_float(payload.get("fees_usd")),
+                    "slippage_bps": _maybe_float(payload.get("slippage_bps")),
+                    "snapshot_hash": snapshot_hash,
+                    "snapshot_hash_short": _short_hash(snapshot_hash),
+                    "hash_mismatch": mismatch,
+                    "age_label": _format_age(age),
+                    "stale": age is not None and age > 900.0,
+                }
+            )
+        positions: List[Dict[str, Any]] = []
+        if self.portfolio is not None:
+            for mint, pos in self.portfolio.balances.items():
+                try:
+                    qty = float(pos.amount)
+                except Exception:
+                    qty = 0.0
+                try:
+                    avg_cost = float(pos.entry_price)
+                except Exception:
+                    avg_cost = 0.0
+                side = "long" if qty >= 0 else "short"
+                current_px = golden_prices.get(mint)
+                unrealized = None
+                if current_px is not None:
+                    unrealized = (current_px - avg_cost) * qty
+                total_pnl = unrealized
+                positions.append(
+                    {
+                        "mint": mint,
+                        "side": side,
+                        "qty_base": qty,
+                        "avg_cost": avg_cost,
+                        "realized_usd": None,
+                        "unrealized_usd": unrealized,
+                        "total_pnl_usd": total_pnl,
+                    }
+                )
+        return {
+            "virtual_fills": items[:200],
+            "paper_positions": positions,
+            "live_fills": [],
+        }
+
+    def _collect_rl_panel(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            weights = list(self._rl_weights_windows)
+            decisions = list(self._vote_decisions)
+            suggestions = list(self._agent_suggestions)
+        entries: List[Dict[str, Any]] = []
+        for payload in weights:
+            mint = payload.get("mint")
+            if not mint:
+                continue
+            ts = _entry_timestamp(payload, "asof")
+            if ts is None:
+                ts = _entry_timestamp(payload, "timestamp")
+            age = _age_seconds(ts, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            multipliers = (
+                payload.get("multipliers")
+                or payload.get("weights")
+                or payload.get("agents")
+            )
+            if isinstance(multipliers, dict):
+                parts: List[str] = []
+                for key, value in list(multipliers.items())[:3]:
+                    val = _maybe_float(value)
+                    if val is None:
+                        continue
+                    parts.append(f"{key}:{val:.2f}")
+                summary = ", ".join(parts)
+                if len(multipliers) > 3:
+                    summary = summary + " …" if summary else "…"
+            else:
+                summary_val = _maybe_float(payload.get("multiplier"))
+                summary = f"{summary_val:.2f}" if summary_val is not None else "n/a"
+            entries.append(
+                {
+                    "mint": mint,
+                    "window_hash": payload.get("window_hash") or payload.get("hash"),
+                    "window_hash_short": _short_hash(
+                        payload.get("window_hash") or payload.get("hash")
+                    ),
+                    "multiplier": summary,
+                    "age_label": _format_age(age),
+                    "stale": age is not None and age > 600.0,
+                }
+            )
+        uplift = _compute_rl_uplift(decisions, suggestions, now)
+        return {"weights": entries[:120], "uplift": uplift}
+
+    def _collect_settings_panel(self) -> Dict[str, Any]:
+        now = time.time()
+        definitions = [
+            ("Global Pause", "/api/control/pause", "control:execution:paused"),
+            ("Paper-only", "/api/control/paper", "control:execution:paper_only"),
+            ("Family Budget", "/api/control/budget/{family}", "control:budget"),
+            ("Spread Gate", "/api/control/spread", "MAX_SPREAD_BPS"),
+            ("Depth Gate", "/api/control/depth", "MIN_DEPTH1PCT_USD"),
+            ("RL Toggle", "/api/control/rl", "RL_WEIGHTS_DISABLED"),
+            ("Blacklist", "/api/control/blacklist", "control:blacklist"),
+        ]
+        controls: List[Dict[str, Any]] = []
+        for label, endpoint, key in definitions:
+            state_entry = self._control_states.get(key, {})
+            value = state_entry.get("value")
+            state = state_entry.get("state")
+            if state is None:
+                if value in ("1", 1, True, "true", "on"):
+                    state = "active"
+                elif value is not None:
+                    state = str(value)
+                else:
+                    state = "unknown"
+            ttl_val = state_entry.get("ttl")
+            ttl_label = _format_ttl(ttl_val, None)
+            updated = state_entry.get("updated_at")
+            age = None
+            if isinstance(updated, (int, float)):
+                try:
+                    age = max(0.0, now - float(updated))
+                except Exception:
+                    age = None
+            controls.append(
+                {
+                    "label": label,
+                    "endpoint": endpoint,
+                    "state": state,
+                    "ttl_label": ttl_label,
+                    "age_label": _format_age(age),
+                }
+            )
+        overrides = {
+            "MAX_SPREAD_BPS": os.getenv("MAX_SPREAD_BPS"),
+            "MIN_DEPTH1PCT_USD": os.getenv("MIN_DEPTH1PCT_USD"),
+            "RL_WEIGHTS_DISABLED": os.getenv("RL_WEIGHTS_DISABLED"),
+        }
+        return {"controls": controls, "overrides": overrides, "staleness": {}}
 
     def _collect_discovery(self) -> Dict[str, Any]:
         with self._discovery_lock:
@@ -1296,6 +1950,173 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
         return float(value)
     except Exception:
         return default
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(text)
+        except Exception:
+            return None
+    return None
+
+
+def _entry_timestamp(entry: Dict[str, Any], field: str) -> Optional[datetime]:
+    ts = _parse_timestamp(entry.get(field))
+    if ts is not None:
+        return ts
+    received = entry.get("_received")
+    if received is not None:
+        try:
+            return datetime.fromtimestamp(float(received), tz=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
+def _age_seconds(timestamp: Optional[datetime], now: Optional[float] = None) -> Optional[float]:
+    if timestamp is None:
+        return None
+    if now is None:
+        now = time.time()
+    try:
+        return max(0.0, now - timestamp.timestamp())
+    except Exception:
+        return None
+
+
+def _format_age(age: Optional[float]) -> str:
+    if age is None:
+        return "n/a"
+    if age < 0.5:
+        return "<1s ago"
+    total = int(age)
+    minutes, seconds = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    parts: List[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if not parts or seconds:
+        parts.append(f"{seconds}s")
+    return " ".join(parts) + " ago"
+
+
+def _format_countdown(seconds: float) -> str:
+    if seconds <= 0:
+        return "expired"
+    total = int(round(seconds))
+    minutes, secs = divmod(total, 60)
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _short_hash(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    text = str(value)
+    if len(text) <= 10:
+        return text
+    return f"{text[:6]}…{text[-4:]}"
+
+
+def _format_ttl(remaining: Optional[float], original: Optional[float]) -> str:
+    if remaining is None:
+        if original is None:
+            return "n/a"
+        try:
+            base = float(original)
+        except Exception:
+            return "n/a"
+        if base <= 0:
+            return "expired"
+        minutes, seconds = divmod(int(base), 60)
+        if minutes:
+            return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
+    if remaining <= 0:
+        return "expired"
+    minutes, seconds = divmod(int(remaining), 60)
+    if minutes:
+        return f"{minutes}m {seconds}s left"
+    return f"{seconds}s left"
+
+
+def _compute_rl_uplift(
+    decisions: List[Dict[str, Any]],
+    suggestions: List[Dict[str, Any]],
+    now: float,
+) -> Dict[str, Any]:
+    window = 300.0
+    decision_scores: List[float] = []
+    for decision in decisions:
+        ts = _entry_timestamp(decision, "ts")
+        age = _age_seconds(ts, now)
+        if age is None and decision.get("_received") is not None:
+            try:
+                age = max(0.0, now - float(decision["_received"]))
+            except Exception:
+                age = None
+        if age is not None and age <= window:
+            score = _maybe_float(decision.get("score"))
+            if score is not None:
+                decision_scores.append(score)
+    suggestion_scores: List[float] = []
+    for suggestion in suggestions:
+        ts = _entry_timestamp(suggestion, "asof")
+        age = _age_seconds(ts, now)
+        if age is None and suggestion.get("_received") is not None:
+            try:
+                age = max(0.0, now - float(suggestion["_received"]))
+            except Exception:
+                age = None
+        if age is not None and age <= window:
+            edge = _maybe_float(suggestion.get("edge"))
+            if edge is not None:
+                suggestion_scores.append(edge)
+    rolling = 0.0
+    if decision_scores and suggestion_scores:
+        rolling = (
+            sum(decision_scores) / len(decision_scores)
+            - sum(suggestion_scores) / len(suggestion_scores)
+        )
+    last_delta = 0.0
+    if decisions:
+        last_decision = decisions[0]
+        score_val = _maybe_float(last_decision.get("score"))
+        if score_val is not None:
+            related = [
+                _maybe_float(suggestion.get("edge"))
+                for suggestion in suggestions
+                if suggestion.get("mint") == last_decision.get("mint")
+                and (
+                    last_decision.get("snapshot_hash") is None
+                    or suggestion.get("inputs_hash")
+                    == last_decision.get("snapshot_hash")
+                )
+            ]
+            related = [value for value in related if value is not None]
+            if related:
+                last_delta = score_val - (sum(related) / len(related))
+    return {"rolling_5m": rolling, "last_decision_delta": last_delta}
 
 
 def _serialize(value: Any) -> Any:

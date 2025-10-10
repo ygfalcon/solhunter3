@@ -1,34 +1,10 @@
-"""Lightweight UI server for SolHunter Zero.
-
-The previous UI module mixed Flask wiring, websocket threads, and a large
-amount of legacy state.  For the new runtime we provide a focused
-implementation that exposes the runtime status over a small REST surface and
-can be embedded cleanly inside the trading orchestrator.
-
-The UI server is intentionally simple:
-
-* ``UIState`` exposes callables that the trading runtime wires up.  The UI
-  never reaches into runtime objects directly which keeps threading concerns
-  manageable and avoids circular imports.
-* ``create_app`` produces a Flask application with a tiny JSON API.  Endpoints
-  are designed to be polled by dashboards, CLI tooling, or simple HTTP checks.
-* ``UIServer`` starts/stops the Flask development server in a background
-  thread.  The runtime controls its lifecycle explicitly so a one-click
-  startup flow can guarantee the UI is available once trading begins.
-
-This module is dependency-light (only Flask) and stays synchronous so it can
-run happily inside the existing asyncio runtime without requiring ASGI
-bridges.  The goal is reliability and observability rather than complex
-visualisations; users can extend the JSON outputs or put a reverse proxy in
-front of it if richer dashboards are required.
-"""
-
 from __future__ import annotations
 
 import logging
 import os
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from flask import Flask, jsonify, render_template_string, request
@@ -65,6 +41,33 @@ class UIState:
     config_provider: DictProvider = field(default=lambda: {})
     actions_provider: ListProvider = field(default=lambda: [])
     history_provider: ListProvider = field(default=lambda: [])
+    discovery_console_provider: DictProvider = field(
+        default=lambda: {"candidates": [], "stats": {}}
+    )
+    token_facts_provider: DictProvider = field(
+        default=lambda: {"tokens": {}, "selected": None}
+    )
+    market_state_provider: DictProvider = field(
+        default=lambda: {"markets": [], "updated_at": None}
+    )
+    golden_snapshot_provider: DictProvider = field(
+        default=lambda: {"snapshots": [], "hash_map": {}}
+    )
+    suggestions_provider: DictProvider = field(
+        default=lambda: {"suggestions": [], "metrics": {}}
+    )
+    vote_windows_provider: DictProvider = field(
+        default=lambda: {"windows": [], "decisions": []}
+    )
+    shadow_provider: DictProvider = field(
+        default=lambda: {"virtual_fills": [], "paper_positions": [], "live_fills": []}
+    )
+    rl_provider: DictProvider = field(
+        default=lambda: {"weights": {}, "uplift": {}}
+    )
+    settings_provider: DictProvider = field(
+        default=lambda: {"controls": {}, "overrides": {}, "staleness": {}}
+    )
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -146,6 +149,619 @@ class UIState:
             log.exception("UI actions provider failed")
             return []
 
+    def snapshot_discovery_console(self) -> Dict[str, Any]:
+        try:
+            return dict(self.discovery_console_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI discovery console provider failed")
+            return {"candidates": [], "stats": {}}
+
+    def snapshot_token_facts(self) -> Dict[str, Any]:
+        try:
+            return dict(self.token_facts_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI token facts provider failed")
+            return {"tokens": {}, "selected": None}
+
+    def snapshot_market_state(self) -> Dict[str, Any]:
+        try:
+            return dict(self.market_state_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI market state provider failed")
+            return {"markets": [], "updated_at": None}
+
+    def snapshot_golden_snapshots(self) -> Dict[str, Any]:
+        try:
+            return dict(self.golden_snapshot_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI golden snapshot provider failed")
+            return {"snapshots": [], "hash_map": {}}
+
+    def snapshot_suggestions(self) -> Dict[str, Any]:
+        try:
+            return dict(self.suggestions_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI suggestions provider failed")
+            return {"suggestions": [], "metrics": {}}
+
+    def snapshot_vote_windows(self) -> Dict[str, Any]:
+        try:
+            return dict(self.vote_windows_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI vote windows provider failed")
+            return {"windows": [], "decisions": []}
+
+    def snapshot_shadow(self) -> Dict[str, Any]:
+        try:
+            return dict(self.shadow_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI shadow provider failed")
+            return {"virtual_fills": [], "paper_positions": [], "live_fills": []}
+
+    def snapshot_rl_panel(self) -> Dict[str, Any]:
+        try:
+            return dict(self.rl_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI RL panel provider failed")
+            return {"weights": {}, "uplift": {}}
+
+    def snapshot_settings(self) -> Dict[str, Any]:
+        try:
+            return dict(self.settings_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI settings provider failed")
+            return {"controls": {}, "overrides": {}, "staleness": {}}
+
+
+_PAGE_TEMPLATE = """
+<!doctype html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>SolHunter Zero · Swarm Console</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            font-family: 'Inter', 'Segoe UI', sans-serif;
+            --bg: #0d1117;
+            --panel: rgba(20, 27, 36, 0.88);
+            --border: rgba(88, 166, 255, 0.15);
+            --accent: #58a6ff;
+            --danger: #ff7b72;
+            --warning: #f2cc60;
+            --success: #3fb950;
+            --muted: #8b949e;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background: radial-gradient(circle at top, rgba(88,166,255,0.12), transparent 55%), var(--bg);
+            color: #e6edf3;
+            min-height: 100vh;
+            line-height: 1.5;
+        }
+        .layout {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 32px 24px 64px;
+            display: grid;
+            gap: 24px;
+        }
+        header {
+            background: linear-gradient(160deg, rgba(20,27,36,0.9), rgba(12,16,24,0.9));
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 24px;
+            display: grid;
+            gap: 18px;
+            box-shadow: 0 18px 44px rgba(0,0,0,0.45);
+        }
+        header h1 {
+            margin: 0;
+            font-size: 1.9rem;
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+        }
+        .status-card {
+            border-radius: 14px;
+            padding: 14px;
+            background: rgba(13,17,23,0.72);
+            border: 1px solid rgba(88,166,255,0.12);
+        }
+        .status-card.ok { border-color: rgba(63,185,80,0.32); }
+        .status-card.fail { border-color: rgba(255,123,114,0.32); }
+        .status-card.warn { border-color: rgba(242,204,96,0.35); }
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border-radius: 999px;
+            padding: 3px 10px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            border: 1px solid rgba(88,166,255,0.25);
+            color: var(--muted);
+        }
+        .pill.stale { color: var(--danger); border-color: rgba(255,123,114,0.45); }
+        .pill.fresh { color: var(--success); border-color: rgba(63,185,80,0.35); }
+        .grid-two {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+            gap: 24px;
+        }
+        .panel {
+            background: var(--panel);
+            border-radius: 18px;
+            border: 1px solid var(--border);
+            padding: 18px 20px 22px;
+            box-shadow: 0 14px 38px rgba(0,0,0,0.35);
+        }
+        .panel h2 {
+            margin-top: 0;
+            font-size: 1.25rem;
+            letter-spacing: 0.02em;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            font-size: 0.92rem;
+        }
+        th, td {
+            padding: 8px 10px;
+            border-bottom: 1px solid rgba(88,166,255,0.08);
+        }
+        th { text-align: left; font-weight: 500; color: rgba(230,237,243,0.75); }
+        tbody tr:hover { background: rgba(88,166,255,0.06); }
+        tbody tr.stale { background: rgba(255,123,114,0.06); }
+        .muted { color: var(--muted); }
+        .section-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .metrics {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 12px;
+        }
+        .metric {
+            background: rgba(13,17,23,0.72);
+            border-radius: 12px;
+            padding: 10px 12px;
+            border: 1px solid rgba(88,166,255,0.12);
+            min-width: 140px;
+        }
+        .metric strong { display: block; font-size: 1.1rem; }
+        .control-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+            margin-top: 16px;
+        }
+        .control-card {
+            border-radius: 14px;
+            padding: 14px;
+            background: rgba(13,17,23,0.72);
+            border: 1px solid rgba(88,166,255,0.12);
+        }
+        .control-card strong { display: block; margin-bottom: 6px; }
+        .stack {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .decision-tape {
+            margin-top: 12px;
+            display: grid;
+            gap: 10px;
+        }
+        .decision-card {
+            padding: 12px;
+            border-radius: 12px;
+            background: rgba(13,17,23,0.72);
+            border: 1px solid rgba(88,166,255,0.1);
+        }
+        .decision-card.duplicate { border-color: rgba(255,123,114,0.4); }
+        @media (max-width: 720px) {
+            .layout { padding: 18px 14px 40px; }
+            header { padding: 18px; }
+            .panel { padding: 16px; }
+        }
+    </style>
+</head>
+<body>
+    <div class=\"layout\">
+        <header>
+            <div class=\"section-title\">
+                <h1>SolHunter Swarm Lifecycle</h1>
+                <span class=\"pill {{ 'fresh' if not swarm_overall.get('stale') else 'stale' }}\">
+                    Updated {{ swarm_overall.get('age_label', 'n/a') }}
+                </span>
+            </div>
+            <div class=\"metrics\">
+                <div class=\"metric\">
+                    <span class=\"muted\">Suggestions / 5m</span>
+                    <strong>{{ suggestion_metrics.get('rate_per_min', 0) | round(2) }}</strong>
+                </div>
+                <div class=\"metric\">
+                    <span class=\"muted\">Acceptance</span>
+                    <strong>{{ (suggestion_metrics.get('acceptance_rate', 0) * 100) | round(1) }}%</strong>
+                </div>
+                <div class=\"metric\">
+                    <span class=\"muted\">Golden Hash</span>
+                    <strong>{{ golden_summary.get('count', 0) }} tracked</strong>
+                </div>
+                <div class=\"metric\">
+                    <span class=\"muted\">RL Windows</span>
+                    <strong>{{ rl_summary.get('weights_applied', 0) }}</strong>
+                </div>
+            </div>
+            <div class=\"status-grid\">
+                {% for card in status_cards %}
+                <div class=\"status-card {{ card.state }}\">
+                    <div>{{ card.label }}</div>
+                    <div class=\"muted\">{{ card.caption }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </header>
+
+        <section class=\"grid-two\">
+            <article class=\"panel\">
+                <div class=\"section-title\">
+                    <h2>Discovery Console</h2>
+                    <span class=\"muted\">{{ discovery_console.stats.total }} candidates</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Mint</th>
+                            <th>Score</th>
+                            <th>Source</th>
+                            <th>Observed</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in discovery_console.candidates %}
+                        <tr class=\"{{ 'stale' if row.stale else '' }}\">
+                            <td>{{ row.mint }}</td>
+                            <td>{{ row.score if row.score is not none else '—' }}</td>
+                            <td>{{ row.source or '—' }}</td>
+                            <td>
+                                {{ row.asof or '—' }}
+                                <span class=\"pill {{ 'stale' if row.stale else 'fresh' }}\">{{ row.age_label }}</span>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"4\" class=\"muted\">Waiting for discovery stream…</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+
+            <article class=\"panel\">
+                <div class=\"section-title\">
+                    <h2>Token Facts Drawer</h2>
+                    <span class=\"muted\">{{ token_facts.tokens | length }} loaded</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Mint</th>
+                            <th>Symbol</th>
+                            <th>Venues</th>
+                            <th>As Of</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for mint, info in token_facts.tokens.items() %}
+                        <tr class=\"{{ 'stale' if info.stale else '' }}\">
+                            <td>{{ mint }}</td>
+                            <td>{{ info.symbol or '—' }}</td>
+                            <td>{{ info.venues | join(', ') if info.venues else '—' }}</td>
+                            <td>{{ info.asof or '—' }} <span class=\"pill {{ 'stale' if info.stale else 'fresh' }}\">{{ info.age_label }}</span></td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"4\" class=\"muted\">No token snapshots yet.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+        </section>
+
+        <section class=\"grid-two\">
+            <article class=\"panel\">
+                <div class=\"section-title\">
+                    <h2>Market · OHLCV & Depth</h2>
+                    <span class=\"muted\">{{ market_state.markets | length }} tracked</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Mint</th>
+                            <th>Close</th>
+                            <th>Volume</th>
+                            <th>Spread</th>
+                            <th>Depth 1%</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for market in market_state.markets %}
+                        <tr class=\"{{ 'stale' if market.stale else '' }}\">
+                            <td>{{ market.mint }}</td>
+                            <td>{{ market.close or '—' }}</td>
+                            <td>{{ market.volume or '—' }}</td>
+                            <td>{{ market.spread_bps or '—' }}</td>
+                            <td>{{ market.depth_pct.get('1') if market.depth_pct else '—' }}</td>
+                            <td>{{ market.updated_label }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"6\" class=\"muted\">Waiting for market state…</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+
+            <article class=\"panel\">
+                <div class=\"section-title\">
+                    <h2>Golden Snapshot Inspector</h2>
+                    <span class=\"muted\">{{ golden_summary.count }} hashes</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Mint</th>
+                            <th>Hash</th>
+                            <th>Price</th>
+                            <th>Liquidity</th>
+                            <th>Published</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for snap in golden_snapshots %}
+                        <tr class=\"{{ 'stale' if snap.stale else '' }}\">
+                            <td>{{ snap.mint }}</td>
+                            <td class=\"muted\">{{ snap.hash_short }}</td>
+                            <td>{{ snap.px or '—' }}</td>
+                            <td>{{ snap.liq or '—' }}</td>
+                            <td>{{ snap.age_label }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"5\" class=\"muted\">Golden pipeline idle.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+        </section>
+
+        <section class=\"grid-two\">
+            <article class=\"panel\">
+                <div class=\"section-title\">
+                    <h2>Agent Suggestions</h2>
+                    <span class=\"muted\">{{ suggestions.suggestions | length }} live</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Agent</th>
+                            <th>Mint</th>
+                            <th>Side</th>
+                            <th>Notional</th>
+                            <th>Edge</th>
+                            <th>Slippage</th>
+                            <th>Inputs Hash</th>
+                            <th>TTL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for entry in suggestions.suggestions %}
+                        <tr class=\"{{ 'stale' if entry.stale else '' }}\">
+                            <td>{{ entry.agent }}</td>
+                            <td>{{ entry.mint }}</td>
+                            <td>{{ entry.side }}</td>
+                            <td>{{ entry.notional_usd or '—' }}</td>
+                            <td>{{ entry.edge or '—' }}</td>
+                            <td>{{ entry.max_slippage_bps or '—' }}</td>
+                            <td>
+                                <span class=\"muted\">{{ entry.inputs_hash_short }}</span>
+                                {% if entry.hash_mismatch %}<span class=\"pill stale\">mismatch</span>{% endif %}
+                            </td>
+                            <td>{{ entry.ttl_label }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"8\" class=\"muted\">No active suggestions.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+
+            <article class=\"panel\">
+                <div class=\"section-title\">
+                    <h2>Vote Window Visualiser</h2>
+                    <span class=\"muted\">{{ vote_windows.windows | length }} open</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Mint</th>
+                            <th>Side</th>
+                            <th>Quorum</th>
+                            <th>Score</th>
+                            <th>Countdown</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for window in vote_windows.windows %}
+                        <tr class=\"{{ 'stale' if window.expired else '' }}\">
+                            <td>{{ window.mint }}</td>
+                            <td>{{ window.side }}</td>
+                            <td>{{ window.quorum }}</td>
+                            <td>{{ window.score | round(3) if window.score is not none else '—' }}</td>
+                            <td>{{ window.countdown_label }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"5\" class=\"muted\">No open vote windows.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <div class=\"decision-tape\">
+                    {% for decision in vote_windows.decisions %}
+                    <div class=\"decision-card {{ 'duplicate' if decision.duplicate else '' }}\">
+                        <strong>{{ decision.mint }} · {{ decision.side }}</strong>
+                        <div class=\"muted\">clientOrderId {{ decision.client_order_id }}</div>
+                        <div>Score {{ decision.score | round(3) if decision.score is not none else '—' }} · Notional {{ decision.notional_usd or '—' }}</div>
+                        <div class=\"muted\">{{ decision.age_label }}</div>
+                    </div>
+                    {% else %}
+                    <div class=\"muted\">No decisions in tape.</div>
+                    {% endfor %}
+                </div>
+            </article>
+        </section>
+
+        <section class=\"grid-two\">
+            <article class=\"panel\">
+                <div class=\"section-title\">
+                    <h2>Shadow Execution</h2>
+                    <span class=\"muted\">{{ shadow.virtual_fills | length }} fills</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Mint</th>
+                            <th>Side</th>
+                            <th>Qty</th>
+                            <th>Price</th>
+                            <th>Slippage</th>
+                            <th>Snapshot</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for fill in shadow.virtual_fills %}
+                        <tr class=\"{{ 'stale' if fill.stale else '' }}\">
+                            <td>{{ fill.mint }}</td>
+                            <td>{{ fill.side }}</td>
+                            <td>{{ fill.qty_base or '—' }}</td>
+                            <td>{{ fill.price_usd or '—' }}</td>
+                            <td>{{ fill.slippage_bps or '—' }}</td>
+                            <td><span class=\"muted\">{{ fill.snapshot_hash_short }}</span> {% if fill.hash_mismatch %}<span class=\"pill stale\">hash</span>{% endif %}</td>
+                            <td>{{ fill.age_label }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"7\" class=\"muted\">Waiting for virtual fills…</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <h3>Paper Positions</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Mint</th>
+                            <th>Side</th>
+                            <th>Qty</th>
+                            <th>Avg Cost</th>
+                            <th>Unrealized</th>
+                            <th>Total PnL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for pos in shadow.paper_positions %}
+                        <tr>
+                            <td>{{ pos.mint }}</td>
+                            <td>{{ pos.side }}</td>
+                            <td>{{ pos.qty_base }}</td>
+                            <td>{{ pos.avg_cost }}</td>
+                            <td>{{ pos.unrealized_usd }}</td>
+                            <td>{{ pos.total_pnl_usd }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"6\" class=\"muted\">No paper positions.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+
+            <article class=\"panel\">
+                <div class=\"section-title\">
+                    <h2>RL Weights & Uplift</h2>
+                    <span class=\"muted\">{{ rl_summary.weights_applied }} windows</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Mint</th>
+                            <th>Window Hash</th>
+                            <th>Multiplier</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for entry in rl_panel.weights %}
+                        <tr class=\"{{ 'stale' if entry.stale else '' }}\">
+                            <td>{{ entry.mint }}</td>
+                            <td class=\"muted\">{{ entry.window_hash_short }}</td>
+                            <td>{{ entry.multiplier }}</td>
+                            <td>{{ entry.age_label }}</td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"4\" class=\"muted\">RL stream idle.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <div class=\"metrics\">
+                    <div class=\"metric\">
+                        <span class=\"muted\">Paper Uplift (5m)</span>
+                        <strong>{{ rl_panel.uplift.get('rolling_5m', 0) | round(4) }}</strong>
+                    </div>
+                    <div class=\"metric\">
+                        <span class=\"muted\">Last Decision Delta</span>
+                        <strong>{{ rl_panel.uplift.get('last_decision_delta', 0) | round(4) }}</strong>
+                    </div>
+                </div>
+            </article>
+        </section>
+
+        <section class=\"panel\">
+            <div class=\"section-title\">
+                <h2>Settings & Controls</h2>
+                <span class=\"muted\">{{ settings.controls | length }} controls</span>
+            </div>
+            <div class=\"control-grid\">
+                {% for control in settings.controls %}
+                <div class=\"control-card\">
+                    <strong>{{ control.label }}</strong>
+                    <div class=\"muted\">Endpoint {{ control.endpoint }}</div>
+                    <div>Status: {{ control.state }}</div>
+                    <div>TTL: {{ control.ttl_label }}</div>
+                </div>
+                {% else %}
+                <div class=\"muted\">No controls available.</div>
+                {% endfor %}
+            </div>
+        </section>
+    </div>
+</body>
+</html>
+"""
+
+
+def _json_ready(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {str(k): _json_ready(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_ready(v) for v in obj]
+    return obj
+
 
 def create_app(state: UIState | None = None) -> Flask:
     """Return a configured Flask application bound to *state*."""
@@ -155,1595 +771,125 @@ def create_app(state: UIState | None = None) -> Flask:
 
     app = Flask(__name__)  # type: ignore[arg-type]
 
+    def _status_cards(status: Dict[str, Any]) -> List[Dict[str, Any]]:
+        cards: List[Dict[str, Any]] = []
+        cards.append(
+            {
+                "label": "Event Bus",
+                "state": "ok" if status.get("event_bus") else "fail",
+                "caption": "connected" if status.get("event_bus") else "offline",
+            }
+        )
+        cards.append(
+            {
+                "label": "Trading Loop",
+                "state": "ok" if status.get("trading_loop") else "fail",
+                "caption": "running" if status.get("trading_loop") else "stopped",
+            }
+        )
+        if status.get("depth_service") is not None:
+            cards.append(
+                {
+                    "label": "Depth",
+                    "state": "ok" if status.get("depth_service") else "warn",
+                    "caption": "streaming" if status.get("depth_service") else "idle",
+                }
+            )
+        if status.get("rl_daemon") is not None:
+            cards.append(
+                {
+                    "label": "RL Daemon",
+                    "state": "ok" if status.get("rl_daemon") else "warn",
+                    "caption": "healthy" if status.get("rl_daemon") else "degraded",
+                }
+            )
+        heartbeat = status.get("heartbeat") or status.get("heartbeat_ts")
+        if heartbeat:
+            cards.append(
+                {
+                    "label": "Heartbeat",
+                    "state": "ok",
+                    "caption": str(heartbeat),
+                }
+            )
+        return cards
+
     @app.get("/")
     def index() -> Any:
         if request.args.get("format", "").lower() == "json":
-            status = state.snapshot_status()
-            summary = state.snapshot_summary()
-            discovery = state.snapshot_discovery()
-            actions = state.snapshot_actions()
-            activity = state.snapshot_activity()
-            trades = state.snapshot_trades()
-            logs = state.snapshot_logs()
-            weights = state.snapshot_weights()
-            config_summary = state.snapshot_config()
-            return jsonify(
-                {
-                    "message": "SolHunter Zero UI",
-                    "status": status,
-                    "summary": summary,
-                    "discovery": discovery,
-                    "actions": actions,
-                    "activity": activity,
-                    "trades": trades,
-                    "logs": logs,
-                    "weights": weights,
-                    "config_overview": config_summary,
-                    "endpoints": [
-                        "/health",
-                        "/status",
-                        "/summary",
-                        "/tokens",
-                        "/actions",
-                        "/activity",
-                        "/trades",
-                        "/weights",
-                        "/rl/status",
-                        "/config",
-                        "/logs",
-                    ],
-                }
-            )
+            payload = {
+                "message": "SolHunter Zero Swarm UI",
+                "status": state.snapshot_status(),
+                "summary": state.snapshot_summary(),
+                "discovery": state.snapshot_discovery_console(),
+                "token_facts": state.snapshot_token_facts(),
+                "market": state.snapshot_market_state(),
+                "golden": state.snapshot_golden_snapshots(),
+                "suggestions": state.snapshot_suggestions(),
+                "votes": state.snapshot_vote_windows(),
+                "shadow": state.snapshot_shadow(),
+                "rl": state.snapshot_rl_panel(),
+                "settings": state.snapshot_settings(),
+                "activity": state.snapshot_activity(),
+                "logs": state.snapshot_logs(),
+                "weights": state.snapshot_weights(),
+                "config_overview": state.snapshot_config(),
+                "history": state.snapshot_history(),
+            }
+            return jsonify(_json_ready(payload))
 
         status = state.snapshot_status()
-        summary_snapshot = state.snapshot_summary()
-        discovery = state.snapshot_discovery()
-        activity = state.snapshot_activity()
-        trades = state.snapshot_trades()
-        logs = state.snapshot_logs()
-        weights_raw = state.snapshot_weights()
-        weights = weights_raw if isinstance(weights_raw, dict) else {}
-        actions = state.snapshot_actions()
-        config_summary = state.snapshot_config()
-        history = state.snapshot_history()
+        status_cards = _status_cards(status)
+        discovery_console = state.snapshot_discovery_console()
+        token_facts = state.snapshot_token_facts()
+        market_state = state.snapshot_market_state()
+        golden_detail = state.snapshot_golden_snapshots()
+        suggestions = state.snapshot_suggestions()
+        vote_windows = state.snapshot_vote_windows()
+        shadow = state.snapshot_shadow()
+        rl_panel = state.snapshot_rl_panel()
+        settings = state.snapshot_settings()
 
-        if isinstance(summary_snapshot, dict):
-            iteration_summary = dict(summary_snapshot.get("iteration") or {})
-            evaluation_summary = dict(summary_snapshot.get("evaluation") or {})
-            execution_summary = dict(summary_snapshot.get("execution") or {})
-            queue_snapshot = dict(summary_snapshot.get("queues") or {})
-            tuning = list(summary_snapshot.get("tuning") or [])
-        else:
-            iteration_summary = dict(summary_snapshot or {})
-            evaluation_summary = {}
-            execution_summary = {}
-            queue_snapshot = {}
-            tuning = []
-        summary = iteration_summary
-
-        agents_map = weights.get("agents") if isinstance(weights.get("agents"), dict) else {}
-        roles_map = weights.get("roles") if isinstance(weights.get("roles"), dict) else {}
-
-        simple_weights: Dict[str, float] = {}
-        if agents_map:
-            for name, detail in agents_map.items():
-                try:
-                    simple_weights[str(name)] = float(detail.get("weight", 0.0))
-                except (TypeError, ValueError):
-                    continue
-        else:
-            for name, value in weights.items():
-                if isinstance(value, (int, float)):
-                    simple_weights[str(name)] = float(value)
-
-        weight_items: List[tuple[str, float]] = []
-        for name, value in simple_weights.items():
-            weight_items.append((name, value))
-        weight_items.sort(key=lambda item: item[1], reverse=True)
-
-        weights_roles: List[Dict[str, Any]] = []
-        roles_source: Dict[str, Any] = roles_map if roles_map else {}
-        if not roles_source and agents_map:
-            temp_roles: Dict[str, Dict[str, Any]] = {}
-            for name, detail in agents_map.items():
-                role_name = str(detail.get("role") or "buyer").lower()
-                bucket = temp_roles.setdefault(
-                    role_name,
-                    {"agents": [], "inactive": [], "weight": 0.0},
-                )
-                bucket["agents"].append(dict(detail))
-                try:
-                    bucket["weight"] += max(0.0, float(detail.get("weight", 0.0)))
-                except (TypeError, ValueError):
-                    continue
-            roles_source = temp_roles
-
-        total_active_weight = 0.0
-        for role_name, payload in roles_source.items():
-            payload = dict(payload)
-            label = role_name.replace("_", " ").title()
-            raw_share = payload.get("share")
-            try:
-                share_value = float(raw_share) if raw_share is not None else None
-            except (TypeError, ValueError):
-                share_value = None
-            weight_value = payload.get("active_weight", payload.get("weight", 0.0))
-            try:
-                weight_float = float(weight_value)
-            except (TypeError, ValueError):
-                weight_float = 0.0
-            total_active_weight += max(0.0, weight_float)
-            agents_list: List[Dict[str, Any]] = []
-            raw_agents = payload.get("agents") if isinstance(payload.get("agents"), list) else []
-            for detail in raw_agents:
-                if not isinstance(detail, dict):
-                    continue
-                agent_name = str(detail.get("agent") or "").strip()
-                metrics_raw = detail.get("metrics") or {}
-                metrics: Dict[str, Any] = {}
-                for key in ("avg_roi", "max_roi", "min_roi", "avg_success", "avg_amount", "avg_price"):
-                    val = metrics_raw.get(key)
-                    metrics[key] = float(val) if isinstance(val, (int, float)) else None
-                try:
-                    agent_weight = float(detail.get("weight", 0.0))
-                except (TypeError, ValueError):
-                    agent_weight = 0.0
-                role_share = detail.get("role_share")
-                global_share = detail.get("global_share")
-                try:
-                    role_share_val = float(role_share) if role_share is not None else None
-                except (TypeError, ValueError):
-                    role_share_val = None
-                try:
-                    global_share_val = float(global_share) if global_share is not None else None
-                except (TypeError, ValueError):
-                    global_share_val = None
-                agents_list.append(
-                    {
-                        "agent": agent_name or "unknown",
-                        "weight": agent_weight,
-                        "role_share": role_share_val,
-                        "global_share": global_share_val,
-                        "proposals": int(detail.get("proposals", 0) or 0),
-                        "metrics": metrics,
-                        "sides": detail.get("sides") or [],
-                        "requirements": detail.get("requirements") or [],
-                        "blocked_reason": detail.get("blocked_reason"),
-                        "simulation": detail.get("simulation") or {},
-                    }
-                )
-            inactive_list: List[Dict[str, Any]] = []
-            raw_inactive = payload.get("inactive") if isinstance(payload.get("inactive"), list) else []
-            for detail in raw_inactive:
-                if not isinstance(detail, dict):
-                    continue
-                agent_name = str(detail.get("agent") or "").strip()
-                try:
-                    inactive_weight = float(detail.get("weight", 0.0))
-                except (TypeError, ValueError):
-                    inactive_weight = 0.0
-                inactive_list.append(
-                    {
-                        "agent": agent_name or "unknown",
-                        "weight": inactive_weight,
-                        "requirements": detail.get("requirements") or [],
-                        "blocked_reason": detail.get("blocked_reason"),
-                    }
-                )
-            role_entry = {
-                "name": role_name,
-                "label": label,
-                "share": share_value,
-                "weight": weight_float,
-                "agents": agents_list,
-                "inactive": inactive_list,
-            }
-            weights_roles.append(role_entry)
-
-        normalised_roles: List[Dict[str, Any]] = []
-        for entry in weights_roles:
-            if isinstance(entry, dict):
-                normalised_roles.append(entry)
-            elif isinstance(entry, (list, tuple)) and entry:
-                name = str(entry[0])
-                try:
-                    share_val = float(entry[1]) if len(entry) > 1 else 0.0
-                except (TypeError, ValueError):
-                    share_val = 0.0
-                normalised_roles.append(
-                    {
-                        "name": name,
-                        "label": name.replace("_", " ").title(),
-                        "share": share_val,
-                        "weight": share_val,
-                        "agents": [],
-                        "inactive": [],
-                    }
-                )
-        weights_roles = normalised_roles
-
-        if weights_roles:
-            for entry in weights_roles:
-                role_weight = max(0.0, float(entry.get("weight", 0.0)))
-                agents_list = entry.get("agents", [])
-                role_total = sum(max(0.0, float(agent.get("weight", 0.0))) for agent in agents_list) or role_weight
-                if entry.get("share") is None:
-                    entry["share"] = (role_weight / total_active_weight) if total_active_weight > 0 else 0.0
-                for agent in agents_list:
-                    if agent.get("role_share") is None:
-                        agent["role_share"] = (
-                            (agent.get("weight", 0.0) / role_total) if role_total > 0 else 0.0
-                        )
-                    if agent.get("global_share") is None:
-                        entry_share = entry.get("share", 0.0)
-                        if entry_share:
-                            agent["global_share"] = agent["role_share"] * entry_share
-                        elif total_active_weight > 0:
-                            agent["global_share"] = agent.get("weight", 0.0) / total_active_weight
-                        else:
-                            agent["global_share"] = 0.0
-                agents_list.sort(
-                    key=lambda item: item.get("global_share", item.get("weight", 0.0)),
-                    reverse=True,
-                )
-            weights_roles.sort(key=lambda item: item.get("share", item.get("weight", 0.0)), reverse=True)
-            for entry in weights_roles:
-                share_val = entry.get("share", 0.0)
-                try:
-                    entry["share"] = float(share_val)
-                except (TypeError, ValueError):
-                    entry["share"] = 0.0
-        elif weight_items:
-            total_simple_weight = sum(max(0.0, value) for _, value in weight_items)
-            for name, value in weight_items:
-                share = (value / total_simple_weight) if total_simple_weight > 0 else 0.0
-                weights_roles.append(
-                    {
-                        "name": name,
-                        "label": name,
-                        "share": share,
-                        "weight": value,
-                        "agents": [
-                            {
-                                "agent": name,
-                                "weight": value,
-                                "role_share": 1.0,
-                                "global_share": share,
-                                "proposals": 0,
-                                "metrics": {},
-                                "sides": [],
-                            }
-                        ],
-                        "inactive": [],
-                    }
-                )
-
-        weights_labels = [entry["label"] for entry in weights_roles]
-        weights_values = [
-            float(entry.get("share", 0.0))
-            if isinstance(entry.get("share"), (int, float))
-            else float(entry.get("weight", 0.0))
-            for entry in weights_roles
-        ]
-        weights_sorted = [
-            {
-                "label": entry["label"],
-                "share": float(entry.get("share", 0.0)),
-                "weight": float(entry.get("weight", 0.0)),
-            }
-            for entry in weights_roles
-        ]
-        if weights_roles:
-            weights_aria_label = "Role weight distribution: " + ", ".join(
-                f"{entry['label']} {entry['share'] * 100:.1f}%"
-                for entry in weights_roles
-            )
-            weights_sample = {
-                entry["label"]: entry["share"] for entry in weights_roles[:5]
-            }
-        elif weight_items:
-            weights_aria_label = "Agent weights distribution: " + ", ".join(
-                f"{name} weight {value}" for name, value in weight_items
-            )
-            weights_sample = dict(weight_items[:5])
-        else:
-            weights_labels = []
-            weights_values = []
-            weights_sorted = []
-            weights_aria_label = "Agent weights unavailable"
-            weights_sample = {}
-
-        weights_count = len(agents_map) if agents_map else len(weight_items)
-
-        counts = {
-            "activity": len(activity),
-            "trades": len(trades),
-            "logs": len(logs),
-            "weights": weights_count,
-            "actions": len(actions),
+        golden_snapshots = golden_detail.get("snapshots", [])
+        golden_summary = {
+            "count": len(golden_snapshots),
         }
-        heartbeat_value = status.get("heartbeat") or "n/a"
-        iterations_completed_raw = (
-            status.get("iterations_completed")
-            or status.get("iterations")
-            or status.get("iterations_complete")
-        )
-        try:
-            iterations_completed = int(iterations_completed_raw)
-        except (TypeError, ValueError):
-            iterations_completed = 0
-        trade_count_raw = status.get("trade_count")
-        if trade_count_raw is None:
-            trade_count_raw = len(trades)
-        try:
-            trade_count = int(trade_count_raw)
-        except (TypeError, ValueError):
-            trade_count = len(trades)
-        last_elapsed = None
-        if summary:
-            elapsed_val = summary.get("elapsed_s")
-            try:
-                last_elapsed = float(elapsed_val) if elapsed_val is not None else None
-            except (TypeError, ValueError):
-                last_elapsed = None
-        trades_per_iteration = (
-            trade_count / iterations_completed if iterations_completed else 0.0
-        )
-        iteration_caption: str
-        if iterations_completed:
-            if last_elapsed is not None:
-                iteration_caption = f"Last run {last_elapsed:.1f}s"
-            else:
-                iteration_caption = "Tracking iterations"
-        else:
-            iteration_caption = "Awaiting first iteration"
-        trades_caption = (
-            f"{trades_per_iteration:.2f} per iteration"
-            if iterations_completed
-            else "No iterations yet"
-        )
-        heartbeat_caption = (
-            "Trading loop online"
-            if status.get("trading_loop") or status.get("event_bus")
-            else "Loop offline"
-        )
-        stat_tiles = [
-            {
-                "title": "Heartbeat",
-                "value": heartbeat_value,
-                "caption": heartbeat_caption,
-                "icon": """
-                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
-                        <path d=\"M4.318 6.318c-1.756 1.756-1.756 4.604 0 6.36L12 20.36l7.682-7.682c1.756-1.756 1.756-4.604 0-6.36-1.756-1.756-4.604-1.756-6.36 0L12 4.64l-1.322-1.322c-1.756-1.756-4.604-1.756-6.36 0z\" />
-                        <polyline points=\"9 11.5 11 14 13 10 15 12\" />
-                    </svg>
-                """,
-                "css_class": "heartbeat",
-            },
-            {
-                "title": "Iterations",
-                "value": f"{iterations_completed:,}",
-                "caption": iteration_caption,
-                "icon": """
-                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
-                        <path d=\"M3 12a9 9 0 1 1 9 9\" />
-                        <polyline points=\"3 3 3 9 9 9\" />
-                        <path d=\"M12 7v5l3 2\" />
-                    </svg>
-                """,
-                "css_class": "iterations",
-            },
-            {
-                "title": "Trades",
-                "value": f"{trade_count:,}",
-                "caption": trades_caption,
-                "icon": """
-                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
-                        <path d=\"M3 6h18\" />
-                        <path d=\"M5 6v14h14V6\" />
-                        <path d=\"M9 10h6\" />
-                        <path d=\"M9 14h4\" />
-                    </svg>
-                """,
-                "css_class": "trades",
-            },
-        ]
-        weights_sample = dict(weight_items[:10]) if weight_items else {}
-        samples = {
-            "activity": activity[-5:],
-            "trades": trades[-5:],
-            "logs": logs[-5:],
-            "weights": weights_sample,
-            "actions": actions[-5:],
+        suggestion_metrics = suggestions.get("metrics", {})
+        rl_summary = {
+            "weights_applied": len(rl_panel.get("weights", [])),
         }
-        discovery_recent_all = list(discovery.get("recent", []))
-        discovery_recent_total = len(discovery_recent_all)
-        discovery_recent_summary = list(
-            reversed(discovery_recent_all[-3:])
-        )
-        discovery_recent_display = list(
-            reversed(discovery_recent_all[-120:])
-        )
-        logs_all = list(logs)
-        logs_total = len(logs_all)
-        logs_summary = list(reversed(logs_all[-3:]))
-        logs_display = list(reversed(logs_all[-200:]))
-        config_overview = {
-            "config_path": config_summary.get("config_path"),
-            "agents": config_summary.get("agents"),
-            "loop_delay": config_summary.get("loop_delay"),
-            "min_delay": config_summary.get("min_delay"),
-            "max_delay": config_summary.get("max_delay"),
+        swarm_overall = {
+            "stale": suggestions.get("metrics", {}).get("stale", False),
+            "age_label": suggestions.get("metrics", {}).get("updated_label", "n/a"),
         }
-        template = """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="utf-8" />
-            <meta name="viewport" content="width=device-width, initial-scale=1" />
-            <meta http-equiv="refresh" content="5" />
-            <title>SolHunter Zero Dashboard</title>
-            <style>
-                :root {
-                    color-scheme: dark;
-                    --bg: #0d1117;
-                    --panel: #161b22;
-                    --border: #30363d;
-                    --text: #e6edf3;
-                    --muted: #8b949e;
-                    --accent: #58a6ff;
-                    --danger: #ff7b72;
-                    --success: #3fb950;
-                }
-                body {
-                    margin: 0;
-                    padding: 24px;
-                    font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, sans-serif;
-                    background: linear-gradient(160deg, #05070d 0%, #0d1117 40%, #05070d 100%);
-                    color: var(--text);
-                }
-                h1, h2, h3 {
-                    margin-top: 0;
-                    font-weight: 600;
-                }
-                a { color: var(--accent); text-decoration: none; }
-                a:hover { text-decoration: underline; }
-                .grid {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-                    gap: 20px;
-                }
-                .panel {
-                    background: rgba(22, 27, 34, 0.85);
-                    border: 1px solid var(--border);
-                    border-radius: 18px;
-                    padding: 20px;
-                    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
-                    backdrop-filter: blur(10px);
-                }
-                .panel h2 {
-                    border-bottom: 1px solid rgba(88, 166, 255, 0.2);
-                    padding-bottom: 8px;
-                    margin-bottom: 16px;
-                }
-                table {
-                    width: 100%;
-                    border-collapse: collapse;
-                    font-size: 0.95rem;
-                }
-                th, td {
-                    text-align: left;
-                    padding: 6px 4px;
-                    border-bottom: 1px solid rgba(48, 54, 61, 0.6);
-                }
-                th { color: var(--muted); font-weight: 500; }
-                .badge {
-                    display: inline-block;
-                    padding: 4px 8px;
-                    border-radius: 999px;
-                    background-color: rgba(88, 166, 255, 0.12);
-                    color: var(--accent);
-                    font-size: 0.8rem;
-                    margin-right: 6px;
-                }
-                .badge.danger { color: var(--danger); background: rgba(255, 123, 114, 0.12); }
-                .badge.success { color: var(--success); background: rgba(63, 185, 80, 0.12); }
-                .badge.disabled { color: var(--muted); background: rgba(139, 148, 158, 0.18); }
-                .badge.attention { color: #ffdf5d; background: rgba(255, 223, 93, 0.14); }
-                ul { padding-left: 18px; margin: 0; }
-                li { margin-bottom: 6px; }
-                .muted { color: var(--muted); font-size: 0.88rem; }
-                .endpoint-list { display: flex; flex-wrap: wrap; gap: 10px; }
-                .endpoint-list a {
-                    padding: 6px 10px;
-                    border-radius: 12px;
-                    background: rgba(88, 166, 255, 0.12);
-                    border: 1px solid rgba(88, 166, 255, 0.2);
-                }
-                .two-column {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-                    gap: 20px;
-                }
-                pre {
-                    background: rgba(13, 17, 23, 0.8);
-                    border: 1px solid var(--border);
-                    border-radius: 12px;
-                    padding: 16px;
-                    overflow: auto;
-                    max-height: 360px;
-                }
-                .agent-row.needs-attention {
-                    background: linear-gradient(90deg, rgba(255, 123, 114, 0.08), rgba(255, 123, 114, 0.0));
-                }
-                .agent-row.needs-attention td {
-                    border-bottom-color: rgba(255, 123, 114, 0.25);
-                }
-                .agent-row:hover td {
-                    background: rgba(88, 166, 255, 0.05);
-                }
-                @keyframes pulseGlow {
-                    0% { text-shadow: 0 0 0 rgba(88, 166, 255, 0.0); }
-                    40% { text-shadow: 0 0 12px rgba(88, 166, 255, 0.7); }
-                    70% { text-shadow: 0 0 8px rgba(88, 166, 255, 0.4); }
-                    100% { text-shadow: 0 0 0 rgba(88, 166, 255, 0.0); }
-                }
-                header {
-                    display: grid;
-                    grid-template-columns: 1fr auto;
-                    align-items: start;
-                    gap: 20px;
-                    margin-bottom: 24px;
-                }
-                header h1 { font-size: 1.8rem; margin-bottom: 12px; }
-                header .meta { text-align: right; font-size: 0.9rem; color: var(--muted); }
-                header .headline { display: flex; flex-direction: column; gap: 12px; }
-                header .stat-tiles {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-                    gap: 14px;
-                }
-                .stat-tile {
-                    position: relative;
-                    overflow: hidden;
-                    border-radius: 16px;
-                    padding: 14px 16px;
-                    border: 1px solid rgba(88, 166, 255, 0.15);
-                    background: linear-gradient(135deg, rgba(13, 17, 23, 0.9), rgba(23, 32, 45, 0.8));
-                    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
-                    display: grid;
-                    grid-template-columns: auto 1fr;
-                    gap: 12px;
-                    align-items: center;
-                }
-                .stat-tile::before {
-                    content: "";
-                    position: absolute;
-                    inset: -40% -60% auto -60%;
-                    height: 140%;
-                    background: radial-gradient(circle at top, rgba(88, 166, 255, 0.45), transparent 65%);
-                    transform: rotate(12deg);
-                    pointer-events: none;
-                }
-                .stat-tile.heartbeat::before {
-                    background: radial-gradient(circle at top, rgba(255, 123, 114, 0.55), transparent 65%);
-                }
-                .stat-icon {
-                    width: 44px;
-                    height: 44px;
-                    border-radius: 12px;
-                    background: linear-gradient(160deg, rgba(88, 166, 255, 0.18), rgba(88, 166, 255, 0));
-                    display: grid;
-                    place-items: center;
-                    color: var(--accent);
-                    box-shadow: inset 0 0 12px rgba(88, 166, 255, 0.25);
-                }
-                .stat-icon svg { width: 26px; height: 26px; }
-                .stat-content { position: relative; z-index: 1; }
-                .stat-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-                .stat-value { font-size: 1.5rem; font-weight: 600; margin-top: 4px; }
-                .stat-caption { font-size: 0.85rem; color: rgba(230, 237, 243, 0.75); margin-top: 4px; }
-                .heartbeat-value { animation: pulseGlow 2.8s ease-in-out infinite; color: var(--accent); }
-                @media (max-width: 900px) {
-                    header { grid-template-columns: 1fr; }
-                    header .meta { text-align: left; }
-                }
-                @media (max-width: 540px) {
-                    body { padding: 18px 16px; }
-                    header .stat-tiles { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
-                }
-                @media (max-width: 360px) {
-                    header .stat-tiles { grid-template-columns: 1fr; }
-                    .stat-tile { grid-template-columns: 1fr; }
-                    .stat-icon { width: 38px; height: 38px; }
-                }
-                .status-grid {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-                    gap: 12px;
-                    margin-top: 12px;
-                }
-                .status-card {
-                    background: rgba(13, 17, 23, 0.7);
-                    border: 1px solid var(--border);
-                    border-radius: 14px;
-                    padding: 12px;
-                }
-                details.collapsible {
-                    border: 1px solid rgba(88, 166, 255, 0.18);
-                    border-radius: 14px;
-                    background: rgba(13, 17, 23, 0.6);
-                    transition: border-color 0.3s ease, box-shadow 0.3s ease;
-                    position: relative;
-                }
-                details.collapsible:hover,
-                details.collapsible:focus-within {
-                    border-color: rgba(88, 166, 255, 0.45);
-                    box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.15), 0 12px 40px rgba(45, 104, 255, 0.18);
-                }
-                details.collapsible summary {
-                    list-style: none;
-                    cursor: pointer;
-                    padding: 14px 18px;
-                    display: flex;
-                    align-items: center;
-                    gap: 16px;
-                    user-select: none;
-                }
-                .weights-chart-container {
-                    position: relative;
-                    min-height: 220px;
-                }
-                .weights-chart-container canvas {
-                    display: block;
-                    max-width: 420px;
-                    margin: 0 auto;
-                }
-                .weights-legend {
-                    margin-top: 18px;
-                    display: flex;
-                    flex-wrap: wrap;
-                    justify-content: center;
-                    gap: 10px;
-                }
-                .weights-legend span {
-                    display: inline-flex;
-                    align-items: center;
-                    gap: 8px;
-                    padding: 6px 12px;
-                    border-radius: 999px;
-                    background: rgba(88, 166, 255, 0.12);
-                    border: 1px solid rgba(88, 166, 255, 0.25);
-                    color: var(--text);
-                    font-size: 0.85rem;
-                }
-                .weights-legend .legend-dot {
-                    width: 10px;
-                    height: 10px;
-                    border-radius: 50%;
-                    background: var(--accent);
-                }
-                .weights-legend .legend-value {
-                    color: var(--muted);
-                    font-variant-numeric: tabular-nums;
-                }
-                .sr-only {
-                    position: absolute;
-                    width: 1px;
-                    height: 1px;
-                    padding: 0;
-                    margin: -1px;
-                    overflow: hidden;
-                    clip: rect(0, 0, 0, 0);
-                    white-space: nowrap;
-                    border: 0;
-                }
-                details.collapsible summary::-webkit-details-marker { display: none; }
-                details.collapsible summary:focus-visible {
-                    outline: 2px solid var(--accent);
-                    outline-offset: 4px;
-                }
-                .collapsible-summary {
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 12px;
-                    flex: 1;
-                    align-items: center;
-                }
-                .summary-stack {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 4px;
-                    min-width: 160px;
-                }
-                .summary-title {
-                    font-size: 0.75rem;
-                    letter-spacing: 0.08em;
-                    text-transform: uppercase;
-                    color: var(--muted);
-                }
-                .summary-count {
-                    font-size: 0.95rem;
-                    color: var(--accent);
-                    font-weight: 600;
-                }
-                details.collapsible[open] .summary-count {
-                    color: #8dbbff;
-                }
-                .summary-peek {
-                    display: flex;
-                    align-items: center;
-                    flex-wrap: wrap;
-                    gap: 8px;
-                    font-size: 0.85rem;
-                    color: rgba(230, 237, 243, 0.8);
-                }
-                .peek-chip {
-                    padding: 4px 8px;
-                    border-radius: 999px;
-                    background: rgba(88, 166, 255, 0.12);
-                    border: 1px solid rgba(88, 166, 255, 0.2);
-                    box-shadow: 0 0 8px rgba(88, 166, 255, 0.2);
-                    white-space: nowrap;
-                }
-                .caret {
-                    margin-left: auto;
-                    width: 14px;
-                    height: 14px;
-                    position: relative;
-                }
-                .caret::before {
-                    content: "";
-                    position: absolute;
-                    inset: 0;
-                    border-right: 2px solid var(--accent);
-                    border-bottom: 2px solid var(--accent);
-                    transform: rotate(-45deg);
-                    transform-origin: center;
-                    transition: transform 0.35s ease, box-shadow 0.35s ease;
-                    box-shadow: 0 0 10px rgba(88, 166, 255, 0.6);
-                }
-                details.collapsible[open] .caret::before {
-                    transform: rotate(45deg);
-                    box-shadow: 0 0 14px rgba(88, 166, 255, 0.85);
-                }
-                .collapsible-body {
-                    max-height: 0;
-                    opacity: 0;
-                    overflow: hidden;
-                    transition: max-height 0.4s ease, opacity 0.4s ease, padding 0.4s ease;
-                    padding: 0 18px;
-                }
-                details.collapsible[open] .collapsible-body {
-                    max-height: 520px;
-                    opacity: 1;
-                    padding: 12px 18px 18px;
-                }
-                .collapsible-scroll {
-                    max-height: 320px;
-                    overflow-y: auto;
-                    padding-right: 6px;
-                    margin-top: 10px;
-                }
-                .chip-group {
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 8px;
-                    margin-top: 10px;
-                }
-            </style>
-            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        </head>
-        <body>
-            <header>
-                <div class="headline">
-                    <h1>SolHunter Zero Dashboard</h1>
-                    <div class="stat-tiles">
-                        {% for tile in stat_tiles %}
-                            <div class="stat-tile {{ tile.css_class }}">
-                                <div class="stat-icon" aria-hidden="true">{{ tile.icon | safe }}</div>
-                                <div class="stat-content">
-                                    <div class="stat-label">{{ tile.title }}</div>
-                                    <div class="stat-value {% if tile.css_class == 'heartbeat' %}heartbeat-value{% endif %}">{{ tile.value }}</div>
-                                    <div class="stat-caption">{{ tile.caption }}</div>
-                                </div>
-                            </div>
-                        {% endfor %}
-                    </div>
-                </div>
-                <div class="meta">
-                    <div>Auto-refreshing every 5s</div>
-                    <div>JSON view: <a href="/?format=json">/?format=json</a></div>
-                </div>
-            </header>
-
-            <section class="grid">
-                <div class="panel">
-                    <h2>Status</h2>
-                    <div class="status-grid">
-                        {% for key, value in status.items() %}
-                            {% if key not in ('recent_tokens', 'last_iteration', 'iterations_completed', 'trade_count', 'activity_count', 'heartbeat', 'pipeline_tokens', 'pipeline_size', 'rl_daemon_status') %}
-                                <div class="status-card">
-                                    <div class="muted">{{ key }}</div>
-                                    <div style="font-size:1.2rem; font-weight:600; margin-top:4px;">
-                                        {% if key == 'rl_daemon' and status.get('rl_daemon_status') %}
-                                            {% set rl = status.get('rl_daemon_status') %}
-                                            {% if not rl.get('enabled', False) %}
-                                                <span class="badge disabled">DISABLED</span>
-                                            {% else %}
-                                                <span class="badge {{ 'success' if rl.get('running') else 'danger' }}">{{ 'ONLINE' if rl.get('running') else 'OFFLINE' }}</span>
-                                            {% endif %}
-                                        {% elif value in (True, False) %}
-                                            <span class="badge {{ 'success' if value else 'danger' }}">{{ 'ONLINE' if value else 'OFFLINE' }}</span>
-                                        {% else %}
-                                            {{ value if value is not none else '—' }}
-                                        {% endif %}
-                                    </div>
-                                    {% if key == 'rl_daemon' and status.get('rl_daemon_status') %}
-                                        {% set rl = status.get('rl_daemon_status') %}
-                                        {% if rl.get('source') or rl.get('error') %}
-                                            <div class="muted" style="font-size:0.75rem; margin-top:4px;">
-                                                {% if rl.get('source') %}{{ rl.get('source').capitalize() }} daemon{% endif %}
-                                                {% if rl.get('error') %}
-                                                    {% if rl.get('source') %} · {% endif %}{{ rl.get('error') }}
-                                                {% endif %}
-                                            </div>
-                                        {% endif %}
-                                    {% endif %}
-                                </div>
-                            {% endif %}
-                        {% endfor %}
-                    </div>
-                    {% if status.get('last_iteration') %}
-                        <div style="margin-top:16px;">
-                            <div class="muted">Last iteration</div>
-                            <div style="margin-top:6px;">Timestamp: {{ status['last_iteration'].get('timestamp') or 'n/a' }}</div>
-                            <div>Actions: {{ status['last_iteration'].get('actions') or 0 }} · Discovered: {{ status['last_iteration'].get('discovered') or 0 }} · Duration: {{ status['last_iteration'].get('elapsed_s') or 0 }}s</div>
-                            <div>Fallback used: {{ 'Yes' if status['last_iteration'].get('fallback_used') else 'No' }}</div>
-                        </div>
-                    {% endif %}
-                    {% if status.get('pipeline_tokens') %}
-                        <div style="margin-top:16px;">
-                            <div class="muted">Pipeline ({{ status.get('pipeline_size', 0) }} queued)</div>
-                            <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">
-                                {% for token in status.get('pipeline_tokens')[:12] %}
-                                    <span class="badge">{{ token }}</span>
-                                {% endfor %}
-                            </div>
-                        </div>
-                    {% endif %}
-                </div>
-
-                <div class="panel">
-                    <h2>Iteration Summary</h2>
-                    {% if summary %}
-                        <table>
-                            <tr><th>Timestamp</th><td>{{ summary.get('timestamp') }}</td></tr>
-                            <tr><th>Elapsed</th><td>{{ summary.get('elapsed_s') or '—' }} s</td></tr>
-                            <tr><th>Actions</th><td>{{ summary.get('actions_count') }}</td></tr>
-                            <tr><th>Any trade</th><td>{{ 'Yes' if summary.get('any_trade') else 'No' }}</td></tr>
-                            <tr><th>Discovered</th><td>{{ summary.get('discovered_count') }}</td></tr>
-                            <tr><th>Picked Tokens</th><td>{{ summary.get('picked_tokens') }}</td></tr>
-                            <tr><th>Committed</th><td>{{ 'Yes' if summary.get('committed') else 'No' }}</td></tr>
-                        </table>
-                        {% set telemetry = summary.get('telemetry') or {} %}
-                        {% if telemetry %}
-                            <div style="margin-top:12px;">
-                                <div class="muted">Telemetry</div>
-                                <table style="margin-top:6px;">
-                                    {% if telemetry.get('evaluation') %}
-                                        <tr>
-                                            <th>Eval Workers</th>
-                                            <td>{{ telemetry['evaluation'].get('workers') }} · avg {{ '%.2f'|format(telemetry['evaluation'].get('latency_avg', 0)) }}s · max {{ '%.2f'|format(telemetry['evaluation'].get('latency_max', 0)) }}s</td>
-                                        </tr>
-                                        <tr><th>Evaluations</th><td>{{ telemetry['evaluation'].get('completed') }}</td></tr>
-                                    {% endif %}
-                                    {% if telemetry.get('execution') %}
-                                        <tr>
-                                            <th>Execution Lanes</th>
-                                            <td>
-                                                {% for lane, size in (telemetry['execution'].get('lanes') or {}).items() %}
-                                                    <span class="badge">{{ lane }}: {{ size }}</span>
-                                                {% else %}
-                                                    none
-                                                {% endfor %}
-                                            </td>
-                                        </tr>
-                                        <tr><th>Submitted</th><td>{{ telemetry['execution'].get('submitted') }} · workers {{ telemetry['execution'].get('lane_workers') }}</td></tr>
-                                    {% endif %}
-                                    {% if telemetry.get('pipeline') %}
-                                        <tr><th>Queued</th><td>{{ telemetry['pipeline'].get('queued') }} / {{ telemetry['pipeline'].get('limit') }}</td></tr>
-                                    {% endif %}
-                                </table>
-                            </div>
-                        {% endif %}
-                        {% if summary.get('errors') %}
-                            <div style="margin-top:12px;">
-                                <div class="muted">Errors</div>
-                                <ul>
-                                    {% for err in summary.get('errors') %}
-                                        <li style="color: var(--danger);">{{ err }}</li>
-                                    {% endfor %}
-                                </ul>
-                            </div>
-                        {% endif %}
-                    {% else %}
-                        <div class="muted">Trading loop has not completed an iteration yet.</div>
-                    {% endif %}
-                </div>
-
-                <div class="panel">
-                    <h2>Discovery</h2>
-                    <details class="collapsible">
-                        <summary>
-                            <div class="collapsible-summary">
-                                <div class="summary-stack">
-                                    <div class="summary-title">Recent Tokens</div>
-                                    <div class="summary-count">{{ discovery_recent_total }} tracked</div>
-                                </div>
-                                <div class="summary-peek" aria-hidden="true">
-                                    {% if discovery_recent_summary %}
-                                        {% for token in discovery_recent_summary %}
-                                            <span class="peek-chip">{{ token }}</span>
-                                        {% endfor %}
-                                    {% else %}
-                                        <span class="muted">Waiting for discovery results…</span>
-                                    {% endif %}
-                                </div>
-                            </div>
-                            <span class="caret" aria-hidden="true"></span>
-                        </summary>
-                        <div class="collapsible-body">
-                            {% if discovery_recent_display %}
-                                <div class="muted">Newest {{ discovery_recent_display|length }} tokens shown below.</div>
-                                <div class="collapsible-scroll">
-                                    <ul>
-                                        {% for token in discovery_recent_display %}
-                                            <li>{{ token }}</li>
-                                        {% endfor %}
-                                    </ul>
-                                </div>
-                            {% else %}
-                                <div class="muted">Waiting for discovery results…</div>
-                            {% endif %}
-                            {% if discovery.get('latest_iteration_tokens') %}
-                                <div class="muted" style="margin-top:14px;">Latest iteration tokens ({{ discovery.get('latest_iteration_tokens')|length }}):</div>
-                                <div class="chip-group" role="list">
-                                    {% for token in discovery.get('latest_iteration_tokens')[:20] %}
-                                        <span class="peek-chip" role="listitem">{{ token }}</span>
-                                    {% endfor %}
-                                </div>
-                            {% endif %}
-                        </div>
-                    </details>
-                </div>
-
-                <div class="panel">
-                    <h2>Counts</h2>
-                    <table>
-                        {% for key, val in counts.items() %}
-                            <tr><th>{{ key }}</th><td>{{ val }}</td></tr>
-                        {% endfor %}
-                    </table>
-                    <div style="margin-top: 14px;" class="muted">Endpoints</div>
-                    <div class="endpoint-list">
-                        {% for link in ['health','status','summary','tokens','actions','activity','trades','weights','rl/status','config','logs'] %}
-                            <a href="/{{ link }}">/{{ link }}</a>
-                        {% endfor %}
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <h2>Agent Diagnostics</h2>
-                    {% if evaluation_summary %}
-                        <table>
-                            <tr><th>Token</th><td>{{ evaluation_summary.get('token') }}</td></tr>
-                            <tr><th>Latency</th><td>{{ '%.2f'|format(evaluation_summary.get('latency', 0)) }}s</td></tr>
-                            <tr><th>Actions</th><td>{{ evaluation_summary.get('actions') }}</td></tr>
-                            <tr><th>Cached</th><td>{{ 'Yes' if evaluation_summary.get('cached') else 'No' }}</td></tr>
-                            {% if evaluation_summary.get('errors') %}
-                                <tr><th>Errors</th><td>{{ evaluation_summary.get('errors') }}</td></tr>
-                            {% endif %}
-                        </table>
-                    {% else %}
-                        <div class="muted">Waiting for evaluation telemetry…</div>
-                    {% endif %}
-
-                    {% if tuning %}
-                        <div class="muted" style="margin-top:14px;">Per-agent suggestions</div>
-                        <table style="margin-top:6px;">
-                            <tr>
-                                <th>Agent</th>
-                                <th>Status</th>
-                                <th>Weight</th>
-                                <th>Global Share</th>
-                                <th>Proposals</th>
-                                <th>Avg ROI</th>
-                                <th>Avg Success</th>
-                                <th>Requirements</th>
-                                <th>Details</th>
-                            </tr>
-                            {% for entry in tuning %}
-                                <tr class="agent-row{% if entry.needs_attention %} needs-attention{% endif %}">
-                                    <td>{{ entry.agent }}</td>
-                                    <td>
-                                        {% if entry.status == 'proposed' %}
-                                            <span class="badge success">proposed</span>
-                                        {% elif entry.status == 'error' %}
-                                            <span class="badge danger">error</span>
-                                        {% elif entry.needs_attention %}
-                                            <span class="badge attention">needs input</span>
-                                        {% else %}
-                                            <span class="badge disabled">no-trade</span>
-                                        {% endif %}
-                                    </td>
-                                    <td>
-                                        {% if entry.weight is not none %}
-                                            {{ '%.4f'|format(entry.weight) }}
-                                        {% else %}
-                                            —
-                                        {% endif %}
-                                    </td>
-                                    <td>
-                                        {% if entry.global_share is not none %}
-                                            {{ '%.1f'|format(entry.global_share * 100) }}%
-                                        {% else %}
-                                            —
-                                        {% endif %}
-                                    </td>
-                                    <td>{{ entry.proposals }}</td>
-                                    <td>
-                                        {% if entry.metrics and entry.metrics.avg_roi is not none %}
-                                            {{ '%.3f'|format(entry.metrics.avg_roi) }}
-                                        {% else %}
-                                            <span class="muted">n/a</span>
-                                        {% endif %}
-                                    </td>
-                                    <td>
-                                        {% if entry.metrics and entry.metrics.avg_success is not none %}
-                                            {{ '%.1f'|format(entry.metrics.avg_success * 100) }}%
-                                        {% else %}
-                                            <span class="muted">n/a</span>
-                                        {% endif %}
-                                    </td>
-                                    <td>
-                                        {% if entry.requirements %}
-                                            <ul style="list-style:none; padding-left:0; margin:0;">
-                                                {% for req in entry.requirements[:3] %}
-                                                    <li>
-                                                        <span class="muted">{{ req.parameter }}</span>:
-                                                        {% if req.current is not none %}
-                                                            <div class="req-values">
-                                                                <span class="req-current">current {{ '%.3f'|format(req.current) }}</span>
-                                                                <span class="muted">→</span>
-                                                                <span class="req-target">target {{ '%.3f'|format(req.target) }}</span>
-                                                            </div>
-                                                            {% set delta = req.get('delta') %}
-                                                            {% if delta is none %}
-                                                                {% set delta = req.target - req.current %}
-                                                            {% endif %}
-                                                            {% if req.met is not none %}
-                                                                {% if req.met %}
-                                                                    <span class="badge success">met</span>
-                                                                {% else %}
-                                                                    <span class="badge danger">
-                                                                        {% if req.kind == 'max' %}
-                                                                            lower {{ '%.3f'|format(delta|abs) }}
-                                                                        {% else %}
-                                                                            raise {{ '%.3f'|format(delta|abs) }}
-                                                                        {% endif %}
-                                                                    </span>
-                                                                {% endif %}
-                                                            {% endif %}
-                                                        {% else %}
-                                                            <div class="req-values">
-                                                                <span class="req-target">target {{ '%.3f'|format(req.target) }}</span>
-                                                            </div>
-                                                        {% endif %}
-                                                    </li>
-                                                {% endfor %}
-                                                {% if entry.requirements|length > 3 %}
-                                                    <li class="muted">…</li>
-                                                {% endif %}
-                                            </ul>
-                                        {% else %}
-                                            <span class="muted">—</span>
-                                        {% endif %}
-                                    </td>
-                                    <td>
-                                        {{ entry.message }}
-                                        {% if entry.sample %}
-                                            <div class="muted" style="margin-top:4px; font-size:0.8rem;">sample: {{ entry.sample }}</div>
-                                        {% endif %}
-                                        {% if entry.blocked_reason %}
-                                            <div class="muted" style="margin-top:4px; font-size:0.8rem;">reason: {{ entry.blocked_reason }}</div>
-                                        {% endif %}
-                                        {% if entry.simulation is defined and entry.simulation and entry.simulation.avg_multiplier is not none %}
-                                            <div class="muted" style="margin-top:4px; font-size:0.75rem;">sim boost {{ '%.2f'|format(entry.simulation.avg_multiplier) }}× (ΔROI {{ '%.3f'|format(entry.simulation.avg_delta_roi) }})</div>
-                                        {% endif %}
-                                    </td>
-                                </tr>
-                            {% endfor %}
-                        </table>
-                    {% else %}
-                        <div class="muted" style="margin-top:12px;">No agent diagnostics available yet.</div>
-                    {% endif %}
-
-                    {% if queue_snapshot %}
-                        <div class="muted" style="margin-top:14px;">Queue health</div>
-                        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px;">
-                            {% for key, val in queue_snapshot.items() %}
-                                <span class="badge">{{ key }}: {{ val }}</span>
-                            {% endfor %}
-                        </div>
-                    {% endif %}
-                </div>
-            </section>
-
-            <section class="grid" style="margin-top:24px;">
-                <div class="panel" style="grid-column: span 2;">
-                    <h2>Iteration Charts</h2>
-                    {% if history %}
-                        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:20px;">
-                            <canvas id="actionsChart" height="180"></canvas>
-                            <canvas id="latencyChart" height="180"></canvas>
-                        </div>
-                    {% else %}
-                        <div class="muted">Waiting for iteration history…</div>
-                    {% endif %}
-                </div>
-            </section>
-
-            <section class="grid" style="margin-top:24px;">
-                <div class="panel">
-                    <h2>Token Results</h2>
-                    {% if summary and summary.get('token_results') %}
-                        <table>
-                            <tr><th>Token</th><th>Actions</th><th>Errors</th><th>Score</th></tr>
-                            {% for result in summary.get('token_results')[:15] %}
-                                <tr>
-                                    <td>{{ result.get('token') }}</td>
-                                    <td>{{ result.get('actions')|length }}</td>
-                                    <td>{{ result.get('errors')|length }}</td>
-                                    <td>{{ '%.3f'|format(result.get('score', 0)) }}</td>
-                                </tr>
-                            {% endfor %}
-                        </table>
-                    {% else %}
-                        <div class="muted">No token results captured yet.</div>
-                    {% endif %}
-                </div>
-
-                <div class="panel">
-                    <h2>Recent Actions</h2>
-                    {% if actions %}
-                        <table>
-                            <tr><th>Agent</th><th>Token</th><th>Side</th><th>Amount</th><th>Result</th></tr>
-                            {% for action in actions[-15:]|reverse %}
-                                <tr>
-                                    <td>{{ action.get('agent') or '—' }}</td>
-                                    <td>{{ action.get('token') or '—' }}</td>
-                                    <td>{{ action.get('side') or '—' }}</td>
-                                    <td>{{ action.get('amount') or '—' }}</td>
-                                    <td>{{ action.get('result') or '—' }}</td>
-                                </tr>
-                            {% endfor %}
-                        </table>
-                    {% else %}
-                        <div class="muted">No actions recorded yet.</div>
-                    {% endif %}
-                </div>
-
-                <div class="panel">
-                    <h2>Event Log</h2>
-                    <details class="collapsible">
-                        <summary>
-                            <div class="collapsible-summary">
-                                <div class="summary-stack">
-                                    <div class="summary-title">Latest Events</div>
-                                    <div class="summary-count">{{ logs_total }} recorded</div>
-                                </div>
-                                <div class="summary-peek" aria-hidden="true">
-                                    {% if logs_summary %}
-                                        {% for entry in logs_summary %}
-                                            {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
-                                            <span class="peek-chip">{{ stage }}</span>
-                                        {% endfor %}
-                                    {% else %}
-                                        <span class="muted">No log entries yet.</span>
-                                    {% endif %}
-                                </div>
-                            </div>
-                            <span class="caret" aria-hidden="true"></span>
-                        </summary>
-                        <div class="collapsible-body">
-                            {% if logs_display %}
-                                <div class="muted">Showing the freshest {{ logs_display|length }} entries.</div>
-                                <div class="collapsible-scroll">
-                                    <ul>
-                                        {% for entry in logs_display %}
-                                            {% set detail = entry.get('payload', {}).get('detail') or entry %}
-                                            {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
-                                            <li><span class="muted">{{ entry.get('timestamp') }}</span> · <strong>{{ stage }}</strong> — {{ detail }}</li>
-                                        {% endfor %}
-                                    </ul>
-                                </div>
-                            {% else %}
-                                <div class="muted">No log entries yet.</div>
-                            {% endif %}
-                        </div>
-                    </details>
-                </div>
-
-                <div class="panel">
-                    <h2>Weights</h2>
-                    {% if weights_roles %}
-                        <div class="weights-chart-container">
-                            <canvas id="weightsChart" role="img" aria-label="{{ weights_aria_label }}" data-summary="{{ weights_aria_label }}"></canvas>
-                        </div>
-                        <div class="weights-legend" id="weightsLegend" role="list">
-                            {% for entry in weights_sorted %}
-                                <span role="listitem" aria-label="{{ entry.label }} share {{ '%.2f'|format(entry.share * 100) }} percent" data-index="{{ loop.index0 }}">
-                                    <span class="legend-dot" aria-hidden="true"></span>
-                                    <span class="legend-label">{{ entry.label }}</span>
-                                    <span class="legend-value" aria-hidden="true">{{ '%.1f'|format(entry.share * 100) }}%</span>
-                                </span>
-                            {% endfor %}
-                        </div>
-                        <div class="role-buckets" style="margin-top:18px; display:flex; flex-direction:column; gap:18px;">
-                            {% for role in weights_roles %}
-                                <div class="role-card">
-                                    <div class="muted">{{ role.label }} · {{ '%.1f'|format(role.share * 100) }}% of active weight</div>
-                                    {% if role.agents %}
-                                        <table style="margin-top:8px;">
-                                            <tr>
-                                                <th>Agent</th>
-                                                <th>Weight</th>
-                                                <th>Global Share</th>
-                                                <th>Role Share</th>
-                                                <th>Proposals</th>
-                                                <th>Avg ROI</th>
-                                                <th>Avg Success</th>
-                                                <th>Avg Amount</th>
-                                                <th>Sides</th>
-                                                <th>Requirements</th>
-                                            </tr>
-                                            {% for agent in role.agents %}
-                                                <tr>
-                                                    <td>{{ agent.agent }}</td>
-                                                    <td>{{ '%.4f'|format(agent.weight) }}</td>
-                                                    <td>{{ '%.1f'|format(agent.global_share * 100) }}%</td>
-                                                    <td>{{ '%.1f'|format(agent.role_share * 100) }}%</td>
-                                                    <td>{{ agent.proposals }}</td>
-                                                    <td>
-                                                        {% if agent.metrics.avg_roi is not none %}
-                                                            {{ '%.3f'|format(agent.metrics.avg_roi) }}
-                                                        {% else %}
-                                                            —
-                                                        {% endif %}
-                                                    </td>
-                                                    <td>
-                                                        {% if agent.metrics.avg_success is not none %}
-                                                            {{ '%.1f'|format(agent.metrics.avg_success * 100) }}%
-                                                        {% else %}
-                                                            —
-                                                        {% endif %}
-                                                    </td>
-                                                    <td>
-                                                        {% if agent.metrics.avg_amount is not none %}
-                                                            {{ '%.3f'|format(agent.metrics.avg_amount) }}
-                                                        {% else %}
-                                                            —
-                                                        {% endif %}
-                                                    </td>
-                                                    <td>{{ agent.sides|join(', ') if agent.sides else '—' }}</td>
-                                                    <td>
-                                                        {% set reqs = agent.requirements if agent.requirements is defined else [] %}
-                                                        {% if reqs %}
-                                                            <ul style="list-style:none; padding-left:0; margin:0;">
-                                                                {% for req in reqs[:3] %}
-                                                                    <li>
-                                                                        <span class="muted">{{ req.parameter }}</span>:
-                                                                        {% if req.current is not none %}
-                                                                            {{ '%.3f'|format(req.current) }} / {{ '%.3f'|format(req.target) }}
-                                                                            {% if req.met is not none %}
-                                                                                {% if req.met %}
-                                                                                    <span class="badge success">met</span>
-                                                                                {% else %}
-                                                                                    <span class="badge danger">needs +{{ '%.3f'|format(req.target - req.current) }}</span>
-                                                                                {% endif %}
-                                                                            {% endif %}
-                                                                        {% else %}
-                                                                            target {{ '%.3f'|format(req.target) }}
-                                                                        {% endif %}
-                                                                    </li>
-                                                                {% endfor %}
-                                                                {% if reqs|length > 3 %}
-                                                                    <li class="muted">…</li>
-                                                                {% endif %}
-                                                            </ul>
-                                                            {% if agent.blocked_reason %}
-                                                                <div class="muted" style="margin-top:4px; font-size:0.75rem;">{{ agent.blocked_reason }}</div>
-                                                            {% endif %}
-                                                            {% if agent.simulation is defined and agent.simulation and agent.simulation.avg_multiplier is not none %}
-                                                                <div class="muted" style="margin-top:4px; font-size:0.75rem;">sim boost {{ '%.2f'|format(agent.simulation.avg_multiplier) }}× (ΔROI {{ '%.3f'|format(agent.simulation.avg_delta_roi) }})</div>
-                                                            {% endif %}
-                                                        {% else %}
-                                                            <span class="muted">—</span>
-                                                        {% endif %}
-                                                    </td>
-                                                </tr>
-                                            {% endfor %}
-                                        </table>
-                                    {% else %}
-                                        <div class="muted" style="margin-top:8px;">No active agents in this bucket.</div>
-                                    {% endif %}
-                                    {% if role.inactive %}
-                                        <div class="muted" style="margin-top:10px;">Inactive agents</div>
-                                        <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:4px;">
-                                            {% for inactive in role.inactive %}
-                                                {% set inactive_reqs = inactive.requirements if inactive.requirements is defined else [] %}
-                                                {% set tooltip_ns = namespace(parts=[]) %}
-                                                {% for req in inactive_reqs[:3] %}
-                                                    {% set tooltip_ns.parts = tooltip_ns.parts + [req.parameter ~ ' → ' ~ ('%.3f'|format(req.target))] %}
-                                                {% endfor %}
-                                                <span class="badge muted" title="{{ tooltip_ns.parts|join(', ') }}">{{ inactive.agent }} ({{ '%.3f'|format(inactive.weight) }})</span>
-                                            {% endfor %}
-                                        </div>
-                                    {% endif %}
-                                </div>
-                            {% endfor %}
-                        </div>
-                        <div class="sr-only" id="weightsTextSummary">{{ weights_aria_label }}</div>
-                    {% else %}
-                        <div class="muted">Weights unavailable. The coordinator has not provided agent weights yet.</div>
-                    {% endif %}
-                </div>
-
-                <div class="panel">
-                    <h2>Configuration</h2>
-                    <div class="muted">Active agents:</div>
-                    <div style="margin:10px 0;">
-                        {% for agent in config_overview.get('agents') or [] %}
-                            <span class="badge">{{ agent }}</span>
-                        {% endfor %}
-                    </div>
-                    <div class="two-column">
-                        <div>
-                            <div class="muted">Loop delay</div>
-                            <div>{{ config_overview.get('loop_delay') }}s</div>
-                        </div>
-                        <div>
-                            <div class="muted">Min delay</div>
-                            <div>{{ config_overview.get('min_delay') }}s</div>
-                        </div>
-                        <div>
-                            <div class="muted">Max delay</div>
-                            <div>{{ config_overview.get('max_delay') }}s</div>
-                        </div>
-                        <div>
-                            <div class="muted">Config path</div>
-                            <div style="word-break: break-all;">{{ config_overview.get('config_path') }}</div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <section class="panel" style="margin-top:24px;">
-                <h2>Raw Summary JSON</h2>
-                <pre>{{ summary | tojson(indent=2) }}</pre>
-            </section>
-            <script>
-            (function() {
-                const history = {{ history | tojson | safe }};
-                const weightLabels = {{ weights_labels | tojson | safe }};
-                const weightValues = {{ weights_values | tojson | safe }};
-                if (history && history.length) {
-                    const labels = history.map(h => (h.timestamp || '').slice(11, 19));
-                    const actionsData = history.map(h => h.actions_count || 0);
-                    const discoveredData = history.map(h => h.discovered_count || 0);
-                    const committedData = history.map(h => (h.committed ? 1 : 0));
-                    const latencyData = history.map(h => (h.elapsed_s || 0));
-                    let budgetData = history.map(h => {
-                        const telemetry = h.telemetry || {};
-                        const pipeline = telemetry.pipeline || {};
-                        return pipeline.budget || null;
-                    });
-                    const wantsBudget = budgetData.some(v => typeof v === 'number');
-                    const ctxA = document.getElementById('actionsChart');
-                    if (ctxA && window.Chart) {
-                        new Chart(ctxA.getContext('2d'), {
-                            type: 'line',
-                            data: {
-                                labels,
-                                datasets: [
-                                    {
-                                        label: 'Actions',
-                                        data: actionsData,
-                                        borderColor: '#58a6ff',
-                                        backgroundColor: 'rgba(88,166,255,0.2)',
-                                        tension: 0.3,
-                                    },
-                                    {
-                                        label: 'Discovered',
-                                        data: discoveredData,
-                                        borderColor: '#3fb950',
-                                        backgroundColor: 'rgba(63,185,80,0.2)',
-                                        tension: 0.3,
-                                    },
-                                    {
-                                        label: 'Committed',
-                                        data: committedData,
-                                        borderColor: '#ffdf5d',
-                                        backgroundColor: 'rgba(255,223,93,0.2)',
-                                        tension: 0.1,
-                                        yAxisID: 'y2',
-                                        stepped: true,
-                                    },
-                                ],
-                            },
-                            options: {
-                                plugins: {
-                                    legend: { labels: { color: '#e6edf3' } },
-                                },
-                                scales: {
-                                    x: {
-                                        ticks: { color: '#8b949e' },
-                                        grid: { color: 'rgba(48,54,61,0.4)' },
-                                    },
-                                    y: {
-                                        ticks: { color: '#8b949e' },
-                                        grid: { color: 'rgba(48,54,61,0.4)' },
-                                    },
-                                    y2: {
-                                        position: 'right',
-                                        ticks: { color: '#8b949e', callback: value => (value ? 'Yes' : 'No') },
-                                        grid: { display: false },
-                                        suggestedMax: 1,
-                                        suggestedMin: 0,
-                                    },
-                                },
-                            },
-                        });
-                    }
-                    const ctxL = document.getElementById('latencyChart');
-                    if (ctxL && window.Chart) {
-                        const datasets = [
-                            {
-                                label: 'Iteration Seconds',
-                                data: latencyData,
-                                borderColor: '#ff7b72',
-                                backgroundColor: 'rgba(255,123,114,0.25)',
-                                tension: 0.2,
-                            },
-                        ];
-                        if (wantsBudget) {
-                            datasets.push({
-                                label: 'Budget',
-                                data: budgetData,
-                                borderColor: '#8b949e',
-                                borderDash: [6, 6],
-                                fill: false,
-                            });
-                        }
-                        new Chart(ctxL.getContext('2d'), {
-                            type: 'line',
-                            data: { labels, datasets },
-                            options: {
-                                plugins: { legend: { labels: { color: '#e6edf3' } } },
-                                scales: {
-                                    x: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
-                                    y: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
-                                },
-                            },
-                        });
-                    }
-                }
-                const weightsCanvas = document.getElementById('weightsChart');
-                if (weightsCanvas && window.Chart && weightLabels.length) {
-                    const palette = ['#7afcff', '#f6a6ff', '#9effa9', '#ffe29a', '#b5b0ff', '#ffb8a5', '#aff8db', '#f3c4fb'];
-                    const backgroundColors = weightLabels.map((_, index) => palette[index % palette.length]);
-                    const totalWeight = weightValues.reduce((acc, value) => acc + value, 0);
-                    new Chart(weightsCanvas.getContext('2d'), {
-                        type: 'doughnut',
-                        data: {
-                            labels: weightLabels,
-                            datasets: [
-                                {
-                                    data: weightValues,
-                                    backgroundColor: backgroundColors,
-                                    borderColor: '#0d1117',
-                                    borderWidth: 2,
-                                },
-                            ],
-                        },
-                        options: {
-                            cutout: '55%',
-                            plugins: {
-                                legend: { display: false },
-                                tooltip: {
-                                    callbacks: {
-                                        label(context) {
-                                            const value = context.parsed || 0;
-                                            const percent = totalWeight ? ((value / totalWeight) * 100).toFixed(1) : '0.0';
-                                            return `${context.label}: ${value} (${percent}%)`;
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                    });
-                    const legendEl = document.getElementById('weightsLegend');
-                    if (legendEl) {
-                        legendEl.querySelectorAll('[data-index]').forEach((pill, index) => {
-                            const color = backgroundColors[index % backgroundColors.length];
-                            pill.style.borderColor = `${color}55`;
-                            const dot = pill.querySelector('.legend-dot');
-                            if (dot) {
-                                dot.style.background = color;
-                            }
-                        });
-                    }
-                    const summary = weightsCanvas.getAttribute('data-summary');
-                    if (summary) {
-                        weightsCanvas.setAttribute('aria-label', summary);
-                    }
-                }
-            })();
-            </script>
-        </body>
-        </html>
-        """
 
         return render_template_string(
-            template,
-            status=status,
-            summary=summary,
-            discovery=discovery,
-            discovery_recent_display=discovery_recent_display,
-            discovery_recent_summary=discovery_recent_summary,
-            discovery_recent_total=discovery_recent_total,
-            counts=counts,
-            evaluation_summary=evaluation_summary,
-            execution_summary=execution_summary,
-            tuning=tuning,
-            queue_snapshot=queue_snapshot,
-            samples=samples,
-            config_overview=config_overview,
-            actions=actions,
-            logs_display=logs_display,
-            logs_summary=logs_summary,
-            logs_total=logs_total,
-            history=history,
-            weights=weights,
-            weights_sorted=weights_sorted,
-            weights_labels=weights_labels,
-            weights_values=weights_values,
-            weights_roles=weights_roles,
-            weights_aria_label=weights_aria_label,
-            stat_tiles=stat_tiles,
+            _PAGE_TEMPLATE,
+            status_cards=status_cards,
+            discovery_console=discovery_console,
+            token_facts=token_facts,
+            market_state=market_state,
+            golden_snapshots=golden_snapshots,
+            golden_summary=golden_summary,
+            suggestions=suggestions,
+            suggestion_metrics=suggestion_metrics,
+            vote_windows=vote_windows,
+            shadow=shadow,
+            rl_panel=rl_panel,
+            rl_summary=rl_summary,
+            settings=settings,
+            swarm_overall=swarm_overall,
         )
 
     @app.get("/health")
     def health() -> Any:
-        return {"ok": True}
+        status = state.snapshot_status()
+        ok = bool(status.get("event_bus")) and bool(status.get("trading_loop"))
+        return jsonify({"ok": ok, "status": status})
 
     @app.get("/status")
-    def status() -> Any:
-        data = state.snapshot_status()
-        summary = state.snapshot_summary()
-        discovery = state.snapshot_discovery()
-        data.setdefault("activity_count", len(state.snapshot_activity()))
-        data.setdefault("trade_count", len(state.snapshot_trades()))
-        if summary:
-            data.setdefault("last_iteration", {
-                "timestamp": summary.get("timestamp"),
-                "actions": summary.get("actions_count"),
-                "discovered": summary.get("discovered_count"),
-                "elapsed_s": summary.get("elapsed_s"),
-            })
-        data.setdefault("recent_tokens", discovery.get("recent", [])[:10])
-        return jsonify(data)
+    def status_view() -> Any:
+        return jsonify(state.snapshot_status())
 
     @app.get("/summary")
     def summary() -> Any:
@@ -1751,11 +897,11 @@ def create_app(state: UIState | None = None) -> Flask:
 
     @app.get("/tokens")
     def tokens() -> Any:
-        return jsonify(state.snapshot_discovery())
+        return jsonify(state.snapshot_token_facts())
 
     @app.get("/actions")
     def actions() -> Any:
-        return jsonify(state.snapshot_actions())
+        return jsonify({"actions": state.snapshot_actions()})
 
     @app.get("/activity")
     def activity() -> Any:
@@ -1827,10 +973,36 @@ def create_app(state: UIState | None = None) -> Flask:
             }
         )
 
+    @app.get("/swarm/discovery")
+    def swarm_discovery() -> Any:
+        return jsonify(_json_ready(state.snapshot_discovery_console()))
+
+    @app.get("/swarm/market")
+    def swarm_market() -> Any:
+        return jsonify(_json_ready(state.snapshot_market_state()))
+
+    @app.get("/swarm/golden")
+    def swarm_golden() -> Any:
+        return jsonify(_json_ready(state.snapshot_golden_snapshots()))
+
+    @app.get("/swarm/suggestions")
+    def swarm_suggestions() -> Any:
+        return jsonify(_json_ready(state.snapshot_suggestions()))
+
+    @app.get("/swarm/votes")
+    def swarm_votes() -> Any:
+        return jsonify(_json_ready(state.snapshot_vote_windows()))
+
+    @app.get("/swarm/shadow")
+    def swarm_shadow() -> Any:
+        return jsonify(_json_ready(state.snapshot_shadow()))
+
+    @app.get("/swarm/rl")
+    def swarm_rl() -> Any:
+        return jsonify(_json_ready(state.snapshot_rl_panel()))
+
     @app.get("/__shutdown__")
     def _shutdown() -> Any:  # pragma: no cover - invoked via HTTP
-        from flask import request
-
         func = request.environ.get("werkzeug.server.shutdown")
         if func is None:
             raise RuntimeError("Not running with the Werkzeug Server")
@@ -1862,8 +1034,6 @@ class UIServer:
 
         def _serve() -> None:
             try:
-                # ``use_reloader`` must be False otherwise Flask tries to spawn
-                # a new process.
                 self.app.run(host=self.host, port=self.port, use_reloader=False)
             except Exception:  # pragma: no cover - best effort logging
                 log.exception("UI server crashed")
