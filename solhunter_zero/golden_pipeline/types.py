@@ -110,6 +110,10 @@ class TradeSuggestion:
     inputs_hash: str
     ttl_sec: float
     generated_at: Timestamp
+    must: bool = False
+    reason: str = ""
+    expected_exit_price: Optional[float] = None
+    tags: Sequence[str] | None = None
 
 
 @dataclass(slots=True)

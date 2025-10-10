@@ -29,7 +29,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from flask import Flask, jsonify, render_template_string, request
 
@@ -45,6 +45,9 @@ log = logging.getLogger(__name__)
 
 StatusProvider = Callable[[], Dict[str, Any]]
 ListProvider = Callable[[], Iterable[Dict[str, Any]]]
+SeriesProvider = Callable[[str], Sequence[tuple[float, float]]]
+HotListProvider = Callable[[], Iterable[str]]
+FlattenHandler = Callable[[str], bool]
 DictProvider = Callable[[], Dict[str, Any]]
 
 
@@ -65,6 +68,13 @@ class UIState:
     config_provider: DictProvider = field(default=lambda: {})
     actions_provider: ListProvider = field(default=lambda: [])
     history_provider: ListProvider = field(default=lambda: [])
+    hot_watch_provider: HotListProvider = field(default=lambda: [])
+    exit_queue_provider: ListProvider = field(default=lambda: [])
+    missed_exit_provider: ListProvider = field(default=lambda: [])
+    micro_chart_provider: SeriesProvider = field(
+        default=lambda token: []
+    )
+    flatten_handler: FlattenHandler | None = None
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -146,6 +156,34 @@ class UIState:
             log.exception("UI actions provider failed")
             return []
 
+    def snapshot_hot(self) -> List[str]:
+        try:
+            return list(self.hot_watch_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI hot watch provider failed")
+            return []
+
+    def snapshot_exit_queue(self) -> List[Dict[str, Any]]:
+        try:
+            return list(self.exit_queue_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI exit queue provider failed")
+            return []
+
+    def snapshot_missed(self) -> List[Dict[str, Any]]:
+        try:
+            return list(self.missed_exit_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI missed exit provider failed")
+            return []
+
+    def snapshot_micro_chart(self, token: str) -> List[tuple[float, float]]:
+        try:
+            return list(self.micro_chart_provider(token))
+        except Exception:  # pragma: no cover
+            log.exception("UI micro chart provider failed")
+            return []
+
 
 def create_app(state: UIState | None = None) -> Flask:
     """Return a configured Flask application bound to *state*."""
@@ -167,6 +205,9 @@ def create_app(state: UIState | None = None) -> Flask:
             logs = state.snapshot_logs()
             weights = state.snapshot_weights()
             config_summary = state.snapshot_config()
+            hot = state.snapshot_hot()
+            exit_queue = state.snapshot_exit_queue()
+            missed = state.snapshot_missed()
             return jsonify(
                 {
                     "message": "SolHunter Zero UI",
@@ -179,6 +220,9 @@ def create_app(state: UIState | None = None) -> Flask:
                     "logs": logs,
                     "weights": weights,
                     "config_overview": config_summary,
+                    "hot_watch": hot,
+                    "exit_queue": exit_queue,
+                    "missed_exits": missed,
                     "endpoints": [
                         "/health",
                         "/status",
@@ -191,6 +235,11 @@ def create_app(state: UIState | None = None) -> Flask:
                         "/rl/status",
                         "/config",
                         "/logs",
+                        "/positions/hot",
+                        "/positions/exit_queue",
+                        "/positions/missed",
+                        "/positions/<token>/micro",
+                        "/positions/<token>/flatten",
                     ],
                 }
             )
@@ -1756,6 +1805,34 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.get("/actions")
     def actions() -> Any:
         return jsonify(state.snapshot_actions())
+
+    @app.get("/positions/hot")
+    def hot_positions() -> Any:
+        return jsonify(state.snapshot_hot())
+
+    @app.get("/positions/exit_queue")
+    def exit_queue() -> Any:
+        return jsonify(state.snapshot_exit_queue())
+
+    @app.get("/positions/missed")
+    def missed_exits() -> Any:
+        return jsonify(state.snapshot_missed())
+
+    @app.get("/positions/<token>/micro")
+    def micro_chart(token: str) -> Any:
+        return jsonify(state.snapshot_micro_chart(token))
+
+    @app.post("/positions/<token>/flatten")
+    def flatten(token: str) -> Any:
+        handler = state.flatten_handler
+        if handler is None:
+            return jsonify({"status": "unsupported"}), 501
+        try:
+            success = bool(handler(token))
+        except Exception:  # pragma: no cover
+            log.exception("Flatten handler failed for %s", token)
+            return jsonify({"status": "error"}), 500
+        return jsonify({"status": "ok" if success else "noop"})
 
     @app.get("/activity")
     def activity() -> Any:

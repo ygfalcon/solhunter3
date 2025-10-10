@@ -33,6 +33,10 @@ class BaseAgent:
         risk: dict,
         confidence: float,
         ttl_sec: float,
+        must: bool = False,
+        reason: str | None = None,
+        expected_exit_price: float | None = None,
+        tags: Sequence[str] | None = None,
     ) -> TradeSuggestion:
         return TradeSuggestion(
             agent=self.name,
@@ -45,6 +49,10 @@ class BaseAgent:
             inputs_hash=snapshot.hash,
             ttl_sec=ttl_sec,
             generated_at=now_ts(),
+            must=must,
+            reason=reason or "",
+            expected_exit_price=expected_exit_price,
+            tags=tags,
         )
 
 

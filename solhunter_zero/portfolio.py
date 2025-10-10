@@ -5,6 +5,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Mapping
 
+import time
+
 from .risk import RiskManager
 
 try:  # Optional dependency
@@ -24,6 +26,12 @@ class Position:
     amount: float
     entry_price: float
     high_price: float = 0.0
+    breakeven_bps: float = 0.0
+    breakeven_components: Dict[str, float] = field(default_factory=dict)
+    opened_at: float = 0.0
+    realized_pnl_usd: float = 0.0
+    unrealized_pnl_usd: float = 0.0
+    attribution: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -47,15 +55,31 @@ class Portfolio:
                 data = loads(f.read())
         except Exception:  # pragma: no cover - invalid file
             return
-        self.balances = {
-            token: Position(
+        balances: Dict[str, Position] = {}
+        for token, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            balances[token] = Position(
                 token,
-                info["amount"],
-                info["entry_price"],
-                info.get("high_price", info["entry_price"]),
+                float(info.get("amount", 0.0)),
+                float(info.get("entry_price", 0.0)),
+                float(info.get("high_price", info.get("entry_price", 0.0))),
+                float(info.get("breakeven_bps", 0.0)),
+                {
+                    str(k): float(v)
+                    for k, v in (info.get("breakeven_components") or {}).items()
+                    if isinstance(v, (int, float))
+                },
+                float(info.get("opened_at", 0.0)),
+                float(info.get("realized_pnl_usd", 0.0)),
+                float(info.get("unrealized_pnl_usd", 0.0)),
+                {
+                    str(k): float(v)
+                    for k, v in (info.get("attribution") or {}).items()
+                    if isinstance(v, (int, float))
+                },
             )
-            for token, info in data.items()
-        }
+        self.balances = balances
 
     def save(self) -> None:
         if not self.path:
@@ -65,6 +89,12 @@ class Portfolio:
                 "amount": pos.amount,
                 "entry_price": pos.entry_price,
                 "high_price": pos.high_price,
+                "breakeven_bps": pos.breakeven_bps,
+                "breakeven_components": dict(pos.breakeven_components),
+                "opened_at": pos.opened_at,
+                "realized_pnl_usd": pos.realized_pnl_usd,
+                "unrealized_pnl_usd": pos.unrealized_pnl_usd,
+                "attribution": dict(pos.attribution),
             }
             for token, pos in self.balances.items()
         }
@@ -90,6 +120,12 @@ class Portfolio:
                 "amount": pos.amount,
                 "entry_price": pos.entry_price,
                 "high_price": pos.high_price,
+                "breakeven_bps": pos.breakeven_bps,
+                "breakeven_components": dict(pos.breakeven_components),
+                "opened_at": pos.opened_at,
+                "realized_pnl_usd": pos.realized_pnl_usd,
+                "unrealized_pnl_usd": pos.unrealized_pnl_usd,
+                "attribution": dict(pos.attribution),
             }
             for token, pos in self.balances.items()
         }
@@ -103,16 +139,62 @@ class Portfolio:
         )
 
     # position management -------------------------------------------------
-    def add(self, token: str, amount: float, price: float) -> None:
-        self.update(token, amount, price)
+    def add(
+        self,
+        token: str,
+        amount: float,
+        price: float,
+        *,
+        breakeven_bps: float | None = None,
+        breakeven_components: Mapping[str, float] | None = None,
+    ) -> None:
+        self.update(
+            token,
+            amount,
+            price,
+            breakeven_bps=breakeven_bps,
+            breakeven_components=breakeven_components,
+        )
 
-    async def add_async(self, token: str, amount: float, price: float) -> None:
-        await self.update_async(token, amount, price)
+    async def add_async(
+        self,
+        token: str,
+        amount: float,
+        price: float,
+        *,
+        breakeven_bps: float | None = None,
+        breakeven_components: Mapping[str, float] | None = None,
+    ) -> None:
+        await self.update_async(
+            token,
+            amount,
+            price,
+            breakeven_bps=breakeven_bps,
+            breakeven_components=breakeven_components,
+        )
 
-    def update(self, token: str, amount: float, price: float) -> None:
+    def update(
+        self,
+        token: str,
+        amount: float,
+        price: float,
+        *,
+        breakeven_bps: float | None = None,
+        breakeven_components: Mapping[str, float] | None = None,
+        attribution: Mapping[str, float] | None = None,
+    ) -> None:
         pos = self.balances.get(token)
         if pos is None:
-            self.balances[token] = Position(token, amount, price, price)
+            components = dict(breakeven_components or {})
+            self.balances[token] = Position(
+                token,
+                amount,
+                price,
+                price,
+                float(breakeven_bps or 0.0),
+                components,
+                time.time(),
+            )
         else:
             total_cost = pos.amount * pos.entry_price + amount * price
             new_amount = pos.amount + amount
@@ -122,8 +204,18 @@ class Portfolio:
                 pos.amount = new_amount
                 if amount > 0:
                     pos.entry_price = total_cost / new_amount
+                    if breakeven_bps is not None:
+                        pos.breakeven_bps = float(breakeven_bps)
+                        pos.breakeven_components = dict(breakeven_components or {})
+                    if pos.opened_at == 0.0:
+                        pos.opened_at = time.time()
                 if price > pos.high_price:
                     pos.high_price = price
+                if attribution:
+                    for agent, value in attribution.items():
+                        pos.attribution[str(agent)] = pos.attribution.get(
+                            str(agent), 0.0
+                        ) + float(value)
         self.save()
         publish(
             "portfolio_updated",
@@ -132,10 +224,28 @@ class Portfolio:
             ),
         )
 
-    async def update_async(self, token: str, amount: float, price: float) -> None:
+    async def update_async(
+        self,
+        token: str,
+        amount: float,
+        price: float,
+        *,
+        breakeven_bps: float | None = None,
+        breakeven_components: Mapping[str, float] | None = None,
+        attribution: Mapping[str, float] | None = None,
+    ) -> None:
         pos = self.balances.get(token)
         if pos is None:
-            self.balances[token] = Position(token, amount, price, price)
+            components = dict(breakeven_components or {})
+            self.balances[token] = Position(
+                token,
+                amount,
+                price,
+                price,
+                float(breakeven_bps or 0.0),
+                components,
+                time.time(),
+            )
         else:
             total_cost = pos.amount * pos.entry_price + amount * price
             new_amount = pos.amount + amount
@@ -145,8 +255,18 @@ class Portfolio:
                 pos.amount = new_amount
                 if amount > 0:
                     pos.entry_price = total_cost / new_amount
+                    if breakeven_bps is not None:
+                        pos.breakeven_bps = float(breakeven_bps)
+                        pos.breakeven_components = dict(breakeven_components or {})
+                    if pos.opened_at == 0.0:
+                        pos.opened_at = time.time()
                 if price > pos.high_price:
                     pos.high_price = price
+                if attribution:
+                    for agent, value in attribution.items():
+                        pos.attribution[str(agent)] = pos.attribution.get(
+                            str(agent), 0.0
+                        ) + float(value)
         await self.save_async()
         publish(
             "portfolio_updated",
@@ -165,6 +285,20 @@ class Portfolio:
                     balances={t: p.amount for t, p in self.balances.items()}
                 ),
             )
+
+    def update_breakeven(
+        self,
+        token: str,
+        *,
+        breakeven_bps: float,
+        components: Mapping[str, float] | None = None,
+    ) -> None:
+        pos = self.balances.get(token)
+        if pos is None:
+            return
+        pos.breakeven_bps = float(breakeven_bps)
+        pos.breakeven_components = dict(components or {})
+        self.save()
 
     # analytics -----------------------------------------------------------
     def unrealized_pnl(self, prices: Dict[str, float]) -> float:
