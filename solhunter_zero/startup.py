@@ -12,6 +12,7 @@ from .config import (
 )
 from .config_runtime import Config
 from . import metrics_aggregator
+from .feature_flags import emit_feature_flag_metrics
 from .connectivity import ensure_connectivity
 
 
@@ -36,6 +37,8 @@ def prepare_environment(
     metrics_aggregator.publish(
         "startup_connectivity_check_duration", time.perf_counter() - start
     )
+
+    emit_feature_flag_metrics(metrics_aggregator.publish)
 
     return cfg, runtime_cfg
 
