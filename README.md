@@ -9,6 +9,7 @@ This project is targeted towards being the greatest Solana bot ever created and 
 
 - ✅ `scripts/start_all.py` now wires the Redis→RL health pipeline: it auto-starts Redis, polls the RL health endpoint with port rollover, and records broker state in `redis_server.log` before unblocking the rest of the stack.
 - ✅ `scripts/run_rl_daemon.py` runs GPU-backed DQN+PPO workers behind the new `RLHealth` HTTP server (`/health`), publishes heartbeats/weights, and keeps GPU learning always on.
+- ✅ RL weights now ship as schema-tagged snapshots. When `RL_WEIGHTS_DISABLED=1` the runtime keeps neutral swarm weights and the vote window enforces a freshness gate (stale heartbeats ≥2× the vote window are ignored).
 - ⚠️ RL daemon logs still spam `coroutine … never awaited`, TorchScript export failures, and Redis reconnect loops whenever the broker/event bus comes up late; training completes but health flaps and weights don’t broadcast reliably.
 - ⚠️ Event bus/websocket stack is noisy (invalid websocket URL fallback, port 8769 collisions, Redis `no message received`), leaving stray tasks on shutdown and tripping the `--auto` launcher.
 - ⚠️ Offline data sync scheduler continues to raise TaskGroup/network errors and leaves `offline_data.db` stale when offline mode is toggled.

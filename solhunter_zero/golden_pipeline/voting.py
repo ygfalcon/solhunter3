@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections import defaultdict
-from typing import Awaitable, Callable, Dict, List, Mapping, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Tuple
 
 from .contracts import vote_dedupe_key
 from .kv import KeyValueStore
@@ -13,6 +14,20 @@ from .types import Decision, TradeSuggestion
 from .utils import now_ts
 
 CONFLICT_DELTA = 0.05
+
+
+def _maybe_float(value: Any) -> float | None:
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+    except Exception:
+        return None
 
 
 class VotingStage:
@@ -42,6 +57,8 @@ class VotingStage:
             agent: float(weight)
             for agent, weight in (rl_weights.items() if rl_weights else [])
         }
+        self._weights_meta: Dict[str, Any] = {"asof": time.time(), "window_hash": None}
+        self._rl_disabled: bool = False
         self._kv = kv
         self._dedupe_ttl = dedupe_ttl
         self._exit_bias: Dict[Tuple[str, str], float] = {}
@@ -98,7 +115,7 @@ class VotingStage:
                 return
         valid = [s for s in suggestions if now <= s.generated_at + s.ttl_sec]
         weighted = [
-            (s, max(self._weights.get(s.agent, 1.0), 0.0)) for s in valid
+            (s, self._current_weight(s.agent, now)) for s in valid
         ]
         weighted = [(s, w) for s, w in weighted if w > 0]
         exit_priority = key[1] == "sell" and any(s.must_exit for s, _ in weighted)
@@ -185,14 +202,67 @@ class VotingStage:
         for key in expired:
             self._recent_scores.pop(key, None)
 
-    def set_rl_weights(self, weights: Mapping[str, float]) -> None:
+    def set_rl_weights(self, weights: Mapping[str, Any]) -> None:
         """Update reinforcement learning weights applied during voting."""
 
-        self._weights = {
-            agent: float(weight)
-            for agent, weight in weights.items()
-            if weight is not None
-        }
+        meta: Dict[str, Any] = {}
+        mapping: Dict[str, float] = {}
+        if isinstance(weights.get("weights") if isinstance(weights, Mapping) else None, Mapping):
+            source = weights.get("weights")  # type: ignore[index]
+            assert isinstance(source, Mapping)
+            for agent, value in source.items():
+                val = _maybe_float(value)
+                if val is not None:
+                    mapping[str(agent)] = max(0.0, val)
+            for key in ("schema", "version", "asof", "window_id", "window_hash", "source"):
+                if key in weights:
+                    meta[key] = weights[key]
+        else:
+            for agent, value in weights.items():
+                val = _maybe_float(value)
+                if val is not None:
+                    mapping[str(agent)] = max(0.0, val)
+
+        if not mapping:
+            self._weights = {}
+        else:
+            self._weights = mapping
+
+        if meta:
+            try:
+                meta["asof"] = float(meta.get("asof", time.time()))
+            except Exception:
+                meta.pop("asof", None)
+            self._weights_meta = meta
+        else:
+            self._weights_meta = {"asof": time.time(), "window_hash": None}
+
+        if not self._weights_meta.get("window_hash"):
+            self._weights_meta["window_hash"] = hashlib.sha256(
+                repr(tuple(sorted(self._weights.items()))).encode("utf-8")
+            ).hexdigest()
+
+    def set_rl_disabled(self, disabled: bool) -> None:
+        self._rl_disabled = bool(disabled)
+
+    def _current_weight(self, agent: str, now: float) -> float:
+        if self._rl_disabled:
+            return 1.0
+        weight = _maybe_float(self._weights.get(agent))
+        if weight is None:
+            weight = 1.0
+        if weight <= 0:
+            return 0.0
+        asof = self._weights_meta.get("asof")
+        try:
+            asof_val = float(asof) if asof is not None else None
+        except Exception:
+            asof_val = None
+        if asof_val is not None:
+            age = max(0.0, now - asof_val)
+            if age > self._window_sec * 2.0:
+                return 1.0
+        return float(weight)
 
     @staticmethod
     def _build_order_id(

@@ -105,6 +105,13 @@ class GoldenPipeline:
             min_score=vote_min_score,
             kv=self._kv,
         )
+        from os import getenv
+
+        rl_disabled = getenv("RL_WEIGHTS_DISABLED")
+        if rl_disabled is not None:
+            flag = rl_disabled.strip().lower()
+            if flag in {"1", "true", "yes", "on", "enabled"}:
+                self._voting_stage.set_rl_disabled(True)
 
         async def _emit_virtual(fill: VirtualFill) -> None:
             await self._publish(STREAMS.virtual_fills, asdict(fill))

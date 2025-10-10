@@ -566,6 +566,11 @@ class TradingRuntime:
             payload["_received"] = time.time()
             with self._swarm_lock:
                 self._rl_weights_windows.appendleft(payload)
+            if self.pipeline is not None:
+                try:
+                    self.pipeline.set_rl_weights(payload)
+                except Exception:
+                    log.exception("Failed to forward RL weights to pipeline")
 
         self._subscriptions.append(("action_executed", _on_action))
         subscribe("action_executed", _on_action)
