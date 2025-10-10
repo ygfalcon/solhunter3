@@ -56,6 +56,9 @@ class UIState:
     suggestions_provider: DictProvider = field(
         default=lambda: {"suggestions": [], "metrics": {}}
     )
+    exit_provider: DictProvider = field(
+        default=lambda: {"hot_watch": [], "diagnostics": [], "closed": [], "queue": [], "missed_exits": []}
+    )
     vote_windows_provider: DictProvider = field(
         default=lambda: {"windows": [], "decisions": []}
     )
@@ -183,6 +186,18 @@ class UIState:
         except Exception:  # pragma: no cover
             log.exception("UI suggestions provider failed")
             return {"suggestions": [], "metrics": {}}
+
+    def snapshot_exit(self) -> Dict[str, Any]:
+        try:
+            data = self.exit_provider()
+            if not isinstance(data, dict):
+                data = {"hot_watch": list(data)}
+            payload = {"hot_watch": [], "diagnostics": [], "closed": [], "queue": [], "missed_exits": []}
+            payload.update(data)
+            return payload
+        except Exception:  # pragma: no cover
+            log.exception("UI exit provider failed")
+            return {"hot_watch": [], "diagnostics": [], "closed": [], "queue": [], "missed_exits": []}
 
     def snapshot_vote_windows(self) -> Dict[str, Any]:
         try:
@@ -560,6 +575,9 @@ _PAGE_TEMPLATE = """
                             <th>Slippage</th>
                             <th>Inputs Hash</th>
                             <th>TTL</th>
+                            <th>Must Exit</th>
+                            <th>Hot Watch</th>
+                            <th>Exit Notes</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -576,12 +594,180 @@ _PAGE_TEMPLATE = """
                                 {% if entry.hash_mismatch %}<span class=\"pill stale\">mismatch</span>{% endif %}
                             </td>
                             <td>{{ entry.ttl_label }}</td>
+                            <td>{{ 'yes' if entry.must_exit else 'no' }}</td>
+                            <td>{{ 'yes' if entry.hot_watch else 'no' }}</td>
+                            <td class=\"muted\">
+                                {% set diag = entry.exit_diagnostics %}
+                                {% if diag %}
+                                    {% if diag.reason is defined and diag.reason %}
+                                        {{ diag.reason }}
+                                    {% elif diag is mapping and diag.get('reason') %}
+                                        {{ diag.get('reason') }}
+                                    {% elif diag.summary is defined and diag.summary %}
+                                        {{ diag.summary }}
+                                    {% else %}
+                                        {{ diag }}
+                                    {% endif %}
+                                {% else %}
+                                    —
+                                {% endif %}
+                            </td>
                         </tr>
                         {% else %}
-                        <tr><td colspan=\"8\" class=\"muted\">No active suggestions.</td></tr>
+                        <tr><td colspan=\"11\" class=\"muted\">No active suggestions.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
+
+                <div class=\"exit-hot-watch\">
+                    <h3>Hot Watch</h3>
+                    {% if exit_panel.hot_watch %}
+                    <div class=\"badge-grid\">
+                        {% for watch in exit_panel.hot_watch %}
+                        <span class=\"pill {{ 'must' if watch.reason == 'must_exit' else 'monitor' }}\">
+                            {{ watch.token }} · {{ watch.reason }} · {{ watch.remaining | round(4) if watch.remaining is not none else '—' }}
+                        </span>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class=\"muted\">No tokens flagged for exit.</div>
+                    {% endif %}
+                    <h3>Exit Queue</h3>
+                    {% if exit_panel.queue %}
+                    <table class=\"compact\">
+                        <thead>
+                            <tr>
+                                <th>Mint</th>
+                                <th>Reason</th>
+                                <th>Must</th>
+                                <th>Notional</th>
+                                <th>Progress</th>
+                                <th>Slices</th>
+                                <th>Age (s)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in exit_panel.queue %}
+                            <tr>
+                                <td>{{ item.token }}</td>
+                                <td>{{ item.reason }}</td>
+                                <td>{{ 'yes' if item.must else 'no' }}</td>
+                                <td>{{ item.notional_usd | round(2) if item.notional_usd is not none else '—' }}</td>
+                                <td>
+                                    {% if item.progress is not none %}
+                                        {{ (item.progress * 100) | round(1) }}%
+                                        <span class=\"muted\">({{ item.filled_qty | round(4) }}/{{ item.initial_qty | round(4) }})</span>
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if item.slice_reasons %}
+                                        {{ item.slice_reasons | join(', ') }}
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                                <td>{{ item.age_sec | round(1) if item.age_sec is not none else '—' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    {% else %}
+                    <div class=\"muted\">Exit queue empty.</div>
+                    {% endif %}
+                    <h3>Exit Diagnostics</h3>
+                    {% if exit_panel.diagnostics %}
+                    <div class=\"exit-diagnostics-grid\">
+                        {% for diag in exit_panel.diagnostics[:5] %}
+                        <div class=\"exit-diagnostic-card\">
+                            <header>
+                                <strong>{{ diag.token }}</strong>
+                                <span class=\"muted\">{% if diag.diagnostics.reason is defined and diag.diagnostics.reason %}{{ diag.diagnostics.reason }}{% elif diag.diagnostics is mapping and diag.diagnostics.get('reason') %}{{ diag.diagnostics.get('reason') }}{% else %}—{% endif %}</span>
+                            </header>
+                            <div class=\"micro-chart\">
+                                {% set samples = diag.monitor %}
+                                {% if samples and samples|length > 1 %}
+                                {% set recent = samples[-12:] %}
+                                {% set entry_line = 0.0 %}
+                                {% set trail_line = diag.diagnostics.trail_line_bps if diag.diagnostics is mapping and diag.diagnostics.get('trail_line_bps') is not none else None %}
+                                {% set base_vals = [] %}
+                                {% for sample in recent %}
+                                    {% set base_vals = base_vals + [sample.delta_mid_bps or 0.0] %}
+                                {% endfor %}
+                                {% set all_vals = base_vals + [entry_line] %}
+                                {% if trail_line is not none %}
+                                    {% set all_vals = all_vals + [trail_line] %}
+                                {% endif %}
+                                {% if all_vals %}
+                                {% set ns = namespace(init=False, min=0.0, max=0.0) %}
+                                {% for val in all_vals %}
+                                    {% if not ns.init %}
+                                        {% set ns.min = val %}
+                                        {% set ns.max = val %}
+                                        {% set ns.init = True %}
+                                    {% else %}
+                                        {% if val < ns.min %}{% set ns.min = val %}{% endif %}
+                                        {% if val > ns.max %}{% set ns.max = val %}{% endif %}
+                                    {% endif %}
+                                {% endfor %}
+                                {% if ns.max == ns.min %}
+                                    {% set ns.max = ns.min + 1 %}
+                                {% endif %}
+                                {% set denom = (ns.max - ns.min) if ns.max != ns.min else 1.0 %}
+                                {% set ns_points = namespace(points=[]) %}
+                                {% for sample in recent %}
+                                    {% set val = sample.delta_mid_bps or 0.0 %}
+                                    {% set normalized = (val - ns.min) / denom %}
+                                    {% set x = (loop.index0 / (recent|length - 1)) * 180 %}
+                                    {% set y = 50 - (normalized * 40) %}
+                                    {% set ns_points.points = ns_points.points + [x|string + ',' + y|string] %}
+                                {% endfor %}
+                                <svg viewBox=\"0 0 180 60\" class=\"sparkline\" preserveAspectRatio=\"none\">
+                                    <polyline points=\"{{ ns_points.points|join(' ') }}\" fill=\"none\" stroke=\"#4f8cff\" stroke-width=\"2\" />
+                                    {% set entry_y = 50 - (((entry_line - ns.min) / denom) * 40) %}
+                                    <line x1=\"0\" y1=\"{{ entry_y }}\" x2=\"180\" y2=\"{{ entry_y }}\" stroke=\"#999\" stroke-dasharray=\"4 4\" />
+                                    {% if trail_line is not none %}
+                                    {% set trail_y = 50 - (((trail_line - ns.min) / denom) * 40) %}
+                                    <line x1=\"0\" y1=\"{{ trail_y }}\" x2=\"180\" y2=\"{{ trail_y }}\" stroke=\"#ff6b6b\" stroke-dasharray=\"2 2\" />
+                                    {% endif %}
+                                </svg>
+                                {% else %}
+                                <div class=\"muted\">No micro-samples yet.</div>
+                                {% endif %}
+                                {% else %}
+                                <div class=\"muted\">No micro-samples yet.</div>
+                                {% endif %}
+                                <button class=\"flatten-btn\" data-mint=\"{{ diag.token }}\">Flatten</button>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class=\"muted\">No exit diagnostics yet.</div>
+                    {% endif %}
+                    <h3>Missed Exits</h3>
+                    {% if exit_panel.missed_exits %}
+                    <ul class=\"missed-exits\">
+                        {% for miss in exit_panel.missed_exits[:10] %}
+                        <li><strong>{{ miss.token }}</strong> · {{ miss.reason }} · <span class=\"muted\">{{ miss.ts }}</span></li>
+                        {% endfor %}
+                    </ul>
+                    {% else %}
+                    <div class=\"muted\">No missed exits recorded.</div>
+                    {% endif %}
+                    <h3>Recently Closed</h3>
+                    {% if exit_panel.closed %}
+                    <ul>
+                        {% for diag in exit_panel.closed[:5] %}
+                        {% set total_pnl = diag.slices | sum(attribute='pnl') %}
+                        <li><strong>{{ diag.token }}</strong> · {{ total_pnl | round(4) }} · {% if diag.diagnostics.reason is defined and diag.diagnostics.reason %}{{ diag.diagnostics.reason }}{% elif diag.diagnostics is mapping and diag.diagnostics.get('reason') %}{{ diag.diagnostics.get('reason') }}{% else %}—{% endif %}</li>
+                        {% endfor %}
+                    </ul>
+                    {% else %}
+                    <div class=\"muted\">No closed exits recorded.</div>
+                    {% endif %}
+                </div>
             </article>
 
             <article class=\"panel\">
@@ -749,9 +935,30 @@ _PAGE_TEMPLATE = """
                 {% endfor %}
             </div>
         </section>
+
+        <script>
+            document.addEventListener('click', function (event) {
+                const btn = event.target.closest('.flatten-btn');
+                if (!btn) {
+                    return;
+                }
+                event.preventDefault();
+                const mint = btn.dataset.mint;
+                if (!mint) {
+                    return;
+                }
+                fetch('/actions/flatten', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({mint: mint, must_exit: true})
+                }).catch(() => {});
+            });
+        </script>
     </div>
 </body>
 </html>
+
+
 """
 
 
@@ -835,6 +1042,7 @@ def create_app(state: UIState | None = None) -> Flask:
                 "weights": state.snapshot_weights(),
                 "config_overview": state.snapshot_config(),
                 "history": state.snapshot_history(),
+                "exits": state.snapshot_exit(),
             }
             return jsonify(_json_ready(payload))
 
@@ -845,6 +1053,7 @@ def create_app(state: UIState | None = None) -> Flask:
         market_state = state.snapshot_market_state()
         golden_detail = state.snapshot_golden_snapshots()
         suggestions = state.snapshot_suggestions()
+        exit_panel = state.snapshot_exit()
         vote_windows = state.snapshot_vote_windows()
         shadow = state.snapshot_shadow()
         rl_panel = state.snapshot_rl_panel()
@@ -873,6 +1082,7 @@ def create_app(state: UIState | None = None) -> Flask:
             golden_summary=golden_summary,
             suggestions=suggestions,
             suggestion_metrics=suggestion_metrics,
+            exit_panel=exit_panel,
             vote_windows=vote_windows,
             shadow=shadow,
             rl_panel=rl_panel,
@@ -988,6 +1198,10 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.get("/swarm/suggestions")
     def swarm_suggestions() -> Any:
         return jsonify(_json_ready(state.snapshot_suggestions()))
+
+    @app.get("/swarm/exits")
+    def swarm_exits() -> Any:
+        return jsonify(_json_ready(state.snapshot_exit()))
 
     @app.get("/swarm/votes")
     def swarm_votes() -> Any:
