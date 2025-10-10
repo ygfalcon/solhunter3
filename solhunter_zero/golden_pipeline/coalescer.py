@@ -51,12 +51,14 @@ class SnapshotCoalescer:
         depth = self._depth.get(mint)
         if not (meta and bar and depth):
             return
+        now = now_ts()
         payload = {
             "mint": mint,
             "meta": {
                 "symbol": meta.symbol,
                 "decimals": meta.decimals,
                 "token_program": meta.token_program,
+                "asof": meta.asof,
             },
             "px": {
                 "mid_usd": depth.mid_usd,
@@ -64,6 +66,7 @@ class SnapshotCoalescer:
             },
             "liq": {
                 "depth_pct": depth.depth_pct,
+                "asof": depth.asof,
             },
             "ohlcv5m": {
                 "o": bar.open,
@@ -75,6 +78,7 @@ class SnapshotCoalescer:
                 "flow_usd": bar.flow_usd,
                 "zret": bar.zret,
                 "zvol": bar.zvol,
+                "asof_close": bar.asof_close,
             },
         }
         snapshot_hash = canonical_hash(payload)
@@ -87,7 +91,11 @@ class SnapshotCoalescer:
             if cached == snapshot_hash:
                 return
             await self._kv.set(key, snapshot_hash, ttl=self._hash_ttl)
-        asof = max(meta.asof, depth.asof, bar.asof_close, now_ts())
+        asof = max(meta.asof, depth.asof, bar.asof_close)
+        latency_ms = max(0.0, (now - asof) * 1000.0)
+        depth_staleness_ms = max(0.0, (now - depth.asof) * 1000.0)
+        candle_age_ms = max(0.0, (now - bar.asof_close) * 1000.0)
+        payload["liq"]["staleness_ms"] = depth_staleness_ms
         golden = GoldenSnapshot(
             mint=mint,
             asof=asof,
@@ -96,5 +104,11 @@ class SnapshotCoalescer:
             liq=payload["liq"],
             ohlcv5m=payload["ohlcv5m"],
             hash=snapshot_hash,
+            metrics={
+                "emitted_at": now,
+                "latency_ms": latency_ms,
+                "depth_staleness_ms": depth_staleness_ms,
+                "candle_age_ms": candle_age_ms,
+            },
         )
         await self._emit(golden)

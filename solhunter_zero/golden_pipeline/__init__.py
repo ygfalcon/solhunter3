@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .agents import BaseAgent
+from .metrics import GoldenMetrics
 from .pipeline import GoldenPipeline
 from .types import (
     Decision,
@@ -36,6 +37,7 @@ __all__ = [
     "LiveFill",
     "GoldenPipelineService",
     "AgentManagerAgent",
+    "GoldenMetrics",
 ]
 
 

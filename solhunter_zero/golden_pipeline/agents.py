@@ -39,6 +39,7 @@ class BaseAgent:
         hot_watch: bool = False,
         diagnostics: Dict[str, Any] | None = None,
     ) -> TradeSuggestion:
+        generated_at = snapshot.asof if snapshot.asof else now_ts()
         return TradeSuggestion(
             agent=self.name,
             mint=snapshot.mint,
@@ -49,7 +50,7 @@ class BaseAgent:
             confidence=confidence,
             inputs_hash=snapshot.hash,
             ttl_sec=ttl_sec,
-            generated_at=now_ts(),
+            generated_at=generated_at,
             gating=dict(gating or {}),
             slices=list(slices or []),
             must_exit=must_exit,

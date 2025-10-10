@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Awaitable, Callable, Iterable, Mapping
+from typing import Awaitable, Callable, Dict, Iterable, Mapping, Optional
 
 from .agents import AgentStage, BaseAgent
 from .bus import InMemoryBus, MessageBus
@@ -15,6 +15,7 @@ from .enrichment import EnrichmentStage, EnrichmentFetcher
 from .execution import ExecutionContext, LiveExecutor, ShadowExecutor
 from .kv import InMemoryKeyValueStore, KeyValueStore
 from .market import MarketDataStage
+from .metrics import GoldenMetrics
 from .types import (
     Decision,
     DepthSnapshot,
@@ -63,9 +64,11 @@ class GoldenPipeline:
         self._on_decision = on_decision
         self._on_virtual_fill = on_virtual_fill
         self._on_virtual_pnl = on_virtual_pnl
+        self.metrics = GoldenMetrics()
 
         async def _emit_golden(snapshot: GoldenSnapshot) -> None:
             self._context.record(snapshot)
+            self.metrics.record(snapshot)
             await self._publish(STREAMS.golden_snapshot, asdict(snapshot))
             if self._on_golden:
                 await self._on_golden(snapshot)
@@ -222,6 +225,11 @@ class GoldenPipeline:
         """Update reinforcement learning weights for voting."""
 
         self._voting_stage.set_rl_weights(weights)
+
+    def metrics_snapshot(self) -> Dict[str, Dict[str, Optional[float]]]:
+        """Return rolling Golden Snapshot telemetry summaries."""
+
+        return self.metrics.snapshot()
 
     async def _publish(self, stream: str, payload: Mapping[str, object]) -> None:
         if not self._bus:
