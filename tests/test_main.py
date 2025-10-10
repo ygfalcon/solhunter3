@@ -2,6 +2,7 @@ import os
 import logging
 import types
 import sys
+from contextlib import asynccontextmanager
 
 os.environ.setdefault("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
 os.environ.setdefault("DEX_BASE_URL", "https://quote-api.jup.ag")
@@ -62,6 +63,22 @@ except Exception:  # pragma: no cover - transformers optional
     transformers = types.SimpleNamespace(__version__="0.0.0", pipeline=lambda *a, **k: None)
     sys.modules.setdefault("transformers", transformers)
 
+# Provide lightweight dataset stubs to satisfy optional imports during tests.
+if "solhunter_zero.datasets" not in sys.modules:
+    sample_ticks_module = types.ModuleType("solhunter_zero.datasets.sample_ticks")
+    sample_ticks_module.DEFAULT_PATH = "sample_ticks.parquet"
+
+    def _load_sample_ticks(*_a, **_k):
+        return []
+
+    sample_ticks_module.load_sample_ticks = _load_sample_ticks  # type: ignore[attr-defined]
+
+    datasets_pkg = types.ModuleType("solhunter_zero.datasets")
+    datasets_pkg.sample_ticks = sample_ticks_module  # type: ignore[attr-defined]
+
+    sys.modules["solhunter_zero.datasets"] = datasets_pkg
+    sys.modules["solhunter_zero.datasets.sample_ticks"] = sample_ticks_module
+
 # Provide a light-weight RL training stub so tests do not pull heavy torch deps.
 if "solhunter_zero.rl_training" not in sys.modules:
     class _DummyMultiAgentRL:
@@ -87,7 +104,8 @@ def _stub_arbitrage(monkeypatch):
     monkeypatch.setattr(
         main_module.arbitrage, "detect_and_execute_arbitrage", _fake
     )
-    monkeypatch.setattr(main_module, "warm_cache", lambda *_a, **_k: None)
+    if hasattr(main_module, "warm_cache"):
+        monkeypatch.setattr(main_module, "warm_cache", lambda *_a, **_k: None)
     monkeypatch.setattr(main_module.AgentManager, "from_config", lambda _cfg: None)
     async def _fake_start_ws_server(*a, **k):
         return None
@@ -1036,6 +1054,65 @@ def test_ensure_connectivity_raises_on_ws_failure(monkeypatch):
     import solhunter_zero.dex_ws as dex_ws
 
     monkeypatch.setattr(dex_ws, "stream_listed_tokens", lambda *_a, **_k: _make_failing_stream())
+
+    with pytest.raises(RuntimeError):
+        main_module.ensure_connectivity()
+
+
+def test_ensure_connectivity_warns_on_additional_ws_failure(monkeypatch, caplog):
+    monkeypatch.delenv("DEX_LISTING_WS_URL", raising=False)
+    monkeypatch.setenv("PHOENIX_DEPTH_WS_URL", "wss://phoenix")
+
+    import solhunter_zero.rpc_utils as rpc_utils
+
+    monkeypatch.setattr(rpc_utils, "ensure_rpc", lambda: None)
+
+    import solhunter_zero.http as http_mod
+
+    class DummySession:
+        def ws_connect(self, *_args, **_kwargs):
+            @asynccontextmanager
+            async def _manager():
+                raise RuntimeError("ws boom")
+                yield
+
+            return _manager()
+
+    async def fake_get_session():
+        return DummySession()
+
+    monkeypatch.setattr(http_mod, "get_session", fake_get_session)
+
+    caplog.set_level(logging.WARNING)
+    main_module.ensure_connectivity()
+
+    assert "Phoenix depth" in caplog.text
+
+
+def test_ensure_connectivity_raises_on_additional_ws_failure(monkeypatch):
+    monkeypatch.delenv("DEX_LISTING_WS_URL", raising=False)
+    monkeypatch.setenv("PHOENIX_DEPTH_WS_URL", "wss://phoenix")
+    monkeypatch.setenv("RAISE_ON_WS_FAIL", "1")
+
+    import solhunter_zero.rpc_utils as rpc_utils
+
+    monkeypatch.setattr(rpc_utils, "ensure_rpc", lambda: None)
+
+    import solhunter_zero.http as http_mod
+
+    class DummySession:
+        def ws_connect(self, *_args, **_kwargs):
+            @asynccontextmanager
+            async def _manager():
+                raise RuntimeError("ws boom")
+                yield
+
+            return _manager()
+
+    async def fake_get_session():
+        return DummySession()
+
+    monkeypatch.setattr(http_mod, "get_session", fake_get_session)
 
     with pytest.raises(RuntimeError):
         main_module.ensure_connectivity()
