@@ -110,6 +110,11 @@ class TradeSuggestion:
     inputs_hash: str
     ttl_sec: float
     generated_at: Timestamp
+    gating: Dict[str, Any] = field(default_factory=dict)
+    slices: List[Dict[str, Any]] = field(default_factory=list)
+    must_exit: bool = False
+    hot_watch: bool = False
+    exit_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

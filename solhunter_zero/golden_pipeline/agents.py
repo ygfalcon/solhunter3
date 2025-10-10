@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Awaitable, Callable, Iterable, List, Sequence, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Sequence, Set
 
 from .types import GoldenSnapshot, TradeSuggestion
 from .utils import TTLCache, now_ts
@@ -33,6 +33,11 @@ class BaseAgent:
         risk: dict,
         confidence: float,
         ttl_sec: float,
+        gating: Dict[str, Any] | None = None,
+        slices: Sequence[Dict[str, Any]] | None = None,
+        must_exit: bool = False,
+        hot_watch: bool = False,
+        diagnostics: Dict[str, Any] | None = None,
     ) -> TradeSuggestion:
         return TradeSuggestion(
             agent=self.name,
@@ -45,6 +50,11 @@ class BaseAgent:
             inputs_hash=snapshot.hash,
             ttl_sec=ttl_sec,
             generated_at=now_ts(),
+            gating=dict(gating or {}),
+            slices=list(slices or []),
+            must_exit=must_exit,
+            hot_watch=hot_watch,
+            exit_diagnostics=dict(diagnostics or {}),
         )
 
 
