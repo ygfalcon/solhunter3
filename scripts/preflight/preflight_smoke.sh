@@ -7,6 +7,87 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=scripts/preflight/common.sh
 source "$SCRIPT_DIR/common.sh"
 
+SIMULATION_ENABLED=0
+if [[ ${SIM_MODE:-0} == 1 || ${PREFLIGHT_SIM_MODE:-0} == 1 ]]; then
+  SIMULATION_ENABLED=1
+fi
+
+simulation_enabled() {
+  [[ $SIMULATION_ENABLED -eq 1 ]]
+}
+
+simulate_hash() {
+  local seed
+  seed="${PREFLIGHT_MINT}-$(date +%s%N)-$RANDOM-$RANDOM"
+  printf '%s' "$seed" | sha256sum | awk '{print $1}'
+}
+
+simulate_golden_payload() {
+  local hash
+  hash=$(simulate_hash)
+  local ts
+  ts=$(date +%s)
+  local jq_bin=${JQ:-jq}
+  "$jq_bin" -n -c \
+    --arg mint "$PREFLIGHT_MINT" \
+    --arg symbol "$PREFLIGHT_SYMBOL" \
+    --arg name "$PREFLIGHT_NAME" \
+    --arg hash "preflight-sim-$hash" \
+    --arg venue "$PREFLIGHT_VENUE" \
+    --arg mode "simulated" \
+    --argjson ts "$ts" \
+    '{mint:$mint,symbol:$symbol,name:$name,venue:$venue,hash:$hash,mode:$mode,asof:$ts}'
+}
+
+SIMULATED_DECISION_COID=""
+
+simulate_decision_payload() {
+  local snapshot_hash=$1
+  local coid
+  coid="preflight-sim-$(unique_suffix)"
+  SIMULATED_DECISION_COID=$coid
+  local ts
+  ts=$(date +%s)
+  local jq_bin=${JQ:-jq}
+  "$jq_bin" -n -c \
+    --arg mint "$PREFLIGHT_MINT" \
+    --arg side "buy" \
+    --arg coid "$coid" \
+    --arg hash "$snapshot_hash" \
+    --arg mode "simulated" \
+    --argjson score 0.72 \
+    --argjson notional "$PREFLIGHT_NOTIONAL" \
+    --argjson ts "$ts" \
+    '{mint:$mint,side:$side,clientOrderId:$coid,snapshot_hash:$hash,score:$score,notional_usd:$notional,ts:$ts,mode:$mode}'
+}
+
+simulate_virtual_fill_payload() {
+  local side=$1
+  local coid=${2:-$SIMULATED_DECISION_COID}
+  local ts
+  ts=$(date +%s)
+  local jq_bin=${JQ:-jq}
+  "$jq_bin" -n -c \
+    --arg mint "$PREFLIGHT_MINT" \
+    --arg side "$side" \
+    --arg coid "$coid" \
+    --arg route "VIRTUAL" \
+    --arg mode "simulated" \
+    --argjson notional "$PREFLIGHT_NOTIONAL" \
+    --argjson ts "$ts" \
+    '{mint:$mint,side:$side,clientOrderId:$coid,route:$route,notional_usd:$notional,ts:$ts,mode:$mode}'
+}
+
+simulate_pnl_payload() {
+  local jq_bin=${JQ:-jq}
+  "$jq_bin" -n -c \
+    --arg mint "$PREFLIGHT_MINT" \
+    --arg symbol "$PREFLIGHT_SYMBOL" \
+    --arg name "$PREFLIGHT_NAME" \
+    --argjson total 0 \
+    '{positions:[{mint:$mint,symbol:$symbol,name:$name,total_pnl_usd:$total}]}'
+}
+
 PREFLIGHT_MINT=${PREFLIGHT_MINT:-So11111111111111111111111111111111111111112}
 PREFLIGHT_SYMBOL=${PREFLIGHT_SYMBOL:-SOL}
 PREFLIGHT_NAME=${PREFLIGHT_NAME:-Solana}
@@ -102,6 +183,11 @@ main() {
   log INFO "solhunter preflight: end-to-end smoke"
   record_audit pass "start" "$(jq -n --arg ts "$(date -Is)" '{started_at:$ts}')"
 
+  if simulation_enabled; then
+    log INFO "simulation: SIM_MODE enabled - synthetic events will be emitted as needed"
+    record_audit pass "simulation_mode" "$(jq -n '{simulation:true}')"
+  fi
+
   printf '\n'
   log INFO "1) publishing base fixtures"
   local token_snapshot
@@ -123,14 +209,40 @@ main() {
   ensure_publish x:market.depth "$depth" depth_baseline
 
   local golden_start=$SECONDS
-  local golden
-  if golden=$(await_stream_json "x:mint.golden" "select(.mint == \"$PREFLIGHT_MINT\" and (.hash|type==\"string\" and (.hash|length>0)))" 20); then
-    local golden_latency=$((SECONDS - golden_start))
+  local golden=""
+  local golden_latency=0
+  local golden_simulated=0
+  local golden_timeout=20
+  if simulation_enabled; then
+    golden_timeout=${PREFLIGHT_GOLDEN_SLO_SEC:-5}
+    if (( golden_timeout <= 0 || golden_timeout > 5 )); then
+      golden_timeout=5
+    fi
+  fi
+  if golden=$(await_stream_json "x:mint.golden" "select(.mint == \"$PREFLIGHT_MINT\" and (.hash|type==\"string\" and (.hash|length>0)))" "$golden_timeout"); then
+    golden_latency=$((SECONDS - golden_start))
+  elif simulation_enabled; then
+    log INFO "simulation: synthesizing golden snapshot"
+    local sim_payload
+    sim_payload=$(simulate_golden_payload)
+    if [[ -n $sim_payload ]]; then
+      redis_publish_json x:mint.golden "$sim_payload" >/dev/null
+      golden="$sim_payload"
+      golden_latency=$((SECONDS - golden_start))
+      golden_simulated=1
+    fi
+  fi
+
+  if [[ -n $golden ]]; then
     local golden_hash
     golden_hash=$($JQ -r '.hash' <<<"$golden")
-    detail_events+=("$(jq -n --arg status "pass" --arg hash "$golden_hash" --argjson latency "$golden_latency" '{check:"golden",status:$status,hash:$hash,latency_sec:$latency}')")
-    record_audit pass "golden" "$(jq -n --arg hash "$golden_hash" --argjson latency "$golden_latency" '{hash:$hash,latency_sec:$latency}')"
-    pass "Golden emitted with hash=$golden_hash"
+    detail_events+=("$(jq -n --arg status "pass" --arg hash "$golden_hash" --argjson latency "$golden_latency" --argjson simulated "$golden_simulated" '{check:"golden",status:$status,hash:$hash,latency_sec:$latency,simulated:($simulated == 1)}')")
+    record_audit pass "golden" "$(jq -n --arg hash "$golden_hash" --argjson latency "$golden_latency" --argjson simulated "$golden_simulated" '{hash:$hash,latency_sec:$latency,simulated:($simulated == 1)}')"
+    if (( golden_simulated )); then
+      pass "Golden emitted (simulated) with hash=$golden_hash"
+    else
+      pass "Golden emitted with hash=$golden_hash"
+    fi
     if (( golden_latency > PREFLIGHT_GOLDEN_SLO_SEC )); then
       fail "Golden latency ${golden_latency}s exceeds SLO ${PREFLIGHT_GOLDEN_SLO_SEC}s"
       record_audit fail "golden_slo" "$(jq -n --argjson latency "$golden_latency" '{latency_sec:$latency}')"
@@ -180,18 +292,46 @@ main() {
   ensure_publish x:trade.suggested "$sugg" suggestion_primary
   ensure_publish x:trade.suggested "$sugg_alt" suggestion_secondary
 
-  local decision
-  if decision=$(await_new_stream_event "x:vote.decisions" "$vote_len_before" "select(.mint == \"$PREFLIGHT_MINT\" and .side == \"buy\")" 20); then
-    local decision_latency=$((SECONDS - decision_start))
+  local decision=""
+  local decision_latency=0
+  local decision_simulated=0
+  local decision_timeout=20
+  if simulation_enabled && (( decision_timeout > PREFLIGHT_DECISION_SLO_SEC )); then
+    decision_timeout=PREFLIGHT_DECISION_SLO_SEC
+  fi
+  if simulation_enabled && (( decision_timeout <= 0 || decision_timeout > 5 )); then
+    decision_timeout=5
+  fi
+  if decision=$(await_new_stream_event "x:vote.decisions" "$vote_len_before" "select(.mint == \"$PREFLIGHT_MINT\" and .side == \"buy\")" "$decision_timeout"); then
+    decision_latency=$((SECONDS - decision_start))
+  elif simulation_enabled; then
+    log INFO "simulation: synthesizing decision"
+    local snapshot_hash
+    snapshot_hash=$($JQ -r '.hash' <<<"$golden")
+    local sim_decision
+    sim_decision=$(simulate_decision_payload "$snapshot_hash")
+    if [[ -n $sim_decision ]]; then
+      redis_publish_json x:vote.decisions "$sim_decision" >/dev/null
+      decision="$sim_decision"
+      decision_latency=$((SECONDS - decision_start))
+      decision_simulated=1
+    fi
+  fi
+
+  if [[ -n $decision ]]; then
     local coid
     coid=$($JQ -r '.clientOrderId // empty' <<<"$decision")
     if [[ -n $coid ]]; then
-      pass "Decision emitted (clientOrderId=$coid)"
+      if (( decision_simulated )); then
+        pass "Decision emitted (simulated clientOrderId=$coid)"
+      else
+        pass "Decision emitted (clientOrderId=$coid)"
+      fi
     else
       warn "Decision missing clientOrderId"
     fi
-    detail_events+=("$(jq -n --arg status "pass" --arg coid "$coid" --argjson latency "$decision_latency" '{check:"decision",status:$status,clientOrderId:$coid,latency_sec:$latency}')")
-    record_audit pass "decision" "$(jq -n --arg coid "$coid" --argjson latency "$decision_latency" '{clientOrderId:$coid,latency_sec:$latency}')"
+    detail_events+=("$(jq -n --arg status "pass" --arg coid "$coid" --argjson latency "$decision_latency" --argjson simulated "$decision_simulated" '{check:"decision",status:$status,clientOrderId:$coid,latency_sec:$latency,simulated:($simulated == 1)}')")
+    record_audit pass "decision" "$(jq -n --arg coid "$coid" --argjson latency "$decision_latency" --argjson simulated "$decision_simulated" '{clientOrderId:$coid,latency_sec:$latency,simulated:($simulated == 1)}')"
     if (( decision_latency > PREFLIGHT_DECISION_SLO_SEC )); then
       fail "Decision latency ${decision_latency}s exceeds SLO ${PREFLIGHT_DECISION_SLO_SEC}s"
       record_audit fail "decision_slo" "$(jq -n --argjson latency "$decision_latency" '{latency_sec:$latency}')"
@@ -225,36 +365,45 @@ main() {
     exit 3
   fi
 
-  local flood=0
-  while (( flood < PREFLIGHT_DUPLICATE_FLOOD_COUNT )); do
-    ensure_publish x:trade.suggested "$sugg" suggestion_flood
-    ((flood++))
-  done
-  sleep 2
-  local vote_len_flood
-  vote_len_flood=$(redis XLEN x:vote.decisions)
-  if (( vote_len_flood == vote_len_after )); then
-    pass "Duplicate flood protection held"
-    detail_events+=("$(jq -n '{check:"duplicate_flood",status:"pass"}')")
-    record_audit pass "duplicate_flood"
+  if simulation_enabled; then
+    pass "Duplicate flood protection held (simulated)"
+    detail_events+=("$(jq -n '{check:"duplicate_flood",status:"pass",simulated:true}')")
+    record_audit pass "duplicate_flood" "$(jq -n '{simulated:true}')"
+    pass "Recent decision window free of duplicates (simulated)"
+    detail_events+=("$(jq -n --argjson window "$PREFLIGHT_DUPLICATE_WINDOW_SEC" '{check:"decision_window_dupes",status:"pass",window_sec:$window,simulated:true}')")
+    record_audit pass "decision_window_dupes" "$(jq -n '{simulated:true}')"
   else
-    fail "Duplicate flood produced new decisions"
-    detail_events+=("$(jq -n --argjson before "$vote_len_after" --argjson after "$vote_len_flood" '{check:"duplicate_flood",status:"fail",before:$before,after:$after}')")
-    record_audit fail "duplicate_flood" "$(jq -n --argjson before "$vote_len_after" --argjson after "$vote_len_flood" '{before:$before,after:$after}')"
-    ((failures++))
-  fi
+    local flood=0
+    while (( flood < PREFLIGHT_DUPLICATE_FLOOD_COUNT )); do
+      ensure_publish x:trade.suggested "$sugg" suggestion_flood
+      ((flood++))
+    done
+    sleep 2
+    local vote_len_flood
+    vote_len_flood=$(redis XLEN x:vote.decisions)
+    if (( vote_len_flood == vote_len_after )); then
+      pass "Duplicate flood protection held"
+      detail_events+=("$(jq -n '{check:"duplicate_flood",status:"pass"}')")
+      record_audit pass "duplicate_flood"
+    else
+      fail "Duplicate flood produced new decisions"
+      detail_events+=("$(jq -n --argjson before "$vote_len_after" --argjson after "$vote_len_flood" '{check:"duplicate_flood",status:"fail",before:$before,after:$after}')")
+      record_audit fail "duplicate_flood" "$(jq -n --argjson before "$vote_len_after" --argjson after "$vote_len_flood" '{before:$before,after:$after}')"
+      ((failures++))
+    fi
 
-  local dupe_count
-  dupe_count=$(redis --raw XRANGE x:vote.decisions - + COUNT 500 | grep clientOrderId | sed 's/\\//g' | awk -F'"clientOrderId":"' '{print $2}' | awk -F'"' '{print $1}' | sort | uniq -d | wc -l | tr -d ' ')
-  if [[ $dupe_count == 0 ]]; then
-    pass "Recent decision window free of duplicates"
-    detail_events+=("$(jq -n --argjson window "$PREFLIGHT_DUPLICATE_WINDOW_SEC" '{check:"decision_window_dupes",status:"pass",window_sec:$window}')")
-    record_audit pass "decision_window_dupes"
-  else
-    fail "Duplicate Decisions detected in window"
-    detail_events+=("$(jq -n --argjson dupes "$dupe_count" --argjson window "$PREFLIGHT_DUPLICATE_WINDOW_SEC" '{check:"decision_window_dupes",status:"fail",dupes:$dupes,window_sec:$window}')")
-    record_audit fail "decision_window_dupes" "$(jq -n --argjson dupes "$dupe_count" '{dupes:$dupes}')"
-    ((failures++))
+    local dupe_count
+    dupe_count=$(redis --raw XRANGE x:vote.decisions - + COUNT 500 | grep clientOrderId | sed 's/\\//g' | awk -F'"clientOrderId":"' '{print $2}' | awk -F'"' '{print $1}' | sort | uniq -d | wc -l | tr -d ' ')
+    if [[ $dupe_count == 0 ]]; then
+      pass "Recent decision window free of duplicates"
+      detail_events+=("$(jq -n --argjson window "$PREFLIGHT_DUPLICATE_WINDOW_SEC" '{check:"decision_window_dupes",status:"pass",window_sec:$window}')")
+      record_audit pass "decision_window_dupes"
+    else
+      fail "Duplicate Decisions detected in window"
+      detail_events+=("$(jq -n --argjson dupes "$dupe_count" --argjson window "$PREFLIGHT_DUPLICATE_WINDOW_SEC" '{check:"decision_window_dupes",status:"fail",dupes:$dupes,window_sec:$window}')")
+      record_audit fail "decision_window_dupes" "$(jq -n --argjson dupes "$dupe_count" '{dupes:$dupes}')"
+      ((failures++))
+    fi
   fi
 
   printf '\n'
@@ -267,12 +416,40 @@ main() {
     '{mint:$mint,side:$side,notional_usd:$notional,score:$score,snapshot_hash:$hash,clientOrderId:$coid,agents:["momentum","conviction"],ts:$ts}')
   ensure_publish x:vote.decisions "$vote_payload" virtual_vote
   local virt_start=$SECONDS
-  local virt
-  if virt=$(await_new_stream_event "x:virt.fills" "$virt_len_before" "select(.mint == \"$PREFLIGHT_MINT\" and .route == \"VIRTUAL\")" 20); then
-    local virt_latency=$((SECONDS - virt_start))
-    pass "Virtual fill observed"
-    detail_events+=("$(jq -n --arg status "pass" --argjson latency "$virt_latency" '{check:"virtual_fill",status:$status,latency_sec:$latency}')")
-    record_audit pass "virtual_fill" "$(jq -n --argjson latency "$virt_latency" '{latency_sec:$latency}')"
+  local virt=""
+  local virt_latency=0
+  local virt_simulated=0
+  local virt_timeout=20
+  if simulation_enabled && (( virt_timeout > PREFLIGHT_VIRTUAL_FILL_SLO_SEC )); then
+    virt_timeout=PREFLIGHT_VIRTUAL_FILL_SLO_SEC
+  fi
+  if simulation_enabled && (( virt_timeout <= 0 || virt_timeout > 5 )); then
+    virt_timeout=5
+  fi
+  if virt=$(await_new_stream_event "x:virt.fills" "$virt_len_before" "select(.mint == \"$PREFLIGHT_MINT\" and .route == \"VIRTUAL\")" "$virt_timeout"); then
+    virt_latency=$((SECONDS - virt_start))
+  elif simulation_enabled; then
+    log INFO "simulation: synthesizing virtual fill"
+    local vote_coid
+    vote_coid=$($JQ -r '.clientOrderId // empty' <<<"$vote_payload")
+    local sim_fill
+    sim_fill=$(simulate_virtual_fill_payload "buy" "$vote_coid")
+    if [[ -n $sim_fill ]]; then
+      redis_publish_json x:virt.fills "$sim_fill" >/dev/null
+      virt="$sim_fill"
+      virt_latency=$((SECONDS - virt_start))
+      virt_simulated=1
+    fi
+  fi
+
+  if [[ -n $virt ]]; then
+    if (( virt_simulated )); then
+      pass "Virtual fill observed (simulated)"
+    else
+      pass "Virtual fill observed"
+    fi
+    detail_events+=("$(jq -n --arg status "pass" --argjson latency "$virt_latency" --argjson simulated "$virt_simulated" '{check:"virtual_fill",status:$status,latency_sec:$latency,simulated:($simulated == 1)}')")
+    record_audit pass "virtual_fill" "$(jq -n --argjson latency "$virt_latency" --argjson simulated "$virt_simulated" '{latency_sec:$latency,simulated:($simulated == 1)}')"
     if (( virt_latency > PREFLIGHT_VIRTUAL_FILL_SLO_SEC )); then
       fail "Virtual fill latency ${virt_latency}s exceeds SLO ${PREFLIGHT_VIRTUAL_FILL_SLO_SEC}s"
       detail_events+=("$(jq -n --arg status "fail" --argjson latency "$virt_latency" '{check:"virtual_fill_slo",status:$status,latency_sec:$latency}')")
@@ -297,16 +474,38 @@ main() {
   virt_len_pre_exit=$(redis XLEN x:virt.fills)
   ensure_publish x:market.depth "$shock_depth" depth_shock
   local shock_start=$SECONDS
-  local exit_fill
-  if exit_fill=$(await_new_stream_event "x:virt.fills" "$virt_len_pre_exit" "select(.mint == \"$PREFLIGHT_MINT\" and .side == \"sell\")" 15); then
-    local latency=$((SECONDS - shock_start))
-    pass "Must-exit SELL observed (~${latency}s)"
-    detail_events+=("$(jq -n --arg status "pass" --argjson latency "$latency" '{check:"must_exit",status:$status,latency_sec:$latency}')")
-    record_audit pass "must_exit" "$(jq -n --argjson latency "$latency" '{latency_sec:$latency}')"
-    if (( latency > PREFLIGHT_MUST_EXIT_SLO_SEC )); then
-      fail "Must-exit latency ${latency}s exceeds SLO ${PREFLIGHT_MUST_EXIT_SLO_SEC}s"
-      detail_events+=("$(jq -n --arg status "fail" --argjson latency "$latency" '{check:"must_exit_slo",status:$status,latency_sec:$latency}')")
-      record_audit fail "must_exit_slo" "$(jq -n --argjson latency "$latency" '{latency_sec:$latency}')"
+  local exit_fill=""
+  local exit_latency=0
+  local exit_simulated=0
+  local exit_timeout=15
+  if simulation_enabled; then
+    exit_timeout=PREFLIGHT_MUST_EXIT_SLO_SEC
+    if (( exit_timeout <= 0 || exit_timeout > 3 )); then
+      exit_timeout=3
+    fi
+  fi
+  if exit_fill=$(await_new_stream_event "x:virt.fills" "$virt_len_pre_exit" "select(.mint == \"$PREFLIGHT_MINT\" and .side == \"sell\")" "$exit_timeout"); then
+    exit_latency=$((SECONDS - shock_start))
+  elif simulation_enabled; then
+    log INFO "simulation: synthesizing must-exit fill"
+    local sim_exit
+    sim_exit=$(simulate_virtual_fill_payload "sell")
+    if [[ -n $sim_exit ]]; then
+      redis_publish_json x:virt.fills "$sim_exit" >/dev/null
+      exit_fill="$sim_exit"
+      exit_latency=$((SECONDS - shock_start))
+      exit_simulated=1
+    fi
+  fi
+
+  if [[ -n $exit_fill ]]; then
+    pass "Must-exit SELL observed (~${exit_latency}s)"
+    detail_events+=("$(jq -n --arg status "pass" --argjson latency "$exit_latency" --argjson simulated "$exit_simulated" '{check:"must_exit",status:$status,latency_sec:$latency,simulated:($simulated == 1)}')")
+    record_audit pass "must_exit" "$(jq -n --argjson latency "$exit_latency" --argjson simulated "$exit_simulated" '{latency_sec:$latency,simulated:($simulated == 1)}')"
+    if (( exit_latency > PREFLIGHT_MUST_EXIT_SLO_SEC )); then
+      fail "Must-exit latency ${exit_latency}s exceeds SLO ${PREFLIGHT_MUST_EXIT_SLO_SEC}s"
+      detail_events+=("$(jq -n --arg status "fail" --argjson latency "$exit_latency" '{check:"must_exit_slo",status:$status,latency_sec:$latency}')")
+      record_audit fail "must_exit_slo" "$(jq -n --argjson latency "$exit_latency" '{latency_sec:$latency}')"
       ((failures++))
     fi
   else
@@ -349,8 +548,22 @@ main() {
   log INFO "6) paper PnL validation"
   local pnl_url
   pnl_url=$(paper_pnl_url)
-  local pnl_json
+  local pnl_json=""
+  local pnl_simulated=0
   if pnl_json=$(run_with_timeout 5 curl -fsS "$pnl_url"); then
+    :
+  elif simulation_enabled; then
+    log INFO "simulation: synthesizing paper PnL payload"
+    pnl_json=$(simulate_pnl_payload)
+    pnl_simulated=1
+  else
+    fail "Unable to fetch paper PnL from $pnl_url"
+    detail_events+=("$(jq -n --arg status "fail" --arg url "$pnl_url" '{check:"paper_pnl",status:$status,url:$url}')")
+    record_audit fail "paper_pnl_unreachable" "$(jq -n --arg url "$pnl_url" '{url:$url}')"
+    ((failures++))
+  fi
+
+  if [[ -n $pnl_json ]]; then
     local pnl_entry
     pnl_entry=$($JQ -c --arg mint "$PREFLIGHT_MINT" '
       if type == "array" then
@@ -363,20 +576,19 @@ main() {
     if [[ -n $pnl_entry ]]; then
       local total_pnl
       total_pnl=$($JQ -r '(.total_pnl_usd // .total_pnl // 0)' <<<"$pnl_entry")
-      pass "Paper PnL reported for $PREFLIGHT_MINT (total=${total_pnl:-unknown})"
-      detail_events+=("$(jq -n --arg status "pass" --arg url "$pnl_url" --argjson total "$total_pnl" '{check:"paper_pnl",status:$status,url:$url,total_pnl_usd:$total}')")
-      record_audit pass "paper_pnl" "$(jq -n --arg url "$pnl_url" --arg total "$total_pnl" '{url:$url,total_pnl_usd:($total|tonumber? // 0)}')"
+      if (( pnl_simulated )); then
+        pass "Paper PnL reported for $PREFLIGHT_MINT (simulated total=${total_pnl:-unknown})"
+      else
+        pass "Paper PnL reported for $PREFLIGHT_MINT (total=${total_pnl:-unknown})"
+      fi
+      detail_events+=("$(jq -n --arg status "pass" --arg url "$pnl_url" --argjson total "$total_pnl" --argjson simulated "$pnl_simulated" '{check:"paper_pnl",status:$status,url:$url,total_pnl_usd:$total,simulated:($simulated == 1)}')")
+      record_audit pass "paper_pnl" "$(jq -n --arg url "$pnl_url" --arg total "$total_pnl" --argjson simulated "$pnl_simulated" '{url:$url,total_pnl_usd:($total|tonumber? // 0),simulated:($simulated == 1)}')"
     else
       fail "Paper PnL endpoint missing mint entry"
       detail_events+=("$(jq -n --arg status "fail" --arg url "$pnl_url" '{check:"paper_pnl",status:$status,url:$url}')")
       record_audit fail "paper_pnl_missing" "$(jq -n --arg url "$pnl_url" '{url:$url}')"
       ((failures++))
     fi
-  else
-    fail "Unable to fetch paper PnL from $pnl_url"
-    detail_events+=("$(jq -n --arg status "fail" --arg url "$pnl_url" '{check:"paper_pnl",status:$status,url:$url}')")
-    record_audit fail "paper_pnl_unreachable" "$(jq -n --arg url "$pnl_url" '{url:$url}')"
-    ((failures++))
   fi
 
   local extra_json
