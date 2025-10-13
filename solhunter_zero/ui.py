@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ _RL_WS_PORT_DEFAULT = 8767
 _EVENT_WS_PORT_DEFAULT = 8770
 _LOG_WS_PORT_DEFAULT = 8768
 _WS_QUEUE_DEFAULT = 512
+_ADDR_IN_USE_ERRNOS = {errno.EADDRINUSE}
 
 
 rl_ws_loop: asyncio.AbstractEventLoop | None = None
@@ -239,17 +241,14 @@ def _start_channel(
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         state.loop = loop
-        state.port = port
+        state.port = 0
 
         if channel == "rl":
             rl_ws_loop = loop
-            _RL_WS_PORT = port
         elif channel == "events":
             event_ws_loop = loop
-            _EVENT_WS_PORT = port
         else:
             log_ws_loop = loop
-            _LOG_WS_PORT = port
 
         queue = asyncio.Queue[str](maxsize=queue_size)
         state.queue = queue
@@ -292,18 +291,99 @@ def _start_channel(
             finally:
                 state.clients.discard(websocket)
 
-        try:
-            server = loop.run_until_complete(
-                websockets.serve(  # type: ignore[call-arg]
-                    _handler,
-                    host,
-                    port,
-                    ping_interval=ping_interval,
-                    ping_timeout=ping_timeout,
+        server = None
+        last_exc: Exception | None = None
+
+        for candidate_port in (port, 0) if port != 0 else (0,):
+            try:
+                server = loop.run_until_complete(
+                    websockets.serve(  # type: ignore[call-arg]
+                        _handler,
+                        host,
+                        candidate_port,
+                        ping_interval=ping_interval,
+                        ping_timeout=ping_timeout,
+                    )
                 )
-            )
-        except Exception as exc:  # pragma: no cover - startup failure surfaced to caller
-            ready.put(exc)
+            except OSError as exc:
+                last_exc = exc
+                if exc.errno in _ADDR_IN_USE_ERRNOS and candidate_port != 0:
+                    log.warning(
+                        "%s websocket port %s unavailable; retrying with automatic port",
+                        channel,
+                        candidate_port,
+                    )
+                    continue
+                ready.put(exc)
+                state.loop = None
+                if channel == "rl":
+                    rl_ws_loop = None
+                    _RL_WS_PORT = _RL_WS_PORT_DEFAULT
+                elif channel == "events":
+                    event_ws_loop = None
+                    _EVENT_WS_PORT = _EVENT_WS_PORT_DEFAULT
+                else:
+                    log_ws_loop = None
+                    _LOG_WS_PORT = _LOG_WS_PORT_DEFAULT
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+                return
+            except Exception as exc:  # pragma: no cover - unexpected startup failure
+                ready.put(exc)
+                state.loop = None
+                if channel == "rl":
+                    rl_ws_loop = None
+                    _RL_WS_PORT = _RL_WS_PORT_DEFAULT
+                elif channel == "events":
+                    event_ws_loop = None
+                    _EVENT_WS_PORT = _EVENT_WS_PORT_DEFAULT
+                else:
+                    log_ws_loop = None
+                    _LOG_WS_PORT = _LOG_WS_PORT_DEFAULT
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+                return
+            else:
+                bound_port = candidate_port
+                if getattr(server, "sockets", None):
+                    try:
+                        sockname = server.sockets[0].getsockname()
+                        bound_port = sockname[1] if isinstance(sockname, tuple) else bound_port
+                    except Exception:
+                        pass
+                previous_port = port
+                bound_port = bound_port or previous_port
+                if candidate_port == 0 and bound_port == previous_port:
+                    log.error(
+                        "Unable to determine dynamically assigned port for %s websocket",
+                        channel,
+                    )
+                    if server is not None:
+                        with contextlib.suppress(Exception):
+                            server.close()
+                            loop.run_until_complete(server.wait_closed())
+                    server = None
+                    continue
+                port = bound_port
+                state.port = bound_port
+                if channel == "rl":
+                    _RL_WS_PORT = bound_port
+                elif channel == "events":
+                    _EVENT_WS_PORT = bound_port
+                else:
+                    _LOG_WS_PORT = bound_port
+                if candidate_port == 0 and bound_port != previous_port:
+                    log.info(
+                        "%s websocket using dynamically assigned port %s", channel, bound_port
+                    )
+                break
+
+        if server is None:
+            ready.put(last_exc or RuntimeError(f"Unable to start {channel} websocket"))
             state.loop = None
             if channel == "rl":
                 rl_ws_loop = None

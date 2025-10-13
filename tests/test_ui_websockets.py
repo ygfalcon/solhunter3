@@ -69,11 +69,22 @@ def test_websocket_port_in_use():
 
     sock = socket.socket()
     sock.bind(("localhost", 8767))
+    sock.listen(1)
     try:
-        with pytest.raises(RuntimeError):
-            ui.start_websockets()
+        threads = ui.start_websockets()
+        assert ui._RL_WS_PORT != 8767
+        for _ in range(50):
+            try:
+                with socket.create_connection(("localhost", ui._RL_WS_PORT), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            pytest.fail("fallback websocket port did not bind")
     finally:
         sock.close()
         for loop in (ui.rl_ws_loop, ui.event_ws_loop, ui.log_ws_loop):
             if loop is not None:
                 loop.call_soon_threadsafe(loop.stop)
+        for t in threads.values() if 'threads' in locals() else []:
+            t.join(timeout=1)
