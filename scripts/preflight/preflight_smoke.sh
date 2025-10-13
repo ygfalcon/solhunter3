@@ -181,7 +181,7 @@ main() {
   now=$(date +%s)
 
   log INFO "solhunter preflight: end-to-end smoke"
-  record_audit pass "start" "$(jq -n --arg ts "$(date -Is)" '{started_at:$ts}')"
+  record_audit pass "start" "$(jq -n --arg ts "$(iso_timestamp)" '{started_at:$ts}')"
 
   if simulation_enabled; then
     log INFO "simulation: SIM_MODE enabled - synthetic events will be emitted as needed"
