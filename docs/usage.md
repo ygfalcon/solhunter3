@@ -54,12 +54,18 @@ Omit ``--url`` or pass ``--preset`` to use one of the bundled datasets.
 ## MEV Bundles
 
 When `use_mev_bundles` is enabled (the default), swaps are submitted
-through the [Jito block-engine](https://jito.network/). On first launch
-the toolkit checks for `JITO_AUTH`; if it is missing, a new token is
-requested from Jito's authentication service using your wallet keypair
-and saved to `.env`. The same credentials can also be used to subscribe
-to Jito's searcher websocket for real‑time pending transactions. To use
-a custom token instead, set `JITO_AUTH` in the environment or your own
+through the [Jito block-engine](https://jito.network/). The toolkit now
+expects you to provide existing credentials; new block-engine access is
+not being issued or processed through the public authentication
+challenge. You must already operate a Solana keypair that has been
+whitelisted with Jito. During normal operation the client reuses the
+Solhunter trading keypair you have configured (for example via
+`KEYPAIR_PATH`) to sign the block engine's challenge and obtain short-lived JWT
+tokens. If `JITO_AUTH` is missing, the launcher will continue to look for
+a cached token in `.env`, but it will not be able to mint a new one on
+your behalf. The same credentials can also be used to subscribe to
+Jito's searcher websocket for real-time pending transactions. To use a
+custom token, set `JITO_AUTH` in the environment or your own
 configuration file before starting. Provide the block-engine and
 websocket endpoints and authentication token:
 
@@ -77,4 +83,15 @@ missing while MEV bundles are enabled. The authentication request signs
 Jito's challenge with your trading keypair to obtain the JWT; editing
 `.env` or exporting `JITO_AUTH` lets you substitute a token retrieved
 elsewhere.
+
+### Jito Authentication Overview
+
+1. Load the Solana keypair already configured for Solhunter—the same
+   signing key used for trading and bundle submission.
+2. Submit the public key to Jito and wait for it to be whitelisted for
+   block-engine access.
+3. During startup the client performs the challenge–response flow with
+   that keypair to mint the short-lived JWT used for gRPC requests.
+4. Once the RPC and websocket parameters are set, authorization happens
+   automatically; no extra API calls are required in your scripts.
 
