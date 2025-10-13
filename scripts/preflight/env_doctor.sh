@@ -95,58 +95,38 @@ main() {
       check_details+=("$(jq -n '{type:"das",status:"skipped"}')")
       record_audit warn "helius:skip"
     elif [[ -n $helius_key ]]; then
-      local das_base=${DAS_BASE_URL:-https://api.helius.xyz/v1}
+      local das_base=${DAS_RPC_URL:-${HELIUS_DAS_RPC_URL:-https://mainnet.helius-rpc.com}}
       das_base=${das_base%/}
-      local das_payload='{"interface":"FungibleToken","limit":1,"sortBy":{"field":"recentAction","direction":"desc"}}'
-      local -a das_candidates=()
-      if [[ -n ${DAS_SEARCH_PATH:-} ]]; then
-        das_candidates+=("${DAS_SEARCH_PATH}")
+      local das_url=$das_base
+      if [[ $das_url != *"api-key="* ]]; then
+        local delimiter='?'
+        if [[ $das_url == *"?"* ]]; then
+          delimiter='&'
+        fi
+        das_url="${das_url}${delimiter}api-key=${helius_key}"
       fi
-      das_candidates+=("asset/search" "nft-events/searchAssets")
-      local das_path=""
-      local das_label=""
-      local das_ok=0
-      local das_seen=""
-      for candidate in "${das_candidates[@]}"; do
-        local path=${candidate#/}
-        if [[ -z $path ]]; then
-          continue
-        fi
-        if [[ " ${das_seen:-} " == *" ${path} "* ]]; then
-          continue
-        fi
-        das_seen="${das_seen:-} ${path}"
-        local das_url="${das_base}/${path}?api-key=${helius_key}"
-        if run_with_timeout 5 curl -fsS -X POST "$das_url" \
-          -H "Content-Type: application/json" \
-          -d "$das_payload" | jq -re '
-            def items_from:
-              if type == "array" then .
-              elif type == "object" then (
-                (.items? // empty | select(type == "array")),
-                (.tokens? // empty | select(type == "array")),
-                (.assets? // empty | select(type == "array")),
-                (.result? | items_from),
-                (.data? | items_from)
-              )
-              else empty end;
-            ([items_from] | length) > 0
-          ' >/dev/null; then
-          das_path=$path
-          das_ok=1
-          break
-        else
-          das_label=$path
-        fi
-      done
-      if [[ $das_ok -eq 1 ]]; then
-        pass "DAS reachable via ${das_path}"
+      local das_payload='{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"interface":"FungibleToken","limit":1,"sortBy":{"field":"recentAction","direction":"desc"}}}'
+      if run_with_timeout 5 curl -fsS -X POST "$das_url" \
+        -H "Content-Type: application/json" \
+        -d "$das_payload" | jq -re '
+          def items_from:
+            if type == "array" then .
+            elif type == "object" then (
+              (.items? // empty | select(type == "array")),
+              (.tokens? // empty | select(type == "array")),
+              (.assets? // empty | select(type == "array")),
+              (.result? | items_from)
+            )
+            else empty end;
+          .result? as $result | ($result | items_from) | length > 0
+        ' >/dev/null; then
+        pass "DAS reachable (JSON-RPC)"
         check_details+=("$(jq -n '{type:"das",status:"pass"}')")
-        record_audit pass "helius:${das_path}"
+        record_audit pass "helius:jsonrpc"
       else
-        fail "DAS probe failed${das_label:+ (via ${das_label})}"
+        fail "DAS probe failed (JSON-RPC)"
         check_details+=("$(jq -n '{type:"das",status:"fail"}')")
-        record_audit fail "helius:${das_label:-unknown}"
+        record_audit fail "helius:jsonrpc"
         ((failures++))
       fi
     else

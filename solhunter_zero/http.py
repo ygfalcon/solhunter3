@@ -118,13 +118,7 @@ def _parse_static_dns(value: str | None) -> dict[str, list[str]]:
     return mapping
 
 
-STATIC_DNS_DEFAULT = (
-    "quote-api.jup.ag=172.64.144.197,104.18.43.59;"
-    "api.helius.xyz=104.18.36.169,172.64.151.87;"
-    "mainnet.helius-rpc.com=104.18.36.169,172.64.151.87;"
-    "pumpportal.fun=35.194.64.63;"
-    "api.dexscreener.com=104.18.38.143,172.64.149.113"
-)
+STATIC_DNS_DEFAULT = ""
 STATIC_DNS_MAP = _parse_static_dns(os.getenv("HTTP_STATIC_DNS", STATIC_DNS_DEFAULT))
 
 
