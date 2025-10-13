@@ -3,7 +3,7 @@ import sys
 import types
 import asyncio
 
-os.environ.setdefault("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+os.environ.setdefault("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
 os.environ.setdefault("DEX_BASE_URL", "https://quote-api.jup.ag")
 os.environ.setdefault("AGENTS", "[\"dummy\"]")
 

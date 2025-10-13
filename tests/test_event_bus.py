@@ -402,6 +402,29 @@ async def test_websocket_client_publish(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_websocket_health_endpoint():
+    import json as json_mod
+    import solhunter_zero.event_bus as ev
+
+    port = 8801
+    await ev.start_ws_server("localhost", port)
+    assert ev._ws_health_port is not None
+    health_host = ev._ws_health_host or "localhost"
+    reader, writer = await asyncio.open_connection(health_host, int(ev._ws_health_port))
+    writer.write(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    await writer.drain()
+    data = await reader.read()
+    writer.close()
+    with contextlib.suppress(Exception):
+        await writer.wait_closed()
+    await ev.stop_ws_server()
+    body = data.split(b"\r\n\r\n", 1)[-1]
+    payload = json_mod.loads(body.decode("utf-8"))
+    assert payload["status"] == "ok"
+    assert isinstance(payload["pending"], int)
+
+
+@pytest.mark.asyncio
 async def test_websocket_reconnect_on_drop():
     port = 8770
     connections = []

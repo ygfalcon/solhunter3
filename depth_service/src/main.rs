@@ -1674,7 +1674,7 @@ async fn main() -> Result<()> {
         Keypair::new()
     };
     if rpc.is_empty() {
-        rpc = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d".to_string();
+        rpc = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY".to_string();
     }
     let exec = Arc::new(ExecContext::new(&rpc, kp).await);
 

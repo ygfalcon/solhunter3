@@ -15,7 +15,7 @@ Env (with sensible defaults):
   CHECK_UI_HEALTH=1
   USE_REDIS=1
   EVENT_BUS_URL=redis://127.0.0.1:6379/0
-  SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
+  SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
   # thresholds (fraction 0..1):
   MIN_OK_RL=0.98
   MIN_OK_UI=0.95
@@ -79,7 +79,7 @@ def main():
     check_ui = os.getenv("CHECK_UI_HEALTH", "1") == "1"
     use_redis = os.getenv("USE_REDIS", "1") == "1"
     redis_url = os.getenv("EVENT_BUS_URL", "redis://127.0.0.1:6379/0")
-    rpc_url = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+    rpc_url = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
 
     min_ok_rl = envf("MIN_OK_RL", 0.98)
     min_ok_ui = envf("MIN_OK_UI", 0.95)

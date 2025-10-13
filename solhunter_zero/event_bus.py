@@ -495,6 +495,95 @@ _ws_server = None
 _flush_task: asyncio.Task | None = None
 _outgoing_queue: Queue | None = None
 _ws_tasks: Set[asyncio.Task] = set()
+_ws_health_server: asyncio.AbstractServer | None = None
+_ws_health_host: str | None = None
+_ws_health_port: int | None = None
+
+
+async def _health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Simple HTTP handler returning websocket health metrics."""
+
+    status = {
+        "status": "ok",
+        "clients": len(_ws_clients),
+        "peers": len(_peer_clients),
+        "pending": (_outgoing_queue.qsize() if _outgoing_queue is not None else 0),
+        "ws_host": _WS_LISTEN_HOST,
+        "ws_port": _WS_LISTEN_PORT,
+    }
+    body = json.dumps(status).encode("utf-8")
+    headers = [
+        b"HTTP/1.1 200 OK",
+        b"Content-Type: application/json",
+        f"Content-Length: {len(body)}".encode("ascii"),
+        b"Connection: close",
+        b"",
+    ]
+    payload = b"\r\n".join(headers) + b"\r\n" + body
+    try:
+        writer.write(payload)
+        await writer.drain()
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:  # pragma: no cover - best effort
+            pass
+
+
+async def _start_ws_health_server(host: str, ws_port: int) -> None:
+    """Launch the optional websocket health endpoint."""
+
+    global _ws_health_server, _ws_health_host, _ws_health_port
+    if _ws_health_server is not None:
+        return
+    if os.getenv("EVENT_BUS_HEALTH_DISABLE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    health_host = os.getenv("EVENT_BUS_HEALTH_HOST") or host
+    port_raw = os.getenv("EVENT_BUS_HEALTH_PORT")
+    if port_raw is None or not port_raw.strip():
+        port_candidate = ws_port + 1
+    else:
+        try:
+            port_candidate = int(port_raw)
+        except Exception:
+            port_candidate = ws_port + 1
+    if port_candidate <= 0:
+        return
+    try:
+        server = await asyncio.start_server(_health_handler, health_host, port_candidate)
+    except OSError as exc:
+        if getattr(exc, "errno", None) in {errno.EADDRINUSE, errno.EACCES}:
+            raise RuntimeError(
+                f"Event bus health port {port_candidate} unavailable"
+            ) from exc
+        raise
+    _ws_health_server = server
+    _ws_health_host = health_host
+    sockets = getattr(server, "sockets", None)
+    resolved_port = port_candidate
+    if sockets:
+        try:
+            resolved_port = sockets[0].getsockname()[1]
+        except Exception:  # pragma: no cover - platform variance
+            pass
+    _ws_health_port = resolved_port
+    logging.getLogger(__name__).info(
+        "Event bus health server listening on %s:%s", health_host, resolved_port
+    )
+
+
+async def _stop_ws_health_server() -> None:
+    """Tear down the health endpoint if it is running."""
+
+    global _ws_health_server, _ws_health_host, _ws_health_port
+    if _ws_health_server is None:
+        return
+    _ws_health_server.close()
+    await _ws_health_server.wait_closed()
+    _ws_health_server = None
+    _ws_health_host = None
+    _ws_health_port = None
 
 
 def _track_ws_task(task: asyncio.Task) -> None:
@@ -1358,6 +1447,11 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
     listen_host = host or _WS_LISTEN_HOST
     current_port = int(port or _WS_LISTEN_PORT)
 
+    if _ws_server is not None:
+        raise RuntimeError(
+            f"Event bus websocket already running on {_WS_LISTEN_HOST}:{_WS_LISTEN_PORT}"
+        )
+
     async def handler(ws):
         allowed: Set[str] | None = None
         try:
@@ -1442,6 +1536,8 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
     os.environ.setdefault("EVENT_BUS_URL", DEFAULT_WS_URL)
     os.environ.setdefault("BROKER_WS_URLS", DEFAULT_WS_URL)
 
+    await _start_ws_health_server(_WS_LISTEN_HOST, _WS_LISTEN_PORT)
+
     return _ws_server
 
 
@@ -1460,6 +1556,7 @@ async def stop_ws_server() -> None:
         _ws_server.close()
         await _ws_server.wait_closed()
         _ws_server = None
+    await _stop_ws_health_server()
     if _flush_task is not None:
         _flush_task.cancel()
         _flush_task = None

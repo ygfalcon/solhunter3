@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # Endpoints / env
 BIRDEYE_API = os.getenv("BIRDEYE_API", "https://public-api.birdeye.so/defi/tokenlist")
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY")
-SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
 
 
 # -----------------------------

@@ -139,10 +139,10 @@ DEFAULT_SWAP_PATH = _ensure_path(SWAP_PATHS.get(SWAP_PRIORITIES[0], "/v6/swap"))
 SWAP_PATH = DEFAULT_SWAP_PATH
 
 
-RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
 RPC_TESTNET_URL = os.getenv(
     "SOLANA_TESTNET_RPC_URL",
-    "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
 )
 
 # Map of venue names to base API URLs used for order submission.  Callers may
