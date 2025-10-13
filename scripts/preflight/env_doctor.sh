@@ -24,7 +24,32 @@ main() {
     fi
   done
 
-  local required_envs=(MODE NEW_DAS_DISCOVERY EXIT_FEATURES_ON RL_WEIGHTS_DISABLED MICRO_MODE REDIS_URL SOLANA_RPC_URL HELIUS_API_KEY)
+  local defaults=(
+    NEW_DAS_DISCOVERY=1
+    EXIT_FEATURES_ON=1
+    RL_WEIGHTS_DISABLED=0
+  )
+
+  local kv name value
+  for kv in "${defaults[@]}"; do
+    name=${kv%%=*}
+    value=${kv#*=}
+    if [[ -z ${!name:-} ]]; then
+      export "$name=$value"
+      log INFO "defaulting $name=$value"
+    fi
+  done
+
+  local required_envs=(
+    MODE
+    MICRO_MODE
+    REDIS_URL
+    SOLANA_RPC_URL
+    HELIUS_API_KEY
+    NEW_DAS_DISCOVERY
+    EXIT_FEATURES_ON
+    RL_WEIGHTS_DISABLED
+  )
   for env_name in "${required_envs[@]}"; do
     if require_env "$env_name"; then
       pass "env: $env_name=${!env_name}"
