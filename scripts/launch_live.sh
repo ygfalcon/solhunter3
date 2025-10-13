@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+timestamp() {
+  date '+%Y-%m-%dT%H:%M:%S%z'
+}
+
+log_info() {
+  local msg=$*
+  printf '[%s] [launch_live] %s\n' "$(timestamp)" "$msg"
+}
+
+log_warn() {
+  local msg=$*
+  printf '[%s] [launch_live][warn] %s\n' "$(timestamp)" "$msg" >&2
+}
+
 EXIT_KEYS=1
 EXIT_PREFLIGHT=2
 EXIT_CONNECTIVITY=3
@@ -10,6 +24,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ARTIFACT_DIR="$ROOT_DIR/artifacts/prelaunch"
 LOG_DIR="$ARTIFACT_DIR/logs"
 mkdir -p "$LOG_DIR"
+log_info "Runtime artifacts will be written to $ARTIFACT_DIR (logs in $LOG_DIR)"
 
 # Ensure the repository root is always importable when invoking helper scripts.
 # "launch_live.sh" may be executed before the package is installed (e.g. from a
@@ -136,6 +151,8 @@ if ! [[ $SOAK_DURATION =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   exit 1
 fi
 
+log_info "Starting launch_live with env=$ENV_FILE micro=$MICRO_FLAG canary=$CANARY_MODE preflight_runs=$PREFLIGHT_RUNS soak=${SOAK_DURATION}s"
+
 MANIFEST_RAW=""
 validate_env_file() {
   python3 - "$ENV_FILE" <<'PY'
@@ -188,6 +205,7 @@ print("\n".join(manifest))
 PY
 }
 
+log_info "Validating environment file $ENV_FILE"
 if ! MANIFEST_RAW=$(validate_env_file); then
   exit $EXIT_KEYS
 fi
@@ -202,6 +220,7 @@ if [[ -n $CONFIG_PATH ]]; then
 fi
 
 PROVIDER_STATUS=""
+log_info "Checking configured provider credentials and connectivity"
 if ! PROVIDER_STATUS=$(python3 - <<'PY'
 from solhunter_zero.production import Provider, assert_providers_ok, format_configured_providers
 import sys
@@ -223,7 +242,9 @@ PY
   exit $EXIT_KEYS
 fi
 
+log_info "Environment manifest (sensitive values masked)"
 printf '%s\n' "$MANIFEST_RAW"
+log_info "Provider status"
 printf '%s\n' "$PROVIDER_STATUS"
 
 ensure_redis() {
@@ -241,7 +262,9 @@ ensure_local_redis_if_needed(urls)
 PY
 }
 
+log_info "Ensuring Redis availability"
 ensure_redis
+log_info "Redis helper completed"
 
 redis_health() {
   if [[ -z ${REDIS_URL:-} ]]; then
@@ -266,14 +289,30 @@ PY
   fi
 }
 
+log_info "Running Redis health check"
 if ! redis_health; then
-  echo "Redis health check failed" >&2
+  log_warn "Redis health check failed"
   exit $EXIT_HEALTH
 fi
+log_info "Redis health check passed"
 
 declare -a CHILD_PIDS=()
 register_child() {
   CHILD_PIDS+=("$1")
+}
+
+start_log_stream() {
+  local log=$1
+  local label=$2
+  touch "$log"
+  {
+    tail -n +1 -F "$log" 2>/dev/null |
+      while IFS= read -r line; do
+        printf '[%s] [%s] %s\n' "$(timestamp)" "$label" "$line"
+      done
+  } &
+  local tail_pid=$!
+  register_child "$tail_pid"
 }
 
 cleanup() {
@@ -306,6 +345,7 @@ start_controller() {
   if [[ -n $notify ]]; then
     args+=("--notify" "$notify")
   fi
+  log_info "Launching runtime controller (mode=$mode, log=$log)"
   python3 "${args[@]}" >"$log" 2>&1 &
   local pid=$!
   register_child "$pid"
@@ -355,25 +395,31 @@ PAPER_LOG="$LOG_DIR/paper_runtime.log"
 PAPER_NOTIFY="$ARTIFACT_DIR/paper_ready"
 rm -f "$PAPER_NOTIFY"
 PAPER_PID=$(start_controller "paper" "$PAPER_LOG" "$PAPER_NOTIFY")
+start_log_stream "$PAPER_LOG" "paper"
+log_info "Waiting for paper runtime readiness"
 if ! wait_for_ready "$PAPER_LOG" "$PAPER_NOTIFY" "$PAPER_PID"; then
-  echo "Paper runtime failed to become ready" >&2
+  log_warn "Paper runtime failed to become ready"
   exit $EXIT_HEALTH
 fi
 
-echo "Paper runtime ready (PID=$PAPER_PID)"
+log_info "Paper runtime ready (PID=$PAPER_PID)"
 
 run_preflight() {
   MODE=paper MICRO_MODE=1 bash "$ROOT_DIR/scripts/preflight/run_all.sh"
 }
 
+log_info "Running preflight suite"
 if ! run_preflight; then
-  echo "Preflight suite failed" >&2
+  log_warn "Preflight suite failed"
   exit $EXIT_PREFLIGHT
 fi
+log_info "Preflight suite completed successfully"
 
 kill "$PAPER_PID" >/dev/null 2>&1 || true
 wait "$PAPER_PID" 2>/dev/null || true
+log_info "Paper runtime stopped after preflight"
 
+log_info "Starting connectivity soak for ${SOAK_DURATION}s"
 connectivity_soak() {
   python3 - <<'PY'
 import json
@@ -403,11 +449,11 @@ export SOAK_DURATION="$SOAK_DURATION"
 export SOAK_REPORT="$ARTIFACT_DIR/connectivity_report.json"
 SOAK_RESULT=""
 if ! SOAK_RESULT=$(connectivity_soak); then
-  echo "Connectivity soak failed" >&2
+  log_warn "Connectivity soak failed"
   exit $EXIT_CONNECTIVITY
 fi
 
-echo "Connectivity soak complete: $SOAK_RESULT"
+log_info "Connectivity soak complete: $SOAK_RESULT"
 
 export MODE=live
 export MICRO_MODE=1
@@ -421,25 +467,25 @@ LIVE_LOG="$LOG_DIR/live_runtime.log"
 LIVE_NOTIFY="$ARTIFACT_DIR/live_ready"
 rm -f "$LIVE_NOTIFY"
 LIVE_PID=$(start_controller "live" "$LIVE_LOG" "$LIVE_NOTIFY")
+start_log_stream "$LIVE_LOG" "live"
+log_info "Waiting for live runtime readiness"
 if ! wait_for_ready "$LIVE_LOG" "$LIVE_NOTIFY" "$LIVE_PID"; then
-  echo "Live runtime failed to become ready" >&2
+  log_warn "Live runtime failed to become ready"
   exit $EXIT_HEALTH
 fi
 
-echo "Live runtime ready (PID=$LIVE_PID)"
+log_info "Live runtime ready (PID=$LIVE_PID)"
 GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (2/2) | Soak PASSED | MODE=live | MICRO=on | Canary limits applied"
-echo "$GO_NO_GO"
-
-tail -n0 -f "$LIVE_LOG" &
-TAIL_PID=$!
-register_child "$TAIL_PID"
+log_info "$GO_NO_GO"
 
 wait "$LIVE_PID"
 status=$?
 if [[ $status -ne 0 ]]; then
   print_log_excerpt "$LIVE_LOG" "Live runtime exited with status $status"
-  echo "Live runtime exited with status $status" >&2
+  log_warn "Live runtime exited with status $status"
   exit $EXIT_HEALTH
 fi
+
+log_info "Live runtime exited cleanly"
 
 exit 0
