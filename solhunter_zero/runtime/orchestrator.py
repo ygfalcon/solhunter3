@@ -10,6 +10,7 @@ import socket
 import sys
 from contextlib import closing
 from dataclasses import dataclass
+from queue import Empty, Queue
 from typing import Any, Optional
 
 from ..util import install_uvloop, parse_bool_env
@@ -163,7 +164,7 @@ class RuntimeOrchestrator:
                     sock.bind((host, 0))
                     return sock.getsockname()[1], True
 
-            def _serve():
+            def _serve(port_queue: Queue[Any]) -> None:
                 try:
                     host = os.getenv("UI_HOST", "127.0.0.1")
                     port_env = os.getenv("UI_PORT", os.getenv("PORT", "5000") or 5000)
@@ -178,18 +179,35 @@ class RuntimeOrchestrator:
                             "Requested UI port %s unavailable; using %s instead", requested_port, port
                         )
                     os.environ["UI_PORT"] = str(port)
+                    port_queue.put(port)
 
                     app.run(host=host, port=port, use_reloader=False)
                 except Exception:
+                    port_queue.put(sys.exc_info()[1] or RuntimeError("ui serve failed"))
                     log.exception("UI HTTP server failed")
 
-            t = threading.Thread(target=_serve, daemon=True)
+            port_queue: Queue[Any] = Queue(maxsize=1)
+            t = threading.Thread(target=_serve, args=(port_queue,), daemon=True)
             t.start()
-            await self._publish_stage(
-                "ui:http",
-                True,
-                f"host={os.getenv('UI_HOST','127.0.0.1')} port={os.getenv('UI_PORT', os.getenv('PORT','5000'))}"
-            )
+            actual_port: str | None = None
+            try:
+                result = port_queue.get(timeout=5)
+            except Empty:
+                await self._publish_stage(
+                    "ui:http",
+                    False,
+                    "ui server did not report readiness within timeout",
+                )
+            else:
+                if isinstance(result, Exception):
+                    await self._publish_stage("ui:http", False, str(result))
+                else:
+                    actual_port = str(result)
+                    await self._publish_stage(
+                        "ui:http",
+                        True,
+                        f"host={os.getenv('UI_HOST','127.0.0.1')} port={actual_port}",
+                    )
 
     async def start_agents(self) -> None:
         # Use existing startup path to ensure consistent connectivity + depth_service
