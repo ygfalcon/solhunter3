@@ -323,7 +323,12 @@ async def _fetch_prices_birdeye(
         return {}
 
     url = f"{BIRDEYE_PRICE_URL.rstrip('/')}/defi/price"
-    headers = {"X-API-KEY": api_key}
+    chain = os.getenv("BIRDEYE_CHAIN", "solana").strip() or "solana"
+    headers = {
+        "X-API-KEY": api_key,
+        "accept": "application/json",
+        "x-chain": chain,
+    }
     prices: Dict[str, float] = {}
 
     for token in token_list:
@@ -331,7 +336,7 @@ async def _fetch_prices_birdeye(
             session,
             url,
             "Birdeye",
-            params={"address": token},
+            params={"address": token, "chain": chain},
             headers=headers,
         )
         if not isinstance(payload, dict):

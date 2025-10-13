@@ -162,3 +162,39 @@ def test_warm_cache(monkeypatch):
     prices.warm_cache(["tok"])
 
     assert prices.get_cached_price("tok") == 3.0
+
+
+def test_birdeye_price_includes_chain_header(monkeypatch):
+    captured = {}
+
+    async def fake_request_json(
+        session,
+        url,
+        provider,
+        *,
+        params=None,
+        headers=None,
+        json=None,
+        method="GET",
+    ):
+        captured["params"] = params
+        captured["headers"] = headers
+        return {"data": {"price": 1.23}}
+
+    monkeypatch.setenv("BIRDEYE_API_KEY", "test-key")
+    monkeypatch.setenv("BIRDEYE_CHAIN", "solana")
+    monkeypatch.setattr(prices, "_request_json", fake_request_json)
+
+    async def _run():
+        result = await prices._fetch_prices_birdeye(object(), ["tok"])
+        assert result == {"tok": 1.23}
+
+    asyncio.run(_run())
+
+    headers = captured.get("headers") or {}
+    params = captured.get("params") or {}
+
+    assert headers.get("X-API-KEY") == "test-key"
+    assert headers.get("x-chain") == "solana"
+    assert params.get("address") == "tok"
+    assert params.get("chain") == "solana"
