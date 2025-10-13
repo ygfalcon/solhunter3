@@ -14,9 +14,17 @@ import aiohttp
 from .discovery.mint_resolver import normalize_candidate
 from .token_aliases import canonical_mint, validate_mint
 from .clients.helius_das import get_asset_batch
+from .util.mints import clean_candidate_mints
 
-# Hard-coded Helius defaults (per your request)
-DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+
+def _default_enrich_rpc() -> str:
+    candidate = (os.environ.get("HELIUS_RPC_URL") or os.environ.get("SOLANA_RPC_URL") or "").strip()
+    if candidate:
+        assert "api-key=" in candidate, "HELIUS_RPC_URL must include ?api-key=..."
+    return candidate
+
+
+DEFAULT_SOLANA_RPC = _default_enrich_rpc()
 
 BIRDEYE_BASE = "https://public-api.birdeye.so"
 
@@ -1239,7 +1247,7 @@ async def _helius_search_assets(
 
     normalized: List[Dict[str, Any]] = []
     seen: Set[str] = set()
-    pagination_token: str | None = None
+    page = 1
     per_page = max(1, min(int(limit) if limit > 0 else 50, 100))
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -1250,16 +1258,12 @@ async def _helius_search_assets(
 
     while len(normalized) < limit:
         params: Dict[str, Any] = {
-            "query": {"interface": "FungibleToken"},
-            "sortBy": {"sortBy": "recent_action", "sortDirection": "desc"},
-            "options": {
-                "limit": per_page,
-                "page": 1,
-                "showUnverifiedCollections": True,
-            },
+            "tokenType": "fungible",
+            "page": page,
+            "limit": per_page,
+            "sortBy": "created",
+            "sortDirection": "desc",
         }
-        if pagination_token:
-            params["paginationToken"] = pagination_token
 
         payload = {
             "jsonrpc": "2.0",
@@ -1284,22 +1288,27 @@ async def _helius_search_assets(
             break
 
         result = data.get("result") if isinstance(data, dict) else None
+        next_page: int | None = None
         if isinstance(result, list):
             items = result
-            pagination_token = None
         elif isinstance(result, dict):
             items = result.get("items") or result.get("tokens") or result.get("assets") or []
-            pagination_token = (
-                result.get("paginationToken")
-                or result.get("pagination_token")
-                or result.get("cursor")
-                or result.get("next")
-                or (result.get("pagination") or {}).get("next")
-                or (result.get("pagination") or {}).get("cursor")
-            )
+            pagination = result.get("pagination") if isinstance(result.get("pagination"), dict) else {}
+            for key in ("nextPage", "next_page", "next", "page"):
+                value = pagination.get(key)
+                if value is None and key != "next":
+                    value = result.get(key)
+                if value is None:
+                    continue
+                try:
+                    next_page = int(value)
+                    break
+                except Exception:
+                    continue
         else:
             items = []
-            pagination_token = None
+        if next_page is None and isinstance(items, list) and len(items) >= per_page:
+            next_page = page + 1
 
         if not isinstance(items, list) or not items:
             break
@@ -1336,8 +1345,9 @@ async def _helius_search_assets(
                 break
         if len(normalized) >= limit:
             break
-        if new_entries == 0 or not pagination_token:
+        if new_entries == 0 or not next_page:
             break
+        page = max(page + 1, int(next_page))
 
     if logger.isEnabledFor(logging.INFO):
         logger.info("Helius searchAssets returned %d candidate(s)", len(normalized))
@@ -1804,8 +1814,11 @@ async def enrich_tokens_async(
     Verify token accounts exist and filter obviously bad ones.
     Keeps tokens if decimals parsing fails (agents can still decide).
     """
+    cleaned, dropped = clean_candidate_mints(list(mints))
+    if dropped:
+        logger.warning("Dropped %d invalid mint(s) during enrichment", len(dropped))
     as_list = []
-    for candidate in mints:
+    for candidate in cleaned:
         mint = _normalize_mint_candidate(candidate)
         if mint:
             as_list.append(mint)

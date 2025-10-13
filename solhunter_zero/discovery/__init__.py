@@ -14,6 +14,7 @@ from ..scanner_onchain import (
     fetch_liquidity_onchain_async as raw_liquidity_onchain_async,
 )
 from ..token_aliases import canonical_mint
+from ..util.mints import clean_candidate_mints
 from .mint_resolver import normalize_candidate
 
 logger = logging.getLogger(__name__)
@@ -57,11 +58,16 @@ async def fetch_trending_tokens_async(limit: int | None = None) -> List[str]:
     size = max(1, int(limit or _DEFAULT_LIMIT))
     token_scanner = _token_scanner_module()
     tokens = await token_scanner.scan_tokens_async(limit=size)
+    cleaned, dropped = clean_candidate_mints(tokens)
+    if dropped:
+        logger.warning(
+            "Dropped %d invalid mint(s) at discovery edge", len(dropped)
+        )
     try:
-        enriched = await token_scanner.enrich_tokens_async(tokens)
+        enriched = await token_scanner.enrich_tokens_async(cleaned)
     except Exception as exc:  # pragma: no cover - defensive fallback
         logger.debug("RPC enrichment failed: %s", exc)
-        enriched = [tok for tok in tokens if isinstance(tok, str)]
+        enriched = [tok for tok in cleaned if isinstance(tok, str)]
     return enriched[:size]
 
 
