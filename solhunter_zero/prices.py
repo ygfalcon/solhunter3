@@ -17,12 +17,14 @@ HELIUS_PRICE_SINGLE_METHOD = os.getenv("HELIUS_PRICE_SINGLE_METHOD") or "getAsse
 HELIUS_PRICE_REST_URL = os.getenv("HELIUS_PRICE_REST_URL") or os.getenv(
     "HELIUS_PRICE_URL", ""
 )
+HELIUS_MARKET_PRICE_URL = os.getenv(
+    "HELIUS_MARKET_PRICE_URL", "https://api.helius.xyz/v1/market/price"
+)
 HELIUS_API_KEY = os.getenv(
     "HELIUS_API_KEY", "YOUR_HELIUS_KEY"
 )
 HELIUS_PRICE_CONCURRENCY = max(1, int(os.getenv("HELIUS_PRICE_CONCURRENCY", "10") or 10))
 
-BIRDEYE_PRICE_URL = os.getenv("BIRDEYE_PRICE_URL", "https://public-api.birdeye.so")
 DEXSCREENER_PRICE_URL = os.getenv(
     "DEXSCREENER_PRICE_URL", "https://api.dexscreener.com/latest/dex/tokens"
 )
@@ -126,6 +128,79 @@ async def _request_json(
                 )
                 await asyncio.sleep(PRICE_RETRY_BACKOFF * (2 ** attempt))
     return None
+
+
+async def _fetch_prices_helius_market(
+    session: aiohttp.ClientSession,
+    tokens: Sequence[str],
+) -> Dict[str, float]:
+    url = HELIUS_MARKET_PRICE_URL.strip()
+    tokens = [tok for tok in tokens if isinstance(tok, str) and tok]
+    if not url or not tokens:
+        return {}
+
+    params: list[Tuple[str, Any]] = []
+    if HELIUS_API_KEY:
+        params.append(("api-key", HELIUS_API_KEY))
+
+    params.extend(("ids[]", token) for token in tokens)
+
+    payload = await _request_json(
+        session,
+        url,
+        "Helius (Market)",
+        params=params,
+    )
+
+    prices: Dict[str, float] = {}
+
+    def _record(token: str, value: Any) -> None:
+        if token not in tokens:
+            return
+        price = _extract_price(value)
+        if price is not None:
+            prices[token] = price
+
+    if isinstance(payload, dict):
+        candidate_dicts: list[Dict[str, Any]] = []
+        for key in ("result", "data"):
+            maybe = payload.get(key)
+            if isinstance(maybe, dict):
+                candidate_dicts.append(maybe)
+        if not candidate_dicts:
+            candidate_dicts.append(payload)
+        for data_dict in candidate_dicts:
+            for token, value in data_dict.items():
+                _record(str(token), value)
+
+        items = payload.get("items")
+        if isinstance(items, list):
+            for entry in items:
+                if isinstance(entry, dict):
+                    mint = (
+                        entry.get("id")
+                        or entry.get("mint")
+                        or entry.get("address")
+                        or entry.get("mintAccount")
+                        or entry.get("mintAddress")
+                    )
+                    if isinstance(mint, str):
+                        _record(mint, entry)
+
+    elif isinstance(payload, list):
+        for entry in payload:
+            if isinstance(entry, dict):
+                mint = (
+                    entry.get("id")
+                    or entry.get("mint")
+                    or entry.get("address")
+                    or entry.get("mintAccount")
+                    or entry.get("mintAddress")
+                )
+                if isinstance(mint, str):
+                    _record(mint, entry)
+
+    return prices
 
 
 async def _fetch_prices_helius_rpc(
@@ -293,8 +368,14 @@ async def _fetch_prices_helius(
     if not tokens:
         return {}
 
-    rpc_prices = await _fetch_prices_helius_rpc(session, tokens)
-    prices = dict(rpc_prices)
+    market_prices = await _fetch_prices_helius_market(session, tokens)
+    prices = dict(market_prices)
+
+    missing = [token for token in tokens if token not in prices]
+    if missing:
+        rpc_prices = await _fetch_prices_helius_rpc(session, missing)
+        if rpc_prices:
+            prices.update(rpc_prices)
 
     missing = [token for token in tokens if token not in prices]
     if missing and HELIUS_PRICE_REST_URL:
@@ -310,52 +391,6 @@ async def _fetch_prices_helius(
         update_price_cache(token, price)
 
     return {token: prices[token] for token in token_list if token in prices}
-
-
-async def _fetch_prices_birdeye(
-    session: aiohttp.ClientSession, token_list: Sequence[str]
-) -> Dict[str, float]:
-    if not token_list:
-        return {}
-
-    api_key = os.getenv("BIRDEYE_API_KEY", "")
-    if not api_key:
-        return {}
-
-    url = f"{BIRDEYE_PRICE_URL.rstrip('/')}/defi/price"
-    chain = os.getenv("BIRDEYE_CHAIN", "solana").strip() or "solana"
-    headers = {
-        "X-API-KEY": api_key,
-        "accept": "application/json",
-        "x-chain": chain,
-    }
-    prices: Dict[str, float] = {}
-
-    for token in token_list:
-        payload = await _request_json(
-            session,
-            url,
-            "Birdeye",
-            params={"address": token, "chain": chain},
-            headers=headers,
-        )
-        if not isinstance(payload, dict):
-            continue
-
-        price = None
-        data = payload.get("data")
-        if isinstance(data, dict):
-            price = _extract_price(data)
-            if price is None:
-                price = _extract_price(data.get("value"))
-        if price is None:
-            price = _extract_price(payload)
-
-        if price is not None:
-            prices[token] = price
-            update_price_cache(token, price)
-
-    return prices
 
 
 async def _fetch_prices_dexscreener(
@@ -403,7 +438,6 @@ async def _fetch_prices(token_list: Iterable[str]) -> Dict[str, float]:
 
     providers = (
         ("Helius", _fetch_prices_helius),
-        ("Birdeye", _fetch_prices_birdeye),
         ("Dexscreener", _fetch_prices_dexscreener),
     )
 
