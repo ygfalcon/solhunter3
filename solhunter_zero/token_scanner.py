@@ -1239,7 +1239,8 @@ async def _helius_search_assets(
 
     normalized: List[Dict[str, Any]] = []
     seen: Set[str] = set()
-    pagination_token: str | None = None
+    cursor: str | None = None
+    page = 1
     per_page = max(1, min(int(limit) if limit > 0 else 50, 100))
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -1250,16 +1251,15 @@ async def _helius_search_assets(
 
     while len(normalized) < limit:
         params: Dict[str, Any] = {
-            "query": {"interface": "FungibleToken"},
-            "sortBy": {"sortBy": "recent_action", "sortDirection": "desc"},
-            "options": {
-                "limit": per_page,
-                "page": 1,
-                "showUnverifiedCollections": True,
-            },
+            "tokenType": "fungible",
+            "limit": per_page,
+            "sortBy": "created",
+            "sortDirection": "desc",
         }
-        if pagination_token:
-            params["paginationToken"] = pagination_token
+        if cursor:
+            params["cursor"] = cursor
+        else:
+            params["page"] = page
 
         payload = {
             "jsonrpc": "2.0",
@@ -1286,10 +1286,10 @@ async def _helius_search_assets(
         result = data.get("result") if isinstance(data, dict) else None
         if isinstance(result, list):
             items = result
-            pagination_token = None
+            cursor = None
         elif isinstance(result, dict):
             items = result.get("items") or result.get("tokens") or result.get("assets") or []
-            pagination_token = (
+            cursor = (
                 result.get("paginationToken")
                 or result.get("pagination_token")
                 or result.get("cursor")
@@ -1299,10 +1299,13 @@ async def _helius_search_assets(
             )
         else:
             items = []
-            pagination_token = None
+            cursor = None
 
         if not isinstance(items, list) or not items:
             break
+
+        if cursor is None:
+            page += 1
 
         new_entries = 0
         for entry in items:

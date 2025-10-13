@@ -105,7 +105,7 @@ main() {
         fi
         das_url="${das_url}${delimiter}api-key=${helius_key}"
       fi
-      local das_payload='{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"interface":"FungibleToken","limit":1,"sortBy":{"field":"recentAction","direction":"desc"}}}'
+      local das_payload='{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1,"sortBy":"created","sortDirection":"desc"}}'
       if run_with_timeout 5 curl -fsS -X POST "$das_url" \
         -H "Content-Type: application/json" \
         -d "$das_payload" | jq -re '
