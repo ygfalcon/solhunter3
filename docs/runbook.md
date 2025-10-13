@@ -3,6 +3,37 @@
 This runbook is designed so that a new operator can take SolHunter Zero from zero to live in a
 controlled manner.  All commands are executed from the repository root unless noted.
 
+## 0. Populate Environment Secrets
+
+Before touching any automation, ensure the production environment file is
+complete. Copy `etc/solhunter/env.production` to the host path that will be
+mounted in production (or edit it in place) and replace **every** placeholder
+string with the live credential or endpoint. All of the following keys must be
+populated with production-grade values:
+
+| Credential bucket | Environment keys that require live secrets |
+| --- | --- |
+| Solana RPC/Websocket access | `SOLANA_RPC_URL`, `SOLANA_WS_URL`, `SOLANA_KEYPAIR`, `KEYPAIR_PATH` |
+| Helius (RPC, price service, and auth) | `HELIUS_API_KEY`, `HELIUS_API_KEYS`, `HELIUS_API_TOKEN`, `HELIUS_RPC_URL`, `HELIUS_WS_URL`, `HELIUS_PRICE_RPC_URL`, `HELIUS_PRICE_REST_URL`, `HELIUS_PRICE_BASE_URL` |
+| Market data & quoting partners | `BIRDEYE_API_KEY`, `SOLSCAN_API_KEY`, `DEX_BASE_URL`, `DEX_TESTNET_URL`, `ORCA_API_URL`, `RAYDIUM_API_URL`, `PHOENIX_API_URL`, `METEORA_API_URL`, `JUPITER_WS_URL` |
+| Persistence and bus connectivity | `REDIS_URL`, `EVENT_BUS_URL` |
+| Jito bundle submission | `JITO_RPC_URL`, `JITO_AUTH`, `JITO_WS_URL`, `JITO_WS_AUTH` |
+| Notification/alerting hooks | `NEWS_FEEDS`, `TWITTER_FEEDS`, `DISCORD_FEEDS` |
+
+If your production deployment relies on additional third-party providers,
+include their credentials in the environment file as well. Audit the template
+for any entry that contains `YOUR_`, `REDACTED`, `XXXX`, empty strings, or other
+obvious placeholders and replace them with secrets from your vault.
+
+Run the placeholder audit to confirm nothing was missed:
+
+```bash
+make audit-placeholders ARGS="etc/solhunter/env.production"
+```
+
+Only proceed once the audit passes and the file is backed by a secure secret
+store.
+
 ## 1. Environment Doctor
 
 ```bash
@@ -104,7 +135,7 @@ file and configuration you intend to promote.
 
 ```bash
 bash scripts/launch_live.sh \
-  --env .env.prod \
+  --env etc/solhunter/env.production \
   --micro 1 \
   --soak 300 \
   --config config.toml
@@ -114,6 +145,11 @@ The script performs two full preflight passes (micro on/off), validates environm
 secrets, ensures Redis is reachable, and starts both paper and live runtime controllers
 before flipping the live executor on. Watch `artifacts/prelaunch/logs/live_runtime.log`
 for the `RUNTIME_READY` marker and the console summary before lifting notional caps.
+
+> **Note:** The launcher hard-fails if any environment variables still contain
+> template placeholders (for example `SOLANA_RPC_URL=YOUR_RPC_URL`). Copy the
+> template file, replace every placeholder with production credentials, and rerun
+> `./env_doctor.sh` before invoking the live launcher.
 
 ## 10. Incident Response
 
