@@ -13,6 +13,7 @@ __all__ = [
     "load_keypair",
     "fetch_token_prices",
     "fetch_token_prices_async",
+    "fetch_price_quotes_async",
     "RiskManager",
     "covariance_matrix",
     "correlation_matrix",
@@ -43,6 +44,10 @@ def __getattr__(name: str):
         return func
     if name == "fetch_token_prices_async":
         from .prices import fetch_token_prices_async as func
+
+        return func
+    if name == "fetch_price_quotes_async":
+        from .prices import fetch_price_quotes_async as func
 
         return func
     if name == "RiskManager":
