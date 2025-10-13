@@ -8,15 +8,22 @@ controlled manner.  All commands are executed from the repository root unless no
 Before touching any automation, ensure the production environment file is
 complete. Copy `etc/solhunter/env.production` to the host path that will be
 mounted in production (or edit it in place) and replace **every** placeholder
-string with the live credential or endpoint. At a minimum, the following values
-must be populated with real secrets:
+string with the live credential or endpoint. All of the following keys must be
+populated with production-grade values:
 
-- `SOLANA_RPC_URL` and `SOLANA_WS_URL`
-- `HELIUS_API_KEY`, `HELIUS_API_KEYS`, and `HELIUS_API_TOKEN`
-- `JITO_AUTH` and `JITO_WS_AUTH`
-- `SOLSCAN_API_KEY` (or remove dependent monitors)
-- Any other entry that contains `YOUR_`, `REDACTED`, `XXXX`, or similar
-  placeholders
+| Credential bucket | Environment keys that require live secrets |
+| --- | --- |
+| Solana RPC/Websocket access | `SOLANA_RPC_URL`, `SOLANA_WS_URL`, `SOLANA_KEYPAIR`, `KEYPAIR_PATH` |
+| Helius (RPC, price service, and auth) | `HELIUS_API_KEY`, `HELIUS_API_KEYS`, `HELIUS_API_TOKEN`, `HELIUS_RPC_URL`, `HELIUS_WS_URL`, `HELIUS_PRICE_RPC_URL`, `HELIUS_PRICE_REST_URL`, `HELIUS_PRICE_BASE_URL` |
+| Market data & quoting partners | `BIRDEYE_API_KEY`, `SOLSCAN_API_KEY`, `DEX_BASE_URL`, `DEX_TESTNET_URL`, `ORCA_API_URL`, `RAYDIUM_API_URL`, `PHOENIX_API_URL`, `METEORA_API_URL`, `JUPITER_WS_URL` |
+| Persistence and bus connectivity | `REDIS_URL`, `EVENT_BUS_URL` |
+| Jito bundle submission | `JITO_RPC_URL`, `JITO_AUTH`, `JITO_WS_URL`, `JITO_WS_AUTH` |
+| Notification/alerting hooks | `NEWS_FEEDS`, `TWITTER_FEEDS`, `DISCORD_FEEDS` |
+
+If your production deployment relies on additional third-party providers,
+include their credentials in the environment file as well. Audit the template
+for any entry that contains `YOUR_`, `REDACTED`, `XXXX`, empty strings, or other
+obvious placeholders and replace them with secrets from your vault.
 
 Run the placeholder audit to confirm nothing was missed:
 
