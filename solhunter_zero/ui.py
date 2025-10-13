@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import logging
 import os
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from queue import Queue
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from flask import Flask, jsonify, render_template_string, request
@@ -17,6 +22,397 @@ from .agents.discovery import (
 
 
 log = logging.getLogger(__name__)
+
+
+try:  # pragma: no cover - imported lazily in tests
+    import websockets
+except ImportError:  # pragma: no cover - optional dependency
+    websockets = None  # type: ignore[assignment]
+
+
+_WS_HOST_ENV_KEYS = ("UI_WS_HOST", "UI_HOST")
+_RL_WS_PORT_DEFAULT = 8767
+_EVENT_WS_PORT_DEFAULT = 8770
+_LOG_WS_PORT_DEFAULT = 8768
+_WS_QUEUE_DEFAULT = 512
+
+
+rl_ws_loop: asyncio.AbstractEventLoop | None = None
+event_ws_loop: asyncio.AbstractEventLoop | None = None
+log_ws_loop: asyncio.AbstractEventLoop | None = None
+
+_RL_WS_PORT = _RL_WS_PORT_DEFAULT
+_EVENT_WS_PORT = _EVENT_WS_PORT_DEFAULT
+_LOG_WS_PORT = _LOG_WS_PORT_DEFAULT
+
+
+class _WebsocketState:
+    __slots__ = (
+        "loop",
+        "server",
+        "clients",
+        "queue",
+        "task",
+        "thread",
+        "port",
+        "name",
+    )
+
+    def __init__(self, name: str) -> None:
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.server: Any | None = None
+        self.clients: set[Any] = set()
+        self.queue: asyncio.Queue[str] | None = None
+        self.task: asyncio.Task[Any] | None = None
+        self.thread: threading.Thread | None = None
+        self.port: int = 0
+        self.name = name
+
+
+_WS_CHANNELS: dict[str, _WebsocketState] = {
+    "rl": _WebsocketState("rl"),
+    "events": _WebsocketState("events"),
+    "logs": _WebsocketState("logs"),
+}
+
+
+def _resolve_host() -> str:
+    for key in _WS_HOST_ENV_KEYS:
+        host = os.getenv(key)
+        if host:
+            return host
+    return "127.0.0.1"
+
+
+def _parse_port(value: str | None, default: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        log.warning("Invalid port value %r; using default %s", value, default)
+        return default
+    if port < 0:
+        log.warning("Negative port %s not allowed; using default %s", port, default)
+        return default
+    return port or default
+
+
+def _resolve_port(*keys: str, default: int) -> int:
+    for key in keys:
+        env_value = os.getenv(key)
+        if env_value is not None and env_value != "":
+            return _parse_port(env_value, default)
+    return default
+
+
+def _parse_positive_int(value: str | None, default: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        log.warning("Invalid integer value %r; using default %s", value, default)
+        return default
+    if parsed <= 0:
+        log.warning("Non-positive integer %s not allowed; using default %s", parsed, default)
+        return default
+    return parsed
+
+
+def _format_payload(payload: Any) -> str:
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace")
+    if isinstance(payload, str):
+        return payload
+    try:
+        return json.dumps(payload)
+    except TypeError:
+        return str(payload)
+
+
+def _enqueue_message(channel: str, payload: Any) -> bool:
+    state = _WS_CHANNELS.get(channel)
+    if not state or state.loop is None or state.queue is None:
+        return False
+
+    message = _format_payload(payload)
+
+    def _put() -> None:
+        if state.queue is None:
+            return
+        try:
+            state.queue.put_nowait(message)
+        except asyncio.QueueFull:
+            try:
+                state.queue.get_nowait()
+                state.queue.task_done()
+            except asyncio.QueueEmpty:  # pragma: no cover - race
+                pass
+            state.queue.put_nowait(message)
+
+    state.loop.call_soon_threadsafe(_put)
+    return True
+
+
+def push_event(payload: Any) -> bool:
+    """Broadcast *payload* to UI event websocket listeners."""
+
+    return _enqueue_message("events", payload)
+
+
+def push_rl(payload: Any) -> bool:
+    """Broadcast *payload* to RL websocket listeners."""
+
+    return _enqueue_message("rl", payload)
+
+
+def push_log(payload: Any) -> bool:
+    """Broadcast *payload* to log websocket listeners."""
+
+    return _enqueue_message("logs", payload)
+
+
+def _shutdown_state(state: _WebsocketState) -> None:
+    loop = state.loop
+    if loop is None:
+        return
+
+    def _stop_loop() -> None:
+        loop.stop()
+
+    loop.call_soon_threadsafe(_stop_loop)
+    thread = state.thread
+    if thread is not None:
+        thread.join(timeout=2)
+    state.thread = None
+
+
+def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> None:
+    server = state.server
+    if server is not None:
+        server.close()
+        with contextlib.suppress(Exception):
+            loop.run_until_complete(server.wait_closed())
+    state.server = None
+
+    for ws in list(state.clients):
+        with contextlib.suppress(Exception):
+            loop.run_until_complete(ws.close(code=1012, reason="server shutdown"))
+    state.clients.clear()
+
+    if state.task is not None:
+        state.task.cancel()
+        with contextlib.suppress(BaseException):
+            loop.run_until_complete(state.task)
+    state.task = None
+
+    if state.queue is not None:
+        with contextlib.suppress(Exception):
+            loop.run_until_complete(state.queue.join())
+    state.queue = None
+
+    with contextlib.suppress(Exception):
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    loop.close()
+    state.loop = None
+    state.thread = None
+    state.port = 0
+
+
+def _start_channel(
+    channel: str,
+    *,
+    host: str,
+    port: int,
+    queue_size: int,
+    ping_interval: float,
+    ping_timeout: float,
+) -> threading.Thread:
+    state = _WS_CHANNELS[channel]
+    ready: Queue[Any] = Queue(maxsize=1)
+
+    def _run() -> None:
+        nonlocal port
+        global rl_ws_loop, event_ws_loop, log_ws_loop
+        global _RL_WS_PORT, _EVENT_WS_PORT, _LOG_WS_PORT
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        state.loop = loop
+        state.port = port
+
+        if channel == "rl":
+            rl_ws_loop = loop
+            _RL_WS_PORT = port
+        elif channel == "events":
+            event_ws_loop = loop
+            _EVENT_WS_PORT = port
+        else:
+            log_ws_loop = loop
+            _LOG_WS_PORT = port
+
+        queue = asyncio.Queue[str](maxsize=queue_size)
+        state.queue = queue
+        backlog: deque[str] = deque()
+
+        async def _broadcast_loop() -> None:
+            while True:
+                message = await queue.get()
+                stale_clients: list[Any] = []
+                for ws in list(state.clients):
+                    try:
+                        await ws.send(message)
+                    except Exception:
+                        stale_clients.append(ws)
+                for ws in stale_clients:
+                    state.clients.discard(ws)
+                backlog.append(message)
+                if len(backlog) > 64:
+                    backlog.popleft()
+                queue.task_done()
+
+        async def _handler(websocket, path) -> None:  # type: ignore[override]
+            if path not in {"", "/", "/ws"}:
+                await websocket.close(code=1008, reason="invalid path")
+                return
+            state.clients.add(websocket)
+            hello = json.dumps({"channel": channel, "event": "hello"})
+            try:
+                await websocket.send(hello)
+            except Exception:
+                state.clients.discard(websocket)
+                return
+            try:
+                for cached in list(backlog):
+                    try:
+                        await websocket.send(cached)
+                    except Exception:
+                        break
+                await websocket.wait_closed()
+            finally:
+                state.clients.discard(websocket)
+
+        try:
+            server = loop.run_until_complete(
+                websockets.serve(  # type: ignore[call-arg]
+                    _handler,
+                    host,
+                    port,
+                    ping_interval=ping_interval,
+                    ping_timeout=ping_timeout,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - startup failure surfaced to caller
+            ready.put(exc)
+            state.loop = None
+            if channel == "rl":
+                rl_ws_loop = None
+                _RL_WS_PORT = _RL_WS_PORT_DEFAULT
+            elif channel == "events":
+                event_ws_loop = None
+                _EVENT_WS_PORT = _EVENT_WS_PORT_DEFAULT
+            else:
+                log_ws_loop = None
+                _LOG_WS_PORT = _LOG_WS_PORT_DEFAULT
+            try:
+                loop.close()
+            except Exception:
+                pass
+            return
+
+        state.server = server
+        state.task = loop.create_task(_broadcast_loop())
+        ready.put(None)
+
+        try:
+            loop.run_forever()
+        finally:
+            _close_server(loop, state)
+
+    thread = threading.Thread(target=_run, name=f"ui-ws-{channel}", daemon=True)
+    thread.start()
+    state.thread = thread
+
+    try:
+        result = ready.get(timeout=5)
+    except Exception as exc:  # pragma: no cover - unexpected queue failure
+        _shutdown_state(state)
+        raise RuntimeError(f"Timeout starting {channel} websocket") from exc
+
+    if isinstance(result, Exception):
+        _shutdown_state(state)
+        raise RuntimeError(
+            f"{channel} websocket failed to bind on {host}:{port}: {result}"
+        ) from result
+
+    return thread
+
+
+def start_websockets() -> dict[str, threading.Thread]:
+    """Launch UI websocket endpoints for RL, runtime events, and logs."""
+
+    if websockets is None:
+        log.warning("UI websockets unavailable: install the 'websockets' package")
+        return {}
+
+    if all(state.loop is not None for state in _WS_CHANNELS.values()):
+        return {
+            name: state.thread
+            for name, state in _WS_CHANNELS.items()
+            if state.thread is not None
+        }
+
+    threads: dict[str, threading.Thread] = {}
+    host = _resolve_host()
+    queue_size = _parse_positive_int(os.getenv("UI_WS_QUEUE_SIZE"), _WS_QUEUE_DEFAULT)
+    ping_interval = float(os.getenv("UI_WS_PING_INTERVAL", os.getenv("WS_PING_INTERVAL", "20")))
+    ping_timeout = float(os.getenv("UI_WS_PING_TIMEOUT", os.getenv("WS_PING_TIMEOUT", "20")))
+    url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+
+    rl_port = _resolve_port("UI_RL_WS_PORT", "RL_WS_PORT", default=_RL_WS_PORT_DEFAULT)
+    log_port = _resolve_port("UI_LOG_WS_PORT", default=_LOG_WS_PORT_DEFAULT)
+    event_port = _resolve_port("UI_EVENT_WS_PORT", "EVENT_WS_PORT", default=_EVENT_WS_PORT_DEFAULT)
+
+    try:
+        threads["rl"] = _start_channel(
+            "rl",
+            host=host,
+            port=rl_port,
+            queue_size=queue_size,
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout,
+        )
+        threads["events"] = _start_channel(
+            "events",
+            host=host,
+            port=event_port,
+            queue_size=queue_size,
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout,
+        )
+        threads["logs"] = _start_channel(
+            "logs",
+            host=host,
+            port=log_port,
+            queue_size=queue_size,
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout,
+        )
+    except Exception:
+        for state in _WS_CHANNELS.values():
+            _shutdown_state(state)
+        raise
+
+    os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
+    os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
+    os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
+    log.info(
+        "UI websockets listening on rl=%s events=%s logs=%s",
+        _RL_WS_PORT,
+        _EVENT_WS_PORT,
+        _LOG_WS_PORT,
+    )
+    return threads
 
 
 StatusProvider = Callable[[], Dict[str, Any]]
