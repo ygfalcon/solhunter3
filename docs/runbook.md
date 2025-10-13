@@ -3,6 +3,30 @@
 This runbook is designed so that a new operator can take SolHunter Zero from zero to live in a
 controlled manner.  All commands are executed from the repository root unless noted.
 
+## 0. Populate Environment Secrets
+
+Before touching any automation, ensure the production environment file is
+complete. Copy `etc/solhunter/env.production` to the host path that will be
+mounted in production (or edit it in place) and replace **every** placeholder
+string with the live credential or endpoint. At a minimum, the following values
+must be populated with real secrets:
+
+- `SOLANA_RPC_URL` and `SOLANA_WS_URL`
+- `HELIUS_API_KEY`, `HELIUS_API_KEYS`, and `HELIUS_API_TOKEN`
+- `JITO_AUTH` and `JITO_WS_AUTH`
+- `SOLSCAN_API_KEY` (or remove dependent monitors)
+- Any other entry that contains `YOUR_`, `REDACTED`, `XXXX`, or similar
+  placeholders
+
+Run the placeholder audit to confirm nothing was missed:
+
+```bash
+make audit-placeholders ARGS="etc/solhunter/env.production"
+```
+
+Only proceed once the audit passes and the file is backed by a secure secret
+store.
+
 ## 1. Environment Doctor
 
 ```bash
