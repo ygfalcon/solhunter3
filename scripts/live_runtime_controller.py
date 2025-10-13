@@ -51,10 +51,25 @@ def _set_runtime_env(args: argparse.Namespace) -> None:
         os.environ["CANARY_RISK_CAP"] = str(args.canary_risk)
 
 
+def _validate_environment() -> None:
+    forbidden_tokens = ("${", "YOUR_", "REDACTED")
+    offenders: list[str] = []
+    for key, value in os.environ.items():
+        if not isinstance(value, str):
+            continue
+        if any(token in value for token in forbidden_tokens):
+            offenders.append(key)
+    if offenders:
+        offenders.sort()
+        logging.error("Keys invalid (placeholder): %s", ", ".join(offenders))
+        raise SystemExit(2)
+
+
 async def _run_controller(args: argparse.Namespace) -> int:
     from solhunter_zero.runtime.orchestrator import RuntimeOrchestrator
 
     _set_runtime_env(args)
+    _validate_environment()
     orch = RuntimeOrchestrator(config_path=args.config, run_http=not args.no_http)
 
     stop_event = asyncio.Event()
