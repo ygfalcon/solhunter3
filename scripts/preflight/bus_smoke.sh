@@ -31,7 +31,7 @@ main() {
   for stream in "${STREAMS[@]}"; do
     local marker="preflight-$(unique_suffix)"
     local payload
-    payload=$(jq -n -c --arg marker "$marker" --arg stream "$stream" --arg ts "$(date -Is)" '{marker:$marker,stream:$stream,ts:$ts}')
+    payload=$(jq -n -c --arg marker "$marker" --arg stream "$stream" --arg ts "$(iso_timestamp)" '{marker:$marker,stream:$stream,ts:$ts}')
     local id
     if ! id=$(redis_publish_json "$stream" "$payload" json); then
       fail "stream $stream: unable to append"

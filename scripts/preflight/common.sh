@@ -96,6 +96,30 @@ unique_suffix() {
   date +%s%N
 }
 
+iso_timestamp() {
+  local ts
+  if ts=$(date -Is 2>/dev/null); then
+    printf '%s\n' "$ts"
+    return 0
+  fi
+  if ts=$(date -Iseconds 2>/dev/null); then
+    printf '%s\n' "$ts"
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    ts=$(python3 - <<'PY'
+import datetime
+print(datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat())
+PY
+)
+    if [[ -n $ts ]]; then
+      printf '%s\n' "$ts"
+      return 0
+    fi
+  fi
+  date -u +"%Y-%m-%dT%H:%M:%S%z"
+}
+
 #########################
 # Redis cleanup helpers #
 #########################
@@ -115,7 +139,8 @@ register_key_cleanup() {
 
 cleanup_redis_artifacts() {
   local cmd
-  for cmd in "${_PREFLIGHT_REDIS_CLEANUP_CMDS[@]}"; do
+  local -a cmds=("${_PREFLIGHT_REDIS_CLEANUP_CMDS[@]-}")
+  for cmd in "${cmds[@]}"; do
     # shellcheck disable=SC2086
     redis $cmd >/dev/null 2>&1 || true
   done
@@ -163,7 +188,7 @@ init_audit() {
   AUDIT_SCRIPT_NAME=$script_name
   AUDIT_EVENTS=()
   AUDIT_START_EPOCH=$(date +%s)
-  AUDIT_START_ISO=$(date -Is)
+  AUDIT_START_ISO=$(iso_timestamp)
 }
 
 record_audit() {
@@ -172,7 +197,7 @@ record_audit() {
   local message=$2
   local data=${3:-}
   local ts
-  ts=$(date -Is)
+  ts=$(iso_timestamp)
   local event
   if [[ -n $data ]]; then
     event=$(jq -n --arg status "$status" --arg message "$message" --arg ts "$ts" --argjson data "$data" '{status:$status,message:$message,ts:$ts,data:$data}')
@@ -188,7 +213,7 @@ emit_audit() {
   local extra_json=${2:-}
   local end_epoch=$(date +%s)
   local end_iso
-  end_iso=$(date -Is)
+  end_iso=$(iso_timestamp)
   local duration=$((end_epoch - AUDIT_START_EPOCH))
   local events_json="[]"
   if (( ${#AUDIT_EVENTS[@]} )); then
