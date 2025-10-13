@@ -64,7 +64,15 @@ main() {
       record_audit warn "helius:skip"
     else
       local das_url="https://api.helius.xyz/v0/addresses/tokens?api-key=${HELIUS_API_KEY}&addresses=So11111111111111111111111111111111111111112"
-      if run_with_timeout 5 curl -sS "$das_url" | jq -re '.[0].address' >/dev/null; then
+      if run_with_timeout 5 curl -sS "$das_url" | jq -re '
+        try (((if type == "array" then (.[0]? | .address? // .mint?)
+          elif type == "object" then (
+            .address? // .mint? //
+            ((.items? // .result? // .data? // .tokens? // []) |
+              (if type=="array" then (.[0]? | .address? // .mint?) else empty end))
+          )
+          else empty end) // empty)) catch empty
+      ' >/dev/null; then
         pass "DAS reachable"
         check_details+=("$(jq -n '{type:"das",status:"pass"}')")
         record_audit pass "helius:tokens"
