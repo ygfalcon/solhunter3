@@ -104,7 +104,7 @@ file and configuration you intend to promote.
 
 ```bash
 bash scripts/launch_live.sh \
-  --env .env.prod \
+  --env etc/solhunter/env.production \
   --micro 1 \
   --soak 300 \
   --config config.toml
@@ -114,6 +114,11 @@ The script performs two full preflight passes (micro on/off), validates environm
 secrets, ensures Redis is reachable, and starts both paper and live runtime controllers
 before flipping the live executor on. Watch `artifacts/prelaunch/logs/live_runtime.log`
 for the `RUNTIME_READY` marker and the console summary before lifting notional caps.
+
+> **Note:** The launcher hard-fails if any environment variables still contain
+> template placeholders (for example `SOLANA_RPC_URL=YOUR_RPC_URL`). Copy the
+> template file, replace every placeholder with production credentials, and rerun
+> `./env_doctor.sh` before invoking the live launcher.
 
 ## 10. Incident Response
 
