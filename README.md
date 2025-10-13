@@ -210,7 +210,7 @@ The bot reads its settings from `config.toml`. Ensure the following keys are def
 A minimal example looks like:
 
 ```toml
-solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
 dex_base_url = "https://swap.helius.dev"
 agents = ["simulation"]
 
@@ -314,7 +314,7 @@ profit calculation so routes are ranked based on the borrowed size.
    To scan the blockchain yourself, provide a Solana RPC endpoint instead:
 
    ```bash
-   export SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
+   export SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
    ```
    If `SOLANA_WS_URL` is unset, it is automatically derived from
    `SOLANA_RPC_URL` by switching the scheme from `http` to `ws` (and `https`
@@ -385,7 +385,7 @@ profit calculation so routes are ranked based on the borrowed size.
 10. **Priority RPC endpoints**
     Specify one or more RPC URLs used for high-priority submission:
     ```bash
-export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
+export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY,https://rpc.helius.dev/?api-key=YOUR_HELIUS_KEY
     ```
 11. **Priority fee multipliers**
     Configure compute unit price multipliers used when the mempool is busy:
@@ -563,7 +563,7 @@ endpoints using ``priority_rpc`` (or the ``PRIORITY_RPC`` environment
 variable):
 
 ```bash
-export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d,https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
+export PRIORITY_RPC=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY,https://rpc.helius.dev/?api-key=YOUR_HELIUS_KEY
 ```
 ### Running in a Cluster
 
@@ -580,11 +580,11 @@ event_bus_url = "ws://0.0.0.0:8787"
 broker_url = "redis://localhost:6379"
 
 [[nodes]]
-solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
 solana_keypair = "keypairs/node1.json"
 
 [[nodes]]
-solana_rpc_url = "https://rpc.helius.dev/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+solana_rpc_url = "https://rpc.helius.dev/?api-key=YOUR_HELIUS_KEY"
 solana_keypair = "keypairs/node2.json"
 ```
 

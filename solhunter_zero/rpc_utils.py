@@ -9,7 +9,7 @@ import urllib.error
 
 def ensure_rpc(*, warn_only: bool = False) -> None:
     """Send a simple JSON-RPC request to ensure the Solana RPC is reachable."""
-    rpc_url = os.environ.get("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+    rpc_url = os.environ.get("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
     if not os.environ.get("SOLANA_RPC_URL"):
         print(f"Using default RPC URL {rpc_url}")
 

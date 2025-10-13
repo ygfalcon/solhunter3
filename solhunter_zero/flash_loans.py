@@ -124,7 +124,7 @@ if not _DEPS_OK:  # pragma: no cover - fallback stubs
 
 from . import depth_client
 
-RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
 
 # Default program id for Solend flash loans on mainnet
 SOLEND_PROGRAM_ID = os.getenv(

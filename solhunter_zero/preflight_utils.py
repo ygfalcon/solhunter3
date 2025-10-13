@@ -162,7 +162,7 @@ def check_wallet_balance(min_sol: float, keypair_path: str | Path | None = None)
         from .gas import LAMPORTS_PER_SOL
 
         client = Client(
-            os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+            os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
         )
         resp = client.get_balance(kp.pubkey())
         try:
@@ -244,7 +244,7 @@ def check_internet(url: str | None = None) -> Check:
     import json
 
     target = url or os.environ.get(
-        "SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+        "SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
     )
 
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getHealth"}).encode()
@@ -307,7 +307,7 @@ def check_required_env(keys: List[str] | None = None) -> Check:
     return True, "Required environment variables set"
 
 
-def check_network(default_url: str = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d") -> Check:
+def check_network(default_url: str = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY") -> Check:
     if sys.platform == "darwin":
         try:
             from solhunter_zero import macos_setup

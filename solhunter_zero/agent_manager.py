@@ -572,8 +572,8 @@ class AgentManager:
         meta["age_seconds"] = age
         if age > self._rl_window_sec * 2.0:
             meta["ignored_reason"] = "stale"
-            logger.debug(
-                "RL weights stale (age %.3fs > gate %.3fs)",
+            logger.info(
+                "stale RL ignored (age=%.3fs gate=%.3fs)",
                 age,
                 self._rl_window_sec * 2.0,
             )

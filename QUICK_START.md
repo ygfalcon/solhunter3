@@ -76,7 +76,7 @@ pytest tests/staging/test_investor_showcase.py
 - Use the dedicated devnet config and launcher to exercise discovery and sign real devnet swaps without touching mainnet:
 
   - Fund the active wallet on devnet:
-    - If you have Solana CLI: `solana config set --url https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d && solana airdrop 2` (re-run until balance ≥ 1 SOL)
+    - If you have Solana CLI: `solana config set --url https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY && solana airdrop 2` (re-run until balance ≥ 1 SOL)
     - Or fund the public key from a faucet. To print the bot wallet pubkey: `python -m solhunter_zero.wallet_cli list` then `python -m solhunter_zero.wallet show` (or open `keypairs/default.json`).
 
   - Launch on devnet (macOS): double‑click `devnet.command`.
@@ -93,14 +93,14 @@ pytest tests/staging/test_investor_showcase.py
 - Notes
   - Jito/MEV is disabled in `config/devnet.toml`.
   - `AUTO_SELECT_KEYPAIR=1` is honored when there’s a single key in `keypairs/`.
-  - Ensure `SOLANA_TESTNET_RPC_URL` points to `https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d`.
+  - Ensure `SOLANA_TESTNET_RPC_URL` points to `https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY`.
 
 ## Live Token Discovery
 
 Enable live discovery of freshly minted tokens from the mempool so agents can react immediately:
 
 ```bash
-export SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d
+export SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
 python -m solhunter_zero.main --auto --live-discovery
 ```
 

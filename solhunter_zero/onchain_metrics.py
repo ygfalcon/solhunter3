@@ -56,7 +56,7 @@ def _get_birdeye_semaphore() -> asyncio.Semaphore:
     return _BIRDEYE_SEMAPHORE
 
 # === Hard defaults per your request ===
-DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", DEFAULT_SOLANA_RPC)
 
 # Your Birdeye key; allow env override but default to what you provided

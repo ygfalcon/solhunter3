@@ -20,7 +20,7 @@ def restore_env():
 
 
 def test_check_required_env_success(restore_env):
-    os.environ["SOLANA_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+    os.environ["SOLANA_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
     os.environ["BIRDEYE_API_KEY"] = "real_key"
     ok, msg = check_required_env()
     assert ok is True
@@ -39,7 +39,7 @@ def test_check_required_env_missing(restore_env, caplog):
 
 
 def test_check_required_env_placeholder(restore_env, caplog):
-    os.environ["SOLANA_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+    os.environ["SOLANA_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
     os.environ["BIRDEYE_API_KEY"] = "invalid_birdeye_key"
     with caplog.at_level(
         logging.WARNING, logger="solhunter_zero.preflight_utils"
@@ -51,7 +51,7 @@ def test_check_required_env_placeholder(restore_env, caplog):
 
 
 def test_check_required_env_bd_placeholder(restore_env, caplog):
-    os.environ["SOLANA_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+    os.environ["SOLANA_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
     os.environ["BIRDEYE_API_KEY"] = "BD1234567890ABCDEFGHIJKL"
     with caplog.at_level(
         logging.WARNING, logger="solhunter_zero.preflight_utils"
@@ -65,7 +65,7 @@ def test_check_required_env_bd_placeholder(restore_env, caplog):
 def test_configure_env_strips_placeholder(tmp_path: Path, restore_env, caplog):
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\n"
+        "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY\n"
         "BIRDEYE_API_KEY=be_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE\n"
     )
     configure_environment(tmp_path)
@@ -84,7 +84,7 @@ def test_configure_env_strips_bd_placeholder(
 ):
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\n"
+        "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY\n"
         "BIRDEYE_API_KEY=BD1234567890ABCDEFGHIJKL\n"
     )
     configure_environment(tmp_path)
@@ -101,7 +101,7 @@ def test_configure_env_strips_bd_placeholder(
 def test_configure_env_uses_config_value(tmp_path: Path, restore_env, caplog):
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\n"
+        "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY\n"
         "BIRDEYE_API_KEY=be_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE\n"
     )
     (tmp_path / "config.toml").write_text('birdeye_api_key="real_key"\n')
@@ -119,7 +119,7 @@ def test_configure_env_uses_config_value(tmp_path: Path, restore_env, caplog):
 def test_configure_env_creates_sanitized_env(tmp_path: Path, restore_env):
     example = tmp_path / ".env.example"
     example.write_text(
-        "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\n"
+        "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY\n"
         "BIRDEYE_API_KEY=be_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE\n"
     )
     configure_environment(tmp_path)
