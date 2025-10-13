@@ -90,7 +90,7 @@ main() {
   ')
 
   local timestamp
-  timestamp=$(date -Is)
+  timestamp=$(iso_timestamp)
   local epoch
   epoch=$(date +%s)
   local commit
