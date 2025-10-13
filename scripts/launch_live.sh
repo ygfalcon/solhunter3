@@ -345,11 +345,10 @@ start_controller() {
   if [[ -n $notify ]]; then
     args+=("--notify" "$notify")
   fi
-  log_info "Launching runtime controller (mode=$mode, log=$log)"
   python3 "${args[@]}" >"$log" 2>&1 &
   local pid=$!
   register_child "$pid"
-  echo "$pid"
+  printf '%s\n' "$pid"
 }
 
 print_log_excerpt() {
@@ -394,6 +393,7 @@ wait_for_ready() {
 PAPER_LOG="$LOG_DIR/paper_runtime.log"
 PAPER_NOTIFY="$ARTIFACT_DIR/paper_ready"
 rm -f "$PAPER_NOTIFY"
+log_info "Launching runtime controller (mode=paper, log=$PAPER_LOG)"
 PAPER_PID=$(start_controller "paper" "$PAPER_LOG" "$PAPER_NOTIFY")
 start_log_stream "$PAPER_LOG" "paper"
 log_info "Waiting for paper runtime readiness"
@@ -466,6 +466,7 @@ fi
 LIVE_LOG="$LOG_DIR/live_runtime.log"
 LIVE_NOTIFY="$ARTIFACT_DIR/live_ready"
 rm -f "$LIVE_NOTIFY"
+log_info "Launching runtime controller (mode=live, log=$LIVE_LOG)"
 LIVE_PID=$(start_controller "live" "$LIVE_LOG" "$LIVE_NOTIFY")
 start_log_stream "$LIVE_LOG" "live"
 log_info "Waiting for live runtime readiness"
