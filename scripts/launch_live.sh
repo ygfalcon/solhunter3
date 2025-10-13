@@ -312,6 +312,22 @@ start_controller() {
   echo "$pid"
 }
 
+print_log_excerpt() {
+  local log=$1
+  local reason=${2:-}
+  local header="---- Runtime log excerpt ($log) ----"
+  if [[ -n $reason ]]; then
+    echo "$reason" >&2
+  fi
+  if [[ -f $log ]]; then
+    echo "$header" >&2
+    tail -n 200 "$log" >&2 || true
+    echo "---- End runtime log ----" >&2
+  else
+    echo "Log file $log not found" >&2
+  fi
+}
+
 wait_for_ready() {
   local log=$1
   local notify=$2
@@ -325,13 +341,13 @@ wait_for_ready() {
       return 0
     fi
     if [[ -n $pid ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
-      echo "Runtime process $pid exited early" >&2
+      print_log_excerpt "$log" "Runtime process $pid exited early"
       return 1
     fi
     sleep 2
     waited=$((waited + 2))
   done
-  echo "Timed out waiting for runtime readiness" >&2
+  print_log_excerpt "$log" "Timed out waiting for runtime readiness"
   return 1
 }
 
@@ -421,6 +437,7 @@ register_child "$TAIL_PID"
 wait "$LIVE_PID"
 status=$?
 if [[ $status -ne 0 ]]; then
+  print_log_excerpt "$LIVE_LOG" "Live runtime exited with status $status"
   echo "Live runtime exited with status $status" >&2
   exit $EXIT_HEALTH
 fi
