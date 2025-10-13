@@ -25,6 +25,9 @@ HELIUS_API_KEY = os.getenv(
 )
 HELIUS_PRICE_CONCURRENCY = max(1, int(os.getenv("HELIUS_PRICE_CONCURRENCY", "10") or 10))
 
+BIRDEYE_PRICE_URL = os.getenv("BIRDEYE_PRICE_URL", "https://public-api.birdeye.so")
+BIRDEYE_CHAIN = os.getenv("BIRDEYE_CHAIN", "solana")
+
 DEXSCREENER_PRICE_URL = os.getenv(
     "DEXSCREENER_PRICE_URL", "https://api.dexscreener.com/latest/dex/tokens"
 )
@@ -393,6 +396,57 @@ async def _fetch_prices_helius(
     return {token: prices[token] for token in token_list if token in prices}
 
 
+async def _fetch_prices_birdeye(
+    session: aiohttp.ClientSession, token_list: Sequence[str]
+) -> Dict[str, float]:
+    if not token_list:
+        return {}
+
+    api_key = os.getenv("BIRDEYE_API_KEY", "")
+    if not api_key:
+        return {}
+
+    tokens = [tok for tok in token_list if isinstance(tok, str) and tok]
+    if not tokens:
+        return {}
+
+    url = f"{BIRDEYE_PRICE_URL.rstrip('/')}/defi/price"
+    headers = {
+        "X-API-KEY": api_key,
+        "accept": "application/json",
+        "x-chain": BIRDEYE_CHAIN,
+    }
+
+    prices: Dict[str, float] = {}
+
+    for token in tokens:
+        params: Dict[str, Any] = {"address": token, "chain": BIRDEYE_CHAIN}
+        payload = await _request_json(
+            session,
+            url,
+            "Birdeye",
+            params=params,
+            headers=headers,
+        )
+        if not isinstance(payload, dict):
+            continue
+
+        price = None
+        data = payload.get("data")
+        if isinstance(data, dict):
+            price = _extract_price(data)
+            if price is None:
+                price = _extract_price(data.get("value"))
+        if price is None:
+            price = _extract_price(payload)
+
+        if price is not None:
+            prices[token] = price
+            update_price_cache(token, price)
+
+    return prices
+
+
 async def _fetch_prices_dexscreener(
     session: aiohttp.ClientSession, token_list: Sequence[str]
 ) -> Dict[str, float]:
@@ -439,6 +493,7 @@ async def _fetch_prices(token_list: Iterable[str]) -> Dict[str, float]:
     providers = (
         ("Helius", _fetch_prices_helius),
         ("Dexscreener", _fetch_prices_dexscreener),
+        ("Birdeye", _fetch_prices_birdeye),
     )
 
     for name, provider in providers:

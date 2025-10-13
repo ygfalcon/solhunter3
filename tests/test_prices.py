@@ -68,6 +68,33 @@ def test_fetch_token_prices_dexscreener_fallback(monkeypatch):
     assert calls == ["helius", "dex"]
 
 
+def test_fetch_token_prices_birdeye_final_fallback(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_helius(session, tokens):
+        calls.append("helius")
+        return {}
+
+    async def fake_dex(session, tokens):
+        calls.append("dex")
+        return {}
+
+    async def fake_birdeye(session, tokens):
+        calls.append("birdeye")
+        return {"tok": 5.0}
+
+    monkeypatch.setattr(prices, "get_session", _dummy_session)
+    monkeypatch.setattr(prices, "_fetch_prices_helius", fake_helius)
+    monkeypatch.setattr(prices, "_fetch_prices_dexscreener", fake_dex)
+    monkeypatch.setattr(prices, "_fetch_prices_birdeye", fake_birdeye)
+
+    result = prices.fetch_token_prices(["tok"])
+
+    assert result == {"tok": 5.0}
+    assert prices.get_cached_price("tok") == 5.0
+    assert calls == ["helius", "dex", "birdeye"]
+
+
 def test_fetch_token_prices_async_error(monkeypatch):
     warnings = []
 
@@ -152,3 +179,43 @@ def test_helius_market_price_fetch(monkeypatch):
     assert params is not None
     assert any(key == "ids[]" and value == "tok" for key, value in params)
     assert captured.get("provider") == "Helius (Market)"
+
+
+def test_birdeye_price_fetch_includes_chain(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_request_json(
+        session,
+        url,
+        provider,
+        *,
+        params=None,
+        headers=None,
+        json=None,
+        method="GET",
+    ):
+        captured["params"] = params
+        captured["headers"] = headers
+        captured["provider"] = provider
+        return {"data": {"price": "6.78"}}
+
+    monkeypatch.setattr(prices, "_request_json", fake_request_json)
+    monkeypatch.setenv("BIRDEYE_API_KEY", "test-key")
+    monkeypatch.setattr(prices, "BIRDEYE_CHAIN", "solana")
+
+    async def _run():
+        result = await prices._fetch_prices_birdeye(object(), ["tok"])
+        assert result == {"tok": 6.78}
+
+    asyncio.run(_run())
+
+    params = captured.get("params")
+    headers = captured.get("headers")
+    assert captured.get("provider") == "Birdeye"
+    assert isinstance(params, dict)
+    assert params.get("address") == "tok"
+    assert params.get("chain") == "solana"
+    assert isinstance(headers, dict)
+    assert headers.get("X-API-KEY") == "test-key"
+    assert headers.get("accept") == "application/json"
+    assert headers.get("x-chain") == "solana"
