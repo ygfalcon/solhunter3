@@ -12,7 +12,7 @@ import logging
 
 from ..portfolio import Portfolio
 from ..prices import fetch_token_prices_async, get_cached_price
-from ..token_aliases import canonical_mint
+from ..token_aliases import canonical_mint, validate_mint
 
 _HELIUS_BASE_URL = os.getenv("HELIUS_PRICE_BASE_URL", "https://api.helius.xyz")
 _HELIUS_PRICE_PATH = os.getenv("HELIUS_PRICE_METADATA_PATH", "/v0/token-metadata")
@@ -42,6 +42,8 @@ async def resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[s
     """
 
     token = canonical_mint(token)
+    if not validate_mint(token):
+        return 0.0, {"error": "invalid_mint"}
     context: Dict[str, Any] = {}
     price = 0.0
     source: str | None = None

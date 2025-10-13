@@ -14,7 +14,6 @@ from ..scanner_onchain import (
     fetch_liquidity_onchain_async as raw_liquidity_onchain_async,
 )
 from ..token_aliases import canonical_mint
-from ..token_scanner import TRENDING_METADATA, enrich_tokens_async, scan_tokens_async
 from .mint_resolver import normalize_candidate
 
 logger = logging.getLogger(__name__)
@@ -56,9 +55,10 @@ async def fetch_trending_tokens_async(limit: int | None = None) -> List[str]:
     """Return a deduplicated list of trending token addresses."""
 
     size = max(1, int(limit or _DEFAULT_LIMIT))
-    tokens = await scan_tokens_async(limit=size)
+    token_scanner = _token_scanner_module()
+    tokens = await token_scanner.scan_tokens_async(limit=size)
     try:
-        enriched = await enrich_tokens_async(tokens)
+        enriched = await token_scanner.enrich_tokens_async(tokens)
     except Exception as exc:  # pragma: no cover - defensive fallback
         logger.debug("RPC enrichment failed: %s", exc)
         enriched = [tok for tok in tokens if isinstance(tok, str)]
@@ -238,7 +238,7 @@ async def merge_sources(
         price_val = _coerce_float(metrics.get("price"))
         if price_val > 0:
             return price_val
-        meta = TRENDING_METADATA.get(token) or {}
+        meta = token_scanner.TRENDING_METADATA.get(token) or {}
         price_val = _coerce_float(meta.get("price"))
         if price_val > 0:
             return price_val
@@ -325,7 +325,7 @@ async def merge_sources(
     for idx, address in enumerate(trending_tokens):
         entry = _entry(address)
         entry["sources"].add("trending")
-        meta = TRENDING_METADATA.get(address) or {}
+        meta = token_scanner.TRENDING_METADATA.get(address) or {}
         _update_entry(entry, meta)
         entry.setdefault("rank", meta.get("rank", idx + 1))
         dex_metrics = dex_metrics_by_token.get(address) or {}
@@ -441,3 +441,8 @@ __all__ = [
     "fetch_trending_tokens_async",
     "merge_sources",
 ]
+def _token_scanner_module():
+    from .. import token_scanner
+
+    return token_scanner
+

@@ -20,6 +20,7 @@ from .scanner_onchain import (
 )
 from .http import get_session
 from .lru import TTLCache
+from .token_aliases import canonical_mint, validate_mint
 
 FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 
@@ -75,6 +76,15 @@ HELIUS_PRICE_IMPACT_URL = os.getenv(
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 HELIUS_API_BASE = os.getenv("HELIUS_API_BASE", "https://api.helius.xyz")
+
+
+def _validated_mint(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    canonical = canonical_mint(value)
+    if not validate_mint(canonical):
+        return None
+    return canonical
 
 
 def _helius_api_key() -> str:
@@ -631,6 +641,18 @@ async def fetch_slippage_onchain_async(
     *,
     in_amount_sol: float = 0.1,
 ) -> Dict[str, Any]:
+    canonical = _validated_mint(mint)
+    if canonical is None:
+        fallback_mint = canonical_mint(mint) if isinstance(mint, str) else ""
+        return {
+            "mint": fallback_mint,
+            "price_impact_pct": 0.0,
+            "slippage_bps_est": 0,
+            "in_amount_sol": float(in_amount_sol),
+            "ts": _now_ts(),
+            "error": "invalid_mint",
+        }
+    mint = canonical
     timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         dec_task = asyncio.create_task(_helius_decimals(session, mint, rpc_url))
@@ -673,6 +695,10 @@ async def _order_book_depth_change_async(
     rpc_url: Optional[str] = None,
     base_url: str | None = None,
 ) -> float:
+    canonical = _validated_mint(mint)
+    if canonical is None:
+        return 0.0
+    mint = canonical
     rpc = rpc_url or SOLANA_RPC_URL
     cache_key = (mint, rpc, base_url or "")
     try:
@@ -702,7 +728,10 @@ def order_book_depth_change(
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-    coro = _order_book_depth_change_async(mint, rpc_url=rpc_url, base_url=base_url)
+    canonical = _validated_mint(mint)
+    if canonical is None:
+        return 0.0
+    coro = _order_book_depth_change_async(canonical, rpc_url=rpc_url, base_url=base_url)
     if loop and loop.is_running():
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
     return asyncio.run(coro)
@@ -714,8 +743,11 @@ def fetch_mempool_tx_rate(
     *,
     limit: int = 20,
 ) -> float:
+    canonical = _validated_mint(token)
+    if canonical is None:
+        return 0.0
     rpc = rpc_url or SOLANA_RPC_URL
-    return _scanner_fetch_mempool_tx_rate(token, rpc, limit=limit)
+    return _scanner_fetch_mempool_tx_rate(canonical, rpc, limit=limit)
 
 
 def fetch_whale_wallet_activity(
@@ -724,8 +756,11 @@ def fetch_whale_wallet_activity(
     *,
     threshold: float = 1_000_000.0,
 ) -> float:
+    canonical = _validated_mint(token)
+    if canonical is None:
+        return 0.0
     rpc = rpc_url or SOLANA_RPC_URL
-    return _scanner_fetch_whale_wallet_activity(token, rpc, threshold=threshold)
+    return _scanner_fetch_whale_wallet_activity(canonical, rpc, threshold=threshold)
 
 
 def fetch_average_swap_size(
@@ -734,19 +769,30 @@ def fetch_average_swap_size(
     *,
     limit: int = 20,
 ) -> float:
+    canonical = _validated_mint(token)
+    if canonical is None:
+        return 0.0
     rpc = rpc_url or SOLANA_RPC_URL
-    return _scanner_fetch_average_swap_size(token, rpc, limit=limit)
+    return _scanner_fetch_average_swap_size(canonical, rpc, limit=limit)
 
 
 async def collect_onchain_insights_async(
     token: str,
     rpc_url: Optional[str] = None,
 ) -> Dict[str, float]:
+    canonical = _validated_mint(token)
+    if canonical is None:
+        return {
+            "depth_change": 0.0,
+            "tx_rate": 0.0,
+            "whale_activity": 0.0,
+            "avg_swap_size": 0.0,
+        }
     rpc = rpc_url or SOLANA_RPC_URL
-    depth = await _order_book_depth_change_async(token, rpc_url=rpc)
-    tx_rate_task = asyncio.to_thread(fetch_mempool_tx_rate, token, rpc, limit=20)
-    whale_task = asyncio.to_thread(fetch_whale_wallet_activity, token, rpc)
-    swap_task = asyncio.to_thread(fetch_average_swap_size, token, rpc, limit=20)
+    depth = await _order_book_depth_change_async(canonical, rpc_url=rpc)
+    tx_rate_task = asyncio.to_thread(fetch_mempool_tx_rate, canonical, rpc, limit=20)
+    whale_task = asyncio.to_thread(fetch_whale_wallet_activity, canonical, rpc)
+    swap_task = asyncio.to_thread(fetch_average_swap_size, canonical, rpc, limit=20)
     tx_rate, whale_activity, avg_swap = await asyncio.gather(
         tx_rate_task,
         whale_task,
@@ -764,11 +810,19 @@ def collect_onchain_insights(
     token: str,
     rpc_url: Optional[str] = None,
 ) -> Dict[str, float]:
+    canonical = _validated_mint(token)
+    if canonical is None:
+        return {
+            "depth_change": 0.0,
+            "tx_rate": 0.0,
+            "whale_activity": 0.0,
+            "avg_swap_size": 0.0,
+        }
     rpc = rpc_url or SOLANA_RPC_URL
-    depth = order_book_depth_change(token)
-    tx_rate = fetch_mempool_tx_rate(token, rpc)
-    whale_activity = fetch_whale_wallet_activity(token, rpc)
-    avg_swap = fetch_average_swap_size(token, rpc)
+    depth = order_book_depth_change(canonical)
+    tx_rate = fetch_mempool_tx_rate(canonical, rpc)
+    whale_activity = fetch_whale_wallet_activity(canonical, rpc)
+    avg_swap = fetch_average_swap_size(canonical, rpc)
     return {
         "depth_change": _numeric(depth, 0.0),
         "tx_rate": _numeric(tx_rate, 0.0),
@@ -785,6 +839,11 @@ async def fetch_dex_metrics_async(
     base_url: str | None = None,
 ) -> Dict[str, Any]:
     _ = base_url  # retained for backward compatibility with older tests/callers
+    canonical = _validated_mint(mint)
+    if canonical is None:
+        fallback = canonical_mint(mint) if isinstance(mint, str) else mint
+        return _build_default_metrics(fallback if isinstance(fallback, str) else str(fallback))
+    mint = canonical
     cache_key = (mint, FAST_MODE, rpc_url or "")
     cached = DEX_METRICS_CACHE.get(cache_key)
     if cached is not None:
@@ -892,12 +951,25 @@ async def fetch_liquidity_onchain_async(
     Returns a :class:`LiquiditySnapshot` with float semantics (``float(snapshot)``
     yields ``liquidity_usd``) so existing numeric consumers remain compatible.
     """
-    metrics = await fetch_dex_metrics_async(mint, rpc_url=rpc_url)
+    canonical = _validated_mint(mint)
+    if canonical is None:
+        fallback = canonical_mint(mint) if isinstance(mint, str) else str(mint)
+        return LiquiditySnapshot(
+            {
+                "mint": fallback,
+                "liquidity_usd": 0.0,
+                "pool_count": 0,
+                "slot": 0,
+                "ts": _now_ts(),
+                "error": "invalid_mint",
+            }
+        )
+    metrics = await fetch_dex_metrics_async(canonical, rpc_url=rpc_url)
     metrics_dict = metrics if isinstance(metrics, dict) else {}
     ts_val = metrics_dict.get("ts")
     snapshot = LiquiditySnapshot(
         {
-            "mint": mint,
+            "mint": canonical,
             "liquidity_usd": _numeric(metrics_dict.get("liquidity_usd"), 0.0),
             "pool_count": _int_numeric(metrics_dict.get("pool_count"), 0),
             "slot": _int_numeric(metrics_dict.get("slot"), 0),
@@ -910,15 +982,28 @@ def fetch_liquidity_onchain(
     mint: str,
     rpc_url: Optional[str] = None,
 ) -> LiquiditySnapshot:
+    canonical = _validated_mint(mint)
+    if canonical is None:
+        fallback = canonical_mint(mint) if isinstance(mint, str) else str(mint)
+        return LiquiditySnapshot(
+            {
+                "mint": fallback,
+                "liquidity_usd": 0.0,
+                "pool_count": 0,
+                "slot": 0,
+                "ts": _now_ts(),
+                "error": "invalid_mint",
+            }
+        )
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
     if loop and loop.is_running():
         return asyncio.run_coroutine_threadsafe(
-            fetch_liquidity_onchain_async(mint, rpc_url=rpc_url), loop
+            fetch_liquidity_onchain_async(canonical, rpc_url=rpc_url), loop
         ).result()
-    return asyncio.run(fetch_liquidity_onchain_async(mint, rpc_url=rpc_url))
+    return asyncio.run(fetch_liquidity_onchain_async(canonical, rpc_url=rpc_url))
 
 
 # -------------------- Volume helpers (reuse scanner implementation) --------------------
@@ -929,13 +1014,19 @@ async def fetch_volume_onchain_async(
 ) -> float:
     """Proxy to scanner_onchain volume helper with default RPC."""
 
+    canonical = _validated_mint(mint)
+    if canonical is None:
+        return 0.0
     rpc = rpc_url or SOLANA_RPC_URL
-    return await _scanner_fetch_volume_async(mint, rpc)
+    return await _scanner_fetch_volume_async(canonical, rpc)
 
 
 def fetch_volume_onchain(
     mint: str,
     rpc_url: Optional[str] = None,
 ) -> float:
+    canonical = _validated_mint(mint)
+    if canonical is None:
+        return 0.0
     rpc = rpc_url or SOLANA_RPC_URL
-    return _scanner_fetch_volume(mint, rpc)
+    return _scanner_fetch_volume(canonical, rpc)

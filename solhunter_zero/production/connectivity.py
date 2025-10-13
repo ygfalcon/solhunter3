@@ -115,7 +115,7 @@ class ConnectivityChecker:
             configured = env.get("DAS_SEARCH_PATH")
             if configured:
                 search_candidates.append(configured)
-            search_candidates.extend(["asset/search", "nft-events/searchAssets"])
+            search_candidates.extend(["searchAssets", "asset/search"])
             das_path = None
             for candidate in search_candidates:
                 norm = (candidate or "").strip().lstrip("/")
