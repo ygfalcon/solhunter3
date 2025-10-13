@@ -94,7 +94,10 @@ class ConnectivityChecker:
         ws = env.get("SOLANA_WS_URL") or env.get("HELIUS_WS_URL")
         das_base = env.get("DAS_BASE_URL") or "https://api.helius.xyz/v1"
         das = das_base.rstrip("/")
-        rest = env.get("HELIUS_PRICE_REST_URL") or f"{das}/nft-events"
+        rest = env.get("HELIUS_PRICE_REST_URL")
+        if not rest:
+            price_base = env.get("HELIUS_PRICE_BASE_URL") or "https://api.helius.xyz"
+            rest = f"{price_base.rstrip('/')}/v0/token-metadata"
         redis_url = env.get("REDIS_URL") or "redis://127.0.0.1:6379/0"
         ui_ws = env.get("UI_WS_URL")
         if not ui_ws:
@@ -108,7 +111,19 @@ class ConnectivityChecker:
         if ws:
             targets.append({"name": "solana-ws", "type": "ws", "url": ws})
         if das:
-            targets.append({"name": "helius-das", "type": "http", "url": f"{das}/searchAssets"})
+            search_candidates = []
+            configured = env.get("DAS_SEARCH_PATH")
+            if configured:
+                search_candidates.append(configured)
+            search_candidates.extend(["asset/search", "nft-events/searchAssets"])
+            das_path = None
+            for candidate in search_candidates:
+                norm = (candidate or "").strip().lstrip("/")
+                if norm:
+                    das_path = norm
+                    break
+            if das_path:
+                targets.append({"name": "helius-das", "type": "http", "url": f"{das}/{das_path}"})
         if rest:
             targets.append({"name": "helius-rest", "type": "http", "url": rest})
         if redis_url:

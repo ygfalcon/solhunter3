@@ -14,6 +14,7 @@ from ..portfolio import Portfolio
 from ..arbitrage import _prepare_service_tx
 from ..exchange import DEX_BASE_URL
 from ..mev_executor import MEVExecutor
+from ..util import sanitize_priority_urls
 
 
 class MempoolSniperAgent(BaseAgent):
@@ -41,7 +42,8 @@ class MempoolSniperAgent(BaseAgent):
         self.mempool_threshold = float(mempool_threshold)
         self.bundle_size = int(bundle_size)
         self.amount = float(amount)
-        self.priority_rpc = list(priority_rpc) if priority_rpc else None
+        cleaned_priority = sanitize_priority_urls(priority_rpc)
+        self.priority_rpc = cleaned_priority or None
         self.jito_rpc_url = jito_rpc_url or os.getenv("JITO_RPC_URL")
         self.jito_auth = jito_auth or os.getenv("JITO_AUTH")
         self.base_url = base_url

@@ -126,7 +126,7 @@ async def _fetch_helius_price(token: str) -> tuple[float, Dict[str, Any]]:
         return 0.0, details
 
     url = _HELIUS_BASE_URL.rstrip("/") + _HELIUS_PRICE_PATH
-    params = {"api-key": api_key, "mintAddresses[]": token}
+    params = {"api-key": api_key, "mintAccounts": token}
     timeout = aiohttp.ClientTimeout(total=_HELIUS_TIMEOUT)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:

@@ -23,6 +23,7 @@ from ..execution import EventExecutor
 from ..depth_client import submit_raw_tx
 from ..portfolio import Portfolio
 from ..logging_utils import serialize_for_log
+from ..util import sanitize_priority_urls
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,8 @@ class ExecutionAgent(BaseAgent):
         self.depth_service = depth_service
         self._executors: Dict[str, EventExecutor] = {}
         self.priority_fees = list(priority_fees) if priority_fees else None
-        self.priority_rpc = list(priority_rpc) if priority_rpc else None
+        cleaned_priority = sanitize_priority_urls(priority_rpc)
+        self.priority_rpc = cleaned_priority or None
         self._cpu_usage = 0.0
         self._cpu_smoothed = 0.0
         self._smoothing = float(os.getenv("CONCURRENCY_SMOOTHING", "0.2") or 0.2)
