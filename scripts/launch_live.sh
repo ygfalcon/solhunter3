@@ -11,6 +11,16 @@ ARTIFACT_DIR="$ROOT_DIR/artifacts/prelaunch"
 LOG_DIR="$ARTIFACT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
+# Ensure the repository root is always importable when invoking helper scripts.
+# "launch_live.sh" may be executed before the package is installed (e.g. from a
+# fresh clone), so python invocations need the project root on PYTHONPATH so
+# that modules like ``solhunter_zero`` can be imported successfully.
+if [[ -n ${PYTHONPATH:-} ]]; then
+  export PYTHONPATH="$ROOT_DIR:$PYTHONPATH"
+else
+  export PYTHONPATH="$ROOT_DIR"
+fi
+
 usage() {
   cat <<'EOF'
 Usage: bash scripts/launch_live.sh --env <env-file> --micro <0|1> [--canary] --budget <usd> --risk <ratio> --preflight <runs> --soak <seconds> [--config <path>]
