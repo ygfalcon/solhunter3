@@ -8,7 +8,6 @@ import errno
 from urllib.parse import urlparse
 
 from .util import install_uvloop
-from .port_utils import find_available_port
 
 install_uvloop()
 
@@ -1411,39 +1410,25 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
             _flush_task = None
         _outgoing_queue = None
 
-    attempts = 0
-    while attempts < 32:
-        try:
-            _ws_server = await websockets.serve(
-                handler,
-                listen_host,
-                current_port,
-                compression=_WS_COMPRESSION,
-                ping_interval=_WS_PING_INTERVAL,
-                ping_timeout=_WS_PING_TIMEOUT,
-            )
-            break
-        except OSError as exc:
-            if getattr(exc, "errno", None) not in {errno.EADDRINUSE, errno.EACCES}:
-                await _reset_flush()
-                raise
-            attempts += 1
-            next_port = find_available_port(listen_host, current_port + 1)
-            if next_port == current_port:
-                next_port += 1
-            logging.getLogger(__name__).info(
-                "Event bus websocket port %s busy, retrying on %s",
-                current_port,
-                next_port,
-            )
-            current_port = next_port
-            continue
-        except Exception:
-            await _reset_flush()
-            raise
-    else:
+    try:
+        _ws_server = await websockets.serve(
+            handler,
+            listen_host,
+            current_port,
+            compression=_WS_COMPRESSION,
+            ping_interval=_WS_PING_INTERVAL,
+            ping_timeout=_WS_PING_TIMEOUT,
+        )
+    except OSError as exc:
         await _reset_flush()
-        raise RuntimeError("Unable to bind event bus websocket; ports exhausted")
+        if getattr(exc, "errno", None) in {errno.EADDRINUSE, errno.EACCES}:
+            raise RuntimeError(
+                f"Event bus websocket port {current_port} already bound"
+            ) from exc
+        raise
+    except Exception:
+        await _reset_flush()
+        raise
 
     try:
         sock = _ws_server.sockets[0]
@@ -1478,6 +1463,19 @@ async def stop_ws_server() -> None:
     if _flush_task is not None:
         _flush_task.cancel()
         _flush_task = None
+    drained = 0
+    if _outgoing_queue is not None:
+        while True:
+            try:
+                _outgoing_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                drained += 1
+        if drained:
+            logging.getLogger(__name__).info(
+                "Event bus websocket drained %d pending frame(s)", drained
+            )
     _outgoing_queue = None
     for ws in list(_ws_clients):
         try:

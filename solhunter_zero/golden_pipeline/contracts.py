@@ -47,6 +47,12 @@ def vote_dedupe_key(client_order_id: str) -> str:
     return f"vote:dupe:{client_order_id}"
 
 
+def vote_input_key(mint: str, side: str, snapshot_hash: str) -> str:
+    """Return the key guarding duplicate votes per (mint, side, snapshot)."""
+
+    return f"vote:input:{mint}:{side}:{snapshot_hash}"
+
+
 __all__ = [
     "STREAMS",
     "StreamNames",
@@ -54,4 +60,5 @@ __all__ = [
     "discovery_cursor_key",
     "golden_hash_key",
     "vote_dedupe_key",
+    "vote_input_key",
 ]

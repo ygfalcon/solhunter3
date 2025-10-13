@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Tuple
 
-from .contracts import vote_dedupe_key
+from .contracts import vote_dedupe_key, vote_input_key
 from .kv import KeyValueStore
 from .types import Decision, TradeSuggestion
 from .utils import now_ts
@@ -157,6 +157,14 @@ class VotingStage:
             ts=now_ts(),
         )
         if self._kv:
+            input_key = vote_input_key(key[0], key[1], key[2])
+            stored_input = await self._kv.set_if_absent(
+                input_key,
+                order_id,
+                ttl=self._dedupe_ttl,
+            )
+            if not stored_input:
+                return
             stored = await self._kv.set_if_absent(
                 vote_dedupe_key(order_id),
                 "1",

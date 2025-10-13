@@ -605,6 +605,37 @@ class AgentManager:
         meta["window_hash"] = hash_source
         self._rl_last_meta = meta
 
+    def set_rl_disabled(self, disabled: bool, *, reason: str | None = None) -> None:
+        """Toggle the RL weight gate and clear cached policies when disabled."""
+
+        state = bool(disabled)
+        if state == self._rl_disabled and state:
+            # Already disabled; keep existing reason but refresh timestamp for observability
+            meta = dict(self._rl_last_meta)
+            meta.setdefault("applied", False)
+            meta["asof"] = time.time()
+            if reason:
+                meta["disabled_reason"] = reason
+            self._rl_last_meta = meta
+            return
+
+        self._rl_disabled = state
+        if state:
+            self.rl_policy.clear()
+            self._rl_last_hash = None
+            meta = dict(self._rl_last_meta)
+            meta["applied"] = False
+            meta["asof"] = time.time()
+            if reason:
+                meta["disabled_reason"] = reason
+            else:
+                meta.pop("disabled_reason", None)
+            self._rl_last_meta = meta
+            logger.info("RL weights disabled (reason=%s)", reason or "manual")
+        else:
+            self._rl_last_meta.pop("disabled_reason", None)
+            logger.info("RL weights re-enabled")
+
     def _normalise_rl_payload(self, payload: Any) -> tuple[Dict[str, float], Dict[str, Any]]:
         weights: Dict[str, float] = {}
         meta: Dict[str, Any] = {}

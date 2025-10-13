@@ -12,6 +12,20 @@ from .utils import TTLCache, now_ts
 log = logging.getLogger(__name__)
 
 
+def _maybe_float(value: Any) -> float | None:
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+    except Exception:
+        return None
+
+
 class BaseAgent:
     """Base class for agents that consume Golden Snapshots."""
 
@@ -67,8 +81,8 @@ class AgentStage:
         emit: Callable[[TradeSuggestion], Awaitable[None]],
         *,
         agents: Iterable[BaseAgent] | None = None,
-        max_spread_bps: float = 80.0,
-        min_depth1_pct_usd: float = 8_000.0,
+        max_spread_bps: float = 40.0,
+        min_depth1_pct_usd: float = 15_000.0,
         blacklist: Iterable[str] | None = None,
         cooldown_sec: float = 0.0,
     ) -> None:
@@ -111,4 +125,23 @@ class AgentStage:
                             snapshot.hash,
                         )
                         continue
+                    if not self._edge_passes(suggestion):
+                        continue
                     await self._emit(suggestion)
+
+    def _edge_passes(self, suggestion: TradeSuggestion) -> bool:
+        gating = suggestion.gating or {}
+        if gating.get("edge_pass") is False:
+            return False
+        buffer = _maybe_float(gating.get("edge_buffer_bps"))
+        if buffer is not None and buffer < 20.0:
+            return False
+        expected = _maybe_float(gating.get("expected_edge_bps"))
+        breakeven = _maybe_float(gating.get("breakeven_bps"))
+        if expected is None or breakeven is None:
+            risk = suggestion.risk or {}
+            expected = _maybe_float(risk.get("expected_edge_bps") or risk.get("edge_bps"))
+            breakeven = _maybe_float(risk.get("breakeven_bps") or risk.get("breakeven"))
+        if expected is None or breakeven is None:
+            return True
+        return expected >= breakeven + 20.0
