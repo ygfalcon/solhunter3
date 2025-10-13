@@ -80,33 +80,54 @@ main() {
 
   printf '\n'
   log INFO "checking Helius DAS proxy"
-  if [[ ${HELIUS_API_KEY:-} ]]; then
+  if [[ ${HELIUS_API_KEY:-} || ${HELIUS_API_KEYS:-} || ${HELIUS_API_TOKEN:-} ]]; then
+    local helius_key="${HELIUS_API_KEY:-}"
+    if [[ -z $helius_key && -n ${HELIUS_API_KEYS:-} ]]; then
+      helius_key=${HELIUS_API_KEYS%%,*}
+    fi
+    if [[ -z $helius_key && -n ${HELIUS_API_TOKEN:-} ]]; then
+      helius_key=$HELIUS_API_TOKEN
+    fi
     local helius_key_lc
-    helius_key_lc=$(printf '%s' "$HELIUS_API_KEY" | tr '[:upper:]' '[:lower:]')
+    helius_key_lc=$(printf '%s' "$helius_key" | tr '[:upper:]' '[:lower:]')
     if [[ $helius_key_lc == skip ]]; then
       warn "DAS probe skipped (HELIUS_API_KEY=skip)"
       check_details+=("$(jq -n '{type:"das",status:"skipped"}')")
       record_audit warn "helius:skip"
-    else
-      local das_url="https://api.helius.xyz/v0/addresses/tokens?api-key=${HELIUS_API_KEY}&addresses=So11111111111111111111111111111111111111112"
-      if run_with_timeout 5 curl -sS "$das_url" | jq -re '
-        try (((if type == "array" then (.[0]? | .address? // .mint?)
-          elif type == "object" then (
-            .address? // .mint? //
-            ((.items? // .result? // .data? // .tokens? // []) |
-              (if type=="array" then (.[0]? | .address? // .mint?) else empty end))
-          )
-          else empty end) // empty)) catch empty
-      ' >/dev/null; then
+    elif [[ -n $helius_key ]]; then
+      local das_base=${DAS_BASE_URL:-https://api.helius.xyz/v1}
+      das_base=${das_base%/}
+      local das_url="${das_base}/searchAssets?api-key=${helius_key}"
+      local das_payload='{"interface":"FungibleToken","limit":1,"sortBy":{"field":"recentAction","direction":"desc"}}'
+      if run_with_timeout 5 curl -fsS -X POST "$das_url" \
+        -H "Content-Type: application/json" \
+        -d "$das_payload" | jq -re '
+          def items_from:
+            if type == "array" then .
+            elif type == "object" then (
+              (.items? // empty | select(type == "array")),
+              (.tokens? // empty | select(type == "array")),
+              (.assets? // empty | select(type == "array")),
+              (.result? | items_from),
+              (.data? | items_from)
+            )
+            else empty end;
+          ([items_from] | length) > 0
+        ' >/dev/null; then
         pass "DAS reachable"
         check_details+=("$(jq -n '{type:"das",status:"pass"}')")
-        record_audit pass "helius:tokens"
+        record_audit pass "helius:searchAssets"
       else
         fail "DAS probe failed"
         check_details+=("$(jq -n '{type:"das",status:"fail"}')")
-        record_audit fail "helius:tokens"
+        record_audit fail "helius:searchAssets"
         ((failures++))
       fi
+    else
+      fail "DAS probe failed (no usable API key)"
+      check_details+=("$(jq -n '{type:"das",status:"fail"}')")
+      record_audit fail "helius:missing-key"
+      ((failures++))
     fi
   fi
 
