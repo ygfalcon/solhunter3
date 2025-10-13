@@ -96,6 +96,25 @@ Proceed to live only when the following are green:
 4. If any SLO is breached, hit **Global Pause**, re-enable paper-only, and investigate.
 5. If stable for 24–48 hours, double notional caps incrementally.
 
+### First live test command
+
+Once the go/no-go checklist is green, run the guarded launcher to execute the first
+live test with micro-sizing enabled. Replace the sample paths with the environment
+file and configuration you intend to promote.
+
+```bash
+bash scripts/launch_live.sh \
+  --env .env.prod \
+  --micro 1 \
+  --soak 300 \
+  --config config.toml
+```
+
+The script performs two full preflight passes (micro on/off), validates environment
+secrets, ensures Redis is reachable, and starts both paper and live runtime controllers
+before flipping the live executor on. Watch `artifacts/prelaunch/logs/live_runtime.log`
+for the `RUNTIME_READY` marker and the console summary before lifting notional caps.
+
 ## 10. Incident Response
 
 - Red tile / alert on the dashboard → consult the corresponding Grafana panel.
