@@ -7,15 +7,10 @@ This project is targeted towards being the greatest Solana bot ever created and 
 
 ## Current Status & Next Steps (Sep 21 2025)
 
-- ✅ `scripts/start_all.py` now wires the Redis→RL health pipeline: it auto-starts Redis, polls the RL health endpoint with port rollover, and records broker state in `redis_server.log` before unblocking the rest of the stack.
-- ✅ `scripts/run_rl_daemon.py` runs GPU-backed DQN+PPO workers behind the new `RLHealth` HTTP server (`/health`), publishes heartbeats/weights, and keeps GPU learning always on.
-- ✅ RL weights now ship as schema-tagged snapshots. When `RL_WEIGHTS_DISABLED=1` the runtime keeps neutral swarm weights and the vote window enforces a freshness gate (stale heartbeats ≥2× the vote window are ignored).
-- ⚠️ RL daemon logs still spam `coroutine … never awaited`, TorchScript export failures, and Redis reconnect loops whenever the broker/event bus comes up late; training completes but health flaps and weights don’t broadcast reliably.
-- ⚠️ Event bus/websocket stack is noisy (invalid websocket URL fallback, port 8769 collisions, Redis `no message received`), leaving stray tasks on shutdown and tripping the `--auto` launcher.
-- ⚠️ Offline data sync scheduler continues to raise TaskGroup/network errors and leaves `offline_data.db` stale when offline mode is toggled.
-- ⚠️ `python -m solhunter_zero.main --auto` still crashes on exit (`Event loop is closed`, lingering websocket tasks) and spews DEX metric errors when offline; needs cleanup or a lighter entrypoint.
+The historical status items from the original public roadmap have been superseded by the **Launch Audit Tracker** documented in [`docs/audit_status.md`](docs/audit_status.md). That document lays out each production gating requirement and whether or not it has been validated in this repository. The previous inline list is intentionally removed to avoid confusion while the new tracker is being adopted.
 
-Pick up from here to tighten the runtime loop, quiet the websocket subsystem, and harden the auto launcher.
+> **Note**
+> The tracker highlights several capabilities that still depend on external infrastructure (Redis, Solana RPC, Helius, managed RL backends, and the real event bus). Those items require live operator intervention to validate and therefore cannot be marked complete from within this repository alone.
 
 For a quick preview across all bundled strategies, double-click `demo.command`
 (or run `python demo.py`) to generate sample reports without additional
