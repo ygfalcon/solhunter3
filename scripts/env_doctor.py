@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import socket
 import ssl
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
-from urllib.parse import urlparse
+from typing import Iterable, Iterator, List, Optional, Tuple
+from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 try:  # optional dependency
@@ -121,9 +122,110 @@ def _wallet_check(name: str) -> CheckResult:
     return _fail(name, f"path missing ({expanded})")
 
 
+def _resolve_helius_token() -> Tuple[Optional[str], str]:
+    """Return the configured Helius token and the env var used."""
+
+    def _clean(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    direct = _clean(os.getenv("HELIUS_API_KEY"))
+    if direct:
+        return direct, "HELIUS_API_KEY"
+
+    keys = _clean(os.getenv("HELIUS_API_KEYS"))
+    if keys:
+        first = _clean(keys.split(",")[0])
+        if first:
+            return first, "HELIUS_API_KEYS"
+
+    token = _clean(os.getenv("HELIUS_API_TOKEN"))
+    if token:
+        return token, "HELIUS_API_TOKEN"
+
+    return None, ""
+
+
+def check_helius_key() -> CheckResult:
+    token, source = _resolve_helius_token()
+    if token is None:
+        return _fail("HELIUS_API_KEY", "no configured API key")
+
+    lowered = token.lower()
+    forbidden = {"replace-with-staging-helius-key", "replace-with-production-helius-key"}
+    if lowered in forbidden:
+        return _fail("HELIUS_API_KEY", "placeholder value detected")
+
+    suffix = f" via {source}" if source else ""
+    if lowered == "skip":
+        return _ok("HELIUS_API_KEY", f"probe skip requested{suffix}")
+
+    return _ok("HELIUS_API_KEY", f"configured{suffix}")
+
+
+def _iter_asset_nodes(node: object) -> Iterator[object]:
+    if isinstance(node, list):
+        for item in node:
+            yield item
+    elif isinstance(node, dict):
+        for key in ("items", "tokens", "assets"):
+            if key in node:
+                yield from _iter_asset_nodes(node[key])
+        for key in ("result", "data"):
+            if key in node:
+                yield from _iter_asset_nodes(node[key])
+
+
+def check_helius_das(*, timeout: float = 5.0) -> CheckResult:
+    token, source = _resolve_helius_token()
+    if token is None:
+        return _fail("HELIUS_API_KEY", "no configured API key")
+
+    if token.lower() == "skip":
+        label = source or "configured key"
+        return _ok("HELIUS_API_KEY", f"Helius DAS probe skipped ({label}=skip)")
+
+    das_base = os.getenv("DAS_BASE_URL") or os.getenv("HELIUS_API_BASE", "https://api.helius.xyz/v1")
+    das_base = das_base.rstrip("/")
+    endpoint = f"{das_base}/searchAssets?api-key={quote_plus(token)}"
+    payload = json.dumps(
+        {
+            "interface": "FungibleToken",
+            "limit": 1,
+            "sortBy": {"field": "recentAction", "direction": "desc"},
+        }
+    ).encode("utf-8")
+    req = Request(endpoint, data=payload, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - controlled endpoint
+            status = resp.status
+            body = resp.read()
+    except Exception as exc:  # noqa: BLE001
+        return _fail("HELIUS_API_KEY", f"Helius DAS probe failed: {exc}")
+
+    if status >= 400:
+        return _fail("HELIUS_API_KEY", f"Helius DAS probe returned HTTP {status}")
+
+    try:
+        parsed = json.loads(body.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return _fail("HELIUS_API_KEY", f"Helius DAS probe yielded invalid JSON: {exc}")
+
+    assets = list(_iter_asset_nodes(parsed))
+    if not assets:
+        return _fail("HELIUS_API_KEY", "Helius DAS probe returned no assets")
+
+    return _ok(
+        "HELIUS_API_KEY",
+        f"Helius DAS reachable via {source or 'configured key'} (HTTP {status})",
+    )
+
+
 async def run_checks() -> List[CheckResult]:
     results: List[CheckResult] = []
-    results.append(check_env_var("HELIUS_API_KEY", forbid_values={"", "replace-with-staging-helius-key", "replace-with-production-helius-key"}))
+    results.append(check_helius_key())
     results.append(check_env_var("SOLANA_RPC_URL"))
     results.append(check_env_var("SOLANA_WS_URL"))
     results.append(check_env_var("REDIS_URL"))
@@ -141,27 +243,8 @@ async def run_checks() -> List[CheckResult]:
     if redis_url:
         results.append(await check_redis(redis_url))
 
-    helius_base = os.getenv("HELIUS_API_BASE", "https://api.helius.xyz")
-    token = os.getenv("HELIUS_API_KEY", "")
-    if token:
-        headers = {"Authorization": f"Bearer {token}"}
-        probe_url = (
-            f"{helius_base.rstrip('/')}/v0/token-metadata?ids="
-            "So11111111111111111111111111111111111111112"
-        )
-        req = Request(probe_url, headers=headers)
-        try:
-            with urlopen(req, timeout=5.0) as resp:  # noqa: S310 - configured endpoint
-                status = resp.status
-        except Exception as exc:  # noqa: BLE001
-            results.append(_fail("HELIUS_API_KEY", f"Helius auth failed: {exc}"))
-        else:
-            if status in {401, 403}:
-                results.append(_fail("HELIUS_API_KEY", "unauthorized"))
-            elif status >= 500:
-                results.append(_fail("HELIUS_API_KEY", f"Helius error (HTTP {status})"))
-            else:
-                results.append(_ok("HELIUS_API_KEY", f"Helius auth ok (HTTP {status})"))
+    if any(os.getenv(name) for name in ("HELIUS_API_KEY", "HELIUS_API_KEYS", "HELIUS_API_TOKEN")):
+        results.append(check_helius_das())
 
     return results
 
