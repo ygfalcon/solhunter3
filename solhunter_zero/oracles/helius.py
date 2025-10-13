@@ -7,7 +7,7 @@ from typing import Dict
 
 from ..agents.price_utils import resolve_price
 from ..prices import update_price_cache
-from ..token_aliases import canonical_mint
+from ..token_aliases import canonical_mint, validate_mint
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,8 @@ async def hydrate_from_trades(mint: str, portfolio, memory_agent) -> Dict[str, f
     """
 
     mint = canonical_mint(mint)
+    if not validate_mint(mint):
+        return {}
     price, context = await resolve_price(mint, portfolio)
     price_info = context.get("helius_price_info") or {}
 
