@@ -3,7 +3,7 @@ import logging
 import aiohttp
 import asyncio
 
-from typing import Iterable, Dict, Any, Sequence
+from typing import Iterable, Dict, Any, Sequence, Tuple, Union
 
 from solhunter_zero.lru import TTLCache
 from .http import get_session
@@ -86,7 +86,7 @@ async def _request_json(
     url: str,
     provider: str,
     *,
-    params: Dict[str, Any] | None = None,
+    params: Union[Dict[str, Any], Sequence[Tuple[str, Any]]] | None = None,
     headers: Dict[str, str] | None = None,
     json: Any | None = None,
     method: str = "GET",
@@ -213,29 +213,73 @@ async def _fetch_prices_helius_rest(
     tokens: Sequence[str],
 ) -> Dict[str, float]:
     url = HELIUS_PRICE_REST_URL.strip()
+    tokens = [tok for tok in tokens if isinstance(tok, str) and tok]
     if not url or not tokens:
         return {}
 
     prices: Dict[str, float] = {}
-    for token in tokens:
-        params: Dict[str, Any] = {"address": token}
-        if HELIUS_API_KEY:
-            params["api-key"] = HELIUS_API_KEY
+    params: list[Tuple[str, Any]] = []
+    if HELIUS_API_KEY:
+        params.append(("api-key", HELIUS_API_KEY))
 
-        payload = await _request_json(
-            session,
-            url,
-            "Helius (GET)",
-            params=params,
-        )
-        if not isinstance(payload, dict):
+    lower_url = url.lower()
+    if "token-metadata" in lower_url or "metadata" in lower_url:
+        query_key = "mintAccounts"
+    else:
+        query_key = "ids[]"
+
+    params.extend((query_key, token) for token in tokens)
+
+    payload = await _request_json(
+        session,
+        url,
+        "Helius (GET)",
+        params=params,
+    )
+
+    entries: Sequence[Any]
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        data = payload.get("items")
+        if isinstance(data, list):
+            entries = data
+        else:
+            entries = [payload]
+    else:
+        entries = []
+
+    for entry in entries:
+        if not isinstance(entry, dict):
             continue
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-        price = _extract_price(data)
-        if price is None and isinstance(data, dict):
-            price = _extract_price(data.get("price"))
+        mint = (
+            entry.get("id")
+            or entry.get("mint")
+            or entry.get("address")
+            or entry.get("mintAddress")
+            or entry.get("mintAccount")
+        )
+        if not isinstance(mint, str) or mint not in tokens:
+            continue
+
+        price = None
+        for candidate in (
+            entry.get("priceInfo"),
+            entry.get("price_info"),
+            entry.get("price"),
+            entry.get("tokenInfo", {}).get("priceInfo") if isinstance(entry.get("tokenInfo"), dict) else None,
+            entry.get("token_info", {}).get("price_info") if isinstance(entry.get("token_info"), dict) else None,
+        ):
+            if candidate is None:
+                continue
+            price = _extract_price(candidate)
+            if price is not None:
+                break
+        if price is None:
+            price = _extract_price(entry)
         if price is not None:
-            prices[token] = price
+            prices[mint] = price
+            update_price_cache(mint, price)
 
     return prices
 
