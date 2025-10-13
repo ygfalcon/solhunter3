@@ -12,6 +12,8 @@ dump.rdb
 replay.db
 offline_data.db
 datasets/
+!solhunter_zero/datasets/
+!solhunter_zero/datasets/*.py
 lightning_logs/
 *.pt
 *.ptc
