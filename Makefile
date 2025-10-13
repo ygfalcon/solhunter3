@@ -29,6 +29,9 @@ typecheck:
 gen-proto:
 >$(PYTHON) scripts/gen_proto.py
 
+audit-placeholders:
+>scripts/audit_placeholders.sh $(ARGS)
+
 # Run the investor demo. Pass ARGS to override or extend defaults.
 # Examples:
 #   make demo ARGS="--preset multi"

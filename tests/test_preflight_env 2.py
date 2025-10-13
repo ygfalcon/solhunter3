@@ -40,7 +40,7 @@ def test_check_required_env_missing(restore_env, caplog):
 
 def test_check_required_env_placeholder(restore_env, caplog):
     os.environ["SOLANA_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
-    os.environ["BIRDEYE_API_KEY"] = "YOUR_BIRDEYE_KEY"
+    os.environ["BIRDEYE_API_KEY"] = "invalid_birdeye_key"
     with caplog.at_level(
         logging.WARNING, logger="solhunter_zero.preflight_utils"
     ):
@@ -66,7 +66,7 @@ def test_configure_env_strips_placeholder(tmp_path: Path, restore_env, caplog):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\n"
-        "BIRDEYE_API_KEY=be_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n"
+        "BIRDEYE_API_KEY=be_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE\n"
     )
     configure_environment(tmp_path)
     with caplog.at_level(
@@ -75,7 +75,7 @@ def test_configure_env_strips_placeholder(tmp_path: Path, restore_env, caplog):
         ok, msg = check_required_env()
     assert ok is True
     assert os.environ.get("BIRDEYE_API_KEY") == ""
-    assert "be_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" not in env_file.read_text()
+    assert "be_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE" not in env_file.read_text()
     assert "BIRDEYE_API_KEY" in caplog.text
 
 
@@ -102,7 +102,7 @@ def test_configure_env_uses_config_value(tmp_path: Path, restore_env, caplog):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\n"
-        "BIRDEYE_API_KEY=be_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n"
+        "BIRDEYE_API_KEY=be_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE\n"
     )
     (tmp_path / "config.toml").write_text('birdeye_api_key="real_key"\n')
     configure_environment(tmp_path)
@@ -120,12 +120,12 @@ def test_configure_env_creates_sanitized_env(tmp_path: Path, restore_env):
     example = tmp_path / ".env.example"
     example.write_text(
         "SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d\n"
-        "BIRDEYE_API_KEY=be_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n"
+        "BIRDEYE_API_KEY=be_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE\n"
     )
     configure_environment(tmp_path)
     env_file = tmp_path / ".env"
     assert env_file.exists()
-    assert "be_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" not in env_file.read_text()
+    assert "be_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE" not in env_file.read_text()
     assert os.environ.get("BIRDEYE_API_KEY") == ""
 
 
