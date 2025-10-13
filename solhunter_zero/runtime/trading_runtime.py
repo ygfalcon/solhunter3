@@ -227,6 +227,9 @@ class TradingRuntime:
         self._pending_tokens: Dict[str, Dict[str, Any]] = {}
         self._last_eval_summary: Dict[str, Any] = {}
         self._last_execution_summary: Dict[str, Any] = {}
+        self._rl_window_sec: float = 0.4
+        self._rl_gate_active: bool = False
+        self._rl_gate_reason: Optional[str] = "boot"
         self._rl_status_info: Dict[str, Any] = {
             "enabled": False,
             "running": False,
@@ -566,6 +569,12 @@ class TradingRuntime:
             payload["_received"] = time.time()
             with self._swarm_lock:
                 self._rl_weights_windows.appendleft(payload)
+            if not self._rl_gate_active:
+                log.debug(
+                    "Skipping RL weights while gate is closed (reason=%s)",
+                    self._rl_gate_reason,
+                )
+                return
             if self.pipeline is not None:
                 try:
                     self.pipeline.set_rl_weights(payload)
@@ -631,6 +640,8 @@ class TradingRuntime:
         if manager is None:
             raise RuntimeError("No trading agents available")
         self.agent_manager = manager
+        self._rl_window_sec = float(getattr(self.agent_manager, "_rl_window_sec", 0.4) or 0.4)
+        self.agent_manager.set_rl_disabled(True, reason="boot")
 
         fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
         if self._use_new_pipeline:
@@ -701,6 +712,8 @@ class TradingRuntime:
             except Exception:
                 log.exception("Failed to start Golden pipeline service")
                 self.activity.add("golden_pipeline", "failed", ok=False)
+
+        self._set_rl_gate_active(False, reason="boot")
 
         rl_enabled = bool(self.cfg.get("rl_auto_train", False)) or parse_bool_env(
             "RL_DAEMON", False
@@ -808,6 +821,7 @@ class TradingRuntime:
 
             self._rl_status_info.update(updates)
             self.status.rl_daemon = bool(self._rl_status_info.get("running"))
+            self._update_rl_gate()
 
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=delay)
@@ -815,6 +829,65 @@ class TradingRuntime:
                 continue
             else:
                 break
+
+    def _rl_gate_allows(self) -> bool:
+        if not self._rl_status_info.get("running"):
+            return False
+        heartbeat_ts = self.status.heartbeat_ts
+        if heartbeat_ts is None:
+            return False
+        try:
+            age = max(0.0, time.time() - float(heartbeat_ts))
+        except Exception:
+            return False
+        window = max(self._rl_window_sec * 2.0, 0.1)
+        return age <= window
+
+    def _set_rl_gate_active(self, active: bool, *, reason: Optional[str] = None) -> None:
+        reason_text = None if active else (reason or self._rl_gate_reason or "unhealthy")
+        if (
+            self._rl_gate_active == active
+            and (active or self._rl_gate_reason == reason_text)
+        ):
+            return
+
+        self._rl_gate_active = active
+        self._rl_gate_reason = None if active else reason_text
+        gate_state = "open" if active else "blocked"
+        self._rl_status_info["gate"] = gate_state
+        self._rl_status_info["gate_reason"] = self._rl_gate_reason
+
+        if self.pipeline is not None:
+            self.pipeline.set_rl_enabled(active)
+        if self.agent_manager is not None:
+            self.agent_manager.set_rl_disabled(not active, reason=reason_text)
+
+        if active:
+            log.info("RL weights gate opened")
+        else:
+            log.warning("RL weights gate closed (%s)", reason_text or "unknown")
+
+    def _update_rl_gate(self) -> None:
+        if not self._rl_status_info.get("enabled"):
+            self._set_rl_gate_active(False, reason="disabled")
+            return
+        if not self._rl_status_info.get("running"):
+            self._set_rl_gate_active(False, reason="rl_unhealthy")
+            return
+        heartbeat_ts = self.status.heartbeat_ts
+        if heartbeat_ts is None:
+            self._set_rl_gate_active(False, reason="no_heartbeat")
+            return
+        try:
+            age = max(0.0, time.time() - float(heartbeat_ts))
+        except Exception:
+            self._set_rl_gate_active(False, reason="invalid_heartbeat")
+            return
+        window = max(self._rl_window_sec * 2.0, 0.1)
+        if age > window:
+            self._set_rl_gate_active(False, reason="stale_heartbeat")
+            return
+        self._set_rl_gate_active(True)
 
     async def _start_loop(self) -> None:
         if self._use_new_pipeline and self.pipeline is not None:
@@ -997,6 +1070,8 @@ class TradingRuntime:
         snapshot.setdefault("running", False)
         snapshot.setdefault("configured", False)
         snapshot.setdefault("detected", False)
+        snapshot.setdefault("gate", "open" if self._rl_gate_active else "blocked")
+        snapshot.setdefault("gate_reason", self._rl_gate_reason)
         return snapshot
 
     def _collect_iteration(self) -> Dict[str, Any]:
@@ -1816,6 +1891,7 @@ class TradingRuntime:
         now_ts = summary.get("timestamp_epoch", time.time())
         self.status.trading_loop = True
         self.status.heartbeat_ts = now_ts
+        self._update_rl_gate()
         if stage == "loop" or summary.get("committed"):
             self._iteration_count += 1
 

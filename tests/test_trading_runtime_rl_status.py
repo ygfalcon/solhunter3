@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import time
 import types
 
 import pytest
@@ -92,6 +93,38 @@ def test_probe_rl_daemon_health_missing(monkeypatch, tmp_path):
     assert result["detected"] is False
     assert result["running"] is False
     assert result["url"] is None
+
+
+def test_rl_gate_blocks_stale_weights(monkeypatch):
+    runtime = trading_runtime.TradingRuntime()
+    pipeline_calls: list[bool] = []
+    manager_calls: list[tuple[bool, str | None]] = []
+
+    runtime.pipeline = types.SimpleNamespace(
+        set_rl_enabled=lambda enabled: pipeline_calls.append(enabled),
+        set_rl_weights=lambda *_a, **_k: None,
+    )
+    runtime.agent_manager = types.SimpleNamespace(
+        set_rl_disabled=lambda disabled, reason=None: manager_calls.append(
+            (bool(disabled), reason)
+        )
+    )
+    runtime._rl_window_sec = 0.4
+    runtime._rl_status_info.update({"enabled": True, "running": True})
+    runtime.status.heartbeat_ts = time.time() - 2.0
+
+    runtime._update_rl_gate()
+
+    assert runtime._rl_gate_active is False
+    assert manager_calls[-1] == (True, "stale_heartbeat")
+    assert pipeline_calls[-1] is False
+
+    runtime.status.heartbeat_ts = time.time()
+    runtime._update_rl_gate()
+
+    assert runtime._rl_gate_active is True
+    assert manager_calls[-1] == (False, None)
+    assert pipeline_calls[-1] is True
 
 
 @pytest.mark.anyio("asyncio")

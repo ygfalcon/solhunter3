@@ -895,8 +895,14 @@ def _das_enabled() -> bool:
     provider = (os.getenv("ONCHAIN_DISCOVERY_PROVIDER") or "").strip().lower()
     if provider in {"das", "helius_das"}:
         return True
+    if provider in {"gpa", "legacy", "rpc"}:
+        return False
     flag = (os.getenv("ONCHAIN_USE_DAS") or "").strip().lower()
-    return flag in {"1", "true", "yes", "on"}
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    return True
 
 
 def _das_page_limit(target: int) -> int:

@@ -1,5 +1,8 @@
 import asyncio
+import contextlib
+import errno
 import json
+import logging
 import sys
 import types
 import importlib.util
@@ -74,6 +77,17 @@ if importlib.util.find_spec("watchfiles") is None:
     watch_mod.__spec__ = importlib.machinery.ModuleSpec("watchfiles", None)
     watch_mod.awatch = lambda *a, **k: iter(())
     sys.modules.setdefault("watchfiles", watch_mod)
+datasets_mod = types.ModuleType("solhunter_zero.datasets")
+datasets_mod.__spec__ = importlib.machinery.ModuleSpec("solhunter_zero.datasets", None)
+sys.modules.setdefault("solhunter_zero.datasets", datasets_mod)
+sample_ticks_mod = types.ModuleType("solhunter_zero.datasets.sample_ticks")
+sample_ticks_mod.__spec__ = importlib.machinery.ModuleSpec(
+    "solhunter_zero.datasets.sample_ticks", None
+)
+sample_ticks_mod.load_sample_ticks = lambda *a, **k: []
+sample_ticks_mod.DEFAULT_PATH = ""
+sys.modules.setdefault("solhunter_zero.datasets.sample_ticks", sample_ticks_mod)
+datasets_mod.sample_ticks = sample_ticks_mod
 if importlib.util.find_spec("pydantic") is None:
     pyd = types.ModuleType("pydantic")
     pyd.__spec__ = importlib.machinery.ModuleSpec("pydantic", None)
@@ -282,6 +296,90 @@ async def test_websocket_publish_and_receive():
         else:
             raise AssertionError("expected binary message")
     await stop_ws_server()
+
+
+def test_websocket_refuses_second_instance():
+    async def _runner():
+        port = 8805
+        server = await asyncio.start_server(lambda r, w: None, "localhost", port)
+        try:
+            import solhunter_zero.event_bus as ev
+
+            original_serve = ev.websockets.serve
+            original_flush = ev._flush_outgoing
+            original_get_loop = asyncio.get_running_loop
+
+            async def fake_serve(*_a, **_k):
+                raise OSError(errno.EADDRINUSE, "address in use")
+
+            async def dummy_flush():
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    return
+
+            class DummyTask:
+                def cancel(self):
+                    return None
+
+                def done(self):
+                    return False
+
+                def __await__(self):
+                    if False:
+                        yield None
+                    return
+
+            class DummyLoop:
+                def create_task(self, coro):
+                    try:
+                        coro.close()
+                    except Exception:
+                        pass
+                    return DummyTask()
+
+            asyncio.get_running_loop = lambda: DummyLoop()
+            ev.websockets.serve = fake_serve
+            ev._flush_outgoing = dummy_flush
+            with pytest.raises(RuntimeError) as exc:
+                await start_ws_server("localhost", port)
+            assert "already bound" in str(exc.value)
+        finally:
+            asyncio.get_running_loop = original_get_loop
+            ev.websockets.serve = original_serve
+            ev._flush_outgoing = original_flush
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(_runner())
+
+
+def test_websocket_shutdown_logs_queue_drain(caplog):
+    async def _runner():
+        import solhunter_zero.event_bus as ev
+
+        caplog.set_level(logging.INFO)
+        ev._ws_server = type(
+            "_DummyServer",
+            (),
+            {
+                "close": lambda self=None: None,
+                "wait_closed": staticmethod(lambda: asyncio.sleep(0)),
+            },
+        )()
+        ev._ws_clients.clear()
+        ev._ws_client_topics.clear()
+        ev._peer_clients.clear()
+        ev._outgoing_queue = asyncio.Queue()
+        ev._flush_task = None
+        ev._outgoing_queue.put_nowait(b"foo")
+        ev._outgoing_queue.put_nowait(b"bar")
+        await ev.stop_ws_server()
+        assert any(
+            "drained 2 pending frame" in record.message for record in caplog.records
+        )
+
+    asyncio.run(_runner())
 
 
 @pytest.mark.asyncio

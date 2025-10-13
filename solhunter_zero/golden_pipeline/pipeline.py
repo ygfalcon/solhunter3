@@ -226,6 +226,14 @@ class GoldenPipeline:
 
         self._voting_stage.set_rl_weights(weights)
 
+    def set_rl_enabled(self, enabled: bool) -> None:
+        """Enable or disable RL influence on the voting stage."""
+
+        self._voting_stage.set_rl_disabled(not enabled)
+        if not enabled:
+            # Ensure any stale weights do not leak once the gate closes
+            self._voting_stage.set_rl_weights({})
+
     def metrics_snapshot(self) -> Dict[str, Dict[str, Optional[float]]]:
         """Return rolling Golden Snapshot telemetry summaries."""
 
