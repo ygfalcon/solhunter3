@@ -478,10 +478,30 @@ class AgentManager:
         if keypair_env:
             candidates.append(str(keypair_env))
 
+        # Add the common Solana CLI default path as a fallback if it is not
+        # already present. This covers local development environments where the
+        # production-specific path (e.g. /etc/solhunter/id.json) is absent.
+        default_cli_path = Path.home() / ".config/solana/id.json"
+        candidates.append(str(default_cli_path))
+
+        # Deduplicate while preserving order so we do not spam logs by checking
+        # the same location multiple times (e.g. if env and config match).
+        deduped_candidates: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            deduped_candidates.append(candidate)
+
+        candidates = deduped_candidates
+
         if not candidates:
             return None, None
 
         last_path: str | None = None
+        missing_paths: list[str] = []
+        load_errors: list[tuple[str, Exception]] = []
         for raw in candidates:
             if not raw:
                 continue
@@ -493,12 +513,21 @@ class AgentManager:
             try:
                 keypair = wallet.load_keypair(path_str)
             except FileNotFoundError:
-                logger.warning("Keypair file not found at %s", path_str)
+                missing_paths.append(path_str)
                 continue
             except Exception as exc:
-                logger.warning("Failed to load keypair from %s: %s", path_str, exc)
+                load_errors.append((path_str, exc))
                 continue
             return keypair, path_str
+
+        if load_errors:
+            for path_str, exc in load_errors:
+                logger.warning("Failed to load keypair from %s: %s", path_str, exc)
+        elif missing_paths:
+            logger.warning(
+                "Keypair file not found at %s",
+                ", ".join(missing_paths),
+            )
 
         return None, last_path
 
