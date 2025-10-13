@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import logging
 import os
 import signal
+import socket
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -139,17 +142,54 @@ class RuntimeOrchestrator:
             # Start Flask server in a background thread using werkzeug only if available.
             import threading
 
+            def _select_listen_port(host: str, requested_port: int) -> tuple[int, bool]:
+                """Return a usable port and whether it differs from the request."""
+
+                if requested_port <= 0:
+                    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+                        sock.bind((host, 0))
+                        return sock.getsockname()[1], requested_port != 0
+
+                with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+                    try:
+                        sock.bind((host, requested_port))
+                        return requested_port, False
+                    except OSError as exc:
+                        if exc.errno not in {errno.EADDRINUSE, errno.EACCES, errno.EADDRNOTAVAIL}:
+                            raise
+
+                # Requested port unavailable; ask OS for an open port
+                with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+                    sock.bind((host, 0))
+                    return sock.getsockname()[1], True
+
             def _serve():
                 try:
                     host = os.getenv("UI_HOST", "127.0.0.1")
-                    port = int(os.getenv("UI_PORT", os.getenv("PORT", "5000") or 5000))
-                    app.run(host=host, port=port)
+                    port_env = os.getenv("UI_PORT", os.getenv("PORT", "5000") or 5000)
+                    try:
+                        requested_port = int(port_env)
+                    except (TypeError, ValueError):
+                        requested_port = 0
+
+                    port, changed = _select_listen_port(host, requested_port)
+                    if changed:
+                        log.warning(
+                            "Requested UI port %s unavailable; using %s instead", requested_port, port
+                        )
+                    os.environ["UI_PORT"] = str(port)
+
+                    app.run(host=host, port=port, use_reloader=False)
                 except Exception:
                     log.exception("UI HTTP server failed")
 
             t = threading.Thread(target=_serve, daemon=True)
             t.start()
-            await self._publish_stage("ui:http", True, f"host={os.getenv('UI_HOST','127.0.0.1')} port={os.getenv('UI_PORT', os.getenv('PORT','5000'))}")
+            await self._publish_stage(
+                "ui:http",
+                True,
+                f"host={os.getenv('UI_HOST','127.0.0.1')} port={os.getenv('UI_PORT', os.getenv('PORT','5000'))}"
+            )
 
     async def start_agents(self) -> None:
         # Use existing startup path to ensure consistent connectivity + depth_service
