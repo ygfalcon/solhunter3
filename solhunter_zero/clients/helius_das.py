@@ -108,7 +108,7 @@ if _API_KEYS.keys:
     log.info(
         "Helius DAS client configured",
         extra={
-            "module": __name__,
+            "client_module": __name__,
             "helius_keys": len(_API_KEYS.keys),
             "das_rps": _rl.rps,
             "das_burst": _rl.burst,
