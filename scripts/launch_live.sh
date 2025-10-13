@@ -267,6 +267,9 @@ register_child() {
 }
 
 cleanup() {
+  if [[ -z ${CHILD_PIDS+x} ]]; then
+    return
+  fi
   for pid in "${CHILD_PIDS[@]}"; do
     if kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" >/dev/null 2>&1 || true
@@ -311,7 +314,7 @@ wait_for_ready() {
     if grep -q "RUNTIME_READY" "$log" 2>/dev/null; then
       return 0
     fi
-    if [[ -n $pid && ! kill -0 "$pid" >/dev/null 2>&1 ]]; then
+    if [[ -n $pid ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
       echo "Runtime process $pid exited early" >&2
       return 1
     fi
