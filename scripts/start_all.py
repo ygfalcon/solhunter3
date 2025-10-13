@@ -13,6 +13,7 @@ It delegates all heavy lifting to :class:`solhunter_zero.runtime.trading_runtime
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import subprocess
@@ -33,6 +34,14 @@ from solhunter_zero.config import (
 )
 from solhunter_zero.redis_util import ensure_local_redis_if_needed
 from solhunter_zero.logging_utils import configure_runtime_logging
+from solhunter_zero.production import (
+    Provider,
+    load_production_env,
+    assert_providers_ok,
+    format_configured_providers,
+    write_env_manifest,
+    ConnectivityChecker,
+)
 
 
 log = logging.getLogger(__name__)
@@ -203,6 +212,93 @@ def summarize_stages(stage_results: list[StageResult]) -> None:
         log.info("  [%s] %s (%.2fs)%s", status, result.name, result.duration, extra)
 
 
+# ---------------------------------------------------------------------------
+# Production helpers
+# ---------------------------------------------------------------------------
+
+
+PRODUCTION_PROVIDERS: list[Provider] = [
+    Provider("Solana", ("SOLANA_RPC_URL", "SOLANA_WS_URL")),
+    Provider("Helius", ("HELIUS_API_KEY",)),
+    Provider("Redis", ("REDIS_URL",), optional=True),
+    Provider("UI", ("UI_WS_URL",), optional=True),
+    Provider("Helius-DAS", ("DAS_BASE_URL",), optional=True),
+]
+
+
+def _load_production_environment() -> dict[str, str]:
+    return load_production_env()
+
+
+def _validate_keys() -> str:
+    assert_providers_ok(PRODUCTION_PROVIDERS)
+    message = format_configured_providers(PRODUCTION_PROVIDERS)
+    log.info(message)
+    return message
+
+
+def _write_manifest(loaded_env: Mapping[str, str]) -> Path:
+    source_map = {name: "file" for name in loaded_env}
+    manifest_path = Path("artifacts/prelaunch/env_manifest.json")
+    return write_env_manifest(manifest_path, PRODUCTION_PROVIDERS, source_map=source_map)
+
+
+def _connectivity_check() -> list[dict[str, object]]:
+    checker = ConnectivityChecker()
+
+    async def _run() -> list[dict[str, object]]:
+        results = await checker.check_all()
+        formatted: list[dict[str, object]] = []
+        for result in results:
+            status = "OK" if result.ok else f"FAIL ({result.error or result.status})"
+            log.info(
+                "Connectivity %s → %s (%.2f ms)",
+                result.name,
+                status,
+                result.latency_ms or -1.0,
+            )
+            formatted.append(
+                {
+                    "name": result.name,
+                    "target": result.target,
+                    "ok": result.ok,
+                    "latency_ms": result.latency_ms,
+                    "status": result.status,
+                    "status_code": result.status_code,
+                    "error": result.error,
+                }
+            )
+        return formatted
+
+    return asyncio.run(_run())
+
+
+def _connectivity_soak() -> dict[str, object]:
+    duration = float(os.getenv("CONNECTIVITY_SOAK_DURATION", "180"))
+    if duration <= 0:
+        log.info("Connectivity soak disabled (duration <= 0)")
+        return {"disabled": True, "duration": duration}
+
+    checker = ConnectivityChecker()
+    output_path = Path("artifacts/prelaunch/connectivity_report.json")
+
+    async def _run() -> dict[str, object]:
+        summary = await checker.run_soak(duration=duration, output_path=output_path)
+        log.info(
+            "Connectivity soak completed in %.1fs (reconnects=%d)",
+            summary.duration,
+            summary.reconnect_count,
+        )
+        return {
+            "duration": summary.duration,
+            "metrics": summary.metrics,
+            "reconnect_count": summary.reconnect_count,
+            "report": str(output_path),
+        }
+
+    return asyncio.run(_run())
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_runtime_logging(force=True)
@@ -216,6 +312,11 @@ def main(argv: list[str] | None = None) -> int:
             run_stage("process-cleanup", kill_lingering_processes, stage_results)
         env = run_stage("ensure-environment", lambda: ensure_environment(args.config), stage_results)
         cfg_path = env["config_path"]
+        loaded_env = run_stage("load-production-env", _load_production_environment, stage_results)
+        run_stage("validate-keys", _validate_keys, stage_results)
+        run_stage("write-env-manifest", lambda: _write_manifest(loaded_env), stage_results)
+        run_stage("connectivity-check", _connectivity_check, stage_results)
+        run_stage("connectivity-soak", _connectivity_soak, stage_results)
 
         if args.foreground:
             run_stage("launch-foreground", lambda: launch_foreground(args, cfg_path), stage_results)
