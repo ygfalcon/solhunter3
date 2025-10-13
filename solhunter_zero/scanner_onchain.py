@@ -417,7 +417,7 @@ async def _load_discovery_cursor() -> Optional[str]:
     if cursor:
         _metric_counter_inc(_METRIC_CURSOR_RESUME)
     if cursor:
-        cursor = cursor.strip()
+        cursor = str(cursor).strip()
     return cursor or None
 
 
@@ -514,6 +514,16 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
     except Exception:
         pass
     return default
+
+
+def _cursor_to_page(token: Optional[str]) -> int:
+    if token is None:
+        return 1
+    try:
+        page = int(token)
+    except Exception:
+        return 1
+    return max(1, page)
 
 
 def _is_rate_limited(exc: Exception) -> bool:
@@ -1302,7 +1312,7 @@ async def _scan_tokens_via_das(
     target_total = max(account_cap, int(math.ceil(account_cap * _DISCOVERY_OVERFETCH_MULT)))
     page_limit = _das_page_limit(target_total)
     cursor = await _load_discovery_cursor()
-    previous_cursor: str | None = None
+    previous_cursor: Optional[str] = None
     uniq_mints: list[str] = []
     mint_details: Dict[str, Dict[str, Any]] = {}
 
@@ -1310,13 +1320,15 @@ async def _scan_tokens_via_das(
         remaining = target_total - len(uniq_mints)
         limit = page_limit if page_limit > 0 else remaining
         limit = max(1, min(limit, remaining))
+        current_page = _cursor_to_page(cursor)
+        cursor_arg = None if cursor is None else current_page
         await _DISCOVERY_BUDGET.acquire()
         _metric_counter_inc(_METRIC_DAS_REQUESTS, labels={"op": "search"})
         start = time.monotonic()
         try:
             items, next_cursor = await search_fungible_recent(
                 session,
-                cursor=cursor,
+                cursor=cursor_arg,
                 limit=limit,
             )
             latency = (time.monotonic() - start) * 1000.0
@@ -1327,7 +1339,8 @@ async def _scan_tokens_via_das(
             return []
 
         if not items:
-            cursor = next_cursor
+            if next_cursor is not None:
+                cursor = str(next_cursor)
             break
 
         added = 0
@@ -1359,6 +1372,8 @@ async def _scan_tokens_via_das(
             extra={
                 "op": "search",
                 "cursor": cursor,
+                "page": current_page,
+                "next_cursor": next_cursor,
                 "page_size": len(items),
                 "added": added,
                 "skipped": skipped,
@@ -1366,10 +1381,24 @@ async def _scan_tokens_via_das(
             },
         )
 
-        cursor = next_cursor
-        if not cursor or cursor == previous_cursor:
-            break
         previous_cursor = cursor
+        next_cursor_token: Optional[str]
+        next_page_numeric: Optional[int]
+        if next_cursor is not None:
+            next_cursor_token = str(next_cursor)
+            try:
+                next_page_numeric = int(next_cursor)
+            except Exception:
+                next_page_numeric = None
+        else:
+            next_cursor_token = None
+            next_page_numeric = None
+        if next_page_numeric is not None and next_page_numeric <= current_page:
+            next_page_numeric = current_page + 1
+            next_cursor_token = str(next_page_numeric)
+        cursor = next_cursor_token
+        if cursor is None:
+            break
 
     await _persist_discovery_cursor(cursor)
 

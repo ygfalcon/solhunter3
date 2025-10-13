@@ -206,25 +206,24 @@ def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 async def search_fungible_recent(
     session: aiohttp.ClientSession,
     *,
-    cursor: Optional[str] = None,
+    page: Optional[int] = None,
+    cursor: Optional[int] = None,
     limit: Optional[int] = None,
     sort_direction: str = "desc",
-) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     """Fetch the most recently active fungible assets via searchAssets."""
 
     resolved_limit = limit if limit is not None else _DEFAULT_LIMIT
-    payload: Dict[str, Any] = {
-        "query": {"interface": "FungibleToken"},
-        "sortBy": {"sortBy": "recent_action", "sortDirection": sort_direction},
-        "options": {
-            "limit": resolved_limit,
-            "page": 1,
-            "showUnverifiedCollections": True,
-        },
+    page_hint = cursor if cursor is not None else page
+    page_number = max(1, int(page_hint or 1))
+    params: Dict[str, Any] = {
+        "tokenType": "fungible",
+        "page": page_number,
+        "limit": resolved_limit,
+        "sortBy": "created",
+        "sortDirection": sort_direction,
     }
-    if cursor:
-        payload["paginationToken"] = cursor
-    payload = _clean_payload(payload)
+    payload = _clean_payload(params)
     data = await _post_rpc(
         session,
         "searchAssets",
@@ -232,9 +231,9 @@ async def search_fungible_recent(
         op="searchAssets",
     )
     result = data.get("result") if isinstance(data, dict) else None
+    next_page: Optional[int] = None
     if isinstance(result, list):
         items = result
-        next_cursor = None
     elif isinstance(result, dict):
         items = (
             result.get("items")
@@ -242,22 +241,27 @@ async def search_fungible_recent(
             or result.get("assets")
             or []
         )
-        next_cursor = (
-            result.get("paginationToken")
-            or result.get("pagination_token")
-            or result.get("cursor")
-            or result.get("nextCursor")
-            or (result.get("pagination") or {}).get("next")
-            or (result.get("pagination") or {}).get("cursor")
-        )
+        pagination = result.get("pagination") if isinstance(result.get("pagination"), dict) else {}
+        for key in ("nextPage", "next_page", "next", "page"):
+            value = pagination.get(key)
+            if value is None and isinstance(result, dict):
+                value = result.get(key) if key != "next" else None
+            if value is None:
+                continue
+            try:
+                next_page = int(value)
+                break
+            except Exception:
+                continue
     else:
         items = []
-        next_cursor = None
+    if next_page is None and isinstance(items, list) and len(items) >= resolved_limit:
+        next_page = page_number + 1
     if isinstance(items, list):
         cleaned_items = [item for item in items if isinstance(item, dict)]
     else:
         cleaned_items = []
-    return cleaned_items, next_cursor if isinstance(next_cursor, str) else None
+    return cleaned_items, next_page if isinstance(next_page, int) and next_page > page_number else None
 
 
 async def get_asset_batch(
