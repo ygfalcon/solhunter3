@@ -18,8 +18,8 @@ DEFAULTS: dict[str, str] = {
     "USE_SERVICE_EXEC": "True",
 
     # Solana RPC endpoints
-    "SOLANA_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
-    "SOLANA_TESTNET_RPC_URL": "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "SOLANA_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+    "SOLANA_TESTNET_RPC_URL": "https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
     "DEX_BASE_URL": "https://swap.helius.dev",
     "AGENTS": "['sim']",
     "AGENT_WEIGHTS": "{'sim': 1.0}",
@@ -41,7 +41,7 @@ DEFAULTS: dict[str, str] = {
     "RAYDIUM_WS_URL": "",
     "PHOENIX_WS_URL": "",
     "METEORA_WS_URL": "",
-    "JUPITER_WS_URL": "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "JUPITER_WS_URL": "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
     "ORCA_DEX_URL": "https://www.orca.so",
     "RAYDIUM_DEX_URL": "https://raydium.io",
     "PHOENIX_DEX_URL": "https://app.phoenix.trade",

@@ -9,8 +9,8 @@ from urllib.parse import urlparse, urlunparse
 # ---------------------------------------------------------------------
 # Hard-coded RPC + WS (your Helius endpoints)
 # ---------------------------------------------------------------------
-DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
-DEFAULT_SOLANA_WS = "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+DEFAULT_SOLANA_WS = "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
 DEFAULT_BIRDEYE_API_KEY = "b1e60d72780940d1bd929b9b2e9225e6"
 
 

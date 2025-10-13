@@ -25,7 +25,7 @@ from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
 from solana.rpc.types import TxOpts
 
-DEFAULT_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+DEFAULT_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
 DEFAULT_JUP_BASE = "https://quote-api.jup.ag"
 
 

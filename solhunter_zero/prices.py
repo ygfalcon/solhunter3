@@ -18,7 +18,7 @@ HELIUS_PRICE_REST_URL = os.getenv("HELIUS_PRICE_REST_URL") or os.getenv(
     "HELIUS_PRICE_URL", ""
 )
 HELIUS_API_KEY = os.getenv(
-    "HELIUS_API_KEY", "af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+    "HELIUS_API_KEY", "YOUR_HELIUS_KEY"
 )
 HELIUS_PRICE_CONCURRENCY = max(1, int(os.getenv("HELIUS_PRICE_CONCURRENCY", "10") or 10))
 

@@ -98,6 +98,7 @@ def _probe_rl_daemon_health(timeout: float = 0.5) -> Dict[str, Any]:
         result["error"] = "missing url"
         return result
 
+    body: Optional[bytes] = None
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             status = getattr(response, "status", None)
@@ -108,8 +109,37 @@ def _probe_rl_daemon_health(timeout: float = 0.5) -> Dict[str, Any]:
                     status = None
             if status is None or 200 <= int(status) < 400:
                 result["running"] = True
+            try:
+                body = response.read()
+            except Exception:  # pragma: no cover - optional body
+                body = None
     except Exception as exc:
         result["error"] = str(exc)
+
+    if body:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            status = str(payload.get("status", "")).strip().lower()
+            result["status"] = status or None
+            heartbeat = payload.get("last_heartbeat")
+            try:
+                hb_ts = float(heartbeat) if heartbeat is not None else None
+            except Exception:
+                hb_ts = None
+            else:
+                if hb_ts is not None:
+                    result["heartbeat_ts"] = hb_ts
+                    result["heartbeat_age"] = max(0.0, time.time() - hb_ts)
+            training = payload.get("last_training")
+            try:
+                result["last_training"] = float(training) if training is not None else None
+            except Exception:
+                result["last_training"] = None
+            if payload.get("last_error"):
+                result["last_error"] = payload.get("last_error")
 
     return result
 
@@ -238,6 +268,9 @@ class TradingRuntime:
             "error": None,
             "detected": False,
             "configured": False,
+            "health_ok": None,
+            "heartbeat_age": None,
+            "heartbeat_ts": None,
         }
 
     # ------------------------------------------------------------------
@@ -569,11 +602,22 @@ class TradingRuntime:
             payload["_received"] = time.time()
             with self._swarm_lock:
                 self._rl_weights_windows.appendleft(payload)
+                vote_window = payload.get("vote_window_ms")
+                if vote_window is not None:
+                    try:
+                        window_ms = float(vote_window)
+                    except Exception:
+                        window_ms = None
+                    if window_ms:
+                        self._rl_window_sec = max(window_ms / 1000.0, 0.1)
+                        self._rl_status_info["vote_window_ms"] = window_ms
             if not self._rl_gate_active:
-                log.debug(
-                    "Skipping RL weights while gate is closed (reason=%s)",
-                    self._rl_gate_reason,
-                )
+                reason = self._rl_gate_reason or "unknown"
+                message = "Skipping RL weights while gate is closed (reason=%s)"
+                if reason in {"stale_heartbeat", "rl_health"}:
+                    log.info("stale RL ignored (reason=%s)", reason)
+                else:
+                    log.debug(message, reason)
                 return
             if self.pipeline is not None:
                 try:
@@ -788,6 +832,7 @@ class TradingRuntime:
                 "url": info.get("url"),
                 "error": info.get("error"),
                 "enabled": bool(configured or detected),
+                "status": info.get("status"),
             }
 
             if internal_running:
@@ -818,6 +863,30 @@ class TradingRuntime:
 
             if not detected:
                 updates.setdefault("url", None)
+
+            hb_ts = info.get("heartbeat_ts")
+            if hb_ts is not None:
+                try:
+                    updates["heartbeat_ts"] = float(hb_ts)
+                except Exception:
+                    pass
+            hb_age = info.get("heartbeat_age")
+            if hb_age is not None:
+                try:
+                    updates["heartbeat_age"] = float(hb_age)
+                except Exception:
+                    pass
+            status_text = str(info.get("status") or "").lower()
+            window = max(self._rl_window_sec * 2.0, 0.1)
+            health_ok = bool(updates.get("running"))
+            if status_text and status_text not in {"running", "ok"}:
+                health_ok = False
+            try:
+                if float(updates.get("heartbeat_age", 0.0)) > window:
+                    health_ok = False
+            except Exception:
+                pass
+            updates["health_ok"] = health_ok
 
             self._rl_status_info.update(updates)
             self.status.rl_daemon = bool(self._rl_status_info.get("running"))
@@ -874,6 +943,17 @@ class TradingRuntime:
         if not self._rl_status_info.get("running"):
             self._set_rl_gate_active(False, reason="rl_unhealthy")
             return
+        if self._rl_status_info.get("health_ok") is False:
+            self._set_rl_gate_active(False, reason="rl_health")
+            return
+        hb_age = self._rl_status_info.get("heartbeat_age")
+        if hb_age is not None:
+            try:
+                if float(hb_age) > max(self._rl_window_sec * 2.0, 0.1):
+                    self._set_rl_gate_active(False, reason="stale_heartbeat")
+                    return
+            except Exception:
+                pass
         heartbeat_ts = self.status.heartbeat_ts
         if heartbeat_ts is None:
             self._set_rl_gate_active(False, reason="no_heartbeat")
