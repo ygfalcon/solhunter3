@@ -169,6 +169,7 @@ if not env_path.exists():
 pattern_strings = [
     r"REDACTED",
     r"YOUR[_-]",
+    r"\$\{",
     r"EXAMPLE",
     r"XXXX",
     r"CHANGE_ME",

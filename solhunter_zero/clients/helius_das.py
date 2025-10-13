@@ -9,6 +9,7 @@ import random
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -91,22 +92,14 @@ def _load_keys() -> Tuple[str, ...]:
 
 
 _API_KEYS = _APIKeyPool(_load_keys())
-DAS_BASE = os.getenv("DAS_BASE_URL", "https://api.helius.xyz/v1").rstrip("/")
+_RPC_BASE_DEFAULT = "https://mainnet.helius-rpc.com"
+DAS_BASE = (os.getenv("DAS_BASE_URL") or _RPC_BASE_DEFAULT).strip().rstrip("/")
 _DEFAULT_LIMIT = _env_int("DAS_DISCOVERY_LIMIT", "100")
 _SESSION_TIMEOUT = _env_float("DAS_TIMEOUT_TOTAL", "5.0") or 5.0
 _CONNECT_TIMEOUT = _env_float("DAS_TIMEOUT_CONNECT", "1.5") or 1.5
 _MAX_RETRIES = _env_int("DAS_MAX_RETRIES", "6", minimum=1)
 _BACKOFF_BASE = max(0.1, _env_float("DAS_BACKOFF_BASE", "0.25"))
 _BACKOFF_CAP = max(_BACKOFF_BASE, _env_float("DAS_BACKOFF_CAP", "5.0"))
-_SEARCH_PATHS = (
-    os.getenv("DAS_SEARCH_PATH") or "asset/search",
-    "nft-events/searchAssets",
-)
-_BATCH_PATHS = (
-    os.getenv("DAS_BATCH_PATH") or "asset/get",
-    "asset/get-multiple",
-    "nft-events/getAssetBatch",
-)
 
 _rl = RateLimiter(
     rps=_env_float("DAS_RPS", "2"),
@@ -127,29 +120,51 @@ else:
     log.warning("HELIUS_API_KEY(S) missing; DAS requests will fail fast")
 
 
-async def _post_json(
+def _rpc_url_for(key: str) -> str:
+    base = DAS_BASE or _RPC_BASE_DEFAULT
+    if "api-key=" in base:
+        try:
+            parts = urlsplit(base)
+            query = dict(parse_qsl(parts.query, keep_blank_values=True))
+            query["api-key"] = key
+            new_query = urlencode(query)
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+        except Exception:  # pragma: no cover - defensive parsing
+            pass
+    if "?" in base:
+        separator = "&"
+    else:
+        separator = "?"
+    return f"{base}{separator}api-key={key}"
+
+
+async def _post_rpc(
     session: aiohttp.ClientSession,
-    path: str,
-    payload: Dict[str, Any],
+    method: str,
+    params: Dict[str, Any],
     *,
     timeout: float | None = None,
     headers: Optional[Dict[str, str]] = None,
     op: str = "unknown",
 ) -> Dict[str, Any]:
-    """POST helper with retry/backoff semantics for DAS endpoints."""
+    """POST helper with retry/backoff semantics for DAS JSON-RPC endpoints."""
 
     await _rl.acquire()
-    url = f"{DAS_BASE}/{path.lstrip('/')}"
     key = _API_KEYS.next()
-    params = {"api-key": key}
+    url = _rpc_url_for(key)
     total_timeout = timeout or _SESSION_TIMEOUT
     backoff = _BACKOFF_BASE
     last_exception: Exception | None = None
+    payload = {
+        "jsonrpc": "2.0",
+        "id": f"das-{int(time.time() * 1000)}-{random.randint(1, 1000)}",
+        "method": method,
+        "params": params,
+    }
     for attempt in range(_MAX_RETRIES):
         try:
             async with session.post(
                 url,
-                params=params,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=total_timeout, connect=_CONNECT_TIMEOUT),
                 headers=headers,
@@ -168,9 +183,11 @@ async def _post_json(
                     continue
                 resp.raise_for_status()
                 data = await resp.json()
-                if isinstance(data, dict):
-                    return data
-                return {}
+                if not isinstance(data, dict):
+                    return {}
+                if "error" in data and data.get("error"):
+                    raise RuntimeError(f"DAS RPC error: {data['error']}")
+                return data
         except Exception as exc:  # pragma: no cover - network failures mocked in tests
             last_exception = exc
             jitter = random.uniform(0, backoff * 0.25)
@@ -205,32 +222,32 @@ async def search_fungible_recent(
     if cursor:
         payload["page"] = {"cursor": cursor}
     payload = _clean_payload(payload)
-    data: Dict[str, Any] | None = None
-    last_error: Exception | None = None
-    for path in _SEARCH_PATHS:
-        try:
-            data = await _post_json(
-                session,
-                path,
-                payload,
-                op="searchAssets",
-            )
-        except aiohttp.ClientResponseError as exc:
-            last_error = exc
-            if exc.status == 404:
-                continue
-            raise
-        except Exception as exc:  # pragma: no cover - network failures mocked in tests
-            last_error = exc
-            continue
-        else:
-            break
-    else:  # pragma: no cover - network failures mocked in tests
-        if last_error is not None:
-            raise last_error
-        return [], None
-    items = data.get("items") or data.get("result") or []
-    next_cursor = data.get("cursor") or data.get("page", {}).get("cursor")
+    data = await _post_rpc(
+        session,
+        "searchAssets",
+        payload,
+        op="searchAssets",
+    )
+    result = data.get("result") if isinstance(data, dict) else None
+    if isinstance(result, list):
+        items = result
+        next_cursor = None
+    elif isinstance(result, dict):
+        items = (
+            result.get("items")
+            or result.get("tokens")
+            or result.get("assets")
+            or []
+        )
+        next_cursor = (
+            result.get("cursor")
+            or result.get("nextCursor")
+            or (result.get("pagination") or {}).get("next")
+            or (result.get("pagination") or {}).get("cursor")
+        )
+    else:
+        items = []
+        next_cursor = None
     if isinstance(items, list):
         cleaned_items = [item for item in items if isinstance(item, dict)]
     else:
@@ -248,32 +265,25 @@ async def get_asset_batch(
     if not batch:
         return []
     payload = {"ids": batch}
-    data: Dict[str, Any] | None = None
-    last_error: Exception | None = None
-    for path in _BATCH_PATHS:
-        try:
-            data = await _post_json(
-                session,
-                path,
-                payload,
-                op="getAssetBatch",
-            )
-        except aiohttp.ClientResponseError as exc:
-            last_error = exc
-            if exc.status == 404:
-                continue
-            raise
-        except Exception as exc:  # pragma: no cover - network failures mocked in tests
-            last_error = exc
-            continue
-        else:
-            break
-    else:  # pragma: no cover - network failures mocked in tests
-        if last_error is not None:
-            raise last_error
-        return []
-    result = data.get("result") or data.get("assets") or []
-    return [item for item in result if isinstance(item, dict)]
+    data = await _post_rpc(
+        session,
+        "getAssetBatch",
+        payload,
+        op="getAssetBatch",
+    )
+    result = data.get("result") if isinstance(data, dict) else None
+    if isinstance(result, list):
+        assets = result
+    elif isinstance(result, dict):
+        assets = (
+            result.get("items")
+            or result.get("assets")
+            or result.get("tokens")
+            or []
+        )
+    else:
+        assets = []
+    return [item for item in assets if isinstance(item, dict)]
 
 
 __all__ = [

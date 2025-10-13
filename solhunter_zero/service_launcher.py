@@ -71,6 +71,9 @@ def start_depth_service(
     cmd = [str(depth_bin)]
     if cfg_path:
         cmd += ["--config", cfg_path]
+    keypair_path = os.getenv("KEYPAIR_PATH") or os.getenv("SOLANA_KEYPAIR")
+    if keypair_path:
+        cmd += ["--keypair", keypair_path]
     env = os.environ.copy()
     stderr = subprocess.PIPE if stream_stderr else None
     proc = subprocess.Popen(cmd, env=env, stderr=stderr)

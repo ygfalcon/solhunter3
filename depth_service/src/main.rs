@@ -1,10 +1,17 @@
-use std::{collections::HashMap, fs::OpenOptions, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs::OpenOptions,
+    path::Path,
+    sync::{Arc, OnceLock},
+};
 
 use tokio::sync::Mutex;
 
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+static PAPER_KEYPAIR_WARNED: OnceLock<()> = OnceLock::new();
+
+use anyhow::{anyhow, Result};
 use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use memmap2::{MmapMut, MmapOptions};
 use prost::Message;
@@ -1668,8 +1675,26 @@ async fn main() -> Result<()> {
         });
     }
 
+    let paper_mode = std::env::var("MODE")
+        .ok()
+        .map(|mode| mode.eq_ignore_ascii_case("paper"))
+        .unwrap_or(false);
     let kp = if !keypair_path.is_empty() {
-        read_keypair_file(&keypair_path).unwrap_or_else(|_| Keypair::new())
+        match read_keypair_file(&keypair_path) {
+            Ok(kp) => kp,
+            Err(err) if paper_mode => {
+                if PAPER_KEYPAIR_WARNED.set(()).is_ok() {
+                    eprintln!(
+                        "[depth_service] keypair missing at {} (paper mode); continuing with ephemeral key",
+                        keypair_path
+                    );
+                }
+                Keypair::new()
+            }
+            Err(err) => {
+                return Err(anyhow!("failed to read keypair {}: {}", keypair_path, err));
+            }
+        }
     } else {
         Keypair::new()
     };
@@ -1694,3 +1719,4 @@ async fn main() -> Result<()> {
     .await?;
     Ok(())
 }
+
