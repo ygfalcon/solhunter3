@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Coroutine, TypeVar
+from typing import Any, Coroutine, Iterable, List, TypeVar
 
 import asyncio
 import importlib
@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _TRUE_VALUES = {"1", "true", "yes"}
 _FALSE_VALUES = {"0", "false", "no"}
+_PLACEHOLDER_MARKERS = ("YOUR_KEY", "YOUR_HELIUS_KEY", "CHANGE_ME", "EXAMPLE", "REDACTED")
 
 
 def parse_bool_env(name: str, default: bool = False) -> bool:
@@ -78,3 +79,25 @@ def run_coro(coro: Coroutine[Any, Any, T] | T) -> T | asyncio.Task:
         return asyncio.run(coro)
     else:
         return loop.create_task(coro)
+
+
+def sanitize_priority_urls(urls: Iterable[str] | None) -> List[str]:
+    """Return ``urls`` without placeholders, empties, or duplicates."""
+
+    seen: set[str] = set()
+    cleaned: List[str] = []
+    if not urls:
+        return cleaned
+    for raw in urls:
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if not text:
+            continue
+        if any(marker in text for marker in _PLACEHOLDER_MARKERS):
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned

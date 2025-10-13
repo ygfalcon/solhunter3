@@ -10,6 +10,7 @@ import socket
 import ssl
 from dataclasses import dataclass
 from typing import Iterable, Iterator, List, Optional, Tuple
+from urllib.error import HTTPError
 from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
 
@@ -189,7 +190,22 @@ def check_helius_das(*, timeout: float = 5.0) -> CheckResult:
 
     das_base = os.getenv("DAS_BASE_URL") or os.getenv("HELIUS_API_BASE", "https://api.helius.xyz/v1")
     das_base = das_base.rstrip("/")
-    endpoint = f"{das_base}/searchAssets?api-key={quote_plus(token)}"
+    configured = os.getenv("DAS_SEARCH_PATH")
+    candidates: list[str] = []
+    if configured:
+        candidates.append(configured)
+    candidates.extend(["asset/search", "nft-events/searchAssets"])
+    seen: set[str] = set()
+    paths = []
+    for cand in candidates:
+        if not cand:
+            continue
+        norm = cand.strip().lstrip("/")
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        paths.append(norm)
+
     payload = json.dumps(
         {
             "interface": "FungibleToken",
@@ -197,30 +213,51 @@ def check_helius_das(*, timeout: float = 5.0) -> CheckResult:
             "sortBy": {"field": "recentAction", "direction": "desc"},
         }
     ).encode("utf-8")
-    req = Request(endpoint, data=payload, method="POST", headers={"Content-Type": "application/json"})
-    try:
-        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - controlled endpoint
-            status = resp.status
-            body = resp.read()
-    except Exception as exc:  # noqa: BLE001
-        return _fail("HELIUS_API_KEY", f"Helius DAS probe failed: {exc}")
+    last_error = "no endpoints attempted"
+    for path in paths:
+        endpoint = f"{das_base}/{path}?api-key={quote_plus(token)}"
+        req = Request(
+            endpoint,
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - controlled endpoint
+                status = resp.status
+                body = resp.read()
+        except HTTPError as exc:
+            last_error = f"HTTP {exc.code} via {path}"
+            if exc.code == 404:
+                continue
+            return _fail("HELIUS_API_KEY", f"Helius DAS probe failed: {last_error}")
+        except Exception as exc:  # noqa: BLE001
+            last_error = f"{exc} via {path}"
+            continue
 
-    if status >= 400:
-        return _fail("HELIUS_API_KEY", f"Helius DAS probe returned HTTP {status}")
+        if status >= 400:
+            last_error = f"HTTP {status} via {path}"
+            if status == 404:
+                continue
+            return _fail("HELIUS_API_KEY", f"Helius DAS probe failed: {last_error}")
 
-    try:
-        parsed = json.loads(body.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        return _fail("HELIUS_API_KEY", f"Helius DAS probe yielded invalid JSON: {exc}")
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            last_error = f"invalid JSON via {path}: {exc}"
+            continue
 
-    assets = list(_iter_asset_nodes(parsed))
-    if not assets:
-        return _fail("HELIUS_API_KEY", "Helius DAS probe returned no assets")
+        assets = list(_iter_asset_nodes(parsed))
+        if not assets:
+            last_error = f"empty response via {path}"
+            continue
 
-    return _ok(
-        "HELIUS_API_KEY",
-        f"Helius DAS reachable via {source or 'configured key'} (HTTP {status})",
-    )
+        return _ok(
+            "HELIUS_API_KEY",
+            f"Helius DAS reachable via {source or 'configured key'} ({path} HTTP {status})",
+        )
+
+    return _fail("HELIUS_API_KEY", f"Helius DAS probe failed: {last_error}")
 
 
 async def run_checks() -> List[CheckResult]:

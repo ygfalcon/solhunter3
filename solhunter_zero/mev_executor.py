@@ -7,6 +7,7 @@ from .http import get_session
 
 from .depth_client import submit_raw_tx, snapshot, DEPTH_SERVICE_SOCKET
 from .gas import adjust_priority_fee
+from .util import sanitize_priority_urls
 
 
 class MEVExecutor:
@@ -22,7 +23,8 @@ class MEVExecutor:
         jito_auth: str | None = None,
     ) -> None:
         self.token = token
-        self.priority_rpc = list(priority_rpc) if priority_rpc else None
+        cleaned_priority = sanitize_priority_urls(priority_rpc)
+        self.priority_rpc = cleaned_priority or None
         self.socket_path = socket_path
         self.jito_rpc_url = jito_rpc_url
         self.jito_auth = jito_auth

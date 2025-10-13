@@ -19,6 +19,7 @@ from ..depth_client import prepare_signed_tx
 from ..mev_executor import MEVExecutor
 from ..portfolio import Portfolio
 from ..exchange import DEX_BASE_URL, SWAP_PATH
+from ..util import sanitize_priority_urls
 
 
 async def _fetch_swap_tx_message(
@@ -68,7 +69,8 @@ class MEVSandwichAgent(BaseAgent):
         self.slippage_threshold = float(slippage_threshold)
         self.size_threshold = float(size_threshold)
         self.amount = float(amount)
-        self.priority_rpc = list(priority_rpc) if priority_rpc else None
+        cleaned_priority = sanitize_priority_urls(priority_rpc)
+        self.priority_rpc = cleaned_priority or None
         self.jito_rpc_url = jito_rpc_url or os.getenv("JITO_RPC_URL")
         self.jito_auth = jito_auth or os.getenv("JITO_AUTH")
         self.jito_ws_url = jito_ws_url or os.getenv("JITO_WS_URL")

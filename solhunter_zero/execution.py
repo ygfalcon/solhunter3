@@ -16,7 +16,7 @@ from .depth_client import (
     auto_exec as service_auto_exec,
     DEPTH_SERVICE_SOCKET,
 )
-from .util import parse_bool_env
+from .util import parse_bool_env, sanitize_priority_urls
 
 USE_DEPTH_STREAM = parse_bool_env("USE_DEPTH_STREAM", True)
 
@@ -40,7 +40,8 @@ class EventExecutor:
         self.rate_limit = rate_limit
         self.threshold = threshold
         self.socket_path = socket_path
-        self.priority_rpc = list(priority_rpc) if priority_rpc else None
+        cleaned_priority = sanitize_priority_urls(priority_rpc)
+        self.priority_rpc = cleaned_priority or None
         self.auto_exec = auto_exec
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._last = 0.0

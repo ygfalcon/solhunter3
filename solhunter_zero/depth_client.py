@@ -16,6 +16,7 @@ from . import routeffi
 
 import aiohttp
 from .http import get_session, loads, dumps
+from .util import sanitize_priority_urls
 
 from .event_bus import publish, subscription
 from .config import get_depth_ws_addr
@@ -626,8 +627,9 @@ async def submit_raw_tx(
 
     client = await get_ipc_client(socket_path)
     payload: Dict[str, Any] = {"cmd": "raw_tx", "tx": tx_b64}
-    if priority_rpc:
-        payload["priority_rpc"] = list(priority_rpc)
+    cleaned_priority = sanitize_priority_urls(priority_rpc)
+    if cleaned_priority:
+        payload["priority_rpc"] = cleaned_priority
     if priority_fee is not None:
         payload["priority_fee"] = int(priority_fee)
     data = await client.request(payload, timeout)

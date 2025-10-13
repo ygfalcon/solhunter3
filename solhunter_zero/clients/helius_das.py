@@ -98,6 +98,15 @@ _CONNECT_TIMEOUT = _env_float("DAS_TIMEOUT_CONNECT", "1.5") or 1.5
 _MAX_RETRIES = _env_int("DAS_MAX_RETRIES", "6", minimum=1)
 _BACKOFF_BASE = max(0.1, _env_float("DAS_BACKOFF_BASE", "0.25"))
 _BACKOFF_CAP = max(_BACKOFF_BASE, _env_float("DAS_BACKOFF_CAP", "5.0"))
+_SEARCH_PATHS = (
+    os.getenv("DAS_SEARCH_PATH") or "asset/search",
+    "nft-events/searchAssets",
+)
+_BATCH_PATHS = (
+    os.getenv("DAS_BATCH_PATH") or "asset/get",
+    "asset/get-multiple",
+    "nft-events/getAssetBatch",
+)
 
 _rl = RateLimiter(
     rps=_env_float("DAS_RPS", "2"),
@@ -196,12 +205,30 @@ async def search_fungible_recent(
     if cursor:
         payload["page"] = {"cursor": cursor}
     payload = _clean_payload(payload)
-    data = await _post_json(
-        session,
-        "nft-events/searchAssets",
-        payload,
-        op="searchAssets",
-    )
+    data: Dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for path in _SEARCH_PATHS:
+        try:
+            data = await _post_json(
+                session,
+                path,
+                payload,
+                op="searchAssets",
+            )
+        except aiohttp.ClientResponseError as exc:
+            last_error = exc
+            if exc.status == 404:
+                continue
+            raise
+        except Exception as exc:  # pragma: no cover - network failures mocked in tests
+            last_error = exc
+            continue
+        else:
+            break
+    else:  # pragma: no cover - network failures mocked in tests
+        if last_error is not None:
+            raise last_error
+        return [], None
     items = data.get("items") or data.get("result") or []
     next_cursor = data.get("cursor") or data.get("page", {}).get("cursor")
     if isinstance(items, list):
@@ -221,12 +248,30 @@ async def get_asset_batch(
     if not batch:
         return []
     payload = {"ids": batch}
-    data = await _post_json(
-        session,
-        "nft-events/getAssetBatch",
-        payload,
-        op="getAssetBatch",
-    )
+    data: Dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for path in _BATCH_PATHS:
+        try:
+            data = await _post_json(
+                session,
+                path,
+                payload,
+                op="getAssetBatch",
+            )
+        except aiohttp.ClientResponseError as exc:
+            last_error = exc
+            if exc.status == 404:
+                continue
+            raise
+        except Exception as exc:  # pragma: no cover - network failures mocked in tests
+            last_error = exc
+            continue
+        else:
+            break
+    else:  # pragma: no cover - network failures mocked in tests
+        if last_error is not None:
+            raise last_error
+        return []
     result = data.get("result") or data.get("assets") or []
     return [item for item in result if isinstance(item, dict)]
 
