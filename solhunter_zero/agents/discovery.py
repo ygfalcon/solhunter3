@@ -8,7 +8,7 @@ import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from .. import config
-from ..token_aliases import canonical_mint
+from ..token_aliases import canonical_mint, validate_mint
 from ..discovery import merge_sources
 from ..event_bus import publish
 from ..mempool_scanner import stream_ranked_mempool_tokens_with_depth
@@ -312,6 +312,8 @@ class DiscoveryAgent:
                 if not isinstance(address, str):
                     continue
                 address = canonical_mint(address)
+                if not validate_mint(address):
+                    continue
                 details[address] = item
             details = {
                 mint: info
@@ -341,14 +343,16 @@ class DiscoveryAgent:
             for item in found:
                 if isinstance(item, dict):
                     mint = canonical_mint(item.get("address"))
-                    if not isinstance(mint, str):
+                    if not isinstance(mint, str) or not validate_mint(mint):
                         continue
                     entry = dict(item)
                     entry.setdefault("sources", {"onchain"})
                     details[mint] = entry
                     tokens.append(mint)
                 elif isinstance(item, str):
-                    tokens.append(canonical_mint(item))
+                    canonical = canonical_mint(item)
+                    if validate_mint(canonical):
+                        tokens.append(canonical)
             tokens = [tok for tok in tokens if not self._should_skip_token(tok)]
             details = {k: v for k, v in details.items() if not self._should_skip_token(k)}
             return tokens, details
@@ -414,7 +418,7 @@ class DiscoveryAgent:
                 if not isinstance(item, dict):
                     continue
                 address = canonical_mint(item.get("address"))
-                if not isinstance(address, str):
+                if not isinstance(address, str) or not validate_mint(address):
                     continue
                 if address not in details:
                     tokens.append(address)
@@ -436,7 +440,7 @@ class DiscoveryAgent:
             if not isinstance(token, str):
                 continue
             candidate = canonical_mint(token.strip())
-            if not candidate:
+            if not candidate or not validate_mint(candidate):
                 continue
             if self._should_skip_token(candidate):
                 continue
@@ -452,9 +456,19 @@ class DiscoveryAgent:
         cached = list(_CACHE.get("tokens", [])) if isinstance(_CACHE.get("tokens"), list) else []
         if cached:
             logger.warning("DiscoveryAgent falling back to cached tokens (%d)", len(cached))
-            return [canonical_mint(tok) for tok in cached[: self.limit]]
+            result: List[str] = []
+            for tok in cached[: self.limit]:
+                canonical = canonical_mint(tok)
+                if validate_mint(canonical):
+                    result.append(canonical)
+            return result
         logger.warning("DiscoveryAgent using static discovery fallback")
-        return [canonical_mint(tok) for tok in _STATIC_FALLBACK[: self.limit]]
+        result: List[str] = []
+        for tok in _STATIC_FALLBACK[: self.limit]:
+            canonical = canonical_mint(tok)
+            if validate_mint(canonical):
+                result.append(canonical)
+        return result
 
     def _should_skip_token(self, token: str) -> bool:
         if not self.filter_prefix_11:
