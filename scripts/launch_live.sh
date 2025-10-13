@@ -19,6 +19,7 @@ EXIT_KEYS=1
 EXIT_PREFLIGHT=2
 EXIT_CONNECTIVITY=3
 EXIT_HEALTH=4
+EXIT_DEPS=5
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ARTIFACT_DIR="$ROOT_DIR/artifacts/prelaunch"
@@ -152,6 +153,12 @@ if ! [[ $SOAK_DURATION =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
 fi
 
 log_info "Starting launch_live with env=$ENV_FILE micro=$MICRO_FLAG canary=$CANARY_MODE preflight_runs=$PREFLIGHT_RUNS soak=${SOAK_DURATION}s"
+
+log_info "Ensuring Python dependencies are installed"
+if ! python3 -m scripts.deps >/dev/null; then
+  log_warn "Failed to install Python dependencies"
+  exit $EXIT_DEPS
+fi
 
 MANIFEST_RAW=""
 validate_env_file() {
