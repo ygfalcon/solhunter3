@@ -58,7 +58,7 @@ Impact: race-prone boot, interleaved responsibilities, harder observability, and
   - UI websockets stay (logs/events/rl), but their startup is delegated by orchestrator for ordering consistency.
 
 - Agents Runtime (event‑driven first)
-  - Introduce `solhunter_zero/agents/runtime.py` with `AgentRuntime`:
+  - Introduce `solhunter_zero/agents/runtime/agent_runtime.py` (exposed via `solhunter_zero.agents.runtime.AgentRuntime`):
     - Subscribes to `token_discovered`, `price_update`, `rl_weights`, `risk_updated`.
     - Publishes `action_proposal` (buy/sell/size/score).
   - Swarm Coordinator consolidates proposals into `action_decision` using weights from RL/heuristics.
@@ -88,7 +88,7 @@ Phase 2 — Responsibility cleanup
 - Keep `start_all.py` as a guard; orchestrator runs it or replicates checks via `health_runtime` helpers.
 
 Phase 3 — Event‑driven agents
-- Add `agents/runtime.py` that:
+- Add `agents/runtime/agent_runtime.py` (re-exported via `agents.runtime`) that:
   - Spins token discovery workers and publishes `token_discovered`.
   - Converts `AgentManager.execute(token, portfolio)` into handlers that produce `action_proposal` messages.
   - Collects proposals in a small time window and emits `action_decision`.
