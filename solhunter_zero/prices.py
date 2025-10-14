@@ -394,7 +394,8 @@ async def _fetch_quotes_birdeye(
         "x-chain": BIRDEYE_CHAIN,
     }
     quotes: Dict[str, PriceQuote] = {}
-    for chunk in _chunked(tokens, min(BIRDEYE_MAX_BATCH, 100)):
+    chunks = _chunked(tokens, min(BIRDEYE_MAX_BATCH, 100))
+    for idx, chunk in enumerate(chunks):
         params = {"list_address": ",".join(chunk), "chain": BIRDEYE_CHAIN}
         payload = await _request_json(session, url, "Birdeye", params=params, headers=headers)
         if not isinstance(payload, MutableMapping):
@@ -423,6 +424,8 @@ async def _fetch_quotes_birdeye(
                     asof=asof,
                     quality="aggregate",
                 )
+        if idx + 1 < len(chunks):
+            await asyncio.sleep(1.0)
     return quotes
 
 
