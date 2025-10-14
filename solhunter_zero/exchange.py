@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Sequence
 
 import aiohttp
 
+from .logging_utils import warn_once_per
 from .util import install_uvloop, parse_bool_env
 from .http import get_session, loads, dumps
 
@@ -730,7 +731,14 @@ async def place_order_async(
                 timeout=timeout,
             )
         except JupiterSwapError as exc:
-            logger.warning("Jupiter fallback failed for %s: %s", token, exc)
+            warn_once_per(
+                1.0,
+                f"jupiter-fallback:{token}",
+                "Jupiter fallback failed for %s: %s",
+                token,
+                exc,
+                logger=logger,
+            )
         except Exception as exc:
             logger.exception("Jupiter fallback unexpected error for %s: %s", token, exc)
         else:

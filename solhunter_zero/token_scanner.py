@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 import aiohttp
 
 from .discovery.mint_resolver import normalize_candidate
+from .logging_utils import warn_once_per
 from .token_aliases import canonical_mint, validate_mint
 from .clients.helius_das import get_asset_batch
 from .util.mints import clean_candidate_mints
@@ -582,7 +583,14 @@ async def _birdeye_trending(
             raise
         except Exception as exc:
             last_exc = exc
-            logger.warning("Birdeye trending request failed (%d/3): %s", attempt, exc)
+            warn_once_per(
+                1.0,
+                "birdeye-trending-request",
+                "Birdeye trending request failed (%d/3): %s",
+                attempt,
+                exc,
+                logger=logger,
+            )
             await asyncio.sleep(0.1)
 
     if last_exc:

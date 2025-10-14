@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
 import sys
 import time
-import logging
 import asyncio
 import threading
 import urllib.parse
@@ -27,6 +27,7 @@ from .service_launcher import (
     start_rl_daemon,
     wait_for_depth_ws,
 )
+from .logging_utils import setup_stdout_logging
 from .paths import ROOT
 PROCS: list[subprocess.Popen] = []
 
@@ -174,7 +175,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _stop_all)
     signal.signal(signal.SIGTERM, _stop_all)
 
-    logging.basicConfig(level=logging.INFO)
+    setup_stdout_logging()
     from . import device
 
     device.initialize_gpu()
