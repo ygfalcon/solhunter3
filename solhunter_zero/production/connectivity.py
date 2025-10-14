@@ -106,8 +106,20 @@ class ConnectivityChecker:
         )
         if not ui_ws:
             host = env.get("UI_HOST", "127.0.0.1")
+            if host in {"0.0.0.0", "::"}:
+                host = "127.0.0.1"
             port = env.get("UI_PORT", "5001")
-            ui_ws = f"ws://{host}:{port}/ws"
+            scheme = (env.get("UI_WS_SCHEME") or env.get("WS_SCHEME") or "ws").strip().lower()
+            if scheme not in {"ws", "wss"}:
+                scheme = "ws"
+            path_template = env.get("UI_WS_PATH_TEMPLATE") or "/ws/{channel}"
+            try:
+                path = path_template.format(channel="events")
+            except Exception:
+                path = "/ws/events"
+            if not path.startswith("/"):
+                path = "/" + path.lstrip("/")
+            ui_ws = f"{scheme}://{host}:{port}{path}"
         ws_gateway = env.get("GATEWAY_WS_URL") or env.get("WS_GATEWAY_URL")
         targets: list[dict[str, Any]] = []
         if rpc:

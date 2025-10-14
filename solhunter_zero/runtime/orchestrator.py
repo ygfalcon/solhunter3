@@ -8,10 +8,12 @@ import os
 import signal
 import socket
 import sys
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Any, Optional
+
+from werkzeug.serving import make_server
 
 from ..util import install_uvloop, parse_bool_env
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
@@ -182,6 +184,7 @@ class RuntimeOrchestrator:
                     return sock.getsockname()[1], True
 
             def _serve(port_queue: Queue[Any]) -> None:
+                server = None
                 try:
                     host = os.getenv("UI_HOST", "127.0.0.1")
                     port_env = os.getenv("UI_PORT", os.getenv("PORT", "5000") or 5000)
@@ -196,12 +199,24 @@ class RuntimeOrchestrator:
                             "Requested UI port %s unavailable; using %s instead", requested_port, port
                         )
                     os.environ["UI_PORT"] = str(port)
-                    port_queue.put(port)
 
-                    app.run(host=host, port=port, use_reloader=False)
+                    app = self.handles.ui_app or _create_ui_app(self.handles.ui_state)
+                    server = make_server(host, port, app)
+                    server.daemon_threads = True
+                    self.handles.ui_server = server
+                    port_queue.put(port)
+                    server.serve_forever()
                 except Exception:
-                    port_queue.put(sys.exc_info()[1] or RuntimeError("ui serve failed"))
+                    with suppress(Exception):
+                        port_queue.put(sys.exc_info()[1] or RuntimeError("ui serve failed"))
                     log.exception("UI HTTP server failed")
+                finally:
+                    self.handles.ui_server = None
+                    if server is not None:
+                        with suppress(Exception):
+                            server.shutdown()
+                        with suppress(Exception):
+                            server.server_close()
 
             port_queue: Queue[Any] = Queue(maxsize=1)
             t = threading.Thread(target=_serve, args=(port_queue,), daemon=True)

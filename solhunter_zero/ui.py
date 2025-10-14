@@ -12,8 +12,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from queue import Queue
 from typing import Any, Callable, Dict, Iterable, List, Optional
+from urllib.parse import urlparse, urlunparse
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, Request, jsonify, render_template_string, request
+from werkzeug.serving import BaseWSGIServer, make_server
 
 from .agents.discovery import (
     DEFAULT_DISCOVERY_METHOD,
@@ -188,6 +190,39 @@ def _normalize_ws_url(value: str | None) -> str | None:
     return None
 
 
+def _infer_ws_scheme(request_scheme: str | None = None) -> str:
+    override = (os.getenv("UI_WS_SCHEME") or os.getenv("WS_SCHEME") or "").strip().lower()
+    if override in {"ws", "wss"}:
+        return override
+    if request_scheme and request_scheme.lower() in {"https", "wss"}:
+        return "wss"
+    return "ws"
+
+
+def _split_netloc(netloc: str | None) -> tuple[str | None, int | None]:
+    if not netloc:
+        return None, None
+    parsed = urlparse(f"//{netloc}", scheme="http")
+    return parsed.hostname, parsed.port
+
+
+def _channel_path(channel: str) -> str:
+    template = os.getenv("UI_WS_PATH_TEMPLATE")
+    if template:
+        try:
+            candidate = template.format(channel=channel)
+        except Exception:
+            log.warning("Invalid UI_WS_PATH_TEMPLATE %r; falling back to default", template)
+            candidate = f"/ws/{channel}"
+    else:
+        candidate = f"/ws/{channel}"
+    if not candidate:
+        candidate = f"/ws/{channel}"
+    if not candidate.startswith("/"):
+        candidate = "/" + candidate.lstrip("/")
+    return candidate
+
+
 def get_ws_urls() -> dict[str, str]:
     """Return websocket URLs for RL, events, and logs channels."""
 
@@ -213,9 +248,40 @@ def get_ws_urls() -> dict[str, str]:
                 port = state.port or _EVENT_WS_PORT
             else:
                 port = state.port or _LOG_WS_PORT
-            resolved = f"ws://{url_host}:{port}/ws"
+            path = _channel_path(channel)
+            scheme = _infer_ws_scheme()
+            resolved = f"{scheme}://{url_host}:{port}{path}"
         urls[channel] = resolved
     return urls
+
+
+def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
+    urls = get_ws_urls()
+    scheme_hint = _infer_ws_scheme(getattr(req, "scheme", None))
+    public_host_env = os.getenv("UI_PUBLIC_HOST") or os.getenv("UI_EXTERNAL_HOST")
+    public_host, _ = _split_netloc(public_host_env)
+    request_host, _ = _split_netloc(getattr(req, "host", None))
+
+    manifest: Dict[str, Any] = {}
+    for channel in ("rl", "events", "logs"):
+        raw_url = urls.get(channel, "")
+        parsed = urlparse(raw_url)
+        host = public_host or parsed.hostname or request_host or _resolve_host()
+        port = parsed.port
+        path = parsed.path or ""
+        if path in {"", "/", "/ws"}:
+            path = _channel_path(channel)
+        if not path.startswith("/"):
+            path = "/" + path.lstrip("/")
+        scheme = parsed.scheme or scheme_hint
+        netloc = host or ""
+        if port:
+            netloc = f"{host}:{port}"
+        manifest[f"{channel}_ws"] = urlunparse((scheme, netloc, path, "", "", ""))
+
+    ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
+    manifest["ui_port"] = _parse_port(ui_port_value, 5000)
+    return manifest
 
 
 def _shutdown_state(state: _WebsocketState) -> None:
@@ -315,7 +381,16 @@ def _start_channel(
                 queue.task_done()
 
         async def _handler(websocket, path) -> None:  # type: ignore[override]
-            if path not in {"", "/", "/ws"}:
+            allowed_paths = {
+                "",
+                "/",
+                "/ws",
+                f"/{channel}",
+                f"/{channel}/",
+                f"/ws/{channel}",
+                f"/ws/{channel}/",
+            }
+            if path not in allowed_paths:
                 await websocket.close(code=1008, reason="invalid path")
                 return
             state.clients.add(websocket)
@@ -492,6 +567,7 @@ def start_websockets() -> dict[str, threading.Thread]:
     ping_interval = float(os.getenv("UI_WS_PING_INTERVAL", os.getenv("WS_PING_INTERVAL", "20")))
     ping_timeout = float(os.getenv("UI_WS_PING_TIMEOUT", os.getenv("WS_PING_TIMEOUT", "20")))
     url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    scheme = _infer_ws_scheme()
 
     rl_port = _resolve_port("UI_RL_WS_PORT", "RL_WS_PORT", default=_RL_WS_PORT_DEFAULT)
     log_port = _resolve_port("UI_LOG_WS_PORT", default=_LOG_WS_PORT_DEFAULT)
@@ -527,9 +603,9 @@ def start_websockets() -> dict[str, threading.Thread]:
             _shutdown_state(state)
         raise
 
-    events_url = f"ws://{url_host}:{_EVENT_WS_PORT}/ws"
-    rl_url = f"ws://{url_host}:{_RL_WS_PORT}/ws"
-    logs_url = f"ws://{url_host}:{_LOG_WS_PORT}/ws"
+    events_url = f"{scheme}://{url_host}:{_EVENT_WS_PORT}{_channel_path('events')}"
+    rl_url = f"{scheme}://{url_host}:{_RL_WS_PORT}{_channel_path('rl')}"
+    logs_url = f"{scheme}://{url_host}:{_LOG_WS_PORT}{_channel_path('logs')}"
 
     defaults = {
         "UI_WS_URL": events_url,
@@ -2235,12 +2311,16 @@ def create_app(state: UIState | None = None) -> Flask:
         )
 
     def _ws_config_payload() -> Dict[str, str]:
-        urls = get_ws_urls()
+        manifest = build_ui_manifest(request)
         return {
-            "rl_ws": urls["rl"],
-            "events_ws": urls["events"],
-            "logs_ws": urls["logs"],
+            "rl_ws": manifest["rl_ws"],
+            "events_ws": manifest["events_ws"],
+            "logs_ws": manifest["logs_ws"],
         }
+
+    @app.get("/api/manifest")
+    def api_manifest() -> Any:
+        return jsonify(build_ui_manifest(request))
 
     @app.get("/ui/ws-config")
     def ui_ws_config() -> Any:
@@ -2400,6 +2480,7 @@ class UIServer:
         self.port = int(port)
         self.app = create_app(state)
         self._thread: Optional[threading.Thread] = None
+        self._server: Optional[BaseWSGIServer] = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -2407,24 +2488,26 @@ class UIServer:
 
         def _serve() -> None:
             try:
-                self.app.run(host=self.host, port=self.port, use_reloader=False)
+                server = make_server(self.host, self.port, self.app)
+                server.daemon_threads = True
+                self._server = server
+                server.serve_forever()
             except Exception:  # pragma: no cover - best effort logging
                 log.exception("UI server crashed")
+            finally:
+                self._server = None
 
         self._thread = threading.Thread(target=_serve, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
-        if not self._thread:
-            return
-        try:
-            import urllib.request
-
-            urllib.request.urlopen(
-                f"http://{self.host}:{self.port}/__shutdown__", timeout=1
-            )
-        except Exception:
-            pass
+        server = self._server
+        if server is not None:
+            with contextlib.suppress(Exception):
+                server.shutdown()
+            with contextlib.suppress(Exception):
+                server.server_close()
         if self._thread:
             self._thread.join(timeout=2)
         self._thread = None
+        self._server = None
