@@ -91,6 +91,7 @@ except Exception:  # pragma: no cover - ffi unavailable
     logger.warning("Failed to import routeffi; using Python fallback.")
 
 import aiohttp
+from .env_settings import api_url
 from .scanner_common import JUPITER_WS_URL
 
 from .exchange import (
@@ -283,10 +284,10 @@ class ArbitrageAgent(BaseAgent):
 
 
 # Default API endpoints for direct price queries
-ORCA_API_URL = os.getenv("ORCA_API_URL", "https://api.orca.so")
-RAYDIUM_API_URL = os.getenv("RAYDIUM_API_URL", "https://api.raydium.io")
-PHOENIX_API_URL = os.getenv("PHOENIX_API_URL", "https://api.phoenix.trade")
-METEORA_API_URL = os.getenv("METEORA_API_URL", "https://api.meteora.ag")
+ORCA_API_URL = api_url("ORCA_API_URL")
+RAYDIUM_API_URL = api_url("RAYDIUM_API_URL")
+PHOENIX_API_URL = api_url("PHOENIX_API_URL")
+METEORA_API_URL = api_url("METEORA_API_URL")
 ORCA_WS_URL = os.getenv("ORCA_WS_URL", "")
 RAYDIUM_WS_URL = os.getenv("RAYDIUM_WS_URL", "")
 PHOENIX_WS_URL = os.getenv("PHOENIX_WS_URL", "")
@@ -1026,9 +1027,7 @@ async def fetch_meteora_price_async(token: str) -> float:
 
 ENABLE_BIRDEYE_FALLBACK = parse_bool_env("ENABLE_BIRDEYE_FALLBACK", True)
 ENABLE_DEXSCREENER_FALLBACK = parse_bool_env("ENABLE_DEXSCREENER_FALLBACK", True)
-DEXSCREENER_API_URL = os.getenv(
-    "DEXSCREENER_API_URL", "https://api.dexscreener.com/latest/dex/tokens"
-)
+DEXSCREENER_API_URL = api_url("DEXSCREENER_API_URL")
 
 
 async def _fetch_price_from_helius(session: aiohttp.ClientSession, token: str) -> float:

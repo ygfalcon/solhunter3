@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Sequence
 import aiohttp
 
 from solhunter_zero.lru import TTLCache
+from .env_settings import api_key, api_url
 from .async_utils import run_async
 from .http import get_session
 from .logging_utils import warn_once_per
@@ -22,18 +23,16 @@ PRICE_CACHE_TTL = float(os.getenv("PRICE_CACHE_TTL", "30") or 30)
 PRICE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
 QUOTE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
 
-JUPITER_PRICE_URL = os.getenv("JUPITER_PRICE_URL", "https://price.jup.ag/v3/price")
+JUPITER_PRICE_URL = api_url("JUPITER_PRICE_URL")
 JUPITER_BATCH_SIZE = max(1, int(os.getenv("JUPITER_BATCH_SIZE", "100") or 100))
 
-DEXSCREENER_PRICE_URL = os.getenv(
-    "DEXSCREENER_PRICE_URL", "https://api.dexscreener.com/latest/dex/tokens"
-)
+DEXSCREENER_PRICE_URL = api_url("DEXSCREENER_PRICE_URL")
 
-BIRDEYE_PRICE_URL = os.getenv("BIRDEYE_PRICE_URL", "https://public-api.birdeye.so")
+BIRDEYE_PRICE_URL = api_url("BIRDEYE_PRICE_URL")
 BIRDEYE_CHAIN = os.getenv("BIRDEYE_CHAIN", "solana")
 BIRDEYE_MAX_BATCH = max(1, int(os.getenv("BIRDEYE_BATCH_SIZE", "100") or 100))
 
-PYTH_PRICE_URL = os.getenv("PYTH_PRICE_URL", "https://hermes.pyth.network/v2/updates/price/latest")
+PYTH_PRICE_URL = api_url("PYTH_PRICE_URL")
 
 SYNTHETIC_HINTS_ENV = "SYNTHETIC_PRICE_HINTS"
 OFFLINE_PRICE_DEFAULT = os.getenv("OFFLINE_PRICE_DEFAULT")
@@ -174,7 +173,7 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
 
 def _get_birdeye_api_key() -> str | None:
     global _LAST_BIRDEYE_KEY
-    key = os.getenv("BIRDEYE_API_KEY") or None
+    key = api_key("BIRDEYE_API_KEY") or None
     if key != _LAST_BIRDEYE_KEY:
         _LAST_BIRDEYE_KEY = key
         if key:

@@ -10,14 +10,8 @@ from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 
+from .env_settings import api_key, api_url, env_value
 from .lru import TTLCache
-
-# ---------------------------------------------------------------------
-# Hard-coded RPC + WS (your Helius endpoints)
-# ---------------------------------------------------------------------
-DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
-DEFAULT_SOLANA_WS = "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
-DEFAULT_BIRDEYE_API_KEY = "b1e60d72780940d1bd929b9b2e9225e6"
 
 logger = logging.getLogger(__name__)
 
@@ -54,20 +48,18 @@ def refresh_runtime_values() -> None:
     global JUPITER_WS_URL, PHOENIX_WS_URL, METEORA_WS_URL
     global BIRDEYE_API_KEY, HEADERS
 
-    rpc = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
+    rpc = env_value("SOLANA_RPC_URL", strip=True)
     SOLANA_RPC_URL = _ensure_env("SOLANA_RPC_URL", rpc)
 
-    ws = os.getenv("SOLANA_WS_URL") or _derive_ws_from_rpc(SOLANA_RPC_URL) or DEFAULT_SOLANA_WS
-    SOLANA_WS_URL = _ensure_env("SOLANA_WS_URL", ws)
+    derived_ws = _derive_ws_from_rpc(SOLANA_RPC_URL)
+    ws = env_value("SOLANA_WS_URL", default=derived_ws or "", strip=True)
+    SOLANA_WS_URL = _ensure_env("SOLANA_WS_URL", ws or derived_ws or "")
 
-    JUPITER_WS_URL = os.getenv("JUPITER_WS_URL", SOLANA_WS_URL)
-    PHOENIX_WS_URL = os.getenv("PHOENIX_WS_URL", SOLANA_WS_URL)
-    METEORA_WS_URL = os.getenv("METEORA_WS_URL", SOLANA_WS_URL)
+    JUPITER_WS_URL = env_value("JUPITER_WS_URL", default=SOLANA_WS_URL, strip=True)
+    PHOENIX_WS_URL = env_value("PHOENIX_WS_URL", default=SOLANA_WS_URL, strip=True)
+    METEORA_WS_URL = env_value("METEORA_WS_URL", default=SOLANA_WS_URL, strip=True)
 
-    api_key = (os.getenv("BIRDEYE_API_KEY") or "").strip()
-    if not api_key:
-        api_key = DEFAULT_BIRDEYE_API_KEY
-    BIRDEYE_API_KEY = api_key
+    BIRDEYE_API_KEY = api_key("BIRDEYE_API_KEY")
 
     HEADERS = {
         "accept": "application/json",
@@ -80,9 +72,9 @@ def get_solana_ws_url() -> str:
     return SOLANA_WS_URL
 
 # ---------------------------------------------------------------------
-# BirdEye config – hardwire your key if desired
+# BirdEye config – environment configured
 # ---------------------------------------------------------------------
-BIRDEYE_API: str = "https://public-api.birdeye.so"
+BIRDEYE_API: str = api_url("BIRDEYE_API_URL") or "https://public-api.birdeye.so"
 
 refresh_runtime_values()
 

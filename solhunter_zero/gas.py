@@ -1,12 +1,10 @@
-import os
 from solana.rpc.api import Client
 from solana.rpc.async_api import AsyncClient
 
-RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
-RPC_TESTNET_URL = os.getenv(
-    "SOLANA_TESTNET_RPC_URL",
-    "https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
-)
+from .env_settings import env_value
+
+RPC_URL = env_value("SOLANA_RPC_URL", strip=True)
+RPC_TESTNET_URL = env_value("SOLANA_TESTNET_RPC_URL", strip=True)
 
 LAMPORTS_PER_SOL = 1_000_000_000
 

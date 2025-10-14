@@ -9,7 +9,7 @@ environment.
 from __future__ import annotations
 
 DEFAULTS: dict[str, str] = {
-    "BIRDEYE_API_KEY": "b1e60d72780940d1bd929b9b2e9225e6",
+    "BIRDEYE_API_KEY": "",
     # Core service toggles
     "DEPTH_SERVICE": "true",
     "USE_DEPTH_STREAM": "1",
@@ -21,6 +21,7 @@ DEFAULTS: dict[str, str] = {
     "SOLANA_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
     "SOLANA_TESTNET_RPC_URL": "https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
     "DEX_BASE_URL": "https://swap.helius.dev",
+    "JUPITER_API_BASE_URL": "https://quote-api.jup.ag",
     "AGENTS": "['sim']",
     "AGENT_WEIGHTS": "{'sim': 1.0}",
 
@@ -37,6 +38,23 @@ DEFAULTS: dict[str, str] = {
     "RAYDIUM_API_URL": "https://api.raydium.io",
     "PHOENIX_API_URL": "https://app.phoenix.trade",
     "METEORA_API_URL": "https://app.meteora.ag",
+    "BIRDEYE_API_URL": "https://public-api.birdeye.so",
+    "BIRDEYE_PRICE_URL": "https://public-api.birdeye.so",
+    "BIRDEYE_TOKENLIST_URL": "https://public-api.birdeye.so/defi/tokenlist",
+    "JUPITER_PRICE_URL": "https://price.jup.ag/v3/price",
+    "DEXSCREENER_API_URL": "https://api.dexscreener.com/latest/dex/tokens",
+    "DEXSCREENER_PRICE_URL": "https://api.dexscreener.com/latest/dex/tokens",
+    "PYTH_PRICE_URL": "https://hermes.pyth.network/v2/updates/price/latest",
+    "SOLSCAN_META_URL": "https://pro-api.solscan.io/v1.0/token/meta",
+    "PUMP_LEADERBOARD_URL": "https://pumpportal.fun/api/leaderboard",
+    "COINGECKO_SOLANA_MARKET_URL": "https://api.coingecko.com/api/v3/coins/solana/market_chart?vs_currency=usd&days=1&interval=hourly",
+    "DEXSCREENER_BASE": "https://api.dexscreener.com/latest/dex",
+    "HELIUS_API_BASE": "https://api.helius.xyz",
+    "HELIUS_PRICE_IMPACT_URL": "https://api.helius.xyz/v0/price-impact",
+    "HELIUS_PRICE_BASE_URL": "https://api.helius.xyz",
+    "HELIUS_PRICE_PATH": "/v1/trending-tokens",
+    "HELIUS_PRICE_METADATA_PATH": "/v0/token-metadata",
+    "DAS_BASE_URL": "https://api.helius.xyz/v1",
     "ORCA_WS_URL": "",
     "RAYDIUM_WS_URL": "",
     "PHOENIX_WS_URL": "",

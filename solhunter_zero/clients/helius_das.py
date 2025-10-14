@@ -13,6 +13,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
+from ..env_settings import env_value
+
 log = logging.getLogger(__name__)
 
 
@@ -93,7 +95,7 @@ def _load_keys() -> Tuple[str, ...]:
 
 _API_KEYS = _APIKeyPool(_load_keys())
 _RPC_BASE_DEFAULT = "https://mainnet.helius-rpc.com"
-DAS_BASE = (os.getenv("DAS_BASE_URL") or _RPC_BASE_DEFAULT).strip().rstrip("/")
+DAS_BASE = env_value("DAS_BASE_URL", default=_RPC_BASE_DEFAULT, strip=True).rstrip("/")
 _DEFAULT_LIMIT = _env_int("DAS_DISCOVERY_LIMIT", "100")
 _SESSION_TIMEOUT = _env_float("DAS_TIMEOUT_TOTAL", "5.0") or 5.0
 _CONNECT_TIMEOUT = _env_float("DAS_TIMEOUT_CONNECT", "1.5") or 1.5

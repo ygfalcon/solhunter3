@@ -13,6 +13,8 @@ import copy
 
 import aiohttp
 
+from .env_settings import api_key, api_url, env_value
+
 logger = logging.getLogger(__name__)
 
 from .scanner_onchain import (
@@ -49,9 +51,7 @@ _BIRDEYE_SEMAPHORE: asyncio.Semaphore | None = None
 ORDER_BOOK_DEPTH_CACHE_TTL = float(os.getenv("ORDER_BOOK_DEPTH_CACHE_TTL", "30") or 30.0)
 ORDER_BOOK_DEPTH_CACHE: TTLCache = TTLCache(maxsize=1024, ttl=ORDER_BOOK_DEPTH_CACHE_TTL)
 
-DEXSCREENER_BASE = os.getenv(
-    "DEXSCREENER_BASE", "https://api.dexscreener.com/latest/dex"
-)
+DEXSCREENER_BASE = api_url("DEXSCREENER_BASE")
 
 
 def _get_birdeye_semaphore() -> asyncio.Semaphore:
@@ -60,26 +60,20 @@ def _get_birdeye_semaphore() -> asyncio.Semaphore:
         _BIRDEYE_SEMAPHORE = asyncio.Semaphore(_BIRDEYE_MAX_CONCURRENCY)
     return _BIRDEYE_SEMAPHORE
 
-# === Hard defaults per your request ===
-DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
-SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", DEFAULT_SOLANA_RPC)
+SOLANA_RPC_URL = env_value("SOLANA_RPC_URL", strip=True)
 
-# Your Birdeye key; allow env override but default to what you provided
-DEFAULT_BIRDEYE_API_KEY = "b1e60d72780940d1bd929b9b2e9225e6"
-BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", DEFAULT_BIRDEYE_API_KEY)
+BIRDEYE_API_KEY = api_key("BIRDEYE_API_KEY")
 
 # Birdeye base (key goes in X-API-KEY header)
-BIRDEYE_BASE = "https://public-api.birdeye.so"  # requires ?chain=solana
+BIRDEYE_BASE = api_url("BIRDEYE_API_URL") or "https://public-api.birdeye.so"
 
 # Helius slippage / price impact endpoint
-HELIUS_PRICE_IMPACT_URL = os.getenv(
-    "HELIUS_PRICE_IMPACT_URL", "https://api.helius.xyz/v0/price-impact"
-)
+HELIUS_PRICE_IMPACT_URL = api_url("HELIUS_PRICE_IMPACT_URL")
 
 # Canonical SOL mint for quotes
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-HELIUS_API_BASE = os.getenv("HELIUS_API_BASE", "https://api.helius.xyz")
+HELIUS_API_BASE = api_url("HELIUS_API_BASE")
 
 
 def _validated_mint(value: str | None) -> str | None:

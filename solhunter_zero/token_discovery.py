@@ -17,6 +17,7 @@ from .scanner_common import (
     BIRDEYE_API_KEY,
     HEADERS,
 )
+from .env_settings import api_key as env_api_key
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
 
@@ -69,14 +70,14 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
     Pull BirdEye token list (paginated) for Solana with correct headers & params.
     Numeric filters only; no name/suffix heuristics.
     """
-    api_key = os.getenv("BIRDEYE_API_KEY") or BIRDEYE_API_KEY
-    if not api_key:
+    api_key_value = env_api_key("BIRDEYE_API_KEY") or BIRDEYE_API_KEY
+    if not api_key_value:
         logger.debug("BirdEye API key missing; skipping BirdEye discovery")
         return []
 
     # Keep HEADERS in sync for other modules
-    if HEADERS.get("X-API-KEY") != api_key:
-        HEADERS["X-API-KEY"] = api_key
+    if HEADERS.get("X-API-KEY") != api_key_value:
+        HEADERS["X-API-KEY"] = api_key_value
     HEADERS.setdefault("Accept", "application/json")
     HEADERS["x-chain"] = "solana"  # BirdEye accepts chain via header
 
@@ -92,7 +93,7 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
     # Build a per-request headers copy to avoid accidental mutation
     def _headers() -> dict:
         return {
-            "X-API-KEY": api_key,
+            "X-API-KEY": api_key_value,
             "x-chain": "solana",
             "Accept": "application/json",
         }
