@@ -58,6 +58,7 @@ class _WebsocketState:
         "thread",
         "port",
         "name",
+        "host",
     )
 
     def __init__(self, name: str) -> None:
@@ -69,6 +70,7 @@ class _WebsocketState:
         self.thread: threading.Thread | None = None
         self.port: int = 0
         self.name = name
+        self.host: str = ""
 
 
 _WS_CHANNELS: dict[str, _WebsocketState] = {
@@ -175,6 +177,47 @@ def push_log(payload: Any) -> bool:
     return _enqueue_message("logs", payload)
 
 
+def _normalize_ws_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if candidate.startswith(("ws://", "wss://")):
+        return candidate
+    return None
+
+
+def get_ws_urls() -> dict[str, str]:
+    """Return websocket URLs for RL, events, and logs channels."""
+
+    channel_env_keys: dict[str, tuple[str, ...]] = {
+        "events": ("UI_EVENTS_WS", "UI_EVENTS_WS_URL", "UI_WS_URL"),
+        "rl": ("UI_RL_WS", "UI_RL_WS_URL"),
+        "logs": ("UI_LOGS_WS", "UI_LOG_WS_URL"),
+    }
+    urls: dict[str, str] = {}
+    for channel, env_keys in channel_env_keys.items():
+        resolved: str | None = None
+        for env_key in env_keys:
+            resolved = _normalize_ws_url(os.environ.get(env_key))
+            if resolved:
+                break
+        if not resolved:
+            state = _WS_CHANNELS.get(channel)
+            host = state.host if state and state.host else _resolve_host()
+            url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+            if channel == "rl":
+                port = state.port or _RL_WS_PORT
+            elif channel == "events":
+                port = state.port or _EVENT_WS_PORT
+            else:
+                port = state.port or _LOG_WS_PORT
+            resolved = f"ws://{url_host}:{port}/ws"
+        urls[channel] = resolved
+    return urls
+
+
 def _shutdown_state(state: _WebsocketState) -> None:
     loop = state.loop
     if loop is None:
@@ -242,6 +285,7 @@ def _start_channel(
         asyncio.set_event_loop(loop)
         state.loop = loop
         state.port = 0
+        state.host = host
 
         if channel == "rl":
             rl_ws_loop = loop
@@ -483,9 +527,21 @@ def start_websockets() -> dict[str, threading.Thread]:
             _shutdown_state(state)
         raise
 
-    os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
-    os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
-    os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
+    events_url = f"ws://{url_host}:{_EVENT_WS_PORT}/ws"
+    rl_url = f"ws://{url_host}:{_RL_WS_PORT}/ws"
+    logs_url = f"ws://{url_host}:{_LOG_WS_PORT}/ws"
+
+    defaults = {
+        "UI_WS_URL": events_url,
+        "UI_EVENTS_WS_URL": events_url,
+        "UI_EVENTS_WS": events_url,
+        "UI_RL_WS_URL": rl_url,
+        "UI_RL_WS": rl_url,
+        "UI_LOG_WS_URL": logs_url,
+        "UI_LOGS_WS": logs_url,
+    }
+    for key, value in defaults.items():
+        os.environ.setdefault(key, value)
     log.info(
         "UI websockets listening on rl=%s events=%s logs=%s",
         _RL_WS_PORT,
@@ -2177,6 +2233,22 @@ def create_app(state: UIState | None = None) -> Flask:
             header_signals=header_signals,
             kpis=kpis,
         )
+
+    def _ws_config_payload() -> Dict[str, str]:
+        urls = get_ws_urls()
+        return {
+            "rl_ws": urls["rl"],
+            "events_ws": urls["events"],
+            "logs_ws": urls["logs"],
+        }
+
+    @app.get("/ui/ws-config")
+    def ui_ws_config() -> Any:
+        return jsonify(_ws_config_payload())
+
+    @app.get("/ws-config")
+    def ws_config() -> Any:
+        return jsonify(_ws_config_payload())
 
     @app.get("/health")
     def health() -> Any:

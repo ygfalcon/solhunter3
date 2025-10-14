@@ -135,6 +135,23 @@ class RuntimeOrchestrator:
                 state_obj = None
         app = _create_ui_app(state_obj)
         threads = _start_ui_ws() if callable(_start_ui_ws) else {}
+        if hasattr(_ui_module, "get_ws_urls"):
+            try:
+                ws_urls = _ui_module.get_ws_urls()  # type: ignore[attr-defined]
+            except Exception:
+                ws_urls = {}
+            else:
+                env_map = {
+                    "events": ("UI_EVENTS_WS", "UI_EVENTS_WS_URL", "UI_WS_URL"),
+                    "rl": ("UI_RL_WS", "UI_RL_WS_URL"),
+                    "logs": ("UI_LOGS_WS", "UI_LOG_WS_URL"),
+                }
+                for channel, keys in env_map.items():
+                    url = ws_urls.get(channel)
+                    if not url:
+                        continue
+                    for key in keys:
+                        os.environ.setdefault(key, url)
         self.handles.ui_app = app
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
