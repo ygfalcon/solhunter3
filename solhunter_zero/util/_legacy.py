@@ -1,4 +1,4 @@
-# Utility functions for runtime helpers.
+"""Legacy utility helpers maintained for backwards compatibility."""
 
 from __future__ import annotations
 
@@ -18,13 +18,7 @@ _PLACEHOLDER_MARKERS = ("YOUR_KEY", "YOUR_HELIUS_KEY", "CHANGE_ME", "EXAMPLE", "
 
 
 def parse_bool_env(name: str, default: bool = False) -> bool:
-    """Return the boolean value for environment variable ``name``.
-
-    The lookup falls back to ``default`` when the variable is unset or when
-    the value does not match any known true/false strings.  Comparisons are
-    performed on ``strip().lower()`` forms to tolerate whitespace and case
-    variations.
-    """
+    """Return the boolean value for environment variable ``name``."""
 
     val = os.getenv(name)
     if val is None:
@@ -38,12 +32,8 @@ def parse_bool_env(name: str, default: bool = False) -> bool:
 
 
 def install_uvloop() -> None:
-    """Install ``uvloop`` if available.
+    """Install ``uvloop`` if available."""
 
-    Importing and calling this function sets ``asyncio``'s event loop
-    policy to ``uvloop``. If the optional dependency is not installed
-    the function silently does nothing.
-    """
     try:
         uvloop = importlib.import_module("uvloop")
     except Exception:  # pragma: no cover - optional dependency missing
@@ -62,14 +52,7 @@ T = TypeVar("T")
 
 
 def run_coro(coro: Coroutine[Any, Any, T] | T) -> T | asyncio.Task:
-    """Run ``coro`` using the active loop if present.
-
-    When called with no running event loop this function falls back to
-    :func:`asyncio.run` and returns the coroutine result.  If a loop is
-    already running, the coroutine is scheduled with
-    :func:`asyncio.AbstractEventLoop.create_task` and the resulting task
-    is returned for awaiting by the caller.
-    """
+    """Run ``coro`` using the active loop if present."""
 
     if not asyncio.iscoroutine(coro):
         return coro
@@ -101,3 +84,11 @@ def sanitize_priority_urls(urls: Iterable[str] | None) -> List[str]:
         seen.add(text)
         cleaned.append(text)
     return cleaned
+
+
+__all__ = [
+    "install_uvloop",
+    "parse_bool_env",
+    "run_coro",
+    "sanitize_priority_urls",
+]

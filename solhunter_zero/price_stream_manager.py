@@ -10,6 +10,7 @@ import websockets
 _WS_PING_INTERVAL = float(os.getenv("WS_PING_INTERVAL", "20") or 20)
 _WS_PING_TIMEOUT = float(os.getenv("WS_PING_TIMEOUT", "20") or 20)
 from .event_bus import publish
+from .util.mints import clean_candidate_mints
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,12 @@ class PriceStreamManager:
 
     def __init__(self, streams: Mapping[str, str], tokens: Iterable[str]):
         self.streams = dict(streams)
-        self.tokens = list(tokens)
+        cleaned, dropped = clean_candidate_mints(tokens)
+        if dropped:
+            logger.warning(
+                "Dropped %d invalid mint(s) at validator edge", len(dropped)
+            )
+        self.tokens = list(dict.fromkeys(cleaned))
         self._tasks: Dict[str, asyncio.Task] = {}
         self._running = False
 

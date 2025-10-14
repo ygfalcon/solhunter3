@@ -8,9 +8,10 @@ from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Sequence
 
 import aiohttp
 
-from solhunter_zero.lru import TTLCache
 from .async_utils import run_async
 from .http import get_session
+from .lru import TTLCache
+from .util.mints import clean_candidate_mints
 
 logger = logging.getLogger(__name__)
 
@@ -647,7 +648,12 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
 
 
 async def fetch_price_quotes_async(tokens: Iterable[str]) -> Dict[str, PriceQuote]:
-    token_list = _tokens_key(tokens)
+    token_list = list(_tokens_key(tokens))
+    token_list, dropped = clean_candidate_mints(token_list)
+    if dropped:
+        logger.warning(
+            "Dropped %d invalid mint(s) at validator edge", len(dropped)
+        )
     if not token_list:
         return {}
     result: Dict[str, PriceQuote] = {}

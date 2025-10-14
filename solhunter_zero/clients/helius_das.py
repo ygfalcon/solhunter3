@@ -13,6 +13,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
+from ..util.mints import clean_candidate_mints
+
 log = logging.getLogger(__name__)
 
 
@@ -267,6 +269,11 @@ async def get_asset_batch(
     """Validate mint addresses and return DAS asset objects."""
 
     batch = [mint for mint in mints if isinstance(mint, str)]
+    batch, dropped = clean_candidate_mints(batch)
+    if dropped:
+        log.warning(
+            "Dropped %d invalid mint(s) at validator edge", len(dropped)
+        )
     if not batch:
         return []
     payload = {"ids": batch}

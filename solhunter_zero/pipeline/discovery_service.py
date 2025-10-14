@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
+from ..util.mints import clean_candidate_mints
 from .types import TokenCandidate
 
 log = logging.getLogger(__name__)
@@ -143,11 +144,18 @@ class DiscoveryService:
             offline=self.offline,
             token_file=self.token_file,
         )
+        seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+        cleaned, dropped = clean_candidate_mints(seq)
+        if dropped:
+            log.warning(
+                "DiscoveryService dropped %d invalid mint(s) at validator edge",
+                len(dropped),
+            )
         if self.limit:
-            tokens = tokens[: self.limit]
+            cleaned = cleaned[: self.limit]
         fetch_ts = time.time()
-        self._apply_fetch_stats(tokens, fetch_ts)
-        return list(tokens)
+        self._apply_fetch_stats(cleaned, fetch_ts)
+        return list(cleaned)
 
     def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
         ts = time.time()
@@ -239,6 +247,12 @@ class DiscoveryService:
 
     async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
         seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+        seq, dropped = clean_candidate_mints(seq)
+        if dropped:
+            log.warning(
+                "DiscoveryService dropped %d invalid mint(s) at validator edge",
+                len(dropped),
+            )
         if not seq:
             return
         if not fresh and seq == self._last_emitted:
@@ -260,6 +274,12 @@ class DiscoveryService:
 
     def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
         payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+        payload, dropped = clean_candidate_mints(payload)
+        if dropped:
+            log.warning(
+                "DiscoveryService dropped %d invalid mint(s) at validator edge",
+                len(dropped),
+            )
         self._last_fetch_ts = fetch_ts
         self._last_tokens = list(payload)
 
@@ -335,6 +355,13 @@ class DiscoveryService:
         if self.limit:
             unique = unique[: self.limit]
 
+        unique, dropped = clean_candidate_mints(unique)
+        if dropped:
+            log.warning(
+                "DiscoveryService dropped %d invalid mint(s) at validator edge",
+                len(dropped),
+            )
+
         fetch_ts = time.time()
         self._apply_fetch_stats(unique, fetch_ts)
 
@@ -355,7 +382,14 @@ class DiscoveryService:
             log.debug(
                 "DiscoveryService startup clone %d fetched %d tokens", idx, len(tokens)
             )
-            return [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+            seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+            cleaned, dropped = clean_candidate_mints(seq)
+            if dropped:
+                log.warning(
+                    "DiscoveryService dropped %d invalid mint(s) at validator edge",
+                    len(dropped),
+                )
+            return cleaned
         except asyncio.CancelledError:
             raise
         except Exception:  # pragma: no cover - defensive logging
