@@ -23,7 +23,7 @@ def test_load_config_yaml(tmp_path):
     path = tmp_path / "my.yaml"
     path.write_text(
         "birdeye_api_key: KEY\n"
-        "solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY\n"
+        "solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=demo-helius-key\n"
         "dex_base_url: https://swap.helius.dev\n"
         "agents: [sim]\n"
         "agent_weights:\n  sim: 1.0\n"
@@ -31,7 +31,7 @@ def test_load_config_yaml(tmp_path):
     )
     cfg = load_config(str(path))
     assert cfg["birdeye_api_key"] == "KEY"
-    assert str(cfg["solana_rpc_url"]).rstrip("/") == "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+    assert str(cfg["solana_rpc_url"]).rstrip("/") == "https://mainnet.helius-rpc.com/?api-key=demo-helius-key"
     assert str(cfg["dex_base_url"]).rstrip("/") == "https://swap.helius.dev"
     assert cfg["agents"] == ["sim"]
     assert cfg["agent_weights"] == {"sim": 1.0}
@@ -42,7 +42,7 @@ def test_load_config_toml(tmp_path):
     path = tmp_path / "my.toml"
     path.write_text(
         'birdeye_api_key="KEY"\n'
-        'solana_rpc_url="https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"\n'
+        'solana_rpc_url="https://mainnet.helius-rpc.com/?api-key=demo-helius-key"\n'
         'dex_base_url="https://swap.helius.dev"\n'
         'event_bus_url="ws://bus"\n'
         'agents=["sim"]\n'
@@ -51,7 +51,7 @@ def test_load_config_toml(tmp_path):
     )
     cfg = load_config(str(path))
     assert cfg["birdeye_api_key"] == "KEY"
-    assert str(cfg["solana_rpc_url"]).rstrip("/") == "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+    assert str(cfg["solana_rpc_url"]).rstrip("/") == "https://mainnet.helius-rpc.com/?api-key=demo-helius-key"
     assert str(cfg["dex_base_url"]).rstrip("/") == "https://swap.helius.dev"
     assert cfg["agents"] == ["sim"]
     assert cfg["event_bus_url"] == "ws://bus"
@@ -61,7 +61,7 @@ def test_load_config_toml(tmp_path):
 def test_load_config_agents(tmp_path):
     path = tmp_path / "agents.toml"
     path.write_text(
-        'solana_rpc_url="https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"\n'
+        'solana_rpc_url="https://mainnet.helius-rpc.com/?api-key=demo-helius-key"\n'
         'dex_base_url="https://swap.helius.dev"\n'
         'agents=["sim","exit"]\n[agent_weights]\nsim=0.5\nexit=1.0\n'
     )
@@ -74,7 +74,7 @@ def test_env_var_overrides_default_search(tmp_path, monkeypatch):
     default = tmp_path / "config.yaml"
     default.write_text(
         "birdeye_api_key: DEFAULT\n"
-        "solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY\n"
+        "solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=demo-helius-key\n"
         "dex_base_url: https://swap.helius.dev\n"
         "agents: [sim]\n"
         "agent_weights:\n  sim: 1.0\n"
@@ -82,7 +82,7 @@ def test_env_var_overrides_default_search(tmp_path, monkeypatch):
     override = tmp_path / "ov.toml"
     override.write_text(
         'birdeye_api_key="OVR"\n'
-        'solana_rpc_url="https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"\n'
+        'solana_rpc_url="https://mainnet.helius-rpc.com/?api-key=demo-helius-key"\n'
         'dex_base_url="https://swap.helius.dev"\n'
         'agents=["sim"]\n'
         '[agent_weights]\n'
@@ -130,13 +130,13 @@ def test_load_config_from_repo_root_when_installed():
     assert Path(lines[0]).resolve() != repo_root.resolve()
     assert Path(lines[1]).resolve() == repo_root / "config.toml"
     cfg = json.loads(lines[2])
-    assert cfg["solana_rpc_url"].startswith("https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
+    assert cfg["solana_rpc_url"].startswith("https://mainnet.helius-rpc.com/?api-key=demo-helius-key")
 
 
 def test_apply_env_overrides(monkeypatch):
     cfg = {
         "birdeye_api_key": "a",
-        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=demo-helius-key",
         "dex_base_url": "https://swap.helius.dev",
         "risk_tolerance": 0.1,
         "token_suffix": "",
@@ -153,7 +153,7 @@ def test_apply_env_overrides(monkeypatch):
     monkeypatch.setenv("EVENT_BUS_URL", "ws://new")
     result = apply_env_overrides(cfg)
     assert result["birdeye_api_key"] == "NEW"
-    assert str(result["solana_rpc_url"]).rstrip("/") == "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+    assert str(result["solana_rpc_url"]).rstrip("/") == "https://mainnet.helius-rpc.com/?api-key=demo-helius-key"
     assert result["risk_tolerance"] == "0.2"
     assert result["token_suffix"] == "doge"
     assert result["agents"] == ["x", "y"]
@@ -163,7 +163,7 @@ def test_apply_env_overrides(monkeypatch):
 
 def test_apply_env_overrides_invalid_values(monkeypatch):
     cfg = {
-        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=demo-helius-key",
         "dex_base_url": "https://swap.helius.dev",
         "agents": ["a"],
         "agent_weights": {"a": 1.0},
@@ -176,7 +176,7 @@ def test_apply_env_overrides_invalid_values(monkeypatch):
 
 def test_llm_env_overrides(monkeypatch):
     cfg = {
-        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=demo-helius-key",
         "dex_base_url": "https://swap.helius.dev",
         "agents": ["a"],
         "agent_weights": {"a": 1.0},
@@ -192,7 +192,7 @@ def test_llm_env_overrides(monkeypatch):
 
 def test_jito_env_overrides(monkeypatch):
     cfg = {
-        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=demo-helius-key",
         "dex_base_url": "https://swap.helius.dev",
         "agents": ["a"],
         "agent_weights": {"a": 1.0},
@@ -218,7 +218,7 @@ def test_agents_env_round_trip(monkeypatch):
     monkeypatch.setenv("AGENTS", dumps(agents))
     monkeypatch.setenv("AGENT_WEIGHTS", dumps(weights))
     cfg = {
-        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=demo-helius-key",
         "dex_base_url": "https://swap.helius.dev",
     }
     result = apply_env_overrides(cfg)
@@ -350,7 +350,7 @@ def test_get_event_bus_peers(monkeypatch):
 
 def test_validate_config_ok():
     cfg = {
-        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=demo-helius-key",
         "dex_base_url": "https://swap.helius.dev",
         "agents": ["a", "b"],
         "agent_weights": {"a": 1.0, "b": 2.0},

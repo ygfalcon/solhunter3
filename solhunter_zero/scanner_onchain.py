@@ -27,6 +27,7 @@ PublicKey = Pubkey
 from solhunter_zero.lru import TTLCache
 from .http import STATIC_DNS_MAP, get_session
 from .clients.helius_das import get_asset_batch, search_fungible_recent
+from .util.mints import clean_candidate_mints
 
 try:  # optional dependency shared with the event bus
     import redis.asyncio as aioredis  # type: ignore
@@ -1182,6 +1183,11 @@ async def _fetch_das_metadata(
         return {}, False
 
     subset = list(dict.fromkeys(mints[:limit]))
+    subset, dropped = clean_candidate_mints(subset)
+    if dropped:
+        logger.warning(
+            "Dropped %d invalid mint(s) before DAS metadata fetch", len(dropped)
+        )
     if not subset:
         return {}, False
 

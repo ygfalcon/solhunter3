@@ -11,12 +11,13 @@ from urllib.parse import urlparse, urlunparse
 import aiohttp
 
 from .lru import TTLCache
+from .util.env import optional_helius_rpc_url, optional_helius_ws_url
 
 # ---------------------------------------------------------------------
 # Hard-coded RPC + WS (your Helius endpoints)
 # ---------------------------------------------------------------------
-DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
-DEFAULT_SOLANA_WS = "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+DEFAULT_SOLANA_RPC = optional_helius_rpc_url("")
+DEFAULT_SOLANA_WS = optional_helius_ws_url("")
 DEFAULT_BIRDEYE_API_KEY = "b1e60d72780940d1bd929b9b2e9225e6"
 
 logger = logging.getLogger(__name__)
@@ -54,10 +55,12 @@ def refresh_runtime_values() -> None:
     global JUPITER_WS_URL, PHOENIX_WS_URL, METEORA_WS_URL
     global BIRDEYE_API_KEY, HEADERS
 
-    rpc = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
+    rpc = optional_helius_rpc_url(DEFAULT_SOLANA_RPC)
+    if not rpc:
+        raise RuntimeError("SOLANA_RPC_URL/HELIUS_RPC_URL not configured")
     SOLANA_RPC_URL = _ensure_env("SOLANA_RPC_URL", rpc)
 
-    ws = os.getenv("SOLANA_WS_URL") or _derive_ws_from_rpc(SOLANA_RPC_URL) or DEFAULT_SOLANA_WS
+    ws = optional_helius_ws_url(DEFAULT_SOLANA_WS) or _derive_ws_from_rpc(SOLANA_RPC_URL) or DEFAULT_SOLANA_WS
     SOLANA_WS_URL = _ensure_env("SOLANA_WS_URL", ws)
 
     JUPITER_WS_URL = os.getenv("JUPITER_WS_URL", SOLANA_WS_URL)

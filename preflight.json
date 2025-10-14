@@ -46,7 +46,7 @@
     },
     {
       "name": "Internet",
-      "message": "Reached https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+      "message": "Reached https://mainnet.helius-rpc.com/?api-key=demo-helius-key"
     },
     {
       "name": "Network",

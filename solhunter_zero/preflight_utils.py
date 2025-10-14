@@ -21,6 +21,7 @@ from solhunter_zero.config_utils import ensure_default_config, select_active_key
 from solhunter_zero import wallet
 from solhunter_zero.paths import ROOT
 from .console_utils import console_print
+from .util.env import optional_helius_rpc_url
 
 Check = Tuple[bool, str]
 
@@ -161,9 +162,10 @@ def check_wallet_balance(min_sol: float, keypair_path: str | Path | None = None)
         from solana.rpc.api import Client
         from .gas import LAMPORTS_PER_SOL
 
-        client = Client(
-            os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
-        )
+        rpc_url = optional_helius_rpc_url("")
+        if not rpc_url:
+            return False, "SOLANA_RPC_URL/HELIUS_RPC_URL not configured"
+        client = Client(rpc_url)
         resp = client.get_balance(kp.pubkey())
         try:
             lamports = int(resp["result"]["value"])
@@ -244,7 +246,7 @@ def check_internet(url: str | None = None) -> Check:
     import json
 
     target = url or os.environ.get(
-        "SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+        "SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=demo-helius-key"
     )
 
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getHealth"}).encode()
@@ -307,7 +309,7 @@ def check_required_env(keys: List[str] | None = None) -> Check:
     return True, "Required environment variables set"
 
 
-def check_network(default_url: str = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY") -> Check:
+def check_network(default_url: str = "") -> Check:
     if sys.platform == "darwin":
         try:
             from solhunter_zero import macos_setup
@@ -318,7 +320,7 @@ def check_network(default_url: str = "https://mainnet.helius-rpc.com/?api-key=YO
         except Exception as exc:  # pragma: no cover - defensive
             return True, f"macOS network check skipped: {exc}"
         return True, "Network connectivity OK"
-    url = os.environ.get("SOLANA_RPC_URL", default_url)
+    url = optional_helius_rpc_url(default_url)
     try:
         from solhunter_zero.http import check_endpoint
 

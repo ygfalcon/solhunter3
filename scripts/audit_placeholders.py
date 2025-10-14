@@ -22,8 +22,8 @@ PLACEHOLDER_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # Allow legitimate references where the code intentionally matches placeholders.
 ALLOWLIST: dict[str, tuple[str, ...]] = {
-    "solhunter_zero/config.py": ("YOUR_KEY", "YOUR_HELIUS_KEY"),
-    "scripts/audit_placeholders.py": ("REDACTED", "XXXX", "YOUR_HELIUS_KEY", "YOUR_SECRET"),
+    "solhunter_zero/config.py": ("YOUR_KEY", "demo-helius-key"),
+    "scripts/audit_placeholders.py": ("REDACTED", "XXXX", "demo-helius-key", "YOUR_SECRET"),
     "solhunter_zero/production/env.py": ("REDACTED", "redacted", "xxxx"),
     "tests/test_audit_placeholders.py": ("YOUR_SECRET",),
     "tests/test_production_env.py": ("REDACTED_VALUE", "YOUR_SECRET_KEY"),

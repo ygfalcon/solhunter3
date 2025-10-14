@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 import urllib.request
 import urllib.error
 
+from .util.env import optional_helius_rpc_url
+
 
 def ensure_rpc(*, warn_only: bool = False) -> None:
     """Send a simple JSON-RPC request to ensure the Solana RPC is reachable."""
-    rpc_url = os.environ.get("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
-    if not os.environ.get("SOLANA_RPC_URL"):
-        print(f"Using default RPC URL {rpc_url}")
+    rpc_url = optional_helius_rpc_url("")
+    if not rpc_url:
+        if warn_only:
+            print("Warning: SOLANA_RPC_URL/HELIUS_RPC_URL not configured; skipping RPC check")
+            return
+        raise RuntimeError("SOLANA_RPC_URL or HELIUS_RPC_URL must be configured")
 
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getHealth"}).encode()
     req = urllib.request.Request(

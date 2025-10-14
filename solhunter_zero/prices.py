@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Sequence, Tuple, Union
@@ -11,6 +12,7 @@ import aiohttp
 from solhunter_zero.lru import TTLCache
 from .async_utils import run_async
 from .http import get_session
+from .util.mints import clean_candidate_mints
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +209,15 @@ def get_provider_health_snapshot() -> Dict[str, Dict[str, Any]]:
 
 
 def _tokens_key(tokens: Iterable[str]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(tok for tok in tokens if isinstance(tok, str) and tok))
+    deduped = []
+    for tok in tokens:
+        if isinstance(tok, str) and tok:
+            deduped.append(tok)
+    unique = list(dict.fromkeys(deduped))
+    cleaned, dropped = clean_candidate_mints(unique)
+    if dropped:
+        logger.warning("Dropped %d invalid token(s) before price fetch", len(dropped))
+    return tuple(cleaned)
 
 
 def get_cached_quote(token: str) -> PriceQuote | None:
@@ -259,7 +269,12 @@ async def _request_json(
     method: str = "GET",
 ) -> Any:
     last_error: BaseException | None = None
-    for attempt in range(PRICE_RETRY_ATTEMPTS):
+    provider_lower = provider.lower()
+    schedule = (0.5, 1.0, 2.0, 4.0)
+    max_attempts = min(len(schedule), max(1, PRICE_RETRY_ATTEMPTS))
+
+    for attempt in range(1, max_attempts + 1):
+        delay = schedule[attempt - 1]
         try:
             async with session.request(
                 method,
@@ -269,14 +284,36 @@ async def _request_json(
                 json=json,
                 timeout=10,
             ) as resp:
-                resp.raise_for_status()
-                return await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                status = resp.status
+                if 200 <= status < 300:
+                    try:
+                        return await resp.json()
+                    except Exception as exc:  # pragma: no cover - JSON parsing
+                        last_error = exc
+                        break
+                text = await resp.text()
+                lower = text.lower() if text else ""
+                if (
+                    provider_lower == "birdeye"
+                    and status in {400, 429}
+                    and "compute units usage limit exceeded" in lower
+                ):
+                    last_error = RuntimeError(f"Birdeye throttle {status}")
+                    wait_for = delay + random.random() * 0.3
+                    logger.debug("Birdeye throttle %s; sleeping %.2fs", status, wait_for)
+                    await asyncio.sleep(wait_for)
+                    continue
+                last_error = RuntimeError(f"{provider} HTTP {status}: {text[:200]}")
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             last_error = exc
-            if attempt == PRICE_RETRY_ATTEMPTS - 1:
-                break
-            delay = PRICE_RETRY_BACKOFF * (2 ** attempt)
-            await asyncio.sleep(delay)
+        if attempt == max_attempts:
+            break
+        await asyncio.sleep(delay)
+
+    if provider_lower in {"jupiter", "pyth"} and last_error is not None:
+        logger.info("Provider %s unavailable; skipping", provider_lower)
+        return None
+
     if last_error:
         raise last_error
     return None
@@ -321,6 +358,8 @@ async def _fetch_quotes_jupiter(
     for chunk in _chunked(tokens, JUPITER_BATCH_SIZE):
         params = {"ids": ",".join(chunk)}
         payload = await _request_json(session, url, "Jupiter", params=params)
+        if not payload:
+            continue
         if not isinstance(payload, MutableMapping):
             continue
         data = payload.get("data") if isinstance(payload.get("data"), MutableMapping) else payload
@@ -348,6 +387,8 @@ async def _fetch_quotes_dexscreener(
     for token in tokens:
         url = f"{DEXSCREENER_PRICE_URL.rstrip('/')}/{token}"
         payload = await _request_json(session, url, "Dexscreener")
+        if not payload:
+            continue
         if not isinstance(payload, MutableMapping):
             continue
         pairs = payload.get("pairs")
@@ -394,9 +435,14 @@ async def _fetch_quotes_birdeye(
         "x-chain": BIRDEYE_CHAIN,
     }
     quotes: Dict[str, PriceQuote] = {}
-    for chunk in _chunked(tokens, min(BIRDEYE_MAX_BATCH, 100)):
+    chunks = _chunked(tokens, min(BIRDEYE_MAX_BATCH, 100))
+    for idx, chunk in enumerate(chunks):
         params = {"list_address": ",".join(chunk), "chain": BIRDEYE_CHAIN}
-        payload = await _request_json(session, url, "Birdeye", params=params, headers=headers)
+        try:
+            payload = await _request_json(session, url, "Birdeye", params=params, headers=headers)
+        except RuntimeError as exc:
+            logger.debug("Birdeye price request failed: %s", exc)
+            break
         if not isinstance(payload, MutableMapping):
             continue
         data = payload.get("data")
@@ -423,6 +469,8 @@ async def _fetch_quotes_birdeye(
                     asof=asof,
                     quality="aggregate",
                 )
+        if idx + 1 < len(chunks):
+            await asyncio.sleep(1.0)
     return quotes
 
 
@@ -455,6 +503,8 @@ async def _fetch_quotes_pyth(
         return {}
     params = {"ids": ",".join(ids)}
     payload = await _request_json(session, PYTH_PRICE_URL, "Pyth", params=params)
+    if not payload:
+        return {}
     if not isinstance(payload, MutableMapping):
         return {}
     records: List[MutableMapping[str, Any]] = []

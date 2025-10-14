@@ -4,12 +4,12 @@ import types
 import sys
 from contextlib import asynccontextmanager
 
-os.environ.setdefault("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
+os.environ.setdefault("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=demo-helius-key")
 os.environ.setdefault("DEX_BASE_URL", "https://quote-api.jup.ag")
 os.environ.pop("AGENTS", None)
 _cfg_path = os.path.join(os.path.dirname(__file__), "tmp_config.toml")
 with open(_cfg_path, "w", encoding="utf-8") as _f:
-    _f.write("solana_rpc_url='https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY'\n")
+    _f.write("solana_rpc_url='https://mainnet.helius-rpc.com/?api-key=demo-helius-key'\n")
     _f.write("dex_base_url='https://quote-api.jup.ag'\n")
     _f.write("agents=['dummy']\n")
     _f.write("agent_weights={dummy=1.0}\n")

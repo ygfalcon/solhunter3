@@ -214,13 +214,11 @@ async def search_fungible_recent(
 
     resolved_limit = limit if limit is not None else _DEFAULT_LIMIT
     payload: Dict[str, Any] = {
-        "query": {"interface": "FungibleToken"},
-        "sortBy": {"sortBy": "recent_action", "sortDirection": sort_direction},
-        "options": {
-            "limit": resolved_limit,
-            "page": 1,
-            "showUnverifiedCollections": True,
-        },
+        "tokenType": "fungible",
+        "page": 1,
+        "limit": resolved_limit,
+        "sortBy": "created",
+        "sortDirection": sort_direction,
     }
     if cursor:
         payload["paginationToken"] = cursor
