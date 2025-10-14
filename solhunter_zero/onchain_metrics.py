@@ -21,6 +21,7 @@ from .scanner_onchain import (
 from .http import get_session
 from .lru import TTLCache
 from .token_aliases import canonical_mint, validate_mint
+from .util.env import optional_helius_rpc_url
 
 FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 
@@ -57,8 +58,8 @@ def _get_birdeye_semaphore() -> asyncio.Semaphore:
     return _BIRDEYE_SEMAPHORE
 
 # === Hard defaults per your request ===
-DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
-SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", DEFAULT_SOLANA_RPC)
+DEFAULT_SOLANA_RPC = optional_helius_rpc_url("")
+SOLANA_RPC_URL = optional_helius_rpc_url("")
 
 # Your Birdeye key; allow env override but default to what you provided
 DEFAULT_BIRDEYE_API_KEY = "b1e60d72780940d1bd929b9b2e9225e6"

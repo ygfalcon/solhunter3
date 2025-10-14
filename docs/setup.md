@@ -58,7 +58,7 @@ The helper wraps the dependency checks and keypair/setup logic used by
 
    ```yaml
 birdeye_api_key: b1e60d72780940d1bd929b9b2e9225e6
-solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=demo-helius-key
 dex_base_url: https://swap.helius.dev
 dex_testnet_url: https://quote-api.jup.ag
 dex_partner_urls:

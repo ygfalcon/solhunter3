@@ -171,7 +171,7 @@ def generate_config() -> dict:
     cfg_path, cfg = ensure_config()
     defaults = {
         "BROKER_WS_URLS": "ws://127.0.0.1:8769",
-        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=demo-helius-key",
         "dex_base_url": "https://swap.helius.dev",
     }
     updated = False

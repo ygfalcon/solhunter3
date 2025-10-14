@@ -1153,6 +1153,9 @@ async fn main() -> Result<()> {
     let mut meteora = None;
     let mut mempool = None;
     let mut rpc = std::env::var("SOLANA_RPC_URL").unwrap_or_default();
+    if rpc.is_empty() {
+        rpc = std::env::var("HELIUS_RPC_URL").unwrap_or_default();
+    }
     let mut keypair_path = std::env::var("SOLANA_KEYPAIR").unwrap_or_default();
     for w in args.windows(2) {
         match w[0].as_str() {
@@ -1699,7 +1702,12 @@ async fn main() -> Result<()> {
         Keypair::new()
     };
     if rpc.is_empty() {
-        rpc = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY".to_string();
+        return Err(anyhow!(
+            "SOLANA_RPC_URL or HELIUS_RPC_URL must be set to a Helius RPC URL"
+        ));
+    }
+    if !(rpc.contains("api-key=") || rpc.contains("api_key=")) {
+        return Err(anyhow!("Helius RPC URL must include ?api-key=…"));
     }
     let exec = Arc::new(ExecContext::new(&rpc, kp).await);
 

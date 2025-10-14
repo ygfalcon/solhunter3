@@ -66,7 +66,7 @@ This document lists environment variables recognized by the project.
 | `GNN_MODEL_PATH` | `route_gnn.pt` | Path to gnn model |
 | `GPU_MEMORY_INDEX` | `` | Configures gpu memory index |
 | `GRAPH_MODEL_PATH` | `` | Path to graph model |
-| `HELIUS_API_KEY` | `YOUR_HELIUS_KEY` | API key used for Helius price and asset requests |
+| `HELIUS_API_KEY` | `demo-helius-key` | API key used for Helius price and asset requests |
 | `HELIUS_PRICE_REST_URL` | `` | Optional legacy REST price endpoint for Helius |
 | `HELIUS_PRICE_RPC_METHOD` | `getAssetBatch` | JSON-RPC method used when querying Helius prices |
 | `HELIUS_PRICE_RPC_URL` | `https://rpc.helius.xyz` | Helius RPC endpoint for token price lookups |
@@ -153,8 +153,8 @@ This document lists environment variables recognized by the project.
 | `SHELL` | `` | Configures shell |
 | `SIM_MODEL_CACHE_TTL` | `300` | TTL for sim model cache cache |
 | `SOLANA_KEYPAIR` | `` | Configures solana keypair |
-| `SOLANA_RPC_URL` | `https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY` | URL for Solana RPC and default endpoint for connectivity checks |
-| `SOLANA_TESTNET_RPC_URL` | `https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY` | URL for solana testnet rpc |
+| `SOLANA_RPC_URL` | `https://mainnet.helius-rpc.com/?api-key=demo-helius-key` | URL for Solana RPC and default endpoint for connectivity checks |
+| `SOLANA_TESTNET_RPC_URL` | `https://devnet.helius-rpc.com/?api-key=demo-helius-key` | URL for solana testnet rpc |
 | `SOLHUNTER_CONFIG` | `` | Configures solhunter config |
 | `SOLHUNTER_FORCE_DEPS` | `` | Configures solhunter force deps |
 | `SOLHUNTER_GPU_AVAILABLE` | `` | Configures solhunter gpu available |

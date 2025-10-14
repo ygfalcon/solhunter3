@@ -484,8 +484,12 @@ def start_websockets() -> dict[str, threading.Thread]:
         raise
 
     os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
+    os.environ.setdefault("UI_EVENTS_WS_URL", os.environ["UI_WS_URL"])
     os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
     os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
+    os.environ.setdefault("UI_EVENTS_WS", os.environ["UI_EVENTS_WS_URL"])
+    os.environ.setdefault("UI_RL_WS", os.environ["UI_RL_WS_URL"])
+    os.environ.setdefault("UI_LOGS_WS", os.environ["UI_LOG_WS_URL"])
     log.info(
         "UI websockets listening on rl=%s events=%s logs=%s",
         _RL_WS_PORT,
@@ -609,10 +613,12 @@ class UIState:
 
     def snapshot_config(self) -> Dict[str, Any]:
         try:
-            return dict(self.config_provider())
+            config = dict(self.config_provider())
         except Exception:  # pragma: no cover
             log.exception("UI config provider failed")
-            return {}
+            config = {}
+        config.setdefault("websockets", _resolve_ws_urls())
+        return config
 
     def snapshot_history(self) -> List[Dict[str, Any]]:
         try:
@@ -2220,6 +2226,10 @@ def create_app(state: UIState | None = None) -> Flask:
     def config() -> Any:
         return jsonify(state.snapshot_config())
 
+    @app.get("/ui/ws-config")
+    def ws_config() -> Any:
+        return jsonify(_resolve_ws_urls())
+
     @app.get("/logs")
     def logs() -> Any:
         return jsonify({"entries": state.snapshot_logs()})
@@ -2356,3 +2366,22 @@ class UIServer:
         if self._thread:
             self._thread.join(timeout=2)
         self._thread = None
+
+
+def _resolve_ws_urls() -> Dict[str, str]:
+    def _pick(*keys: str, default: str) -> str:
+        for key in keys:
+            value = os.getenv(key)
+            if value and value.strip().lower().startswith(("ws://", "wss://")):
+                return value.strip()
+        return default
+
+    rl_default = f"ws://127.0.0.1:{_RL_WS_PORT}/ws"
+    events_default = f"ws://127.0.0.1:{_EVENT_WS_PORT}/ws"
+    logs_default = f"ws://127.0.0.1:{_LOG_WS_PORT}/ws"
+
+    return {
+        "rl": _pick("UI_RL_WS", "UI_RL_WS_URL", default=rl_default),
+        "events": _pick("UI_EVENTS_WS", "UI_WS_URL", "UI_EVENTS_WS_URL", default=events_default),
+        "logs": _pick("UI_LOGS_WS", "UI_LOG_WS_URL", default=logs_default),
+    }

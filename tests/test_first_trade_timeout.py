@@ -13,12 +13,12 @@ def config_env(tmp_path):
     original = os.environ.copy()
     cfg_path = tmp_path / "config.toml"
     cfg_path.write_text(
-        "solana_rpc_url='https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY'\n"
+        "solana_rpc_url='https://mainnet.helius-rpc.com/?api-key=demo-helius-key'\n"
         "dex_base_url='https://quote-api.jup.ag'\n"
         "agents=['dummy']\n"
         "agent_weights={dummy=1.0}\n"
     )
-    os.environ["SOLANA_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+    os.environ["SOLANA_RPC_URL"] = "https://mainnet.helius-rpc.com/?api-key=demo-helius-key"
     os.environ["DEX_BASE_URL"] = "https://quote-api.jup.ag"
     os.environ["AGENTS"] = '["dummy"]'
     os.environ["SOLHUNTER_CONFIG"] = str(cfg_path)

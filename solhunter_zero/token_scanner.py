@@ -4,6 +4,7 @@ import asyncio
 import copy
 import logging
 import os
+import random
 import time
 from collections import deque
 from typing import Any, Dict, Iterable, List, Sequence, Set
@@ -14,9 +15,11 @@ import aiohttp
 from .discovery.mint_resolver import normalize_candidate
 from .token_aliases import canonical_mint, validate_mint
 from .clients.helius_das import get_asset_batch
+from .util.env import optional_helius_rpc_url
+from .util.mints import clean_candidate_mints
 
-# Hard-coded Helius defaults (per your request)
-DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+# Resolved on import to support tooling that inspects the module constants.
+DEFAULT_SOLANA_RPC = optional_helius_rpc_url("")
 
 BIRDEYE_BASE = "https://public-api.birdeye.so"
 
@@ -379,6 +382,8 @@ async def _birdeye_trending(
 
     resolved_birdeye_key = _resolve_birdeye_key(api_key)
     birdeye_allowed = _birdeye_enabled(resolved_birdeye_key)
+    if (os.getenv("PREFLIGHT_RUNS") or "").strip():
+        birdeye_allowed = False
     if not api_key:
         logger.debug("Birdeye API key missing; skipping trending fetch")
         return []
@@ -386,6 +391,7 @@ async def _birdeye_trending(
     headers = {
         "accept": "application/json",
         "X-API-KEY": api_key,
+        "x-api-key": api_key,
         "x-chain": os.getenv("BIRDEYE_CHAIN", "solana"),
     }
     timeframe = (
@@ -418,7 +424,9 @@ async def _birdeye_trending(
         "exceeded your request limit",
     )
 
-    for attempt in range(1, 4):
+    backoff_schedule = (0.5, 1.0, 2.0, 4.0)
+
+    for attempt, delay in enumerate(backoff_schedule, start=1):
         try:
             async with session.get(
                 url,
@@ -570,13 +578,21 @@ async def _birdeye_trending(
                     if len(addresses) >= limit:
                         break
                 return records if return_entries else addresses
+        except BirdeyeThrottleError as exc:
+            last_exc = exc
+            wait_for = delay + random.random() * 0.3
+            logger.debug("Birdeye throttle hit; sleeping %.2fs", wait_for)
+            await asyncio.sleep(wait_for)
+            continue
         except BirdeyeFatalError:
             raise
         except Exception as exc:
             last_exc = exc
-            logger.warning("Birdeye trending request failed (%d/3): %s", attempt, exc)
-            await asyncio.sleep(0.1)
+            logger.warning("Birdeye trending request failed (%d/%d): %s", attempt, len(backoff_schedule), exc)
+            await asyncio.sleep(delay)
 
+    if isinstance(last_exc, BirdeyeThrottleError):
+        raise last_exc
     if last_exc:
         logger.debug("Birdeye last_exc: %s", last_exc)
     return []
@@ -1250,13 +1266,11 @@ async def _helius_search_assets(
 
     while len(normalized) < limit:
         params: Dict[str, Any] = {
-            "query": {"interface": "FungibleToken"},
-            "sortBy": {"sortBy": "recent_action", "sortDirection": "desc"},
-            "options": {
-                "limit": per_page,
-                "page": 1,
-                "showUnverifiedCollections": True,
-            },
+            "tokenType": "fungible",
+            "page": 1,
+            "limit": per_page,
+            "sortBy": "created",
+            "sortDirection": "desc",
         }
         if pagination_token:
             params["paginationToken"] = pagination_token
@@ -1347,7 +1361,7 @@ async def _helius_search_assets(
 
 async def scan_tokens_async(
     *,
-    rpc_url: str = DEFAULT_SOLANA_RPC,
+    rpc_url: str | None = None,
     limit: int = 50,
     enrich: bool = True,   # kept for compatibility; enrichment is separate call
     api_key: str | None = None,
@@ -1356,6 +1370,7 @@ async def scan_tokens_async(
     Pull trending mints preferring Helius price data, falling back to BirdEye.
     If both sources fail, return a small static set so the loop can proceed.
     """
+    rpc_url = rpc_url or optional_helius_rpc_url("")
     _ = rpc_url  # reserved for future use; enrichment uses this parameter
     global _FAILURE_COUNT, _COOLDOWN_UNTIL
 
@@ -1670,10 +1685,11 @@ async def scan_tokens_async(
         failure = False
 
         if not mints:
+            rpc_candidate = os.getenv("SOLANA_RPC_URL") or optional_helius_rpc_url("")
             search_items = await _helius_search_assets(
                 session,
                 limit=requested,
-                rpc_url=os.getenv("SOLANA_RPC_URL", DEFAULT_SOLANA_RPC),
+                rpc_url=rpc_candidate,
             )
             for item in search_items:
                 address = _normalize_mint_candidate(item.get("address"))
@@ -1734,7 +1750,16 @@ async def scan_tokens_async(
                 result = _apply_static()
             failure = True
         else:
-            result = mints[:requested]
+            deduped = list(dict.fromkeys(mints))
+            cleaned, dropped = clean_candidate_mints(deduped)
+            if dropped:
+                logger.warning(
+                    "Dropped %d invalid mint(s) at validator edge", len(dropped)
+                )
+                for _original, sanitized in dropped:
+                    if sanitized:
+                        TRENDING_METADATA.pop(sanitized, None)
+            result = cleaned[:requested]
 
         if result:
             _LAST_TRENDING_RESULT["mints"] = list(result)
@@ -1798,7 +1823,7 @@ async def _rpc_get_multiple_accounts(
 async def enrich_tokens_async(
     mints: Iterable[str],
     *,
-    rpc_url: str = DEFAULT_SOLANA_RPC,
+    rpc_url: str | None = None,
 ) -> List[str]:
     """
     Verify token accounts exist and filter obviously bad ones.
@@ -1810,6 +1835,11 @@ async def enrich_tokens_async(
         if mint:
             as_list.append(mint)
     if not as_list:
+        return []
+
+    rpc_url = rpc_url or optional_helius_rpc_url("")
+    if not rpc_url:
+        logger.warning("Token enrichment skipped: RPC URL not configured")
         return []
 
     async with aiohttp.ClientSession() as session:

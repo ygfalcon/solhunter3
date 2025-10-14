@@ -17,9 +17,10 @@ from .jsonutil import loads, dumps
 from .dex_config import DEXConfig
 from .paths import ROOT
 from .config_schema import ConfigModel
+from .util.env import optional_helius_rpc_url, optional_helius_ws_url
 
-DEFAULT_HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
-DEFAULT_HELIUS_WS_URL = "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+DEFAULT_HELIUS_RPC_URL = optional_helius_rpc_url("")
+DEFAULT_HELIUS_WS_URL = optional_helius_ws_url("")
 
 logger = logging.getLogger(__name__)
 
@@ -399,7 +400,7 @@ def _apply_helius_defaults(cfg: dict[str, Any]) -> None:
         text = url.strip()
         if not text:
             return default
-        for marker in ("YOUR_KEY", "YOUR_HELIUS_KEY"):
+        for marker in ("YOUR_KEY", "demo-helius-key"):
             if marker in text:
                 return default
         return None
@@ -671,7 +672,7 @@ def load_selected_config() -> dict:
 def load_dex_config(config: Mapping[str, Any] | None = None) -> DEXConfig:
     """Return `DEXConfig` populated from `config` + env overrides."""
     base_cfg: dict[str, Any] = {
-        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+        "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=demo-helius-key",
         "dex_base_url": "https://swap.helius.dev",
         "dex_partner_urls": {
             "birdeye": "https://public-api.birdeye.so",

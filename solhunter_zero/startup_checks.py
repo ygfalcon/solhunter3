@@ -6,6 +6,8 @@ import logging
 import os
 from typing import Any, Optional
 
+from .util.env import optional_helius_rpc_url
+
 try:
     import aiohttp  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
@@ -16,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Endpoints / env
 BIRDEYE_API = os.getenv("BIRDEYE_API", "https://public-api.birdeye.so/defi/tokenlist")
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY")
-SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
+SOLANA_RPC_URL = optional_helius_rpc_url("")
 
 
 # -----------------------------
@@ -65,6 +67,11 @@ def ensure_rpc(*, warn_only: bool = False) -> None:
         return
 
     async def _run() -> None:
+        if not SOLANA_RPC_URL:
+            if warn_only:
+                logger.warning("RPC URL not configured; skipping RPC check")
+                return
+            raise SystemExit("SOLANA_RPC_URL/HELIUS_RPC_URL not configured")
         async with aiohttp.ClientSession() as session:
             ok, msg = await _json_rpc_health(session, SOLANA_RPC_URL)
             if ok:
@@ -90,6 +97,9 @@ def ensure_endpoints(_cfg: Optional[dict[str, Any]] = None) -> None:
         return
 
     async def _run() -> None:
+        if not SOLANA_RPC_URL:
+            logger.warning("RPC URL not configured; skipping endpoint checks")
+            return
         async with aiohttp.ClientSession() as session:
             ok, msg = await _json_rpc_health(session, SOLANA_RPC_URL)
             logger.log(logging.INFO if ok else logging.WARNING, "Endpoint RPC: %s", msg)

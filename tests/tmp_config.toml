@@ -1,4 +1,4 @@
-solana_rpc_url='https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY'
+solana_rpc_url='https://mainnet.helius-rpc.com/?api-key=demo-helius-key'
 dex_base_url='https://quote-api.jup.ag'
 agents=['dummy']
 agent_weights={dummy=1.0}

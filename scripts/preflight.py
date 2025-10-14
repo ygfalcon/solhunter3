@@ -50,7 +50,7 @@ CHECKS: List[Tuple[str, Callable[[], Check]]] = [
         "Network",
         lambda: check_network(
             os.environ.get(
-                "SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+                "SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=demo-helius-key"
             )
         ),
     ),

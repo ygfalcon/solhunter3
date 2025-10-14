@@ -1,4 +1,4 @@
-solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=demo-helius-key"
 dex_base_url = "https://swap.helius.dev/"
 agents = [
     "simulation",
@@ -23,9 +23,9 @@ agents = [
     "ramanujan",
     "alien_cipher",
 ]
-solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=demo-helius-key"
 jupiter_ws_url = "wss://stats.jup.ag/ws"
-priority_rpc = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+priority_rpc = "https://mainnet.helius-rpc.com/?api-key=demo-helius-key"
 dex_testnet_url = "https://quote-api.jup.ag"
 orca_api_url = "https://api.orca.so"
 raydium_api_url = "https://api.raydium.io"

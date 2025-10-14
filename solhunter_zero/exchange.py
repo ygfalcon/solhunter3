@@ -22,6 +22,7 @@ from .gas import get_current_fee_async
 from .config import load_dex_config
 from .onchain_metrics import fetch_dex_metrics_async
 from .prices import fetch_token_prices_async
+from .util.env import optional_testnet_rpc_url, require_helius_rpc_url
 from .swap.jupiter import (
     load_config as load_jupiter_config,
     request_swap_transaction as jupiter_request_swap_transaction,
@@ -139,11 +140,8 @@ DEFAULT_SWAP_PATH = _ensure_path(SWAP_PATHS.get(SWAP_PRIORITIES[0], "/v6/swap"))
 SWAP_PATH = DEFAULT_SWAP_PATH
 
 
-RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
-RPC_TESTNET_URL = os.getenv(
-    "SOLANA_TESTNET_RPC_URL",
-    "https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
-)
+RPC_URL = require_helius_rpc_url()
+RPC_TESTNET_URL = optional_testnet_rpc_url(RPC_URL)
 
 # Map of venue names to base API URLs used for order submission.  Callers may
 # reference these keys or provide custom URLs directly.

@@ -202,9 +202,11 @@ def check_helius_das(*, timeout: float = 5.0) -> CheckResult:
             "id": "env-doctor",
             "method": "searchAssets",
             "params": {
-                "interface": "FungibleToken",
+                "tokenType": "fungible",
+                "page": 1,
                 "limit": 1,
-                "sortBy": {"field": "recentAction", "direction": "desc"},
+                "sortBy": "created",
+                "sortDirection": "desc",
             },
         }
     ).encode("utf-8")
