@@ -11,6 +11,7 @@ import aiohttp
 from solhunter_zero.lru import TTLCache
 from .async_utils import run_async
 from .http import get_session
+from .logging_utils import warn_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -646,11 +647,23 @@ def _record_provider_failure(name: str, exc: BaseException, latency_ms: float) -
     PROVIDER_HEALTH[name].record_failure(status, cooldown=cooldown)
     PROVIDER_STATS[name].record_failure(status, latency_ms, exc)
     if isinstance(exc, aiohttp.ClientResponseError):
-        logger.warning(
-            "Prices: %s HTTP error %s", name, exc.status,
+        warn_once_per(
+            1.0,
+            f"prices-http:{name}:{exc.status}",
+            "Prices: %s HTTP error %s",
+            name,
+            exc.status,
+            logger=logger,
         )
     else:
-        logger.warning("Prices: %s failure %s", name, exc)
+        warn_once_per(
+            1.0,
+            f"prices-failure:{name}:{exc.__class__.__name__}",
+            "Prices: %s failure %s",
+            name,
+            exc,
+            logger=logger,
+        )
 
 
 async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
