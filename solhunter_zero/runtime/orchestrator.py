@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import errno
 import logging
 import os
@@ -198,7 +199,21 @@ class RuntimeOrchestrator:
                     os.environ["UI_PORT"] = str(port)
                     port_queue.put(port)
 
-                    app.run(host=host, port=port, use_reloader=False)
+                    app.config.update(ENV="production", DEBUG=False)
+                    os.environ.setdefault("FLASK_ENV", "production")
+                    try:
+                        from werkzeug.serving import make_server
+                    except Exception as exc:  # pragma: no cover - optional dependency issues
+                        raise RuntimeError(f"werkzeug unavailable: {exc}") from exc
+
+                    server = make_server(host, port, app, threaded=False)
+                    port_queue.put(port)
+                    log.info("UI HTTP server listening on %s:%s", host, port)
+                    try:
+                        server.serve_forever()
+                    finally:
+                        with contextlib.suppress(Exception):
+                            server.shutdown()
                 except Exception:
                     port_queue.put(sys.exc_info()[1] or RuntimeError("ui serve failed"))
                     log.exception("UI HTTP server failed")

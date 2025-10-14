@@ -6,19 +6,38 @@ from typing import Dict, Any
 
 import aiohttp
 import os
-from urllib.parse import parse_qs, urlparse
 
 import logging
 
 from ..portfolio import Portfolio
 from ..prices import fetch_token_prices_async, get_cached_price
 from ..token_aliases import canonical_mint, validate_mint
-
-_HELIUS_BASE_URL = os.getenv("HELIUS_PRICE_BASE_URL", "https://api.helius.xyz")
-_HELIUS_PRICE_PATH = os.getenv("HELIUS_PRICE_METADATA_PATH", "/v0/token-metadata")
-_HELIUS_TIMEOUT = float(os.getenv("HELIUS_PRICE_TIMEOUT", "2.5"))
+from ..runtime_settings import (
+    RuntimeSettings,
+    SettingsError,
+    refresh_runtime_settings,
+    runtime_settings,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _settings() -> RuntimeSettings:
+    loader = refresh_runtime_settings if os.getenv("PYTEST_CURRENT_TEST") else runtime_settings
+    try:
+        return loader()
+    except SettingsError:
+        if os.getenv("PYTEST_CURRENT_TEST") is not None:
+            os.environ.setdefault(
+                "HELIUS_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=test"
+            )
+            os.environ.setdefault(
+                "HELIUS_WS_URL", "wss://mainnet.helius-rpc.com/?api-key=test"
+            )
+            os.environ.setdefault("HELIUS_API_KEY", "test-helius-key")
+            os.environ.setdefault("HELIUS_API_KEYS", "test-helius-key")
+            return refresh_runtime_settings()
+        return refresh_runtime_settings()
 
 
 async def resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[str, Any]]:
@@ -28,7 +47,7 @@ async def resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[s
     available.  The live quote fetch can legitimately fail when upstream REST
     or websocket providers are unreachable, credentials such as the Birdeye API
     key are missing, or a token simply is not listed by any of the configured
-    feeds (Helius, Birdeye, Dexscreener).  This helper consolidates the common
+    feeds (Helius, Birdeye, Jupiter, Pyth).  This helper consolidates the common
     fallbacks used across the codebase so agents can continue operating in
     those scenarios:
 
@@ -102,22 +121,10 @@ async def resolve_price(token: str, portfolio: Portfolio) -> tuple[float, Dict[s
 
 
 def _helius_api_key() -> str | None:
-    explicit = os.getenv("HELIUS_API_KEY")
-    if explicit and explicit.strip():
-        return explicit.strip()
-    rpc_url = os.getenv("SOLANA_RPC_URL")
-    if not rpc_url:
-        return None
     try:
-        parsed = urlparse(rpc_url)
-    except Exception:
+        return _settings().helius_api_key
+    except SettingsError:
         return None
-    query = parse_qs(parsed.query)
-    for key in ("api-key", "apiKey"):
-        values = query.get(key)
-        if values:
-            return values[0]
-    return None
 
 
 async def _fetch_helius_price(token: str) -> tuple[float, Dict[str, Any]]:
@@ -127,9 +134,10 @@ async def _fetch_helius_price(token: str) -> tuple[float, Dict[str, Any]]:
         details["helius_error"] = "missing_api_key"
         return 0.0, details
 
-    url = _HELIUS_BASE_URL.rstrip("/") + _HELIUS_PRICE_PATH
+    settings = _settings()
+    url = settings.helius_price_base_url.rstrip("/") + settings.helius_price_metadata_path
     params = {"api-key": api_key, "mintAccounts": token}
-    timeout = aiohttp.ClientTimeout(total=_HELIUS_TIMEOUT)
+    timeout = aiohttp.ClientTimeout(total=settings.helius_price_timeout)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params) as resp:

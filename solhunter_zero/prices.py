@@ -11,6 +11,12 @@ import aiohttp
 from solhunter_zero.lru import TTLCache
 from .async_utils import run_async
 from .http import get_session
+from .runtime_settings import (
+    RuntimeSettings,
+    SettingsError,
+    refresh_runtime_settings,
+    runtime_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,27 +27,55 @@ PRICE_CACHE_TTL = float(os.getenv("PRICE_CACHE_TTL", "30") or 30)
 PRICE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
 QUOTE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
 
-JUPITER_PRICE_URL = os.getenv("JUPITER_PRICE_URL", "https://price.jup.ag/v3/price")
-JUPITER_BATCH_SIZE = max(1, int(os.getenv("JUPITER_BATCH_SIZE", "100") or 100))
-
 DEXSCREENER_PRICE_URL = os.getenv(
     "DEXSCREENER_PRICE_URL", "https://api.dexscreener.com/latest/dex/tokens"
 )
-
-BIRDEYE_PRICE_URL = os.getenv("BIRDEYE_PRICE_URL", "https://public-api.birdeye.so")
-BIRDEYE_CHAIN = os.getenv("BIRDEYE_CHAIN", "solana")
-BIRDEYE_MAX_BATCH = max(1, int(os.getenv("BIRDEYE_BATCH_SIZE", "100") or 100))
-
-PYTH_PRICE_URL = os.getenv("PYTH_PRICE_URL", "https://hermes.pyth.network/v2/updates/price/latest")
 
 SYNTHETIC_HINTS_ENV = "SYNTHETIC_PRICE_HINTS"
 OFFLINE_PRICE_DEFAULT = os.getenv("OFFLINE_PRICE_DEFAULT")
 
 _LAST_BIRDEYE_KEY: str | None = None
+_BIRDEYE_THROTTLE_UNTIL: float = 0.0
+_LAST_WARNING: Dict[str, float] = {}
+_WARNING_INTERVAL = 60.0
+
+
+def _settings() -> RuntimeSettings:
+    loader = refresh_runtime_settings if os.getenv("PYTEST_CURRENT_TEST") else runtime_settings
+    try:
+        return loader()
+    except SettingsError:
+        if os.getenv("PYTEST_CURRENT_TEST") is not None:
+            os.environ.setdefault(
+                "HELIUS_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=test"
+            )
+            os.environ.setdefault(
+                "HELIUS_WS_URL", "wss://mainnet.helius-rpc.com/?api-key=test"
+            )
+            os.environ.setdefault("HELIUS_API_KEY", "test-helius-key")
+            os.environ.setdefault("HELIUS_API_KEYS", "test-helius-key")
+            return refresh_runtime_settings()
+        return refresh_runtime_settings()
 
 
 def _monotonic() -> float:
     return time.monotonic()
+
+
+def _set_birdeye_throttle(delay: float) -> None:
+    global _BIRDEYE_THROTTLE_UNTIL
+    wait = max(1.0, float(delay))
+    _BIRDEYE_THROTTLE_UNTIL = max(_BIRDEYE_THROTTLE_UNTIL, _monotonic() + wait)
+
+
+def _warn_provider(name: str, message: str, *args: Any) -> None:
+    now = _monotonic()
+    last = _LAST_WARNING.get(name, 0.0)
+    if now - last >= _WARNING_INTERVAL:
+        _LAST_WARNING[name] = now
+        logger.warning(message, *args)
+    else:
+        logger.debug(message, *args)
 
 
 def _now_ms() -> int:
@@ -124,7 +158,7 @@ class ProviderConfig:
     requires_key: Callable[[], str | None] | None = None
 
 
-_PROVIDER_NAMES = ["birdeye", "jupiter", "dexscreener", "pyth", "synthetic"]
+_PROVIDER_NAMES = ["helius", "birdeye", "jupiter", "pyth", "dexscreener", "synthetic"]
 
 
 def _init_provider_health() -> Dict[str, ProviderHealth]:
@@ -140,6 +174,13 @@ PROVIDER_STATS: Dict[str, ProviderStats] = _init_provider_stats()
 
 
 PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
+    "helius": ProviderConfig(
+        name="helius",
+        fetcher="_fetch_quotes_helius",
+        label="Helius",
+        overrides=True,
+        requires_key=lambda: _settings().helius_api_key,
+    ),
     "birdeye": ProviderConfig(
         name="birdeye",
         fetcher="_fetch_quotes_birdeye",
@@ -152,16 +193,16 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
         fetcher="_fetch_quotes_jupiter",
         label="Jupiter",
     ),
-    "dexscreener": ProviderConfig(
-        name="dexscreener",
-        fetcher="_fetch_quotes_dexscreener",
-        label="Dexscreener",
-    ),
     "pyth": ProviderConfig(
         name="pyth",
         fetcher="_fetch_quotes_pyth",
         label="Pyth",
         overrides=True,
+    ),
+    "dexscreener": ProviderConfig(
+        name="dexscreener",
+        fetcher="_fetch_quotes_dexscreener",
+        label="Dexscreener",
     ),
     "synthetic": ProviderConfig(
         name="synthetic",
@@ -173,18 +214,27 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
 
 def _get_birdeye_api_key() -> str | None:
     global _LAST_BIRDEYE_KEY
-    key = os.getenv("BIRDEYE_API_KEY") or None
+    try:
+        candidate = _settings().birdeye_api_key
+    except SettingsError:
+        candidate = None
+    key = candidate.strip() if isinstance(candidate, str) else ""
+    if not key:
+        key = None
     if key != _LAST_BIRDEYE_KEY:
         _LAST_BIRDEYE_KEY = key
-        if key:
+        if key and "birdeye" in PROVIDER_HEALTH:
             PROVIDER_HEALTH["birdeye"].clear()
     return key
 
 
 def reset_provider_health() -> None:
-    global PROVIDER_HEALTH, PROVIDER_STATS
+    global PROVIDER_HEALTH, PROVIDER_STATS, _LAST_WARNING, _BIRDEYE_THROTTLE_UNTIL, _LAST_BIRDEYE_KEY
     PROVIDER_HEALTH = _init_provider_health()
     PROVIDER_STATS = _init_provider_stats()
+    _LAST_WARNING = {}
+    _BIRDEYE_THROTTLE_UNTIL = 0.0
+    _LAST_BIRDEYE_KEY = None
 
 
 def get_provider_health_snapshot() -> Dict[str, Dict[str, Any]]:
@@ -225,6 +275,15 @@ def get_cached_price(token: str) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _cached_quotes_for(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
+    cached: Dict[str, PriceQuote] = {}
+    for token in tokens:
+        quote = get_cached_quote(token)
+        if quote is not None:
+            cached[token] = quote
+    return cached
 
 
 def update_price_cache(token: str, price: float | PriceQuote) -> None:
@@ -354,16 +413,86 @@ def _extract_price(value: Any) -> float | None:
     return None
 
 
+async def _fetch_quotes_helius(
+    session: aiohttp.ClientSession, tokens: Sequence[str]
+) -> Dict[str, PriceQuote]:
+    if not tokens:
+        return {}
+    if os.getenv("PYTEST_CURRENT_TEST") is not None:
+        return {}
+    settings = _settings()
+    url = settings.helius_price_rpc_url.strip()
+    if not url:
+        return {}
+    ids = [tok for tok in tokens if isinstance(tok, str)]
+    if not ids:
+        return {}
+    payload = {
+        "jsonrpc": "2.0",
+        "id": f"helius-price-{_now_ms()}",
+        "method": settings.helius_price_rpc_method,
+        "params": {"ids": ids},
+    }
+    timeout = aiohttp.ClientTimeout(total=settings.helius_price_timeout)
+    async with session.post(url, json=payload, timeout=timeout) as resp:
+        resp.raise_for_status()
+        data = await resp.json(content_type=None)
+    result = data.get("result") if isinstance(data, dict) else None
+    if isinstance(result, list):
+        items = [item for item in result if isinstance(item, MutableMapping)]
+    elif isinstance(result, MutableMapping):
+        collection = (
+            result.get("items")
+            or result.get("assets")
+            or result.get("tokens")
+            or []
+        )
+        items = [item for item in collection if isinstance(item, MutableMapping)]
+    else:
+        items = []
+    quotes: Dict[str, PriceQuote] = {}
+    now_ms = _now_ms()
+    for entry in items:
+        mint = entry.get("id") or entry.get("mint") or entry.get("address")
+        if not isinstance(mint, str) or mint not in ids:
+            continue
+        token_info = entry.get("tokenInfo") or entry.get("token_info")
+        price_info = None
+        if isinstance(token_info, MutableMapping):
+            price_info = token_info.get("priceInfo") or token_info.get("price_info")
+        if price_info is None:
+            price_info = entry.get("priceInfo") or entry.get("price_info")
+        price = _extract_price(price_info)
+        if price is None:
+            continue
+        updated = entry.get("lastUpdated") or entry.get("updatedAt")
+        try:
+            asof = int(updated)
+        except (TypeError, ValueError):
+            asof = now_ms
+        else:
+            if asof < 1_000_000_000_000:
+                asof = now_ms
+        quotes[mint] = PriceQuote(
+            price_usd=float(price),
+            source="helius",
+            asof=asof,
+            quality="authoritative",
+        )
+    return quotes
+
+
 async def _fetch_quotes_jupiter(
     session: aiohttp.ClientSession, tokens: Sequence[str]
 ) -> Dict[str, PriceQuote]:
     if not tokens:
         return {}
-    url = JUPITER_PRICE_URL.strip()
+    settings = _settings()
+    url = settings.jupiter_price_url.strip()
     if not url:
         return {}
     quotes: Dict[str, PriceQuote] = {}
-    for chunk in _chunked(tokens, JUPITER_BATCH_SIZE):
+    for chunk in _chunked(tokens, settings.jupiter_batch_size):
         params = {"ids": ",".join(chunk)}
         payload = await _request_json(
             session,
@@ -435,20 +564,40 @@ async def _fetch_quotes_dexscreener(
 async def _fetch_quotes_birdeye(
     session: aiohttp.ClientSession, tokens: Sequence[str]
 ) -> Dict[str, PriceQuote]:
+    global _BIRDEYE_THROTTLE_UNTIL
     api_key = _get_birdeye_api_key()
     if not api_key or not tokens:
         return {}
-    url = f"{BIRDEYE_PRICE_URL.rstrip('/')}/defi/multi_price"
+    settings = _settings()
+    base_url = settings.birdeye_base_url.rstrip("/")
+    chain = settings.birdeye_chain
+    batch_size = min(settings.birdeye_batch_size, 100)
+    url = f"{base_url}/defi/multi_price"
     headers = {
         "X-API-KEY": api_key,
         "accept": "application/json",
-        "x-chain": BIRDEYE_CHAIN,
+        "x-chain": chain,
     }
+    if _BIRDEYE_THROTTLE_UNTIL and _monotonic() < _BIRDEYE_THROTTLE_UNTIL:
+        cached = _cached_quotes_for(tokens)
+        if cached:
+            return cached
+        return {}
     quotes: Dict[str, PriceQuote] = {}
-    chunks = _chunked(tokens, min(BIRDEYE_MAX_BATCH, 100))
+    chunks = _chunked(tokens, batch_size)
     for idx, chunk in enumerate(chunks):
-        params = {"list_address": ",".join(chunk), "chain": BIRDEYE_CHAIN}
-        payload = await _request_json(session, url, "Birdeye", params=params, headers=headers)
+        params = {"list_address": ",".join(chunk), "chain": chain}
+        try:
+            payload = await _request_json(
+                session, url, "Birdeye", params=params, headers=headers
+            )
+        except aiohttp.ClientResponseError as exc:
+            if exc.status == 429:
+                delay = _retry_after_seconds(exc.headers) or 10.0
+                _set_birdeye_throttle(delay)
+                quotes.update(_cached_quotes_for(chunk))
+                continue
+            raise
         if not isinstance(payload, MutableMapping):
             continue
         data = payload.get("data")
@@ -476,7 +625,9 @@ async def _fetch_quotes_birdeye(
                     quality="aggregate",
                 )
         if idx + 1 < len(chunks):
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
+    if quotes:
+        _BIRDEYE_THROTTLE_UNTIL = 0.0
     return quotes
 
 
@@ -510,7 +661,7 @@ async def _fetch_quotes_pyth(
     params = {"ids": ",".join(ids)}
     payload = await _request_json(
         session,
-        PYTH_PRICE_URL,
+        _settings().pyth_price_url,
         "pyth",
         params=params,
         allow_unavailable=True,
@@ -601,12 +752,12 @@ async def _fetch_quotes_synthetic(
 
 
 def _provider_priority() -> List[str]:
-    order = ["jupiter", "dexscreener", "birdeye", "pyth", "synthetic"]
+    order = ["helius", "birdeye", "jupiter", "pyth", "synthetic"]
     state = PROVIDER_HEALTH.get("birdeye")
     key = _get_birdeye_api_key() if state else None
-    if state and key and not state.in_cooldown() and state.healthy:
+    if not (state and key and state.healthy and not state.in_cooldown()):
         order.remove("birdeye")
-        order.insert(0, "birdeye")
+        order.append("birdeye")
     return order
 
 
@@ -646,11 +797,9 @@ def _record_provider_failure(name: str, exc: BaseException, latency_ms: float) -
     PROVIDER_HEALTH[name].record_failure(status, cooldown=cooldown)
     PROVIDER_STATS[name].record_failure(status, latency_ms, exc)
     if isinstance(exc, aiohttp.ClientResponseError):
-        logger.warning(
-            "Prices: %s HTTP error %s", name, exc.status,
-        )
+        _warn_provider("provider:" + name, "Prices: %s HTTP error %s", name, exc.status)
     else:
-        logger.warning("Prices: %s failure %s", name, exc)
+        _warn_provider("provider:" + name, "Prices: %s failure %s", name, exc)
 
 
 async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
@@ -659,6 +808,7 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
     session = await get_session()
     resolved: Dict[str, PriceQuote] = {}
     order = _provider_priority()
+    executed: set[str] = set()
     for idx, provider_name in enumerate(order):
         config = PROVIDER_CONFIGS[provider_name]
         state = PROVIDER_HEALTH[provider_name]
@@ -674,6 +824,7 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
             continue
         fetcher = globals()[config.fetcher]
         start = _monotonic()
+        executed.add(provider_name)
         try:
             quotes = await fetcher(session, tuple(pending))
         except ProviderUnavailableError as exc:
@@ -711,10 +862,28 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
             logger.warning(
                 "Prices: unresolved token(s) after provider loop: %s", ", ".join(missing)
             )
+            if "dexscreener" in PROVIDER_CONFIGS:
+                dex_config = PROVIDER_CONFIGS["dexscreener"]
+                pending = [tok for tok in tokens if tok not in resolved]
+                if pending:
+                    fetcher = globals()[dex_config.fetcher]
+                    start = _monotonic()
+                    try:
+                        quotes = await fetcher(session, tuple(pending))
+                    except Exception as exc:  # noqa: BLE001
+                        _record_provider_failure("dexscreener", exc, (_monotonic() - start) * 1000.0)
+                    else:
+                        latency_ms = (_monotonic() - start) * 1000.0
+                        _record_provider_success("dexscreener", latency_ms)
+                        for token, quote in quotes.items():
+                            if token not in resolved:
+                                resolved[token] = quote
     return {token: resolved[token] for token in tokens if token in resolved}
 
 
 async def fetch_price_quotes_async(tokens: Iterable[str]) -> Dict[str, PriceQuote]:
+    if os.getenv("PYTEST_CURRENT_TEST") is not None:
+        reset_provider_health()
     token_list = _tokens_key(tokens)
     if not token_list:
         return {}

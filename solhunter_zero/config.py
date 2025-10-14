@@ -510,6 +510,8 @@ def set_env_from_config(config: dict) -> None:
                 host,
             )
 
+    _validate_primary_env()
+
 
 def validate_config(cfg: Mapping[str, Any]) -> dict:
     """Validate config against `ConfigModel` schema and return normalized dict."""
@@ -518,6 +520,20 @@ def validate_config(cfg: Mapping[str, Any]) -> dict:
         return model.model_dump(mode="json") if hasattr(model, "model_dump") else model.dict()
     except ValidationError as exc:
         raise ValueError(f"Invalid configuration: {exc}") from exc
+
+
+def _validate_primary_env() -> None:
+    """Ensure core providers are configured with real credentials."""
+
+    try:
+        from .runtime_settings import refresh_runtime_settings, SettingsError
+    except Exception as exc:  # pragma: no cover - defensive
+        raise RuntimeError(f"Failed to import runtime settings: {exc}") from exc
+
+    try:
+        refresh_runtime_settings()
+    except SettingsError as exc:
+        raise RuntimeError(f"Critical environment validation failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

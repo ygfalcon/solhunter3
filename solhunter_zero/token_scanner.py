@@ -1476,6 +1476,69 @@ async def scan_tokens_async(
 
     session = aiohttp.ClientSession()
     try:
+        helius_candidates: List[Dict[str, Any]] = []
+        try:
+            helius_candidates = await _helius_trending(
+                session, limit=max(requested * 2, requested + 5)
+            )
+        except Exception as exc:
+            logger.debug("Helius trending fetch failed: %s", exc)
+            helius_candidates = []
+
+        for item in helius_candidates:
+            if not isinstance(item, dict):
+                continue
+            mint = _normalize_mint_candidate(item.get("address"))
+            if not mint:
+                continue
+            if mint in mints:
+                existing = TRENDING_METADATA.setdefault(mint, dict(item))
+                if isinstance(existing, dict):
+                    sources = existing.setdefault("sources", [])
+                    if isinstance(sources, list) and "helius" not in sources:
+                        sources.insert(0, "helius")
+                    meta_map = existing.setdefault("metadata", {})
+                    if isinstance(meta_map, dict):
+                        meta_map.setdefault("helius", item.get("metadata") or item)
+                continue
+            mints.append(mint)
+            meta = dict(item)
+            meta["address"] = mint
+            meta.setdefault("source", "helius")
+            sources = meta.setdefault("sources", [])
+            if isinstance(sources, list):
+                if "helius" not in sources:
+                    sources.insert(0, "helius")
+            else:
+                meta["sources"] = ["helius"]
+            details = meta.setdefault("metadata", {})
+            if isinstance(details, dict):
+                details.setdefault("helius", item.get("metadata") or item)
+            if SOLSCAN_API_KEY and (
+                not meta.get("name")
+                or not meta.get("symbol")
+                or "decimals" not in meta
+            ):
+                solscan_meta = await _solscan_enrich(
+                    session,
+                    mint,
+                    SOLSCAN_API_KEY,
+                )
+                if solscan_meta:
+                    meta.update(solscan_meta)
+                    srcs = meta.setdefault("sources", [])
+                    if isinstance(srcs, list) and "solscan" not in srcs:
+                        srcs.append("solscan")
+                    details = meta.setdefault("metadata", {})
+                    if isinstance(details, dict):
+                        details.setdefault("solscan", solscan_meta)
+            meta.setdefault("rank", len(TRENDING_METADATA))
+            TRENDING_METADATA[mint] = meta
+            if len(mints) >= requested:
+                break
+        if mints:
+            success = True
+
         birdeye_key = resolved_birdeye_key if use_birdeye else None
         try:
             seed_candidates = await _collect_trending_seeds(
