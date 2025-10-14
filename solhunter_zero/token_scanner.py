@@ -1361,6 +1361,7 @@ async def scan_tokens_async(
     limit: int = 50,
     enrich: bool = True,   # kept for compatibility; enrichment is separate call
     api_key: str | None = None,
+    preflight_runs: bool | None = None,
 ) -> List[str]:
     """
     Pull trending mints preferring Helius price data, falling back to BirdEye.
@@ -1374,6 +1375,24 @@ async def scan_tokens_async(
 
     resolved_birdeye_key = _resolve_birdeye_key(api_key)
     birdeye_allowed = _birdeye_enabled(resolved_birdeye_key)
+
+    if preflight_runs is None:
+        preflight_env = os.getenv("SOLHUNTER_PREFLIGHT") or os.getenv("PREFLIGHT_RUNS") or ""
+        normalized = preflight_env.strip().lower()
+        if not normalized:
+            preflight_runs = False
+        elif normalized in {"0", "false", "no", "off"}:
+            preflight_runs = False
+        else:
+            try:
+                preflight_runs = int(normalized) > 0
+            except ValueError:
+                preflight_runs = True
+
+    preflight_active = bool(preflight_runs)
+    use_birdeye = birdeye_allowed and not preflight_active
+    if birdeye_allowed and not use_birdeye:
+        logger.debug("Birdeye disabled during preflight runs")
 
     now = time.time()
 
@@ -1457,7 +1476,7 @@ async def scan_tokens_async(
 
     session = aiohttp.ClientSession()
     try:
-        birdeye_key = resolved_birdeye_key if birdeye_allowed else None
+        birdeye_key = resolved_birdeye_key if use_birdeye else None
         try:
             seed_candidates = await _collect_trending_seeds(
                 session,
@@ -1599,7 +1618,7 @@ async def scan_tokens_async(
                 requested,
             )
 
-        while birdeye_allowed and not allow_partial and len(mints) < requested:
+        while use_birdeye and not allow_partial and len(mints) < requested:
             page_size = min(20, requested - len(mints))
             try:
                 batch = await _birdeye_trending(

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import random
 import time
 from typing import Any, Dict, Optional, Tuple, List
 from urllib.parse import urlparse, parse_qs
@@ -10,6 +12,8 @@ from urllib.parse import urlparse, parse_qs
 import copy
 
 import aiohttp
+
+logger = logging.getLogger(__name__)
 
 from .scanner_onchain import (
     fetch_average_swap_size as _scanner_fetch_average_swap_size,
@@ -196,12 +200,17 @@ async def _json(session: aiohttp.ClientSession, r: aiohttp.ClientResponse) -> Di
 # -------------------- Birdeye --------------------
 
 async def _birdeye_get(session: aiohttp.ClientSession, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    headers = {"X-API-KEY": BIRDEYE_API_KEY}
+    headers = {
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "accept": "application/json",
+        "x-chain": os.getenv("BIRDEYE_CHAIN", "solana"),
+    }
     params = dict(params or {})
-    params.setdefault("chain", "solana")
+    params.setdefault("chain", os.getenv("BIRDEYE_CHAIN", "solana"))
     url = f"{BIRDEYE_BASE}{path}"
     sem = _get_birdeye_semaphore()
-    for attempt in range(3):
+    throttle_marker = "compute units usage limit exceeded"
+    for delay in (0.5, 1.0, 2.0, 4.0):
         try:
             async with sem:
                 async with session.get(
@@ -210,15 +219,30 @@ async def _birdeye_get(session: aiohttp.ClientSession, path: str, params: Dict[s
                     params=params,
                     timeout=aiohttp.ClientTimeout(total=8),
                 ) as r:
-                    if r.status == 429:
-                        await asyncio.sleep(0.6 * (attempt + 1))
+                    if r.status == 200:
+                        return await _json(session, r)
+                    try:
+                        body = await r.text()
+                    except Exception:  # pragma: no cover - defensive
+                        body = ""
+                    lower = body.lower()
+                    if r.status in (400, 429) and throttle_marker in lower:
+                        sleep_for = delay + random.random() * 0.3
+                        logger.debug(
+                            "Birdeye throttle %s; sleeping %.2fs", r.status, sleep_for
+                        )
+                        await asyncio.sleep(sleep_for)
                         continue
                     if r.status >= 400:
+                        logger.warning(
+                            "Birdeye error %s: %s", r.status, (body or "")[:200]
+                        )
                         return {}
                     return await _json(session, r)
         except asyncio.TimeoutError:
             continue
-        except Exception:
+        except Exception as exc:
+            logger.debug("Birdeye request failed: %s", exc)
             return {}
     return {}
 
