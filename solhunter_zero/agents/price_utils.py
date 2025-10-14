@@ -10,12 +10,15 @@ from urllib.parse import parse_qs, urlparse
 
 import logging
 
+from ..env_settings import api_url, env_value
 from ..portfolio import Portfolio
 from ..prices import fetch_token_prices_async, get_cached_price
 from ..token_aliases import canonical_mint, validate_mint
 
-_HELIUS_BASE_URL = os.getenv("HELIUS_PRICE_BASE_URL", "https://api.helius.xyz")
-_HELIUS_PRICE_PATH = os.getenv("HELIUS_PRICE_METADATA_PATH", "/v0/token-metadata")
+_HELIUS_BASE_URL = api_url("HELIUS_PRICE_BASE_URL") or "https://api.helius.xyz"
+_HELIUS_PRICE_PATH = env_value(
+    "HELIUS_PRICE_METADATA_PATH", default="/v0/token-metadata", strip=True
+)
 _HELIUS_TIMEOUT = float(os.getenv("HELIUS_PRICE_TIMEOUT", "2.5"))
 
 logger = logging.getLogger(__name__)

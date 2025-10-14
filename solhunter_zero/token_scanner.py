@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 import aiohttp
 
 from .discovery.mint_resolver import normalize_candidate
+from .env_settings import api_key, api_url, env_value
 from .logging_utils import warn_once_per
 from .token_aliases import canonical_mint, validate_mint
 from .clients.helius_das import get_asset_batch
@@ -27,17 +28,13 @@ def _default_enrich_rpc() -> str:
 
 DEFAULT_SOLANA_RPC = _default_enrich_rpc()
 
-BIRDEYE_BASE = "https://public-api.birdeye.so"
+BIRDEYE_BASE = api_url("BIRDEYE_API_URL") or "https://public-api.birdeye.so"
 
-HELIUS_BASE = os.getenv("HELIUS_PRICE_BASE_URL", "https://api.helius.xyz")
-HELIUS_TREND_PATH = os.getenv("HELIUS_PRICE_PATH", "/v1/trending-tokens")
-SOLSCAN_META_URL = os.getenv(
-    "SOLSCAN_META_URL", "https://pro-api.solscan.io/v1.0/token/meta"
-)
-SOLSCAN_API_KEY = (os.getenv("SOLSCAN_API_KEY") or "").strip() or None
-PUMP_LEADERBOARD_URL = os.getenv(
-    "PUMP_LEADERBOARD_URL", "https://pumpportal.fun/api/leaderboard"
-)
+HELIUS_BASE = api_url("HELIUS_PRICE_BASE_URL") or "https://api.helius.xyz"
+HELIUS_TREND_PATH = env_value("HELIUS_PRICE_PATH", default="/v1/trending-tokens", strip=True)
+SOLSCAN_META_URL = api_url("SOLSCAN_META_URL")
+SOLSCAN_API_KEY = api_key("SOLSCAN_API_KEY") or None
+PUMP_LEADERBOARD_URL = api_url("PUMP_LEADERBOARD_URL")
 
 
 def _extract_helius_key() -> str:
@@ -114,7 +111,7 @@ _TRENDING_MIN_VOLUME = float(os.getenv("TRENDING_MIN_VOLUME_USD", "20000") or 20
 _MAX_DAS_CHUNK = max(1, int(os.getenv("DAS_TRENDING_CHUNK", "80") or 80))
 
 def _resolve_birdeye_key(candidate: str | None = None) -> str | None:
-    key = (candidate or os.getenv("BIRDEYE_API_KEY") or "").strip()
+    key = (candidate or api_key("BIRDEYE_API_KEY"))
     return key or None
 
 

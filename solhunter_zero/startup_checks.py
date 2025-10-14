@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any, Optional
 
 try:
@@ -11,12 +10,17 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     aiohttp = None
 
+from .env_settings import api_key, env_value
+
 logger = logging.getLogger(__name__)
 
 # Endpoints / env
-BIRDEYE_API = os.getenv("BIRDEYE_API", "https://public-api.birdeye.so/defi/tokenlist")
-BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY")
-SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY")
+_birdeye_url = env_value("BIRDEYE_TOKENLIST_URL", strip=True)
+if not _birdeye_url:
+    _birdeye_url = env_value("BIRDEYE_API", default="https://public-api.birdeye.so/defi/tokenlist", strip=True)
+BIRDEYE_API = _birdeye_url
+BIRDEYE_API_KEY = api_key("BIRDEYE_API_KEY")
+SOLANA_RPC_URL = env_value("SOLANA_RPC_URL", strip=True)
 
 
 # -----------------------------

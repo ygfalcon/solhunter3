@@ -8,10 +8,9 @@ from typing import Any, Iterable
 from urllib.error import URLError, HTTPError
 from urllib.request import urlopen
 
-DEFAULT_URL = (
-    "https://api.coingecko.com/api/v3/coins/solana/market_chart"
-    "?vs_currency=usd&days=1&interval=hourly"
-)
+from ..env_settings import api_url
+
+DEFAULT_URL = api_url("COINGECKO_SOLANA_MARKET_URL")
 FALLBACK_PATH = Path(__file__).resolve().parents[1] / "data" / "paper_ticks.json"
 
 
