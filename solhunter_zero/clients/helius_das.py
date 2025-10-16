@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -161,7 +162,7 @@ async def _post_rpc(
         "method": method,
         "params": params,
     }
-    for attempt in range(_MAX_RETRIES):
+    for attempt in range(1, _MAX_RETRIES + 1):
         try:
             async with session.post(
                 url,
@@ -171,30 +172,66 @@ async def _post_rpc(
             ) as resp:
                 if resp.status == 429:
                     retry_after = resp.headers.get("Retry-After")
-                    delay = float(retry_after) if retry_after else backoff
+                    try:
+                        delay = float(retry_after) if retry_after else backoff
+                    except (TypeError, ValueError):
+                        delay = backoff
                     jitter = random.uniform(0, delay * 0.25)
                     wait_for = min(delay + jitter, _BACKOFF_CAP)
                     log.warning(
                         "DAS request hit 429",
-                        extra={"op": op, "retry_after": retry_after, "delay": wait_for},
+                        extra={
+                            "op": op,
+                            "attempt": attempt,
+                            "status": resp.status,
+                            "retry_after": retry_after,
+                            "delay": wait_for,
+                        },
                     )
+                    if attempt >= _MAX_RETRIES:
+                        raise RuntimeError("DAS RPC rate limited (429)")
                     await asyncio.sleep(wait_for)
                     backoff = min(backoff * 2, _BACKOFF_CAP)
                     continue
                 resp.raise_for_status()
-                data = await resp.json()
+                text = await resp.text()
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError as err:
+                    raise RuntimeError("Invalid JSON returned from DAS") from err
                 if not isinstance(data, dict):
-                    return {}
-                if "error" in data and data.get("error"):
+                    raise RuntimeError("Unexpected DAS response type")
+                if data.get("error"):
                     raise RuntimeError(f"DAS RPC error: {data['error']}")
                 return data
         except Exception as exc:  # pragma: no cover - network failures mocked in tests
             last_exception = exc
+            if attempt >= _MAX_RETRIES:
+                break
             jitter = random.uniform(0, backoff * 0.25)
             wait_for = min(backoff + jitter, _BACKOFF_CAP)
+            log.warning(
+                "Retrying DAS request",
+                extra={
+                    "op": op,
+                    "attempt": attempt,
+                    "delay": wait_for,
+                    "error_type": type(exc).__name__,
+                    "status": getattr(exc, "status", None),
+                },
+            )
             await asyncio.sleep(wait_for)
             backoff = min(backoff * 2, _BACKOFF_CAP)
     if last_exception is not None:
+        log.error(
+            "DAS request failed",
+            extra={
+                "op": op,
+                "attempts": _MAX_RETRIES,
+                "error_type": type(last_exception).__name__,
+                "status": getattr(last_exception, "status", None),
+            },
+        )
         raise last_exception
     raise RuntimeError("DAS request failed without exception")
 
@@ -213,9 +250,20 @@ async def search_fungible_recent(
 ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     """Fetch the most recently active fungible assets via searchAssets."""
 
-    resolved_limit = limit if limit is not None else _DEFAULT_LIMIT
+    if limit is not None:
+        try:
+            resolved_limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            resolved_limit = _DEFAULT_LIMIT
+    else:
+        resolved_limit = _DEFAULT_LIMIT
     page_hint = cursor if cursor is not None else page
-    page_number = max(1, int(page_hint or 1))
+    page_number = 1
+    if page_hint is not None:
+        try:
+            page_number = max(1, int(page_hint))
+        except (TypeError, ValueError):
+            page_number = 1
     params: Dict[str, Any] = {
         "tokenType": "fungible",
         "page": page_number,
@@ -253,7 +301,14 @@ async def search_fungible_recent(
             except Exception:
                 continue
     else:
-        items = []
+        fallback = []
+        if isinstance(data, dict):
+            for key in ("items", "tokens", "assets"):
+                candidate = data.get(key)
+                if isinstance(candidate, list):
+                    fallback = candidate
+                    break
+        items = fallback
     if next_page is None and isinstance(items, list) and len(items) >= resolved_limit:
         next_page = page_number + 1
     if isinstance(items, list):
@@ -290,7 +345,14 @@ async def get_asset_batch(
             or []
         )
     else:
-        assets = []
+        fallback = []
+        if isinstance(data, dict):
+            for key in ("items", "assets", "tokens"):
+                candidate = data.get(key)
+                if isinstance(candidate, list):
+                    fallback = candidate
+                    break
+        assets = fallback
     return [item for item in assets if isinstance(item, dict)]
 
 
