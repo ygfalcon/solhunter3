@@ -5,12 +5,19 @@ import ast
 import os
 import sys
 import logging
+import re
 from typing import Mapping, Any, Sequence, cast
 from pathlib import Path
 from importlib import import_module
 import urllib.parse
 
-import tomllib
+try:  # Python 3.11+
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover - fallback for <3.11
+    try:
+        import tomli as tomllib  # type: ignore[import-not-found, no-redef]
+    except ModuleNotFoundError:  # pragma: no cover - optional dependency
+        tomllib = None  # type: ignore[assignment]
 from pydantic import ValidationError
 
 from .jsonutil import loads, dumps
@@ -28,6 +35,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _VALIDATED_URLS: dict[str, str] = {}
+
+
+_REDACT_PATTERN = re.compile(r"(?i)(api[-_]?key|token|auth)=([^&#]+)")
+
+
+def _redact(text: str | None) -> str:
+    """Mask sensitive query parameter values when logging URLs."""
+
+    if text is None:
+        return ""
+
+    def _mask(match: re.Match[str]) -> str:
+        return f"{match.group(1)}=****"
+
+    return _REDACT_PATTERN.sub(_mask, text)
 
 
 def _extract_helius_api_key(url: str | None) -> str | None:
@@ -55,9 +77,11 @@ def _validate_and_store_url(name: str, url: str, schemes: set[str] | None = None
     """
     parsed = urllib.parse.urlparse(url)
     if not parsed.scheme or not parsed.netloc:
-        raise ValueError(f"Invalid {name}: {url!r}")
+        raise ValueError(f"Invalid {name}: {_redact(url)!r}")
     if schemes and parsed.scheme not in schemes:
-        raise ValueError(f"Invalid {name} scheme: {parsed.scheme}")
+        raise ValueError(
+            f"Invalid {name} scheme: {parsed.scheme} ({_redact(url)!r})"
+        )
     # Persist exactly as provided (keep query strings like ?api-key=…)
     os.environ[name] = url
     _VALIDATED_URLS[name] = url
@@ -385,6 +409,10 @@ def _read_config_file(path: Path) -> dict:
         with path.open("r", encoding="utf-8") as fh:
             return yaml.safe_load(fh) or {}
     if path.suffix == ".toml":
+        if tomllib is None:
+            raise RuntimeError(
+                "TOML support requires Python 3.11+ or installing the optional 'tomli' package"
+            )
         with path.open("rb") as fh:
             return tomllib.load(fh)
     raise ValueError(f"Unsupported config format: {path}")
@@ -394,6 +422,7 @@ def _apply_helius_defaults(cfg: dict[str, Any]) -> None:
     """Replace placeholder Helius credentials with usable defaults."""
 
     def _sanitize(url: Any, default: str) -> str | None:
+        """Return ``default`` when ``url`` is empty or still a placeholder."""
         if not isinstance(url, str):
             return None
         text = url.strip()
@@ -454,6 +483,8 @@ def apply_env_overrides(config: Mapping[str, Any] | None) -> dict[str, Any]:
         env_val = os.getenv(env)
         if env_val is not None:
             if isinstance(env_val, str):
+                if not env_val.strip():
+                    continue
                 parsed = None
                 try:
                     parsed = loads(env_val)
@@ -461,9 +492,22 @@ def apply_env_overrides(config: Mapping[str, Any] | None) -> dict[str, Any]:
                     try:
                         parsed = ast.literal_eval(env_val)
                     except (ValueError, SyntaxError):
+                        logger.debug(
+                            "Environment override %s could not be parsed as structured data; using raw string",
+                            env,
+                        )
                         parsed = None
                 if isinstance(parsed, (list, dict)):
                     env_val = parsed
+                elif parsed is not None and key == "agent_weights":
+                    logger.warning(
+                        "Environment override AGENT_WEIGHTS should decode to a mapping; received %s",
+                        type(parsed).__name__,
+                    )
+                elif parsed is None and key == "agent_weights":
+                    logger.warning(
+                        "Environment override AGENT_WEIGHTS must be JSON or a Python mapping literal",
+                    )
             cfg[key] = env_val
     # Validate & normalize via schema
     normalized = validate_config(cfg)
@@ -644,8 +688,10 @@ def select_config(name: str) -> None:
     path = os.path.join(CONFIG_DIR, name)
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    with open(ACTIVE_CONFIG_FILE, "w", encoding="utf-8") as fh:
+    tmp_path = f"{ACTIVE_CONFIG_FILE}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
         fh.write(name)
+    os.replace(tmp_path, ACTIVE_CONFIG_FILE)
     reload_active_config()
 
 
@@ -833,7 +879,9 @@ def reload_active_config() -> dict:
 def get_event_bus_url(cfg: Mapping[str, Any] | None = None) -> str:
     """
     Return websocket URL of the external event bus.
-    Falls back to the built-in default when neither env nor config provide it.
+
+    Only ``ws://`` and ``wss://`` schemes are accepted. Falls back to the
+    built-in default when neither env nor config provide it.
     """
     if "EVENT_BUS_URL" in _VALIDATED_URLS:
         os.environ.setdefault("EVENT_BUS_URL", _VALIDATED_URLS["EVENT_BUS_URL"])
@@ -843,10 +891,7 @@ def get_event_bus_url(cfg: Mapping[str, Any] | None = None) -> str:
     url = os.getenv("EVENT_BUS_URL") or str(cfg.get("event_bus_url", ""))
     if url:
         try:
-            # Include redis/rediss here as depth_service may use it
-            return _validate_and_store_url(
-                "EVENT_BUS_URL", url, {"ws", "wss", "redis", "rediss"}
-            )
+            return _validate_and_store_url("EVENT_BUS_URL", url, {"ws", "wss"})
         except ValueError as exc:
             logger.error(str(exc))
 
@@ -870,7 +915,20 @@ def get_event_bus_peers(cfg: Mapping[str, Any] | None = None) -> list[str]:
             peers = [str(u).strip() for u in raw if str(u).strip()]
         else:
             peers = []
-    return peers
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for peer in peers:
+        parsed = urllib.parse.urlparse(peer)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"ws", "wss"}:
+            logger.warning(
+                "Ignoring non-websocket event bus peer %s", _redact(peer)
+            )
+            continue
+        if peer not in seen:
+            seen.add(peer)
+            cleaned.append(peer)
+    return cleaned
 
 
 def get_broker_url(cfg: Mapping[str, Any] | None = None) -> str | None:
@@ -880,7 +938,7 @@ def get_broker_url(cfg: Mapping[str, Any] | None = None) -> str | None:
 
 
 def get_broker_urls(cfg: Mapping[str, Any] | None = None) -> list[str]:
-    """Return list of message broker URLs."""
+    """Return list of message broker URLs (``redis://``, ``rediss://``, ``nats://``)."""
     cfg = cfg or _ACTIVE_CONFIG
     env_val = os.getenv("BROKER_URLS")
     if env_val:
@@ -897,7 +955,27 @@ def get_broker_urls(cfg: Mapping[str, Any] | None = None) -> list[str]:
         url = os.getenv("BROKER_URL") or str(cfg.get("broker_url", ""))
         if url:
             urls = [url]
-    return urls
+    allowed_schemes = {"redis", "rediss", "nats"}
+    cleaned: list[str] = []
+    for url in urls:
+        parsed = urllib.parse.urlparse(url)
+        scheme = parsed.scheme.lower()
+        if scheme in {"ws", "wss"}:
+            logger.warning(
+                "Ignoring websocket URL %s in BROKER_URLS; use EVENT_BUS_URL or EVENT_BUS_PEERS",
+                _redact(url),
+            )
+            continue
+        if not scheme or scheme not in allowed_schemes:
+            logger.warning(
+                "Ignoring broker URL %s with unsupported scheme %s",
+                _redact(url),
+                scheme or "(none)",
+            )
+            continue
+        if url not in cleaned:
+            cleaned.append(url)
+    return cleaned
 
 
 def get_event_serialization(cfg: Mapping[str, Any] | None = None) -> str | None:
