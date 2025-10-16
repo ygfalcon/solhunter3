@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import signal
 import threading
@@ -13,16 +14,10 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 from ..agent_manager import AgentManager
-from ..config import (
-    apply_env_overrides,
-    get_broker_urls,
-    load_config,
-    load_selected_config,
-    set_env_from_config,
-)
+from ..config import get_broker_urls, load_selected_config, set_env_from_config
 from ..event_bus import (
     publish,
     subscribe,
@@ -53,6 +48,16 @@ log = logging.getLogger(__name__)
 _RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
 _RL_HEALTH_INITIAL_INTERVAL = 5.0
 _RL_HEALTH_MAX_INTERVAL = 60.0
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        raw = os.getenv(name, str(default))
+        if raw is None or raw == "":
+            return default
+        return max(1, int(raw))
+    except Exception:
+        return default
 
 
 def _probe_rl_daemon_health(timeout: float = 0.5) -> Dict[str, Any]:
@@ -195,6 +200,12 @@ class TradingRuntime:
         self.explicit_min_delay = min_delay
         self.explicit_max_delay = max_delay
 
+        self._ui_enabled = os.getenv("UI_ENABLED", "1").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
         self.cfg: Dict[str, Any] = {}
         self.runtime_cfg: Any = None
         self.depth_proc: Optional[Any] = None
@@ -212,8 +223,12 @@ class TradingRuntime:
         self.stop_event = asyncio.Event()
         self._tasks: List[asyncio.Task] = []
         self._subscriptions: List[tuple[str, Any]] = []
-        self._trades: Deque[Dict[str, Any]] = deque(maxlen=200)
-        self._ui_logs: Deque[Dict[str, Any]] = deque(maxlen=200)
+        self._trades: Deque[Dict[str, Any]] = deque(
+            maxlen=_int_env("UI_TRADES_LIMIT", 200)
+        )
+        self._ui_logs: Deque[Dict[str, Any]] = deque(
+            maxlen=_int_env("UI_LOGS_LIMIT", 200)
+        )
         self._last_iteration: Dict[str, Any] = {}
         self._iteration_lock = threading.Lock()
         self._iteration_count = 0
@@ -235,15 +250,22 @@ class TradingRuntime:
         self._market_depth: Dict[str, Dict[str, Any]] = {}
         self._golden_snapshots: Dict[str, Dict[str, Any]] = {}
         self._latest_golden_hash: Dict[str, str] = {}
-        self._agent_suggestions: Deque[Dict[str, Any]] = deque(maxlen=600)
-        self._vote_decisions: Deque[Dict[str, Any]] = deque(maxlen=400)
+        self._agent_suggestions: Deque[Dict[str, Any]] = deque(
+            maxlen=_int_env("UI_SUGGESTIONS_LIMIT", 600)
+        )
+        self._vote_decisions: Deque[Dict[str, Any]] = deque(
+            maxlen=_int_env("UI_VOTE_LIMIT", 400)
+        )
         self._decision_counts: Dict[str, int] = {}
         self._decision_recent: Deque[tuple[str, float]] = deque()
         self._decision_first_seen: Dict[str, float] = {}
-        self._virtual_fills: Deque[Dict[str, Any]] = deque(maxlen=400)
-        self._live_fills: Deque[Dict[str, Any]] = deque(maxlen=400)
+        fills_limit = _int_env("UI_FILLS_LIMIT", 400)
+        self._virtual_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
+        self._live_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
         self._paper_positions_cache: List[Dict[str, Any]] = []
-        self._rl_weights_windows: Deque[Dict[str, Any]] = deque(maxlen=240)
+        self._rl_weights_windows: Deque[Dict[str, Any]] = deque(
+            maxlen=_int_env("UI_RL_WEIGHTS_LIMIT", 240)
+        )
         self._control_states: Dict[str, Dict[str, Any]] = {}
         pipeline_env = os.getenv("NEW_PIPELINE", "")
         fast_flag = os.getenv("FAST_PIPELINE_MODE", "")
@@ -260,6 +282,7 @@ class TradingRuntime:
         self._rl_window_sec: float = 0.4
         self._rl_gate_active: bool = False
         self._rl_gate_reason: Optional[str] = "boot"
+        self._last_heartbeat_perf: Optional[float] = None
         self._rl_status_info: Dict[str, Any] = {
             "enabled": False,
             "running": False,
@@ -301,11 +324,25 @@ class TradingRuntime:
         self.activity.add("runtime", "starting")
         self._start_time = time.time()
         await self._prepare_configuration()
+        log.info("TradingRuntime: configuration prepared")
+        self.activity.add("config", "ready")
         await self._start_event_bus()
+        bus_ok = self.status.event_bus
+        detail = "ready" if bus_ok else "degraded"
+        self.activity.add("bus", detail, ok=bus_ok)
+        log.log(logging.INFO if bus_ok else logging.WARNING, "TradingRuntime: event bus %s", detail)
         await self._start_ui()
+        ui_detail = "enabled" if self.ui_server else "disabled"
+        self.activity.add("ui", ui_detail, ok=bool(self.ui_server))
+        log.info("TradingRuntime: UI %s", ui_detail)
         await self._start_agents()
+        self.activity.add("agents", "ready")
+        log.info("TradingRuntime: agents ready")
         self._start_rl_status_watcher()
         await self._start_loop()
+        loop_state = "pipeline" if self.pipeline is not None else "loop"
+        self.activity.add("loop", loop_state)
+        log.info("TradingRuntime: trading loop started (%s)", loop_state)
         self.activity.add("runtime", "started")
 
     async def stop(self) -> None:
@@ -329,7 +366,14 @@ class TradingRuntime:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-        self._tasks = [t for t in self._tasks if t not in tasks_to_cancel]
+        self._tasks = [
+            t for t in self._tasks if not t.cancelled() and not t.done()
+        ]
+        if not self._tasks:
+            self._tasks = []
+        if self.trading_task is not None:
+            if self.trading_task in tasks_to_cancel or self.trading_task.done():
+                self.trading_task = None
 
         for topic, handler in list(self._subscriptions):
             with contextlib.suppress(Exception):
@@ -340,6 +384,7 @@ class TradingRuntime:
             with contextlib.suppress(Exception):
                 await stop_ws_server()
             self.bus_started = False
+            self.status.event_bus = False
 
         if self.ui_server:
             self.ui_server.stop()
@@ -365,6 +410,9 @@ class TradingRuntime:
             await self.pipeline.stop()
             self.pipeline = None
         self.status.trading_loop = False
+        self.status.heartbeat_ts = None
+        self._last_heartbeat_perf = None
+        self.status.rl_daemon = False
 
         self.activity.add("runtime", "stopped")
 
@@ -453,12 +501,16 @@ class TradingRuntime:
             self.activity.add("event_bus", f"listening on {event_bus_url}")
         except Exception as exc:
             self.activity.add("event_bus", f"failed: {exc}", ok=False)
-            log.exception("Failed to start event bus websocket")
+            log.warning(
+                "Failed to start event bus websocket; running in degraded mode",
+                exc_info=True,
+            )
 
         ok = await verify_broker_connection(timeout=2.0)
-        self.status.event_bus = ok
-        if not ok:
+        self.status.event_bus = bool(ok and self.bus_started)
+        if not ok or not self.bus_started:
             self.activity.add("broker", "verification failed", ok=False)
+            log.warning("Event bus verification failed; continuing without bus")
         else:
             self.activity.add("broker", "verified")
 
@@ -577,6 +629,15 @@ class TradingRuntime:
                     payload["_idempotent"] = count <= 1
                     payload["_first_seen"] = self._decision_first_seen.get(client_id_str)
                     self._vote_decisions.appendleft(payload)
+                    cap = _int_env("VOTE_IDEMPOTENCY_CAP", 20000)
+                    excess = len(self._decision_counts) - cap
+                    if excess > 0:
+                        oldest = sorted(
+                            self._decision_first_seen.items(), key=lambda kv: kv[1]
+                        )[:excess]
+                        for key, _ts in oldest:
+                            self._decision_counts.pop(key, None)
+                            self._decision_first_seen.pop(key, None)
             else:
                 with self._swarm_lock:
                     self._vote_decisions.appendleft(payload)
@@ -666,6 +727,11 @@ class TradingRuntime:
         self.ui_state.rl_provider = self._collect_rl_panel
         self.ui_state.settings_provider = self._collect_settings_panel
 
+        if not self._ui_enabled:
+            self.ui_server = None
+            log.info("TradingRuntime: UI disabled via UI_ENABLED")
+            return
+
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
         self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
@@ -726,21 +792,37 @@ class TradingRuntime:
                     )
                     evaluation_cache_ttl = None
 
+            scoring_batch = self._determine_scoring_batch(fast_mode)
+            evaluation_workers = self._determine_eval_workers(fast_mode)
+            execution_lanes = self._determine_execution_lanes(fast_mode)
+            # FAST_PIPELINE_MODE clamps discovery cadence and worker counts for CI/load shedding.
             self.pipeline = PipelineCoordinator(
                 self.agent_manager,
                 self.portfolio,
                 discovery_interval=discovery_interval_cfg,
                 discovery_cache_ttl=discovery_cache_ttl,
-                scoring_batch=self._determine_scoring_batch(fast_mode),
+                scoring_batch=scoring_batch,
                 evaluation_cache_ttl=evaluation_cache_ttl,
-                evaluation_workers=self._determine_eval_workers(fast_mode),
-                execution_lanes=self._determine_execution_lanes(fast_mode),
+                evaluation_workers=evaluation_workers,
+                execution_lanes=execution_lanes,
                 on_evaluation=self._pipeline_on_evaluation,
                 on_execution=self._pipeline_on_execution,
             )
             log.info(
                 "TradingRuntime: pipeline created; evaluations will run through AgentManager swarm"
             )
+            if fast_mode:
+                publish(
+                    "runtime.log",
+                    {
+                        "stage": "pipeline",
+                        "detail": "FAST mode clamp",
+                        "discovery_interval_s": discovery_interval_cfg,
+                        "evaluation_workers": evaluation_workers,
+                        "execution_lanes": execution_lanes,
+                        "scoring_batch": scoring_batch,
+                    },
+                )
 
         if self._use_golden_pipeline and self.agent_manager is not None and self.portfolio is not None:
             try:
@@ -782,7 +864,7 @@ class TradingRuntime:
             self.cfg, rl_daemon=rl_enabled, rl_interval=rl_interval
         )
         if self.rl_task is not None:
-            self._tasks.append(self.rl_task)
+            self._register_task(self.rl_task)
             running = not self.rl_task.done()
             self._rl_status_info.update(
                 {
@@ -815,7 +897,7 @@ class TradingRuntime:
     def _start_rl_status_watcher(self) -> None:
         loop = asyncio.get_running_loop()
         task = loop.create_task(self._rl_status_watcher(), name="rl_status_watcher")
-        self._tasks.append(task)
+        self._register_task(task)
 
     async def _rl_status_watcher(self) -> None:
         delay = float(_RL_HEALTH_INITIAL_INTERVAL)
@@ -888,12 +970,26 @@ class TradingRuntime:
                 pass
             updates["health_ok"] = health_ok
 
+            internal_age = self._internal_heartbeat_age()
+            if internal_age is not None:
+                existing_age = updates.get("heartbeat_age")
+                try:
+                    existing_val = (
+                        None if existing_age is None else float(existing_age)
+                    )
+                except Exception:
+                    existing_val = None
+                if existing_val is None or internal_age > existing_val:
+                    updates["heartbeat_age"] = internal_age
+
             self._rl_status_info.update(updates)
             self.status.rl_daemon = bool(self._rl_status_info.get("running"))
             self._update_rl_gate()
 
+            jitter = 1.0 + (0.30 * (os.urandom(1)[0] / 255.0 - 0.5))
+            sleep_for = max(0.2, min(float(_RL_HEALTH_MAX_INTERVAL), delay * jitter))
             try:
-                await asyncio.wait_for(self.stop_event.wait(), timeout=delay)
+                await asyncio.wait_for(self.stop_event.wait(), timeout=sleep_for)
             except asyncio.TimeoutError:
                 continue
             else:
@@ -902,15 +998,42 @@ class TradingRuntime:
     def _rl_gate_allows(self) -> bool:
         if not self._rl_status_info.get("running"):
             return False
-        heartbeat_ts = self.status.heartbeat_ts
-        if heartbeat_ts is None:
-            return False
-        try:
-            age = max(0.0, time.time() - float(heartbeat_ts))
-        except Exception:
+        age = self._effective_heartbeat_age()
+        if age is None:
             return False
         window = max(self._rl_window_sec * 2.0, 0.1)
         return age <= window
+
+    def _internal_heartbeat_age(self) -> Optional[float]:
+        epoch_age: Optional[float] = None
+        if self.status.heartbeat_ts is not None:
+            try:
+                epoch_age = max(0.0, time.time() - float(self.status.heartbeat_ts))
+            except Exception:
+                epoch_age = None
+        perf_age: Optional[float] = None
+        if self._last_heartbeat_perf is not None:
+            try:
+                perf_age = max(0.0, time.perf_counter() - self._last_heartbeat_perf)
+            except Exception:
+                perf_age = None
+        candidates = [value for value in (epoch_age, perf_age) if value is not None]
+        if not candidates:
+            return None
+        return max(candidates)
+
+    def _effective_heartbeat_age(self) -> Optional[float]:
+        internal_age = self._internal_heartbeat_age()
+        external_raw = self._rl_status_info.get("heartbeat_age")
+        external_age: Optional[float]
+        try:
+            external_age = None if external_raw is None else max(0.0, float(external_raw))
+        except Exception:
+            external_age = None
+        candidates = [value for value in (internal_age, external_age) if value is not None]
+        if not candidates:
+            return None
+        return max(candidates)
 
     def _set_rl_gate_active(self, active: bool, *, reason: Optional[str] = None) -> None:
         reason_text = None if active else (reason or self._rl_gate_reason or "unhealthy")
@@ -946,25 +1069,12 @@ class TradingRuntime:
         if self._rl_status_info.get("health_ok") is False:
             self._set_rl_gate_active(False, reason="rl_health")
             return
-        hb_age = self._rl_status_info.get("heartbeat_age")
-        if hb_age is not None:
-            try:
-                if float(hb_age) > max(self._rl_window_sec * 2.0, 0.1):
-                    self._set_rl_gate_active(False, reason="stale_heartbeat")
-                    return
-            except Exception:
-                pass
-        heartbeat_ts = self.status.heartbeat_ts
-        if heartbeat_ts is None:
+        window = max(self._rl_window_sec * 2.0, 0.1)
+        hb_age = self._effective_heartbeat_age()
+        if hb_age is None:
             self._set_rl_gate_active(False, reason="no_heartbeat")
             return
-        try:
-            age = max(0.0, time.time() - float(heartbeat_ts))
-        except Exception:
-            self._set_rl_gate_active(False, reason="invalid_heartbeat")
-            return
-        window = max(self._rl_window_sec * 2.0, 0.1)
-        if age > window:
+        if hb_age > window:
             self._set_rl_gate_active(False, reason="stale_heartbeat")
             return
         self._set_rl_gate_active(True)
@@ -974,11 +1084,11 @@ class TradingRuntime:
             await self.pipeline.start()
             self.status.trading_loop = True
             poller = asyncio.create_task(self._pipeline_telemetry_poller(), name="pipeline_telemetry")
-            self._tasks.append(poller)
+            self._register_task(poller)
         else:
             task = asyncio.create_task(self._trading_loop(), name="trading_loop")
             self.trading_task = task
-            self._tasks.append(task)
+            self._register_task(task)
 
     # ------------------------------------------------------------------
     # Trading loop
@@ -1067,6 +1177,7 @@ class TradingRuntime:
         rl_snapshot = self._collect_rl_status()
         rl_running = bool(rl_snapshot.get("running")) if rl_snapshot else False
         self.status.rl_daemon = rl_running
+        activity_entries = self.activity.snapshot()
         status = {
             "event_bus": self.status.event_bus,
             "trading_loop": self.status.trading_loop,
@@ -1076,17 +1187,24 @@ class TradingRuntime:
             "heartbeat": self.status.heartbeat_ts,
             "iterations_completed": self._iteration_count,
             "trade_count": len(self._trades),
-            "activity_count": len(self.activity.snapshot()),
+            "activity_count": len(activity_entries),
         }
-        now_ts = time.time()
         heartbeat_ts = self.status.heartbeat_ts
-        if heartbeat_ts:
+        latency_ms: Optional[float] = None
+        if self._last_heartbeat_perf is not None:
             try:
-                latency = max(0.0, now_ts - float(heartbeat_ts)) * 1000.0
+                latency_ms = max(
+                    0.0, (time.perf_counter() - self._last_heartbeat_perf) * 1000.0
+                )
             except Exception:
-                latency = None
-            if latency is not None:
-                status["bus_latency_ms"] = latency
+                latency_ms = None
+        if latency_ms is None and heartbeat_ts is not None:
+            try:
+                latency_ms = max(0.0, time.time() - float(heartbeat_ts)) * 1000.0
+            except Exception:
+                latency_ms = None
+        if latency_ms is not None:
+            status["bus_latency_ms"] = latency_ms
         env_label = (
             os.getenv("SOLHUNTER_ENV")
             or os.getenv("DEPLOY_ENV")
@@ -1119,6 +1237,8 @@ class TradingRuntime:
         discovery = self._collect_discovery()
         recent_tokens = discovery.get("recent", [])
         status["recent_tokens"] = recent_tokens[:10]
+        status["rl_gate"] = rl_snapshot.get("gate")
+        status["rl_gate_reason"] = rl_snapshot.get("gate_reason")
         return status
 
     def _collect_weights(self) -> Dict[str, Any]:
@@ -1152,6 +1272,9 @@ class TradingRuntime:
         snapshot.setdefault("detected", False)
         snapshot.setdefault("gate", "open" if self._rl_gate_active else "blocked")
         snapshot.setdefault("gate_reason", self._rl_gate_reason)
+        effective_age = self._effective_heartbeat_age()
+        if effective_age is not None:
+            snapshot["heartbeat_age"] = effective_age
         return snapshot
 
     def _collect_iteration(self) -> Dict[str, Any]:
@@ -1300,6 +1423,7 @@ class TradingRuntime:
             if isinstance(depth_pct_raw, dict):
                 for key, value in depth_pct_raw.items():
                     depth_pct[str(key).strip("% ")] = _maybe_float(value)
+            depth_pct = {k: v for k, v in depth_pct.items() if v is not None}
             combined_age = None
             for value in (age_close, age_depth):
                 if value is None:
@@ -1377,6 +1501,8 @@ class TradingRuntime:
                     stale_threshold = max(0.0, float(coalesce) * 2.0 + 5.0)
                 except Exception:
                     stale_threshold = None
+                else:
+                    stale_threshold = min(600.0, max(5.0, stale_threshold))
             stale_flag = False
             if age is not None:
                 if stale_threshold is not None:
@@ -1664,7 +1790,12 @@ class TradingRuntime:
             )
         positions: List[Dict[str, Any]] = []
         if self.portfolio is not None:
-            for mint, pos in self.portfolio.balances.items():
+            balances = getattr(self.portfolio, "balances", {})
+            if isinstance(balances, dict):
+                iterator = balances.items()
+            else:
+                iterator = []
+            for mint, pos in iterator:
                 try:
                     qty = float(pos.amount)
                 except Exception:
@@ -1832,6 +1963,13 @@ class TradingRuntime:
                 env_summary[env_key] = (val[:4] + "…" + val[-2:]) if len(val) > 6 else "***"
             else:
                 env_summary[env_key] = val
+        sensitive_suffixes = ("_KEY", "_SECRET", "_TOKEN")
+        for key, value in os.environ.items():
+            if key in env_summary:
+                continue
+            upper_key = key.upper()
+            if any(upper_key.endswith(suffix) for suffix in sensitive_suffixes):
+                env_summary[key] = "***" if value else None
         if self.agent_manager is not None:
             weights_snapshot = self._collect_weights()
             if isinstance(weights_snapshot, dict):
@@ -1867,11 +2005,11 @@ class TradingRuntime:
             for token in tokens:
                 if token is None:
                     continue
-                tok = str(token)
-                if tok in self._discovery_seen:
+                token_str = str(token).strip()
+                if not token_str or token_str in self._discovery_seen:
                     continue
-                self._recent_tokens.appendleft(tok)
-                self._discovery_seen.add(tok)
+                self._recent_tokens.appendleft(token_str)
+                self._discovery_seen.add(token_str)
             while len(self._recent_tokens) > self._recent_tokens_limit:
                 removed = self._recent_tokens.pop()
                 self._discovery_seen.discard(removed)
@@ -1880,8 +2018,9 @@ class TradingRuntime:
         with self._iteration_lock:
             return list(self._last_actions)
 
-    def _emit_action_decisions(self, actions: Iterable[Dict[str, Any]]) -> int:
+    def _emit_action_decisions(self, actions: Iterable[Dict[str, Any]]) -> Tuple[int, int]:
         count = 0
+        failures = 0
         for action in actions:
             payload = self._prepare_action_decision(action)
             if not payload:
@@ -1889,10 +2028,11 @@ class TradingRuntime:
             try:
                 publish("action_decision", payload)
             except Exception:  # pragma: no cover - defensive logging
+                failures += 1
                 log.exception("Failed to publish action_decision")
                 continue
             count += 1
-        return count
+        return count, failures
 
     def _prepare_action_decision(self, action: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(action, dict):
@@ -1971,11 +2111,19 @@ class TradingRuntime:
         now_ts = summary.get("timestamp_epoch", time.time())
         self.status.trading_loop = True
         self.status.heartbeat_ts = now_ts
+        self._last_heartbeat_perf = time.perf_counter()
         self._update_rl_gate()
         if stage == "loop" or summary.get("committed"):
             self._iteration_count += 1
 
         actions = summary.get("actions_executed") or []
+        telemetry = summary.get("telemetry")
+        if telemetry and stage == "loop":
+            evaluation_meta = telemetry.get("evaluation")
+            if isinstance(evaluation_meta, dict):
+                cached = evaluation_meta.get("cached")
+                if cached and not summary.get("actions_count"):
+                    evaluation_meta.pop("latency", None)
         with self._iteration_lock:
             self._last_iteration = dict(summary)
             self._last_iteration_errors = list(summary.get("errors", []))
@@ -2117,7 +2265,10 @@ class TradingRuntime:
                     real_trades += 1
         elif actions:
             for action in actions:
-                action["result"] = receipt.errors[0] if receipt.errors else "error"
+                if receipt.errors:
+                    action["result"] = str(receipt.errors[0])
+                else:
+                    action["result"] = action.get("result")
                 action["simulated"] = None
 
         updated = summary or {
@@ -2157,9 +2308,9 @@ class TradingRuntime:
             simulated_trades,
             receipt.errors or None,
         )
-        emitted = self._emit_action_decisions(actions)
-        if emitted:
-            updated["telemetry"]["execution"]["decisions_emitted"] = emitted
+        emitted, failed = self._emit_action_decisions(actions)
+        updated["telemetry"]["execution"]["decisions_emitted"] = emitted
+        updated["telemetry"]["execution"]["decisions_failed"] = failed
         updated["committed"] = receipt.success
         updated.setdefault("timestamp", timestamp)
         updated.setdefault("timestamp_epoch", time.time())
@@ -2208,6 +2359,8 @@ class TradingRuntime:
                     self._ui_logs.append(entry)
                 index = len(samples)
             await asyncio.sleep(1.0)
+            if self.stop_event.is_set() or self.pipeline is None:
+                break
     def _collect_history(self) -> List[Dict[str, Any]]:
         with self._history_lock:
             return list(self._iteration_history)
@@ -2215,6 +2368,17 @@ class TradingRuntime:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
+
+    def _cleanup_task(self, task: asyncio.Task) -> None:
+        self._tasks = [t for t in self._tasks if t is not task]
+
+    def _register_task(self, task: Optional[asyncio.Task]) -> None:
+        if task is None or task.done():
+            return
+        self._tasks = [t for t in self._tasks if not t.done()]
+        if task not in self._tasks:
+            self._tasks.append(task)
+            task.add_done_callback(self._cleanup_task)
 
     def _config_float(
         self, key: str, explicit: Optional[float], default: float
@@ -2234,9 +2398,12 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
     if value in (None, "", "null"):
         return default
     try:
-        return float(value)
+        result = float(value)
     except Exception:
         return default
+    if not math.isfinite(result):
+        return default
+    return result
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
