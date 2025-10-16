@@ -1,0 +1,62 @@
+[
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 0.95157,
+    "depth": 978.05,
+    "imbalance": -0.1021
+  },
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 1.00155,
+    "depth": 989.05,
+    "imbalance": -0.211
+  },
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 0.92626,
+    "depth": 962.08,
+    "imbalance": 0.3992
+  },
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 1.07169,
+    "depth": 1082.2,
+    "imbalance": -0.1724
+  },
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 1.02234,
+    "depth": 938.73,
+    "imbalance": -0.4063
+  },
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 1.03435,
+    "depth": 1043.44,
+    "imbalance": 0.2831
+  },
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 1.09428,
+    "depth": 1041.24,
+    "imbalance": -0.2782
+  },
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 0.92777,
+    "depth": 960.24,
+    "imbalance": 0.2269
+  },
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 1.00691,
+    "depth": 1016.9,
+    "imbalance": -0.0421
+  },
+  {
+    "timestamp": "2023-01-01T00:00:00",
+    "price": 1.06266,
+    "depth": 1009.63,
+    "imbalance": 0.2038
+  }
+]

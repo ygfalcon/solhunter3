@@ -60,7 +60,6 @@ class _WebsocketState:
         "thread",
         "port",
         "name",
-        "host",
     )
 
     def __init__(self, name: str) -> None:
@@ -72,7 +71,6 @@ class _WebsocketState:
         self.thread: threading.Thread | None = None
         self.port: int = 0
         self.name = name
-        self.host: str = ""
 
 
 _WS_CHANNELS: dict[str, _WebsocketState] = {
@@ -179,6 +177,7 @@ def push_log(payload: Any) -> bool:
     return _enqueue_message("logs", payload)
 
 
+<<<<<<< Updated upstream
 def _normalize_ws_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -284,6 +283,8 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
     return manifest
 
 
+=======
+>>>>>>> Stashed changes
 def _shutdown_state(state: _WebsocketState) -> None:
     loop = state.loop
     if loop is None:
@@ -351,7 +352,6 @@ def _start_channel(
         asyncio.set_event_loop(loop)
         state.loop = loop
         state.port = 0
-        state.host = host
 
         if channel == "rl":
             rl_ws_loop = loop
@@ -603,6 +603,7 @@ def start_websockets() -> dict[str, threading.Thread]:
             _shutdown_state(state)
         raise
 
+<<<<<<< Updated upstream
     events_url = f"{scheme}://{url_host}:{_EVENT_WS_PORT}{_channel_path('events')}"
     rl_url = f"{scheme}://{url_host}:{_RL_WS_PORT}{_channel_path('rl')}"
     logs_url = f"{scheme}://{url_host}:{_LOG_WS_PORT}{_channel_path('logs')}"
@@ -618,6 +619,11 @@ def start_websockets() -> dict[str, threading.Thread]:
     }
     for key, value in defaults.items():
         os.environ.setdefault(key, value)
+=======
+    os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
+    os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
+    os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
+>>>>>>> Stashed changes
     log.info(
         "UI websockets listening on rl=%s events=%s logs=%s",
         _RL_WS_PORT,
@@ -2310,6 +2316,7 @@ def create_app(state: UIState | None = None) -> Flask:
             kpis=kpis,
         )
 
+<<<<<<< Updated upstream
     def _ws_config_payload() -> Dict[str, str]:
         manifest = build_ui_manifest(request)
         return {
@@ -2330,6 +2337,8 @@ def create_app(state: UIState | None = None) -> Flask:
     def ws_config() -> Any:
         return jsonify(_ws_config_payload())
 
+=======
+>>>>>>> Stashed changes
     @app.get("/health")
     def health() -> Any:
         status = state.snapshot_status()

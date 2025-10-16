@@ -1,0 +1,5 @@
+[
+  {"glyphs": "◈◉◌", "encoding": [1, 2, 3]},
+  {"glyphs": "◌◉◈", "encoding": [3, 2, 1]},
+  {"glyphs": "◉◈◌", "encoding": [2, 1, 3]}
+]
