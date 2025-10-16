@@ -517,3 +517,86 @@ def test_tx_volume_str_values():
     ]
 
     assert onchain_metrics._tx_volume(entries) == pytest.approx(3.5)
+
+
+def test_fetch_dex_metrics_async_schema(monkeypatch):
+    onchain_metrics.DEX_METRICS_CACHE.clear()
+
+    async def fake_get_session():
+        return object()
+
+    async def fake_slot(session, rpc_url):
+        return 123
+
+    async def fake_decimals(session, mint, rpc_url):
+        return 0
+
+    async def fake_helius_price(session, mint):
+        return 0.0, 0.0, 0.0, 0.0, 0, 0, None
+
+    async def fake_birdeye(session, mint):
+        return {
+            "price": 1.25,
+            "price_24h_change": 0.5,
+            "volume_24h": 2.5,
+            "liquidity_usd": 3.5,
+            "holders": 4,
+            "pool_count": 5,
+            "decimals": 6,
+        }
+
+    async def fake_dexscreener(session, mint):
+        return {}
+
+    monkeypatch.setattr(onchain_metrics, "FAST_MODE", True)
+    monkeypatch.setattr(onchain_metrics, "get_session", fake_get_session)
+    monkeypatch.setattr(onchain_metrics, "_helius_slot", fake_slot)
+    monkeypatch.setattr(onchain_metrics, "_helius_decimals", fake_decimals)
+    monkeypatch.setattr(onchain_metrics, "_helius_price_overview", fake_helius_price)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_birdeye", fake_birdeye)
+    monkeypatch.setattr(onchain_metrics, "_fetch_metrics_dexscreener", fake_dexscreener)
+
+    result = asyncio.run(onchain_metrics.fetch_dex_metrics_async(onchain_metrics.SOL_MINT))
+
+    expected_keys = {
+        "mint",
+        "price",
+        "price_24h_change",
+        "volume_24h",
+        "liquidity_usd",
+        "holders",
+        "pool_count",
+        "decimals",
+        "slot",
+        "ts",
+        "ohlcv_5m",
+        "ohlcv_1h",
+    }
+
+    assert expected_keys <= set(result)
+    assert isinstance(result["price"], float)
+    assert isinstance(result["price_24h_change"], float)
+    assert isinstance(result["volume_24h"], float)
+    assert isinstance(result["liquidity_usd"], float)
+    assert isinstance(result["holders"], int)
+    assert isinstance(result["pool_count"], int)
+    assert isinstance(result["slot"], int)
+    assert isinstance(result["ts"], int)
+    assert isinstance(result["ohlcv_5m"], list)
+    assert isinstance(result["ohlcv_1h"], list)
+    assert result["ohlcv_5m"] == []
+    assert result["ohlcv_1h"] == []
+    assert result["decimals"] == 6
+
+
+def test_liquidity_snapshot_repr_and_float():
+    snapshot = onchain_metrics.LiquiditySnapshot(
+        {"liquidity_usd": "123.4", "pool_count": "7", "slot": "99"}
+    )
+
+    assert float(snapshot) == pytest.approx(123.4)
+    rep = repr(snapshot)
+    assert "LiquiditySnapshot" in rep
+    assert "liquidity_usd=123.4" in rep
+    assert "pools=7" in rep
+    assert "slot=99" in rep
