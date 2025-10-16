@@ -53,14 +53,20 @@ def setup_stdout_logging(
     root.setLevel(level)
 
     stream_handler: logging.StreamHandler | None = None
-    for handler in root.handlers:
-        if isinstance(handler, logging.StreamHandler):
-            stream = getattr(handler, "stream", None)
-            if stream is sys.stdout:
-                stream_handler = handler
-                break
-            if stream_handler is None:
-                stream_handler = handler
+    for handler in list(root.handlers):
+        if not isinstance(handler, logging.StreamHandler):
+            continue
+
+        stream = getattr(handler, "stream", None)
+        if stream is sys.stdout and stream_handler is None:
+            stream_handler = handler
+            continue
+
+        # ``logging.basicConfig`` may have already attached a ``StreamHandler``
+        # pointing at ``stderr`` or a duplicate ``stdout`` handler. These extra
+        # handlers cause every log record to be emitted multiple times. Remove
+        # them so we end up with a single ``stdout`` handler that we control.
+        root.removeHandler(handler)
 
     if stream_handler is None:
         stream_handler = logging.StreamHandler(sys.stdout)
