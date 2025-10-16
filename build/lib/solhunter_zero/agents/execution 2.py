@@ -1,0 +1,465 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import logging
+import os
+from typing import Dict, Any, List
+
+import aiohttp
+from ..http import get_session
+from ..event_bus import subscription
+from ..dynamic_limit import _target_concurrency, _step_limit
+
+from . import BaseAgent
+from ..exchange import (
+    place_order_async,
+    DEX_BASE_URL,
+    VENUE_URLS,
+    _sign_transaction,
+    resolve_swap_endpoint,
+)
+from ..execution import EventExecutor
+from ..depth_client import submit_raw_tx
+from ..portfolio import Portfolio
+from ..logging_utils import serialize_for_log
+from ..util import sanitize_priority_urls
+
+logger = logging.getLogger(__name__)
+
+
+class ExecutionAgent(BaseAgent):
+    """Submit orders with simple rate limiting."""
+
+    name = "execution"
+
+    def __init__(
+        self,
+        *,
+        rate_limit: float = 1.0,
+        concurrency: int = 1,
+        testnet: bool = False,
+        dry_run: bool = False,
+        keypair=None,
+        retries: int = 1,
+        depth_service: bool = False,
+        priority_fees: list[float] | None = None,
+        priority_rpc: list[str] | None = None,
+        min_rate: float | None = None,
+        max_rate: float | None = None,
+        threshold: float | None = None,
+    ):
+        self.rate_limit = rate_limit
+        self.min_rate = float(min_rate) if min_rate is not None else 0.0
+        self.max_rate = float(max_rate) if max_rate is not None else rate_limit
+        self._base_concurrency = max(1, int(concurrency))
+        self.testnet = testnet
+        self.dry_run = dry_run
+        self.keypair = keypair
+        self.retries = retries
+        self._sem = asyncio.Semaphore(concurrency)
+        self._rate_lock = asyncio.Lock()
+        self._last = 0.0
+        self.depth_service = depth_service
+        self._executors: Dict[str, EventExecutor] = {}
+        self.priority_fees = list(priority_fees) if priority_fees else None
+        cleaned_priority = sanitize_priority_urls(priority_rpc)
+        self.priority_rpc = cleaned_priority or None
+        self._cpu_usage = 0.0
+        self._cpu_smoothed = 0.0
+        self._smoothing = float(os.getenv("CONCURRENCY_SMOOTHING", "0.2") or 0.2)
+        self.threshold = float(threshold) if threshold is not None else 0.0
+        self._resource_subs = [
+            subscription("system_metrics", self._on_resource_update),
+            subscription("resource_update", self._on_resource_update),
+            subscription("system_metrics_combined", self._on_resource_update),
+        ]
+        for sub in self._resource_subs:
+            sub.__enter__()
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "ExecutionAgent: initialized depth_service=%s rate_limit=%.3f concurrency=%s priority_rpc=%s",
+                self.depth_service,
+                self.rate_limit,
+                concurrency,
+                serialize_for_log(self.priority_rpc),
+            )
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Support pickling/reloading across versions with new attributes."""
+
+        return dict(self.__dict__)
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore state and backfill attributes added in newer releases."""
+
+        self.__dict__.update(state)
+        if "threshold" not in self.__dict__:
+            self.threshold = 0.0
+
+    def _on_resource_update(self, payload: Any) -> None:
+        """Update resource usage and adjust concurrency and rate limit."""
+        cpu = getattr(payload, "cpu", None)
+        if isinstance(payload, dict):
+            cpu = payload.get("cpu", cpu)
+        if cpu is None:
+            return
+        try:
+            self._cpu_usage = float(cpu)
+            if self._cpu_smoothed:
+                self._cpu_smoothed = (
+                    self._smoothing * self._cpu_usage
+                    + (1 - self._smoothing) * self._cpu_smoothed
+                )
+            else:
+                self._cpu_smoothed = self._cpu_usage
+        except Exception:
+            return
+        frac = max(0.0, min(1.0, self._cpu_smoothed / 100.0))
+        target = _target_concurrency(self._cpu_smoothed, self._base_concurrency, 0.0, 100.0)
+        conc = _step_limit(self._sem._value, target, self._base_concurrency)
+        if conc != self._sem._value:
+            self._sem = asyncio.Semaphore(conc)
+        self.rate_limit = self.min_rate + (self.max_rate - self.min_rate) * frac
+
+    async def _create_signed_tx(
+        self,
+        token: str,
+        side: str,
+        amount: float,
+        price: float,
+        endpoint: str,
+        *,
+        priority_fee: int | None = None,
+    ) -> str | None:
+        """Return a signed transaction for ``token`` using ``endpoint``."""
+
+        payload = {
+            "token": token,
+            "side": side,
+            "amount": amount,
+            "price": price,
+            "cluster": "devnet" if self.testnet else "mainnet-beta",
+        }
+
+        session = await get_session()
+        try:
+            async with session.post(endpoint, json=payload, timeout=10) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        except aiohttp.ClientError as exc:
+            if logger.isEnabledFor(logging.WARNING):
+                logger.warning(
+                    "ExecutionAgent: swap request failed token=%s endpoint=%s error=%s",
+                    token,
+                    endpoint,
+                    exc,
+                )
+            return None
+
+        tx_b64 = data.get("swapTransaction")
+        if not tx_b64:
+            if logger.isEnabledFor(logging.WARNING):
+                logger.warning(
+                    "ExecutionAgent: swap endpoint returned no transaction token=%s endpoint=%s payload=%s",
+                    token,
+                    endpoint,
+                    serialize_for_log(data),
+                )
+            return None
+
+        if self.depth_service:
+            from ..depth_client import prepare_signed_tx
+
+            return await prepare_signed_tx(tx_b64, priority_fee=priority_fee)
+
+        if self.keypair is None:
+            return None
+
+        tx = _sign_transaction(tx_b64, self.keypair)
+        return base64.b64encode(bytes(tx)).decode()
+
+    def add_executor(self, token: str, executor: EventExecutor) -> None:
+        """Register an :class:`EventExecutor` for ``token``."""
+
+        self._executors[token] = executor
+
+    def close(self) -> None:
+        """Unsubscribe from resource updates."""
+        if hasattr(self, "_resource_subs"):
+            for sub in self._resource_subs:
+                sub.__exit__(None, None, None)
+
+    async def execute(self, action: Dict[str, Any]) -> Any:
+        token = str(action.get("token", ""))
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "ExecutionAgent: received action -> %s",
+                serialize_for_log(action),
+            )
+        action_dry_run = bool(action.get("dry_run", False))
+        async with self._sem:
+            async with self._rate_lock:
+                now = asyncio.get_event_loop().time()
+                delay = self.rate_limit - (now - self._last)
+                if delay > 0:
+                    if logger.isEnabledFor(logging.INFO):
+                        logger.info(
+                            "ExecutionAgent: throttling token=%s delay=%.4fs",
+                            token,
+                            delay,
+                        )
+                    await asyncio.sleep(delay)
+                self._last = asyncio.get_event_loop().time()
+
+            # Read current mempool transaction rate
+            from ..depth_client import snapshot
+
+            _depth, tx_rate = snapshot(action["token"])
+            dry_run_flag = bool(self.dry_run or action_dry_run)
+            if logger.isEnabledFor(logging.INFO):
+                logger.info(
+                    "ExecutionAgent: snapshot token=%s tx_rate=%.6f threshold=%.3f depth_service=%s simulated=%s",
+                    token,
+                    tx_rate,
+                    getattr(self, "threshold", 0.0),
+                    self.depth_service,
+                    dry_run_flag,
+                )
+
+            priority_fee: int | None = None
+            pri_idx = int(action.get("priority", 0))
+            if self.priority_fees and 0 <= pri_idx < len(self.priority_fees):
+                from ..gas import adjust_priority_fee
+
+                priority_fee = int(
+                    adjust_priority_fee(tx_rate) * self.priority_fees[pri_idx]
+                )
+                if logger.isEnabledFor(logging.INFO):
+                    logger.info(
+                        "ExecutionAgent: adjusted priority fee token=%s idx=%s fee=%s",
+                        token,
+                        pri_idx,
+                        priority_fee,
+                    )
+
+            venue = str(action.get("venue", "")).strip().lower()
+            venues_raw = action.get("venues")
+
+            base_entries: list[tuple[str | None, str]] = []
+            normalized_venues: list[str] | None = None
+
+            custom_base = action.get("base_url")
+            primary_base: str | None = None
+            if custom_base:
+                primary_base = str(custom_base)
+                base_entries.append((None, primary_base))
+
+            if isinstance(venues_raw, list):
+                normalized: list[str] = []
+                for entry in venues_raw:
+                    text = str(entry).strip()
+                    if not text:
+                        continue
+                    if "://" in text:
+                        normalized.append(text)
+                        base_entries.append((None, text))
+                    else:
+                        norm = text.lower()
+                        normalized.append(norm)
+                        base_entries.append((norm, str(VENUE_URLS.get(norm, text))))
+                normalized_venues = normalized or None
+            else:
+                normalized_venues = None
+
+            if primary_base is None:
+                if base_entries:
+                    primary_base = base_entries[0][1]
+                else:
+                    base_value = str(VENUE_URLS.get(venue, DEX_BASE_URL))
+                    base_entries.append((venue or None, base_value))
+                    primary_base = base_value
+
+            endpoints: list[str] = []
+            seen_endpoints: set[str] = set()
+            for hint, base in base_entries:
+                if not base:
+                    continue
+                endpoint = resolve_swap_endpoint(str(base), venue=hint)
+                if endpoint and endpoint not in seen_endpoints:
+                    endpoints.append(endpoint)
+                    seen_endpoints.add(endpoint)
+
+            if not endpoints:
+                primary_base = str(DEX_BASE_URL)
+                endpoints.append(resolve_swap_endpoint(primary_base))
+
+            if logger.isEnabledFor(logging.INFO):
+                logger.info(
+                    "ExecutionAgent: endpoints token=%s primary=%s venues=%s -> %s",
+                    token,
+                    primary_base,
+                    serialize_for_log(normalized_venues),
+                    serialize_for_log(endpoints),
+                )
+
+        used_depth_queue = False
+        last_endpoint: str | None = None
+        if self.depth_service:
+            for endpoint in endpoints:
+                last_endpoint = endpoint
+                tx = await self._create_signed_tx(
+                    action["token"],
+                    action["side"],
+                    action.get("amount", 0.0),
+                    action.get("price", 0.0),
+                    endpoint,
+                    priority_fee=priority_fee,
+                )
+                if tx:
+                    if logger.isEnabledFor(logging.INFO):
+                        logger.info(
+                            "ExecutionAgent: prepared tx token=%s endpoint=%s payload=%s",
+                            token,
+                            endpoint,
+                            serialize_for_log({"priority_fee": priority_fee, "tx": tx}),
+                        )
+                    execer = self._executors.get(action["token"])
+                    if execer:
+                        if logger.isEnabledFor(logging.INFO):
+                            logger.info(
+                                "ExecutionAgent: enqueueing tx for token=%s via executor=%s",
+                                token,
+                                execer.__class__.__name__,
+                            )
+                        if dry_run_flag:
+                            if logger.isEnabledFor(logging.INFO):
+                                logger.info(
+                                    "ExecutionAgent: dry run active, skipping enqueue for token=%s",
+                                    token,
+                                )
+                            return {
+                                "queued": False,
+                                "mode": "depth",
+                                "simulated": True,
+                                "endpoint": endpoint,
+                            }
+                        await execer.enqueue(tx)
+                        return {
+                            "queued": True,
+                            "mode": "depth",
+                            "simulated": False,
+                            "endpoint": endpoint,
+                        }
+                    if dry_run_flag:
+                        if logger.isEnabledFor(logging.INFO):
+                            logger.info(
+                                "ExecutionAgent: dry run active, skipping submit_raw_tx for token=%s",
+                                token,
+                            )
+                        return {
+                            "queued": False,
+                            "mode": "depth",
+                            "simulated": True,
+                            "endpoint": endpoint,
+                        }
+                    if logger.isEnabledFor(logging.INFO):
+                        logger.info(
+                            "ExecutionAgent: submitting raw tx for token=%s priority_rpc=%s",
+                            token,
+                            serialize_for_log(self.priority_rpc),
+                        )
+                    await submit_raw_tx(
+                        tx,
+                        priority_rpc=self.priority_rpc,
+                        priority_fee=priority_fee,
+                    )
+                    used_depth_queue = True
+                    break
+                else:
+                    if logger.isEnabledFor(logging.INFO):
+                        logger.info(
+                            "ExecutionAgent: endpoint %s returned no transaction for token=%s",
+                            endpoint,
+                            token,
+                        )
+            if used_depth_queue:
+                return {
+                    "queued": True,
+                    "mode": "depth",
+                    "simulated": False,
+                    "endpoint": last_endpoint,
+                }
+            if logger.isEnabledFor(logging.WARNING):
+                logger.warning(
+                    "ExecutionAgent: unable to prepare transaction for token=%s after %s endpoints; attempting direct submission",
+                    token,
+                    len(endpoints),
+                )
+
+            amount = action.get("amount", 0.0)
+            pri_idx = int(action.get("priority", 0))
+            if (
+                self.priority_fees
+                and 0 <= pri_idx < len(self.priority_fees)
+                and self.priority_rpc
+            ):
+                from ..gas import get_priority_fee_estimate
+
+                fee = await get_priority_fee_estimate(self.priority_rpc)
+                amount = max(0.0, amount - fee * self.priority_fees[pri_idx])
+
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "ExecutionAgent: placing order token=%s side=%s amount=%.8f price=%.8f base=%s venues=%s dry_run=%s testnet=%s priority_idx=%s",
+                token,
+                action.get("side"),
+                amount,
+                action.get("price", 0.0),
+                primary_base,
+                serialize_for_log(normalized_venues),
+                dry_run_flag,
+                self.testnet,
+                pri_idx,
+            )
+
+        result = await place_order_async(
+                action["token"],
+                action["side"],
+            amount,
+            action.get("price", 0.0),
+            testnet=self.testnet,
+            dry_run=dry_run_flag,
+            keypair=self.keypair,
+            base_url=primary_base,
+            venues=normalized_venues,
+            max_retries=action.get("retries", self.retries),
+            timeout=action.get("timeout"),
+            context=action,
+        )
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "ExecutionAgent: received exchange response token=%s -> %s",
+                token,
+                serialize_for_log(result),
+            )
+        if result is None:
+            raise RuntimeError(f"Swap endpoints returned no transaction for {token}")
+        if not isinstance(result, dict):
+            return result
+        enriched = dict(result)
+        enriched.setdefault("mode", "direct")
+        enriched["simulated"] = dry_run_flag
+        enriched.setdefault("endpoint", primary_base)
+        return enriched
+
+    async def propose_trade(
+        self,
+        token: str,
+        portfolio: Portfolio,
+        *,
+        depth: float | None = None,
+        imbalance: float | None = None,
+    ) -> List[Dict[str, Any]]:
+        # Execution agent does not propose trades itself
+        return []
