@@ -14,7 +14,7 @@ from queue import Queue
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import urlparse, urlunparse
 
-from flask import Flask, Request, jsonify, render_template_string, request
+from flask import Flask, Request, Response, jsonify, render_template_string, request
 from werkzeug.serving import BaseWSGIServer, make_server
 
 from .agents.discovery import (
@@ -628,6 +628,13 @@ def start_websockets() -> dict[str, threading.Thread]:
         _LOG_WS_PORT,
     )
     return threads
+
+
+def stop_websockets() -> None:
+    """Shut down all websocket channels."""
+
+    for state in _WS_CHANNELS.values():
+        _shutdown_state(state)
 
 
 StatusProvider = Callable[[], Dict[str, Any]]
@@ -2174,6 +2181,14 @@ def create_app(state: UIState | None = None) -> Flask:
 
     app = Flask(__name__)  # type: ignore[arg-type]
 
+    @app.after_request
+    def _no_store(response: Response) -> Response:
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        content_type = response.content_type or ""
+        if "application/json" in content_type.lower():
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     def _status_cards(status: Dict[str, Any]) -> List[Dict[str, Any]]:
         cards: List[Dict[str, Any]] = []
         cards.append(
@@ -2456,6 +2471,30 @@ def create_app(state: UIState | None = None) -> Flask:
     def swarm_rl() -> Any:
         return jsonify(_json_ready(state.snapshot_rl_panel()))
 
+    @app.post("/actions/flatten")
+    def action_flatten() -> Any:
+        payload = request.get_json(silent=True) or {}
+        mint = payload.get("mint")
+        if not isinstance(mint, str) or not mint.strip():
+            return jsonify({"ok": False, "error": "mint must be a non-empty string"}), 400
+
+        must = bool(payload.get("must", False))
+        must_exit = bool(payload.get("must_exit", False))
+        action = {
+            "type": "flatten",
+            "mint": mint,
+            "must": must,
+            "must_exit": must_exit,
+        }
+        log.info(
+            "UI flatten requested mint=%s must=%s must_exit=%s",
+            mint,
+            must,
+            must_exit,
+        )
+        push_event({"ui_action": action})
+        return jsonify({"ok": True, "action": action})
+
     @app.get("/__shutdown__")
     def _shutdown() -> Any:  # pragma: no cover - invoked via HTTP
         func = request.environ.get("werkzeug.server.shutdown")
@@ -2513,3 +2552,4 @@ class UIServer:
             self._thread.join(timeout=2)
         self._thread = None
         self._server = None
+        stop_websockets()
