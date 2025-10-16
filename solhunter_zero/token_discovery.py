@@ -7,7 +7,7 @@ import math
 import os
 import logging
 import threading
-from typing import Dict, List
+from typing import Dict, List, Any, Union
 
 from aiohttp import ClientTimeout
 import aiohttp
@@ -15,7 +15,6 @@ import aiohttp
 from .scanner_common import (
     BIRDEYE_API,
     BIRDEYE_API_KEY,
-    HEADERS,
 )
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
@@ -55,7 +54,9 @@ _BIRDEYE_RETRIES = int(os.getenv("DISCOVERY_BIRDEYE_RETRIES", "3") or 3)
 _BIRDEYE_BACKOFF = float(os.getenv("DISCOVERY_BIRDEYE_BACKOFF", "1.0") or 1.0)
 _BIRDEYE_BACKOFF_MAX = float(os.getenv("DISCOVERY_BIRDEYE_BACKOFF_MAX", "8.0") or 8.0)
 
-_BIRDEYE_CACHE: TTLCache[str, List[Dict[str, float]]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
+TokenEntry = Dict[str, Union[float, str, List[str]]]
+
+_BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
 
 
 def _score_component(value: float) -> float:
@@ -64,7 +65,15 @@ def _score_component(value: float) -> float:
     return math.log1p(value)
 
 
-async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
+def _clear_birdeye_cache_for_tests() -> None:
+    """Testing helper: clear the BirdEye TTL cache."""
+    try:
+        _BIRDEYE_CACHE.clear()
+    except Exception:
+        pass
+
+
+async def _fetch_birdeye_tokens() -> List[TokenEntry]:
     """
     Pull BirdEye token list (paginated) for Solana with correct headers & params.
     Numeric filters only; no name/suffix heuristics.
@@ -74,22 +83,19 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
         logger.debug("BirdEye API key missing; skipping BirdEye discovery")
         return []
 
-    # Keep HEADERS in sync for other modules
-    if HEADERS.get("X-API-KEY") != api_key:
-        HEADERS["X-API-KEY"] = api_key
-    HEADERS.setdefault("Accept", "application/json")
-    HEADERS["x-chain"] = "solana"  # BirdEye accepts chain via header
-
     cached = _BIRDEYE_CACHE.get("tokens")
     if cached is not None:
         return cached
 
-    tokens: Dict[str, Dict[str, float]] = {}
+    tokens: Dict[str, TokenEntry] = {}
     offset = 0
     target_count = max(int(_MAX_TOKENS * _OVERFETCH_FACTOR), _PAGE_LIMIT)
     backoff = _BIRDEYE_BACKOFF
 
-    # Build a per-request headers copy to avoid accidental mutation
+    logger.debug(
+        "BirdEye fetch start offset=%s limit=%s target=%s", offset, _PAGE_LIMIT, target_count
+    )
+
     def _headers() -> dict:
         return {
             "X-API-KEY": api_key,
@@ -99,43 +105,98 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
 
     async with aiohttp.ClientSession(timeout=ClientTimeout(total=12)) as session:
         while offset < _MAX_OFFSET and len(tokens) < target_count:
+            logger.debug(
+                "BirdEye fetch page offset=%s limit=%s accumulated=%s",
+                offset,
+                _PAGE_LIMIT,
+                len(tokens),
+            )
             params = {
                 "offset": offset,
                 "limit": _PAGE_LIMIT,
                 "sortBy": "v24hUSD",
                 "chain": "solana",  # also pass chain in query to satisfy stricter backends
             }
-            try:
-                async with session.get(BIRDEYE_API, params=params, headers=_headers()) as resp:
-                    if resp.status in (429, 503):
-                        if tokens:
-                            logger.info("BirdEye %s after %s tokens; using partial batch", resp.status, len(tokens))
+            payload: Dict[str, Any] | None = None
+            for attempt in range(1, _BIRDEYE_RETRIES + 1):
+                try:
+                    async with session.get(
+                        BIRDEYE_API, params=params, headers=_headers()
+                    ) as resp:
+                        if resp.status in (429, 503):
+                            logger.warning(
+                                "BirdEye %s attempt=%s offset=%s backoff=%.2fs",
+                                resp.status,
+                                attempt,
+                                offset,
+                                backoff,
+                            )
+                            if attempt >= _BIRDEYE_RETRIES:
+                                if tokens:
+                                    logger.warning(
+                                        "BirdEye %s after %s tokens; returning partial results",
+                                        resp.status,
+                                        len(tokens),
+                                    )
+                                    payload = None
+                                    break
+                                _BIRDEYE_CACHE.set("tokens", [])
+                                return []
+                            await asyncio.sleep(backoff)
+                            backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
+                            continue
+
+                        if resp.status == 400:
+                            text = await resp.text()
+                            logger.warning(
+                                "BirdEye 400 at offset %s (params=%r): %s",
+                                offset,
+                                params,
+                                text[:200],
+                            )
+                            payload = None
+                            offset = _MAX_OFFSET
                             break
-                        text = await resp.text()
-                        logger.warning("BirdEye %s at offset %s: %s; backoff %.1fs", resp.status, offset, text[:200], backoff)
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
-                        continue
 
-                    if resp.status == 400:
-                        text = await resp.text()
-                        logger.warning("BirdEye 400 at offset %s (params=%r): %s", offset, params, text[:200])
-                        # Do not loop infinitely on 400; bail out.
+                        resp.raise_for_status()
+                        payload = await resp.json()
+                        backoff = _BIRDEYE_BACKOFF
                         break
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "BirdEye request error attempt=%s offset=%s: %s",
+                        attempt,
+                        offset,
+                        exc,
+                    )
+                    if attempt >= _BIRDEYE_RETRIES:
+                        if tokens:
+                            logger.warning(
+                                "BirdEye retries exhausted after %s tokens; returning partial",
+                                len(tokens),
+                            )
+                            payload = None
+                            break
+                        _BIRDEYE_CACHE.set("tokens", [])
+                        return []
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
+                    continue
+                except Exception as exc:
+                    logger.warning("BirdEye unexpected error offset=%s: %s", offset, exc)
+                    if not tokens:
+                        _BIRDEYE_CACHE.set("tokens", [])
+                        return []
+                    payload = None
+                    break
+                else:
+                    # Success path already breaks out of loop
+                    pass
 
-                    resp.raise_for_status()
-                    payload = await resp.json()
-                    backoff = _BIRDEYE_BACKOFF  # reset backoff on success
+                if payload is not None:
+                    break
 
-            except aiohttp.ClientResponseError as exc:
-                logger.warning("BirdEye token fetch failed at offset %s: %s", offset, exc)
-                if not tokens:
-                    _BIRDEYE_CACHE.set("tokens", [])
-                break
-            except Exception as exc:
-                logger.warning("BirdEye token fetch failed at offset %s: %s", offset, exc)
-                if not tokens:
-                    _BIRDEYE_CACHE.set("tokens", [])
+            if payload is None:
                 break
 
             data = payload.get("data", {})
@@ -172,14 +233,14 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
                 entry = tokens.setdefault(
                     address,
                     {
-                        "address": address,
-                        "symbol": item.get("symbol") or "",
-                        "name": item.get("name") or item.get("symbol") or address,
+                        "address": str(address),
+                        "symbol": str(item.get("symbol") or ""),
+                        "name": str(item.get("name") or item.get("symbol") or address),
                         "liquidity": liquidity,
                         "volume": volume,
                         "price": price,
                         "price_change": change,
-                        "sources": {"birdeye"},
+                        "sources": ["birdeye"],
                     },
                 )
                 # Aggregate max across pages
@@ -201,6 +262,9 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
     _BIRDEYE_CACHE.set("tokens", result)
     if not result:
         logger.warning("Token discovery: BirdEye returned no items after filtering.")
+    logger.debug(
+        "BirdEye fetch complete total=%s cached=%s", len(result), bool(result)
+    )
     return result
 
 
@@ -231,7 +295,7 @@ async def discover_candidates(
     *,
     limit: int | None = None,
     mempool_threshold: float | None = None,
-) -> List[Dict[str, float]]:
+) -> List[TokenEntry]:
     """Combine BirdEye numeric candidates with mempool signals and rank."""
     if limit is None or limit <= 0:
         limit = _MAX_TOKENS
@@ -245,32 +309,64 @@ async def discover_candidates(
         else None
     )
 
-    results = await asyncio.gather(*(t for t in (bird_task, mempool_task) if t), return_exceptions=True)
-    bird_tokens: List[Dict[str, float]] = []
+    tasks = [bird_task]
+    task_labels = ["bird"]
+    if mempool_task is not None:
+        tasks.append(mempool_task)
+        task_labels.append("mempool")
+
+    overall_timeout_raw = os.getenv("DISCOVERY_OVERALL_TIMEOUT", "0")
+    try:
+        overall_timeout = float(overall_timeout_raw or 0.0)
+    except Exception:
+        overall_timeout = 0.0
+
+    results: List[Any] = []
+    if overall_timeout > 0:
+        done, pending = await asyncio.wait(tasks, timeout=overall_timeout)
+        if pending:
+            logger.warning(
+                "Discovery overall timeout after %.2fs; pending_tasks=%s",
+                overall_timeout,
+                len(pending),
+            )
+        for task in tasks:
+            if task in done:
+                try:
+                    results.append(task.result())
+                except Exception as exc:  # pragma: no cover - defensive
+                    results.append(exc)
+            else:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                results.append(asyncio.TimeoutError(f"Discovery timed out after {overall_timeout}s"))
+    else:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    bird_tokens: List[TokenEntry] = []
     mempool: Dict[str, Dict[str, float]] = {}
 
-    if results:
-        bird_res = results[0]
-        if isinstance(bird_res, Exception):
-            logger.warning("BirdEye discovery failed: %s", bird_res)
-        else:
-            bird_tokens = bird_res or []
-
-        if len(results) > 1:
-            mp_res = results[1]
-            if isinstance(mp_res, Exception):
-                logger.debug("Mempool signals unavailable: %s", mp_res)
+    for label, res in zip(task_labels, results):
+        if label == "bird":
+            if isinstance(res, Exception):
+                logger.warning("BirdEye discovery failed: %s", res)
             else:
-                mempool = mp_res or {}
+                bird_tokens = list(res or [])
+        elif label == "mempool":
+            if isinstance(res, Exception):
+                logger.debug("Mempool signals unavailable: %s", res)
+            else:
+                mempool = dict(res or {})
 
-    candidates: Dict[str, Dict[str, float]] = {}
+    candidates: Dict[str, Dict[str, Any]] = {}
     bird_addresses = set()
     for token in bird_tokens:
         addr = token.get("address")
         if not addr:
             continue
         entry = dict(token)
-        entry["sources"] = set(token.get("sources", {"birdeye"}))
+        entry["sources"] = set(token.get("sources") or ["birdeye"])
         candidates[addr] = entry
         bird_addresses.add(addr)
 
@@ -278,9 +374,9 @@ async def discover_candidates(
         entry = candidates.setdefault(
             addr,
             {
-                "address": addr,
-                "symbol": mp.get("symbol", ""),
-                "name": mp.get("name", addr),
+                "address": str(addr),
+                "symbol": str(mp.get("symbol") or ""),
+                "name": str(mp.get("name") or addr),
                 "liquidity": float(mp.get("liquidity", 0.0) or 0.0),
                 "volume": float(mp.get("volume", 0.0) or 0.0),
                 "price": float(mp.get("price", 0.0) or 0.0),
@@ -307,6 +403,7 @@ async def discover_candidates(
         liquidity = float(entry.get("liquidity", 0.0) or 0.0)
         volume = float(entry.get("volume", 0.0) or 0.0)
 
+        # base score = log-liquidity * wL + log-volume * wV
         base = (
             _LIQUIDITY_WEIGHT * _score_component(liquidity)
             + _VOLUME_WEIGHT * _score_component(volume)
@@ -315,6 +412,7 @@ async def discover_candidates(
         mp = mempool.get(addr)
         if mp:
             try:
+                # mempool bonus = score * bonus
                 base += _MEMPOOL_BONUS * float(mp.get("score", 0.0) or 0.0)
             except Exception:
                 pass
@@ -323,16 +421,26 @@ async def discover_candidates(
             change = float(entry.get("price_change", 0.0) or 0.0)
         except Exception:
             change = 0.0
+        # price_change soft multiplier = clamp ≥ 0.5
         base *= max(0.5, 1.0 + (change / 100.0) * 0.1)
 
         entry["score"] = base
 
     ordered = sorted(candidates.values(), key=lambda c: c.get("score", 0.0), reverse=True)
 
-    final: List[Dict[str, float]] = []
+    final: List[TokenEntry] = []
     for entry in ordered[:limit]:
         entry["sources"] = sorted(entry.get("sources", []))
         final.append(entry)
+
+    top_score = final[0]["score"] if final and "score" in final[0] else None
+    logger.debug(
+        "Discovery combine summary bird=%s mempool=%s final=%s top_score=%s",
+        len(bird_tokens),
+        len(mempool),
+        len(final),
+        f"{top_score:.4f}" if isinstance(top_score, (int, float)) else "n/a",
+    )
 
     return final
 
@@ -344,13 +452,15 @@ def warm_cache(rpc_url: str, *, limit: int | None = None) -> None:
 
     limit = limit or min(_MAX_TOKENS, 10)
     mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
-    coro = discover_candidates(rpc_url, limit=limit, mempool_threshold=mempool_threshold)
 
     def _worker() -> None:
         try:
+            coro = discover_candidates(
+                rpc_url, limit=limit, mempool_threshold=mempool_threshold
+            )
             asyncio.run(asyncio.wait_for(coro, timeout=_WARM_TIMEOUT))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Discovery warm cache failed: %s", exc)
 
     thread = threading.Thread(target=_worker, name="discovery-warm", daemon=True)
     thread.start()
