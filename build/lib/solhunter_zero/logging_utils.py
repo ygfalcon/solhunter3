@@ -4,10 +4,12 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .paths import ROOT
 
@@ -25,6 +27,96 @@ DEFAULT_RUNTIME_FORMAT = (
     "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d | %(message)s"
 )
 DEFAULT_RUNTIME_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+_NOISY_LOGGERS: tuple[str, ...] = (
+    "live-runtime",
+    "asyncio",
+    "websockets",
+    "solana",
+    "depth_service",
+)
+
+_warn_once_lock = threading.Lock()
+_warn_once_last_emit: dict[str, float] = {}
+
+
+def setup_stdout_logging(
+    *,
+    level: int = logging.INFO,
+    fmt: str | None = None,
+    datefmt: str | None = None,
+    propagate_off: Iterable[str] = _NOISY_LOGGERS,
+) -> logging.StreamHandler:
+    """Ensure a single ``StreamHandler`` to ``sys.stdout`` exists on the root logger."""
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    stream_handler: logging.StreamHandler | None = None
+    for handler in list(root.handlers):
+        if not isinstance(handler, logging.StreamHandler):
+            continue
+
+        stream = getattr(handler, "stream", None)
+        if stream is sys.stdout and stream_handler is None:
+            stream_handler = handler
+            continue
+
+        # ``logging.basicConfig`` may have already attached a ``StreamHandler``
+        # pointing at ``stderr`` or a duplicate ``stdout`` handler. These extra
+        # handlers cause every log record to be emitted multiple times. Remove
+        # them so we end up with a single ``stdout`` handler that we control.
+        root.removeHandler(handler)
+
+    if stream_handler is None:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        root.addHandler(stream_handler)
+    else:
+        try:
+            stream_handler.setStream(sys.stdout)
+        except Exception:  # pragma: no cover - fall back to attribute assignment
+            stream_handler.stream = sys.stdout  # type: ignore[attr-defined]
+
+    stream_handler.setLevel(level)
+
+    if fmt:
+        stream_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+
+    for name in propagate_off:
+        logging.getLogger(name).propagate = False
+
+    return stream_handler
+
+
+def warn_once_per(
+    minutes: float,
+    key: str,
+    message: str,
+    *args: Any,
+    logger: logging.Logger | None = None,
+    **kwargs: Any,
+) -> bool:
+    """Emit ``logger.warning`` for *message* at most once per *minutes* interval."""
+
+    interval = max(0.0, minutes) * 60.0
+    now = time.monotonic()
+
+    with _warn_once_lock:
+        last = _warn_once_last_emit.get(key)
+        if last is not None and interval > 0 and now - last < interval:
+            return False
+        _warn_once_last_emit[key] = now
+
+    target = logger or logging.getLogger()
+    target.warning(message, *args, **kwargs)
+    return True
+
+
+def reset_warn_once_cache() -> None:
+    """Clear cached emission timestamps for :func:`warn_once_per`."""
+
+    with _warn_once_lock:
+        _warn_once_last_emit.clear()
 
 
 def setup_logging(
@@ -157,34 +249,46 @@ def configure_runtime_logging(
 
     log_path = Path(logfile or os.getenv("LOG_FILE") or RUNTIME_LOG)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path = log_path.resolve()
 
     root = logging.getLogger()
     if force:
         for handler in list(root.handlers):
             root.removeHandler(handler)
-    if root.handlers:
-        return log_path
 
     root.setLevel(resolved_level)
 
     formatter = logging.Formatter(resolved_format, datefmt=resolved_datefmt)
 
-    handlers: list[logging.Handler] = []
-    file_handler = RotatingFileHandler(
-        log_path,
-        maxBytes=max_bytes or DEFAULT_RUNTIME_MAX_BYTES,
-        backupCount=backup_count or DEFAULT_RUNTIME_BACKUP_COUNT,
-        encoding="utf-8",
-    )
-    handlers.append(file_handler)
+    file_handler: RotatingFileHandler | None = None
+    for handler in root.handlers:
+        if isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename) == log_path:
+            file_handler = handler
+            break
 
+    if file_handler is None:
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=max_bytes or DEFAULT_RUNTIME_MAX_BYTES,
+            backupCount=backup_count or DEFAULT_RUNTIME_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        root.addHandler(file_handler)
+
+    file_handler.setLevel(resolved_level)
+    file_handler.setFormatter(formatter)
+
+    stream_handler: logging.StreamHandler | None = None
     if console:
-        stream = logging.StreamHandler(sys.stdout)
-        handlers.append(stream)
+        stream_handler = setup_stdout_logging(
+            level=resolved_level,
+            fmt=resolved_format,
+            datefmt=resolved_datefmt,
+        )
 
-    for handler in handlers:
-        handler.setFormatter(formatter)
-        root.addHandler(handler)
+    if stream_handler is not None:
+        stream_handler.setLevel(resolved_level)
+        # ``setup_stdout_logging`` already applies the formatter
 
     root.debug("Logging initialised", extra={"log_file": str(log_path)})
     return log_path
