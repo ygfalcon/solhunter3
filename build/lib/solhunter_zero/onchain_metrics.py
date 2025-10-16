@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Awaitable, Dict, List, Tuple, TypeVar
 from urllib.parse import urlparse, parse_qs
 
 import copy
+import random
 
 import aiohttp
 
@@ -101,6 +103,10 @@ def _helius_api_key() -> str:
         return vals[0]
     return ""
 
+
+def _helius_headers(api_key: str) -> Dict[str, str]:
+    return {"accept": "application/json", "x-api-key": api_key}
+
 __all__ = [
     "fetch_dex_metrics_async",
     "fetch_dex_metrics",
@@ -140,6 +146,14 @@ class LiquiditySnapshot(dict):
     def __int__(self) -> int:  # pragma: no cover - trivial conversion
         return int(float(self))
 
+    def __repr__(self) -> str:
+        return (
+            "LiquiditySnapshot("
+            f"liquidity_usd={_numeric(self.get('liquidity_usd'), 0.0)}, "
+            f"pools={_int_numeric(self.get('pool_count'), 0)}, "
+            f"slot={_int_numeric(self.get('slot'), 0)})"
+        )
+
     @property
     def value(self) -> float:
         """Explicit accessor matching the numeric semantics."""
@@ -149,6 +163,16 @@ class LiquiditySnapshot(dict):
 
 def _now_ts() -> int:
     return int(time.time())
+
+T = TypeVar("T")
+
+
+def _run_blocking(coro: Awaitable[T]) -> T:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    raise RuntimeError("Use the async version inside an event loop.")
 
 def _numeric(value: Any, default: float = 0.0) -> float:
     try:
@@ -211,7 +235,7 @@ async def _birdeye_get(session: aiohttp.ClientSession, path: str, params: Dict[s
                     timeout=aiohttp.ClientTimeout(total=8),
                 ) as r:
                     if r.status == 429:
-                        await asyncio.sleep(0.6 * (attempt + 1))
+                        await asyncio.sleep(0.6 * (attempt + 1) + random.random() * 0.2)
                         continue
                     if r.status >= 400:
                         return {}
@@ -222,7 +246,7 @@ async def _birdeye_get(session: aiohttp.ClientSession, path: str, params: Dict[s
             return {}
     return {}
 
-async def _birdeye_price_overview(session: aiohttp.ClientSession, mint: str) -> Tuple[float, float, float, float, int, int, Optional[int]]:
+async def _birdeye_price_overview(session: aiohttp.ClientSession, mint: str) -> Tuple[float, float, float, float, int, int, int | None]:
     """
     Returns: price, change24h, volume24h, liquidity, holders, pool_count, decimals_or_none
     """
@@ -379,7 +403,7 @@ async def _fetch_metrics_dexscreener(
     price = 0.0
     change = 0.0
     holders = 0
-    decimals: Optional[int] = None
+    decimals: int | None = None
 
     if isinstance(best, dict):
         liquidity = _numeric((best.get("liquidity") or {}).get("usd"), 0.0)
@@ -432,7 +456,7 @@ def _helius_pick_entry(payload: Any, mint: str) -> Dict[str, Any] | None:
     return None
 
 
-async def _helius_price_overview(session: aiohttp.ClientSession, mint: str) -> Tuple[float, float, float, float, int, int, Optional[int]]:
+async def _helius_price_overview(session: aiohttp.ClientSession, mint: str) -> Tuple[float, float, float, float, int, int, int | None]:
     cache_key = ("helius_price", mint)
     cached = DEX_METRICS_CACHE.get(cache_key)
     if cached is not None:
@@ -444,9 +468,9 @@ async def _helius_price_overview(session: aiohttp.ClientSession, mint: str) -> T
         DEX_METRICS_CACHE.set(cache_key, result)
         return result
 
-    headers = {"accept": "application/json"}
-    price_params = {"ids": mint, "vs": "usd", "api-key": api_key}
-    market_params = {"mint": mint, "api-key": api_key}
+    headers = _helius_headers(api_key)
+    price_params = {"ids": mint, "vs": "usd"}
+    market_params = {"mint": mint}
 
     async def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{HELIUS_API_BASE.rstrip('/')}{path}"
@@ -484,7 +508,7 @@ async def _helius_price_overview(session: aiohttp.ClientSession, mint: str) -> T
     liquidity = 0.0
     holders = 0
     pool_count = 0
-    decimals: Optional[int] = None
+    decimals: int | None = None
 
     if isinstance(market_entry, dict):
         for key in ("volume24hUsd", "volume24h", "volumeUsd24h", "totalVolume24hUsd", "volume_24h_usd"):
@@ -516,7 +540,7 @@ async def _helius_price_overview(session: aiohttp.ClientSession, mint: str) -> T
 
 # -------------------- Helius RPC --------------------
 
-async def _rpc_post(session: aiohttp.ClientSession, method: str, params: Any, rpc_url: Optional[str]) -> Dict[str, Any]:
+async def _rpc_post(session: aiohttp.ClientSession, method: str, params: Any, rpc_url: str | None) -> Dict[str, Any]:
     url = rpc_url or SOLANA_RPC_URL
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     try:
@@ -527,7 +551,7 @@ async def _rpc_post(session: aiohttp.ClientSession, method: str, params: Any, rp
     except Exception:
         return {}
 
-async def _helius_slot(session: aiohttp.ClientSession, rpc_url: Optional[str]) -> int:
+async def _helius_slot(session: aiohttp.ClientSession, rpc_url: str | None) -> int:
     cache_key = rpc_url or "default"
     cached = HELIUS_SLOT_CACHE.get(cache_key)
     if cached is not None:
@@ -539,7 +563,7 @@ async def _helius_slot(session: aiohttp.ClientSession, rpc_url: Optional[str]) -
         HELIUS_SLOT_CACHE.set(cache_key, slot)
     return slot
 
-async def _helius_decimals(session: aiohttp.ClientSession, mint: str, rpc_url: Optional[str]) -> int:
+async def _helius_decimals(session: aiohttp.ClientSession, mint: str, rpc_url: str | None) -> int:
     # getTokenSupply returns decimals
     cache_key = (mint, rpc_url or "default")
     cached = HELIUS_DECIMALS_CACHE.get(cache_key)
@@ -556,7 +580,7 @@ async def _helius_decimals(session: aiohttp.ClientSession, mint: str, rpc_url: O
 
 # -------------------- Jupiter slippage / price impact --------------------
 
-def _extract_price_impact(data: Any) -> Optional[float]:
+def _extract_price_impact(data: Any) -> float | None:
     if data is None:
         return None
     if isinstance(data, (int, float)):
@@ -609,9 +633,8 @@ async def _jupiter_quote_price_impact_pct(
         "inputMint": in_mint,
         "outputMint": out_mint,
         "amount": str(lamports),
-        "api-key": api_key,
     }
-    headers = {"accept": "application/json", "x-api-key": api_key}
+    headers = _helius_headers(api_key)
     timeout = aiohttp.ClientTimeout(total=8)
 
     for attempt in range(3):
@@ -637,10 +660,16 @@ async def _jupiter_quote_price_impact_pct(
 
 async def fetch_slippage_onchain_async(
     mint: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
     *,
     in_amount_sol: float = 0.1,
 ) -> Dict[str, Any]:
+    """Estimate swap slippage for ``mint`` using the shared HTTP session.
+
+    The coroutine warms the decimals cache in the background and queries the
+    Helius price-impact endpoint with per-request timeouts, returning a stable
+    payload that includes the request size in SOL.
+    """
     canonical = _validated_mint(mint)
     if canonical is None:
         fallback_mint = canonical_mint(mint) if isinstance(mint, str) else ""
@@ -653,14 +682,11 @@ async def fetch_slippage_onchain_async(
             "error": "invalid_mint",
         }
     mint = canonical
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        dec_task = asyncio.create_task(_helius_decimals(session, mint, rpc_url))
-        impact = await _jupiter_quote_price_impact_pct(session, mint, in_amount_sol=in_amount_sol)
-        try:
-            _ = await dec_task
-        except Exception:
-            pass
+    session = await get_session()
+    dec_task = asyncio.create_task(_helius_decimals(session, mint, rpc_url))
+    impact = await _jupiter_quote_price_impact_pct(session, mint, in_amount_sol=in_amount_sol)
+    with contextlib.suppress(Exception):
+        await dec_task
 
     bps = int(abs(impact) * 10_000)
     return {
@@ -673,76 +699,57 @@ async def fetch_slippage_onchain_async(
 
 def fetch_slippage_onchain(
     mint: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
     *,
     in_amount_sol: float = 0.1,
 ) -> Dict[str, Any]:
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        return asyncio.run_coroutine_threadsafe(
-            fetch_slippage_onchain_async(mint, rpc_url=rpc_url, in_amount_sol=in_amount_sol), loop
-        ).result()
-    return asyncio.run(fetch_slippage_onchain_async(mint, rpc_url=rpc_url, in_amount_sol=in_amount_sol))
+    """Blocking wrapper for :func:`fetch_slippage_onchain_async`."""
+    return _run_blocking(
+        fetch_slippage_onchain_async(mint, rpc_url=rpc_url, in_amount_sol=in_amount_sol)
+    )
 
 # -------------------- Order book / insight helpers --------------------
 
 async def _order_book_depth_change_async(
     mint: str,
     *,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
     base_url: str | None = None,
 ) -> float:
     canonical = _validated_mint(mint)
     if canonical is None:
         return 0.0
-    mint = canonical
-    rpc = rpc_url or SOLANA_RPC_URL
-    cache_key = (mint, rpc, base_url or "")
-    try:
-        metrics = await fetch_dex_metrics_async(mint, rpc_url=rpc, base_url=base_url)
-    except Exception:
-        metrics = {}
-    depth_val = 0.0
-    if isinstance(metrics, dict):
-        depth_val = _numeric(metrics.get("depth"), 0.0)
-    previous = ORDER_BOOK_DEPTH_CACHE.get(cache_key)
-    ORDER_BOOK_DEPTH_CACHE.set(cache_key, depth_val)
-    if previous is None:
-        return 0.0
-    prev_val = _numeric(previous, 0.0)
-    return _numeric(depth_val - prev_val, 0.0)
+    # depth not yet available; returns 0.0.
+    _ = (canonical, rpc_url, base_url)
+    return 0.0
 
 
 def order_book_depth_change(
     mint: str,
     *,
     base_url: str | None = None,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
 ) -> float:
-    """Return the change in reported order book depth since the previous call."""
+    """Return the stubbed order book depth delta; ``base_url`` is deprecated.
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+    The metric currently returns ``0.0`` until depth_service integration lands,
+    so the first and subsequent invocations behave identically.
+    """
+
     canonical = _validated_mint(mint)
     if canonical is None:
         return 0.0
     coro = _order_book_depth_change_async(canonical, rpc_url=rpc_url, base_url=base_url)
-    if loop and loop.is_running():
-        return asyncio.run_coroutine_threadsafe(coro, loop).result()
-    return asyncio.run(coro)
+    return _run_blocking(coro)
 
 
 def fetch_mempool_tx_rate(
     token: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
     *,
     limit: int = 20,
 ) -> float:
+    """Return the short-term mempool transaction rate via ``scanner_onchain``."""
     canonical = _validated_mint(token)
     if canonical is None:
         return 0.0
@@ -752,10 +759,11 @@ def fetch_mempool_tx_rate(
 
 def fetch_whale_wallet_activity(
     token: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
     *,
     threshold: float = 1_000_000.0,
 ) -> float:
+    """Return whale wallet activity in USD-equivalent volume via the scanner."""
     canonical = _validated_mint(token)
     if canonical is None:
         return 0.0
@@ -765,10 +773,11 @@ def fetch_whale_wallet_activity(
 
 def fetch_average_swap_size(
     token: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
     *,
     limit: int = 20,
 ) -> float:
+    """Return the average swap size proxy using the scanner volume helper."""
     canonical = _validated_mint(token)
     if canonical is None:
         return 0.0
@@ -778,8 +787,15 @@ def fetch_average_swap_size(
 
 async def collect_onchain_insights_async(
     token: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
 ) -> Dict[str, float]:
+    """Gather liquidity, mempool, whale, and swap signals concurrently.
+
+    Scanner-derived metrics are executed in threads to keep the event loop
+    responsive, while the depth helper runs on the loop. All helper calls
+    propagate their ``limit``/``threshold`` parameters explicitly for
+    observability.
+    """
     canonical = _validated_mint(token)
     if canonical is None:
         return {
@@ -791,7 +807,9 @@ async def collect_onchain_insights_async(
     rpc = rpc_url or SOLANA_RPC_URL
     depth = await _order_book_depth_change_async(canonical, rpc_url=rpc)
     tx_rate_task = asyncio.to_thread(fetch_mempool_tx_rate, canonical, rpc, limit=20)
-    whale_task = asyncio.to_thread(fetch_whale_wallet_activity, canonical, rpc)
+    whale_task = asyncio.to_thread(
+        fetch_whale_wallet_activity, canonical, rpc, threshold=1_000_000.0
+    )
     swap_task = asyncio.to_thread(fetch_average_swap_size, canonical, rpc, limit=20)
     tx_rate, whale_activity, avg_swap = await asyncio.gather(
         tx_rate_task,
@@ -808,8 +826,9 @@ async def collect_onchain_insights_async(
 
 def collect_onchain_insights(
     token: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
 ) -> Dict[str, float]:
+    """Blocking wrapper for :func:`collect_onchain_insights_async`."""
     canonical = _validated_mint(token)
     if canonical is None:
         return {
@@ -820,9 +839,9 @@ def collect_onchain_insights(
         }
     rpc = rpc_url or SOLANA_RPC_URL
     depth = order_book_depth_change(canonical)
-    tx_rate = fetch_mempool_tx_rate(canonical, rpc)
-    whale_activity = fetch_whale_wallet_activity(canonical, rpc)
-    avg_swap = fetch_average_swap_size(canonical, rpc)
+    tx_rate = fetch_mempool_tx_rate(canonical, rpc, limit=20)
+    whale_activity = fetch_whale_wallet_activity(canonical, rpc, threshold=1_000_000.0)
+    avg_swap = fetch_average_swap_size(canonical, rpc, limit=20)
     return {
         "depth_change": _numeric(depth, 0.0),
         "tx_rate": _numeric(tx_rate, 0.0),
@@ -835,9 +854,17 @@ def collect_onchain_insights(
 async def fetch_dex_metrics_async(
     mint: str,
     *,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
     base_url: str | None = None,
 ) -> Dict[str, Any]:
+    """Aggregate on-chain DEX metrics with caching and global timeouts.
+
+    The coroutine queries Helius first, falls back to Birdeye and Dexscreener,
+    and respects the 10-second wall-clock guard in addition to per-request
+    timeouts. When ``FAST_MODE`` is enabled the OHLCV lookups are skipped to
+    reduce load. Results are cached in :data:`DEX_METRICS_CACHE` for repeated
+    calls and always contain the full metrics schema.
+    """
     _ = base_url  # retained for backward compatibility with older tests/callers
     canonical = _validated_mint(mint)
     if canonical is None:
@@ -849,107 +876,105 @@ async def fetch_dex_metrics_async(
     if cached is not None:
         return copy.deepcopy(cached)
 
-    base = _build_default_metrics(mint)
-    session = await get_session()
-    slot_task = asyncio.create_task(_helius_slot(session, rpc_url))
-    dec_task = asyncio.create_task(_helius_decimals(session, mint, rpc_url))
+    async with asyncio.timeout(10):
+        base = _build_default_metrics(mint)
+        session = await get_session()
+        slot_task = asyncio.create_task(_helius_slot(session, rpc_url))
+        dec_task = asyncio.create_task(_helius_decimals(session, mint, rpc_url))
 
-    helius_price: Tuple[float, float, float, float, int, int, Optional[int]]
-    try:
-        helius_price = await _helius_price_overview(session, mint)
-    except Exception:
-        helius_price = (0.0, 0.0, 0.0, 0.0, 0, 0, None)
-
-    price_h, chg_h, vol_h, liq_h, holders_h, pools_h, decimals_h = helius_price
-    helius_metrics = {
-        "price": _numeric(price_h, 0.0),
-        "price_24h_change": _numeric(chg_h, 0.0),
-        "volume_24h": _numeric(vol_h, 0.0),
-        "liquidity_usd": _numeric(liq_h, 0.0),
-        "holders": _int_numeric(holders_h, 0),
-        "pool_count": _int_numeric(pools_h, 0),
-        "decimals": _int_numeric(decimals_h, 0) if decimals_h is not None else None,
-        "ohlcv_5m": [],
-        "ohlcv_1h": [],
-    }
-
-    selected_metrics: Dict[str, Any] | None
-    if _metrics_has_data(helius_metrics):
-        selected_metrics = helius_metrics
-    else:
+        helius_price: Tuple[float, float, float, float, int, int, int | None]
         try:
-            birdeye_metrics = await _fetch_metrics_birdeye(session, mint)
+            helius_price = await _helius_price_overview(session, mint)
         except Exception:
-            birdeye_metrics = {}
-        if _metrics_has_data(birdeye_metrics):
-            selected_metrics = birdeye_metrics
+            helius_price = (0.0, 0.0, 0.0, 0.0, 0, 0, None)
+
+        price_h, chg_h, vol_h, liq_h, holders_h, pools_h, decimals_h = helius_price
+        helius_metrics = {
+            "price": _numeric(price_h, 0.0),
+            "price_24h_change": _numeric(chg_h, 0.0),
+            "volume_24h": _numeric(vol_h, 0.0),
+            "liquidity_usd": _numeric(liq_h, 0.0),
+            "holders": _int_numeric(holders_h, 0),
+            "pool_count": _int_numeric(pools_h, 0),
+            "decimals": _int_numeric(decimals_h, 0) if decimals_h is not None else None,
+            "ohlcv_5m": [],
+            "ohlcv_1h": [],
+        }
+
+        selected_metrics: Dict[str, Any] | None
+        if _metrics_has_data(helius_metrics):
+            selected_metrics = helius_metrics
         else:
             try:
-                tertiary_metrics = await _fetch_metrics_dexscreener(session, mint)
+                birdeye_metrics = await _fetch_metrics_birdeye(session, mint)
             except Exception:
-                tertiary_metrics = {}
-            if _metrics_has_data(tertiary_metrics):
-                selected_metrics = tertiary_metrics
+                birdeye_metrics = {}
+            if _metrics_has_data(birdeye_metrics):
+                selected_metrics = birdeye_metrics
             else:
-                selected_metrics = None
+                try:
+                    tertiary_metrics = await _fetch_metrics_dexscreener(session, mint)
+                except Exception:
+                    tertiary_metrics = {}
+                if _metrics_has_data(tertiary_metrics):
+                    selected_metrics = tertiary_metrics
+                else:
+                    selected_metrics = None
 
-    try:
-        slot = await slot_task
-    except Exception:
-        slot = 0
-    try:
-        decimals_rpc = await dec_task
-    except Exception:
-        decimals_rpc = 0
+        try:
+            slot = await slot_task
+        except Exception:
+            slot = 0
+        try:
+            decimals_rpc = await dec_task
+        except Exception:
+            decimals_rpc = 0
 
-    selected = selected_metrics or {}
-    decimals_hint = selected.get("decimals") if isinstance(selected, dict) else None
-    decimals_final = decimals_rpc if decimals_rpc > 0 else (
-        decimals_hint if isinstance(decimals_hint, (int, float)) and decimals_hint > 0 else 9
-    )
+        selected = selected_metrics or {}
+        decimals_hint = selected.get("decimals") if isinstance(selected, dict) else None
+        decimals_final = decimals_rpc if decimals_rpc > 0 else (
+            decimals_hint if isinstance(decimals_hint, (int, float)) and decimals_hint > 0 else 9
+        )
+        decimals_final = max(0, int(decimals_final))
 
-    ohlcv5_val = selected.get("ohlcv_5m") if isinstance(selected, dict) else []
-    ohlcv1_val = selected.get("ohlcv_1h") if isinstance(selected, dict) else []
+        ohlcv5_val = selected.get("ohlcv_5m") if isinstance(selected, dict) else []
+        ohlcv1_val = selected.get("ohlcv_1h") if isinstance(selected, dict) else []
 
-    base.update({
-        "price": _numeric(selected.get("price"), 0.0),
-        "price_24h_change": _numeric(selected.get("price_24h_change"), 0.0),
-        "volume_24h": _numeric(selected.get("volume_24h"), 0.0),
-        "liquidity_usd": _numeric(selected.get("liquidity_usd"), 0.0),
-        "holders": _int_numeric(selected.get("holders"), 0),
-        "pool_count": _int_numeric(selected.get("pool_count"), 0),
-        "decimals": _int_numeric(decimals_final, 9),
-        "slot": _int_numeric(slot, 0),
-        "ohlcv_5m": list(ohlcv5_val) if isinstance(ohlcv5_val, list) else [],
-        "ohlcv_1h": list(ohlcv1_val) if isinstance(ohlcv1_val, list) else [],
-        "ts": _now_ts(),
-    })
-    cached_entry = copy.deepcopy(base)
-    DEX_METRICS_CACHE.set(cache_key, cached_entry)
-    return copy.deepcopy(cached_entry)
+        base.update({
+            "price": _numeric(selected.get("price"), 0.0),
+            "price_24h_change": _numeric(selected.get("price_24h_change"), 0.0),
+            "volume_24h": _numeric(selected.get("volume_24h"), 0.0),
+            "liquidity_usd": _numeric(selected.get("liquidity_usd"), 0.0),
+            "holders": _int_numeric(selected.get("holders"), 0),
+            "pool_count": _int_numeric(selected.get("pool_count"), 0),
+            "decimals": _int_numeric(decimals_final, 9),
+            "slot": _int_numeric(slot, 0),
+            "ohlcv_5m": list(ohlcv5_val) if isinstance(ohlcv5_val, list) else [],
+            "ohlcv_1h": list(ohlcv1_val) if isinstance(ohlcv1_val, list) else [],
+            "ts": _now_ts(),
+        })
+        # 'depth' intentionally omitted; pending depth_service integration.
+        cached_entry = copy.deepcopy(base)
+        DEX_METRICS_CACHE.set(cache_key, cached_entry)
+        return copy.deepcopy(cached_entry)
 
-def fetch_dex_metrics(mint: str, *, rpc_url: Optional[str] = None) -> Dict[str, Any]:
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        return asyncio.run_coroutine_threadsafe(
-            fetch_dex_metrics_async(mint, rpc_url=rpc_url), loop
-        ).result()
-    return asyncio.run(fetch_dex_metrics_async(mint, rpc_url=rpc_url))
+def fetch_dex_metrics(mint: str, *, rpc_url: str | None = None) -> Dict[str, Any]:
+    """Synchronous facade for :func:`fetch_dex_metrics_async` outside event loops."""
+    return _run_blocking(fetch_dex_metrics_async(mint, rpc_url=rpc_url))
 
 # -------------------- liquidity-only facade (what callers expect) --------------------
 
 async def fetch_liquidity_onchain_async(
     mint: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
 ) -> LiquiditySnapshot:
     """
     Lightweight facade used by other modules.
     Uses Birdeye liquidity (USD) and pool_count, plus a slot touch via Helius.
     Returns a :class:`LiquiditySnapshot` with float semantics (``float(snapshot)``
     yields ``liquidity_usd``) so existing numeric consumers remain compatible.
+    Relies on :func:`fetch_dex_metrics_async`, and therefore inherits its cache
+    behavior and timeout guards.
     """
     canonical = _validated_mint(mint)
     if canonical is None:
@@ -980,8 +1005,9 @@ async def fetch_liquidity_onchain_async(
 
 def fetch_liquidity_onchain(
     mint: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
 ) -> LiquiditySnapshot:
+    """Blocking wrapper for :func:`fetch_liquidity_onchain_async`."""
     canonical = _validated_mint(mint)
     if canonical is None:
         fallback = canonical_mint(mint) if isinstance(mint, str) else str(mint)
@@ -995,22 +1021,14 @@ def fetch_liquidity_onchain(
                 "error": "invalid_mint",
             }
         )
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        return asyncio.run_coroutine_threadsafe(
-            fetch_liquidity_onchain_async(canonical, rpc_url=rpc_url), loop
-        ).result()
-    return asyncio.run(fetch_liquidity_onchain_async(canonical, rpc_url=rpc_url))
+    return _run_blocking(fetch_liquidity_onchain_async(canonical, rpc_url=rpc_url))
 
 
 # -------------------- Volume helpers (reuse scanner implementation) --------------------
 
 async def fetch_volume_onchain_async(
     mint: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
 ) -> float:
     """Proxy to scanner_onchain volume helper with default RPC."""
 
@@ -1023,8 +1041,9 @@ async def fetch_volume_onchain_async(
 
 def fetch_volume_onchain(
     mint: str,
-    rpc_url: Optional[str] = None,
+    rpc_url: str | None = None,
 ) -> float:
+    """Blocking wrapper for :func:`fetch_volume_onchain_async`."""
     canonical = _validated_mint(mint)
     if canonical is None:
         return 0.0

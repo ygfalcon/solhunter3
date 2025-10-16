@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from solhunter_zero.logging_utils import setup_stdout_logging
+
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch SolHunter runtime controller")
@@ -24,15 +26,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [live-runtime] %(message)s",
+def setup_logging() -> None:
+    setup_stdout_logging(
+        fmt="%(asctime)s %(levelname)s [live-runtime] %(message)s",
     )
 
 
 def _set_runtime_env(args: argparse.Namespace) -> None:
     os.environ.setdefault("NEW_RUNTIME", "1")
+    os.environ.setdefault("FLASK_ENV", "production")
+    os.environ.setdefault("FLASK_DEBUG", "0")
     os.environ["MODE"] = "live" if args.mode == "live" else "paper"
     os.environ["MICRO_MODE"] = str(args.micro)
     # Running in paper mode should never touch the live executor
@@ -111,7 +114,7 @@ async def _run_controller(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    _configure_logging()
+    setup_logging()
     try:
         return asyncio.run(_run_controller(args))
     except KeyboardInterrupt:
