@@ -106,6 +106,25 @@ def _normalize_mint_candidate(candidate: object) -> str | None:
 FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 _BIRDEYE_TIMEOUT = float(os.getenv("FAST_BIRDEYE_TIMEOUT", "6.0")) if FAST_MODE else 10.0
 _BIRDEYE_PAGE_DELAY = float(os.getenv("FAST_BIRDEYE_PAGE_DELAY", "0.35")) if FAST_MODE else 1.1
+# Bounded retry/backoff configuration for Birdeye trending lookups.
+_BIRDEYE_MAX_ATTEMPTS = max(
+    1,
+    int(os.getenv("BIRDEYE_TRENDING_RETRIES", "4") or 4),
+)
+_BIRDEYE_BACKOFF_BASE = max(
+    0.0,
+    float(
+        os.getenv(
+            "BIRDEYE_TRENDING_BACKOFF",
+            "0.4" if FAST_MODE else "1.0",
+        )
+        or ("0.4" if FAST_MODE else "1.0")
+    ),
+)
+_BIRDEYE_BACKOFF_MAX = max(
+    _BIRDEYE_BACKOFF_BASE,
+    float(os.getenv("BIRDEYE_TRENDING_BACKOFF_MAX", "6.0") or 6.0),
+)
 
 _SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 _TOKEN_2022_PREFIX = "Tokenz"
@@ -143,6 +162,19 @@ _PARTIAL_THRESHOLD = max(
     ),
 )
 
+# Optional timeout (seconds) to bound combined seed collection latency.
+_SEED_COLLECTION_TIMEOUT = max(
+    0.0,
+    float(os.getenv("SEED_COLLECTION_TIMEOUT", "0") or 0.0),
+)
+
+ENABLE_HELIUS_TRENDING = (
+    (os.getenv("ENABLE_HELIUS_TRENDING") or "")
+    .strip()
+    .lower()
+    in {"1", "true", "yes", "on"}
+)
+
 TRENDING_METADATA: Dict[str, Dict[str, Any]] = {}
 
 _FAILURE_THRESHOLD = max(1, int(os.getenv("TOKEN_SCAN_FAILURE_THRESHOLD", "3")))
@@ -161,6 +193,17 @@ _MIN_SCAN_INTERVAL = max(0.0, float(os.getenv("TOKEN_SCAN_MIN_INTERVAL", "45")))
 _LAST_TRENDING_RESULT: Dict[str, Any] = {"mints": [], "metadata": {}, "timestamp": 0.0}
 _FAILURE_COUNT = 0
 _COOLDOWN_UNTIL = 0.0
+
+
+def _clear_trending_cache_for_tests() -> None:
+    """Testing helper: clear trending cache and metadata."""
+
+    TRENDING_METADATA.clear()
+    _LAST_TRENDING_RESULT.clear()
+    _LAST_TRENDING_RESULT.update({"mints": [], "metadata": {}, "timestamp": 0.0})
+    global _FAILURE_COUNT, _COOLDOWN_UNTIL
+    _FAILURE_COUNT = 0
+    _COOLDOWN_UNTIL = 0.0
 
 __all__ = [
     "scan_tokens_async",
@@ -384,10 +427,8 @@ async def _birdeye_trending(
     return_entries: bool = False,
 ) -> List[Any]:
     """Fetch trending token mints from Birdeye's trending/top-mover endpoint."""
-    api_key = api_key or ""
 
-    resolved_birdeye_key = _resolve_birdeye_key(api_key)
-    birdeye_allowed = _birdeye_enabled(resolved_birdeye_key)
+    api_key = api_key or ""
     if not api_key:
         logger.debug("Birdeye API key missing; skipping trending fetch")
         return []
@@ -417,6 +458,7 @@ async def _birdeye_trending(
     url = f"{BIRDEYE_BASE}/defi/trending"
 
     last_exc: Exception | None = None
+    partial_result: List[Any] = []
 
     throttle_markers = (
         "compute units usage limit exceeded",
@@ -427,7 +469,21 @@ async def _birdeye_trending(
         "exceeded your request limit",
     )
 
-    for attempt in range(1, 4):
+    for attempt in range(1, _BIRDEYE_MAX_ATTEMPTS + 1):
+        if attempt > 1 and _BIRDEYE_BACKOFF_BASE > 0:
+            backoff = min(
+                _BIRDEYE_BACKOFF_MAX,
+                _BIRDEYE_BACKOFF_BASE * (2 ** (attempt - 2)),
+            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Birdeye retry %d/%d sleeping %.2fs (offset=%s)",
+                    attempt,
+                    _BIRDEYE_MAX_ATTEMPTS,
+                    backoff,
+                    offset,
+                )
+            await asyncio.sleep(backoff)
         try:
             async with session.get(
                 url,
@@ -466,6 +522,15 @@ async def _birdeye_trending(
                         if detail_clean:
                             message = f"{message} - {detail_clean}"
                     raise BirdeyeFatalError(resp.status, message, body=detail)
+                if resp.status == 503:
+                    try:
+                        detail = (await resp.text())[:400]
+                    except Exception:  # pragma: no cover - defensive guard
+                        detail = ""
+                    message = "Birdeye service unavailable"
+                    if resp.reason:
+                        message = f"{message}: {resp.reason}"
+                    raise BirdeyeThrottleError(resp.status, message, body=detail)
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
                 if not isinstance(data, dict):
@@ -529,6 +594,9 @@ async def _birdeye_trending(
                         if return_entries and entry_dict is not None:
                             for record in records:
                                 if record.get("address") == normalized:
+                                    existing_sources = record.setdefault("sources", [])
+                                    if isinstance(existing_sources, list) and "birdeye" not in existing_sources:
+                                        existing_sources.append("birdeye")
                                     record.setdefault("metadata", {}).setdefault(
                                         "birdeye", entry_dict
                                     )
@@ -556,7 +624,9 @@ async def _birdeye_trending(
                         }
                         if entry_dict is not None:
                             record["raw"] = entry_dict
-                            record.setdefault("metadata", {})["birdeye"] = entry_dict
+                            meta_map = record.setdefault("metadata", {})
+                            if isinstance(meta_map, dict):
+                                meta_map.setdefault("birdeye", entry_dict)
                             liquidity_val = _search_numeric(
                                 entry_dict,
                                 ("liquidity", "liquidityusd", "usdliquidity"),
@@ -578,25 +648,42 @@ async def _birdeye_trending(
                         records.append(record)
                     if len(addresses) >= limit:
                         break
-                return records if return_entries else addresses
+                partial_result = records if return_entries else addresses
+                if logger.isEnabledFor(logging.INFO):
+                    logger.info(
+                        "Birdeye returned %d candidate(s) (offset=%s, limit=%s)",
+                        len(partial_result),
+                        offset,
+                        limit,
+                    )
+                return partial_result
         except BirdeyeFatalError:
             raise
-        except Exception as exc:
+        except BirdeyeThrottleError as exc:
             last_exc = exc
-            warn_once_per(
-                1.0,
-                "birdeye-trending-request",
-                "Birdeye trending request failed (%d/3): %s",
-                attempt,
-                exc,
-                logger=logger,
-            )
-            await asyncio.sleep(0.1)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_exc = exc
+        except Exception as exc:  # pragma: no cover - defensive
+            last_exc = exc
 
-    if last_exc:
-        logger.debug("Birdeye last_exc: %s", last_exc)
+    if partial_result:
+        logger.debug(
+            "Birdeye returning partial result after %d attempt(s) (offset=%s)",
+            _BIRDEYE_MAX_ATTEMPTS,
+            offset,
+        )
+        return partial_result
+
+    if last_exc is not None:
+        logger.warning(
+            "Birdeye trending failed after %d attempt(s) (offset=%s): %s: %s",
+            _BIRDEYE_MAX_ATTEMPTS,
+            offset,
+            last_exc.__class__.__name__,
+            last_exc,
+        )
+
     return []
-
 
 async def _dexscreener_trending_movers(
     session: aiohttp.ClientSession,
@@ -700,6 +787,8 @@ async def _dexscreener_trending_movers(
                 raw,
                 ("liquidityusd", "usdliquidity", "totalliquidity", "liquidity"),
             )
+        if liquidity_val is not None and liquidity_val < 0:
+            liquidity_val = None
         if liquidity_val is not None:
             record["liquidity"] = liquidity_val
 
@@ -715,8 +804,10 @@ async def _dexscreener_trending_movers(
             volume_val = _search_numeric(
                 raw,
                 ("volume24h", "volumeusd", "usdvolume", "volume"),
-                avoid=("change", "ratio"),
+                avoid=("ratio", "change"),
             )
+        if volume_val is not None and volume_val < 0:
+            volume_val = None
         if volume_val is not None:
             record["volume"] = volume_val
 
@@ -748,8 +839,12 @@ async def _das_enrich_candidates(
         try:
             assets = await get_asset_batch(session, chunk)
         except Exception as exc:
-            logger.warning("DAS getAssetBatch failed: %s", exc)
-            return {}
+            logger.warning(
+                "DAS getAssetBatch failed for chunk size %d: %s",
+                len(chunk),
+                exc,
+            )
+            continue
         for asset in assets:
             if not isinstance(asset, dict):
                 continue
@@ -781,6 +876,8 @@ def _asset_is_valid(asset: Dict[str, Any]) -> bool:
             meta = content.get("metadata")
             if isinstance(meta, dict):
                 decimals = meta.get("decimals")
+        # Missing decimals should not automatically disqualify assets; later
+        # filters and agents can make a decision with partial metadata.
     if decimals is not None:
         try:
             dec_value = int(decimals)
@@ -837,76 +934,127 @@ async def _collect_trending_seeds(
 ) -> List[Dict[str, Any]]:
     if not hasattr(session, "post"):
         return []
+
     desired = max(limit, 10)
     seeds: List[Dict[str, Any]] = []
     seen: Set[str] = set()
 
-    dexscreener_candidates = await _dexscreener_trending_movers(session, limit=desired)
-    for item in dexscreener_candidates:
-        mint = _normalize_mint_candidate(item.get("address"))
-        if not mint or mint in seen:
-            continue
-        item = dict(item)
-        item["address"] = mint
-        seeds.append(item)
-        seen.add(mint)
-        if len(seeds) >= desired:
-            break
-
-    if birdeye_api_key:
-        birdeye_limit = max(desired - len(seeds), desired)
-        try:
-            birdeye_entries = await _birdeye_trending(
-                session,
-                birdeye_api_key,
-                limit=birdeye_limit,
-                offset=0,
-                return_entries=True,
-            )
-        except BirdeyeFatalError:
-            raise
-        except BirdeyeThrottleError:
-            raise
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Birdeye top movers fetch failed: %s", exc)
-            birdeye_entries = []
-        for entry in birdeye_entries:
-            if not isinstance(entry, dict):
+    async def _gather_sources() -> None:
+        nonlocal seeds, seen
+        dexscreener_candidates = await _dexscreener_trending_movers(session, limit=desired)
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("Dexscreener returned %d candidate(s)", len(dexscreener_candidates))
+        for item in dexscreener_candidates:
+            mint = _normalize_mint_candidate(item.get("address"))
+            if not mint or mint in seen:
                 continue
-            mint = _normalize_mint_candidate(entry.get("address"))
-            if not mint:
-                continue
-            entry = dict(entry)
+            entry = dict(item)
             entry["address"] = mint
-            existing: Dict[str, Any] | None = None
-            for candidate in seeds:
-                if candidate.get("address") == mint:
-                    existing = candidate
-                    break
-            if existing is not None:
-                sources = existing.setdefault("sources", [])
-                if isinstance(sources, list) and "birdeye" not in sources:
-                    sources.append("birdeye")
-                existing.setdefault("metadata", {}).setdefault("birdeye", entry.get("raw", entry))
-                if "liquidity" not in existing and isinstance(entry.get("liquidity"), (int, float)):
-                    existing["liquidity"] = entry["liquidity"]
-                if "volume" not in existing and isinstance(entry.get("volume"), (int, float)):
-                    existing["volume"] = entry["volume"]
-                if not existing.get("symbol") and entry.get("symbol"):
-                    existing["symbol"] = entry["symbol"]
-                if not existing.get("name") and entry.get("name"):
-                    existing["name"] = entry["name"]
-                continue
-            entry.setdefault("source", "birdeye")
-            entry.setdefault("sources", ["birdeye"])
-            entry.setdefault("metadata", {})
-            if "birdeye" not in entry["metadata"]:
-                raw = entry.get("raw") or entry
-                entry["metadata"]["birdeye"] = raw
+            sources = entry.setdefault("sources", [])
+            if not isinstance(sources, list):
+                sources = list(sources) if isinstance(sources, (set, tuple)) else []
+                entry["sources"] = sources
+            if "dexscreener" not in sources:
+                sources.append("dexscreener")
+            metadata = entry.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                entry["metadata"] = metadata
+            metadata.setdefault("dexscreener", entry.get("raw", entry))
             seeds.append(entry)
             seen.add(mint)
             if len(seeds) >= desired:
                 break
+
+        if birdeye_api_key and len(seeds) < desired:
+            birdeye_limit = max(desired - len(seeds), desired)
+            try:
+                birdeye_entries = await _birdeye_trending(
+                    session,
+                    birdeye_api_key,
+                    limit=birdeye_limit,
+                    offset=0,
+                    return_entries=True,
+                )
+            except BirdeyeFatalError:
+                raise
+            except BirdeyeThrottleError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Birdeye top movers fetch failed: %s", exc)
+                birdeye_entries = []
+            if logger.isEnabledFor(logging.INFO):
+                logger.info(
+                    "Birdeye returned %d candidate(s) (offset=0, limit=%s)",
+                    len(birdeye_entries),
+                    birdeye_limit,
+                )
+            for entry in birdeye_entries:
+                if not isinstance(entry, dict):
+                    continue
+                mint = _normalize_mint_candidate(entry.get("address"))
+                if not mint:
+                    continue
+                existing: Dict[str, Any] | None = None
+                for candidate in seeds:
+                    if candidate.get("address") == mint:
+                        existing = candidate
+                        break
+                if existing is not None:
+                    sources = existing.setdefault("sources", [])
+                    if not isinstance(sources, list):
+                        sources = list(sources) if isinstance(sources, (set, tuple)) else []
+                        existing["sources"] = sources
+                    if "birdeye" not in sources:
+                        sources.append("birdeye")
+                    meta_store = existing.setdefault("metadata", {})
+                    if not isinstance(meta_store, dict):
+                        meta_store = {}
+                        existing["metadata"] = meta_store
+                    if "birdeye" not in meta_store:
+                        raw_meta = entry.get("raw")
+                        meta_store["birdeye"] = raw_meta if isinstance(raw_meta, dict) else entry
+                    if "liquidity" not in existing and isinstance(entry.get("liquidity"), (int, float)):
+                        existing["liquidity"] = entry["liquidity"]
+                    if "volume" not in existing and isinstance(entry.get("volume"), (int, float)):
+                        existing["volume"] = entry["volume"]
+                    if not existing.get("symbol") and isinstance(entry.get("symbol"), str):
+                        existing["symbol"] = entry["symbol"]
+                    if not existing.get("name") and isinstance(entry.get("name"), str):
+                        existing["name"] = entry["name"]
+                    continue
+                new_entry = dict(entry)
+                new_entry["address"] = mint
+                sources = new_entry.setdefault("sources", [])
+                if not isinstance(sources, list):
+                    sources = list(sources) if isinstance(sources, (set, tuple)) else []
+                    new_entry["sources"] = sources
+                if "birdeye" not in sources:
+                    sources.append("birdeye")
+                metadata = new_entry.setdefault("metadata", {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                    new_entry["metadata"] = metadata
+                if "birdeye" not in metadata:
+                    raw_meta = new_entry.get("raw") or new_entry
+                    metadata["birdeye"] = raw_meta
+                seeds.append(new_entry)
+                seen.add(mint)
+                if len(seeds) >= desired:
+                    break
+
+    if _SEED_COLLECTION_TIMEOUT > 0:
+        try:
+            await asyncio.wait_for(_gather_sources(), timeout=_SEED_COLLECTION_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Seed collection timed out after %.2fs; using partial set",
+                _SEED_COLLECTION_TIMEOUT,
+            )
+        except Exception:
+            raise
+    else:
+        await _gather_sources()
 
     filtered: List[Dict[str, Any]] = []
     for candidate in seeds:
@@ -916,15 +1064,17 @@ async def _collect_trending_seeds(
             continue
         if volume is not None and volume < _TRENDING_MIN_VOLUME:
             continue
+        sources = candidate.get("sources")
+        if not isinstance(sources, list):
+            sources = list(sources) if isinstance(sources, (set, tuple)) else []
+            candidate["sources"] = sources
         filtered.append(candidate)
 
     if not filtered:
         filtered = list(seeds)
 
-    metadata = await _das_enrich_candidates(
-        session,
-        [item["address"] for item in filtered],
-    )
+    address_list = [item["address"] for item in filtered if isinstance(item.get("address"), str)]
+    metadata = await _das_enrich_candidates(session, address_list)
     if not metadata:
         return [dict(candidate) for candidate in filtered[:limit]]
 
@@ -937,11 +1087,17 @@ async def _collect_trending_seeds(
         if not asset or not _asset_is_valid(asset):
             continue
         enriched = dict(candidate)
-        enriched.setdefault("sources", [])
-        sources = enriched["sources"]
-        if isinstance(sources, list) and "das" not in sources:
+        sources = enriched.setdefault("sources", [])
+        if not isinstance(sources, list):
+            sources = list(sources) if isinstance(sources, (set, tuple)) else []
+            enriched["sources"] = sources
+        if "das" not in sources:
             sources.append("das")
-        enriched.setdefault("metadata", {})["das"] = asset
+        meta_store = enriched.setdefault("metadata", {})
+        if not isinstance(meta_store, dict):
+            meta_store = {}
+            enriched["metadata"] = meta_store
+        meta_store["das"] = asset
         enriched.update(_extract_asset_metadata(asset))
         enriched["address"] = mint
         final.append(enriched)
@@ -949,7 +1105,6 @@ async def _collect_trending_seeds(
             break
 
     return final
-
 
 async def _helius_trending(
     session: aiohttp.ClientSession,
@@ -1111,6 +1266,9 @@ async def _solscan_enrich(
     }
     if api_key:
         headers["token"] = api_key
+    elif "pro-api" in SOLSCAN_META_URL:
+        logger.debug("Solscan API key not set; skipping enrich for %s", mint)
+        return None
 
     params = {"address": mint}
 
@@ -1377,12 +1535,17 @@ async def scan_tokens_async(
     global _FAILURE_COUNT, _COOLDOWN_UNTIL
 
     requested = max(1, int(limit))
+    threshold = min(_PARTIAL_THRESHOLD, requested)
     api_key = api_key or ""
 
     resolved_birdeye_key = _resolve_birdeye_key(api_key)
     birdeye_allowed = _birdeye_enabled(resolved_birdeye_key)
 
     now = time.time()
+
+    if _COOLDOWN_UNTIL and now >= _COOLDOWN_UNTIL:
+        _LAST_TRENDING_RESULT.pop("cooldown_reason", None)
+        _LAST_TRENDING_RESULT.pop("cooldown_until", None)
 
     def _apply_cached() -> List[str]:
         cached_mints = list(_LAST_TRENDING_RESULT.get("mints") or [])
@@ -1511,6 +1674,7 @@ async def scan_tokens_async(
                 "Trending seed fetch returned no candidates; attempting Birdeye fallback",
             )
             forced_cooldown_seconds = max(forced_cooldown_seconds or 0.0, 15.0)
+            forced_cooldown_reason = forced_cooldown_reason or "seed-empty"
 
         for item in seed_candidates:
             if not isinstance(item, dict):
@@ -1522,14 +1686,19 @@ async def scan_tokens_async(
                 existing = TRENDING_METADATA.setdefault(mint, dict(item))
                 if isinstance(existing, dict):
                     sources = existing.setdefault("sources", [])
+                    if not isinstance(sources, list):
+                        sources = list(sources) if isinstance(sources, (set, tuple)) else []
+                        existing["sources"] = sources
                     source_name = item.get("source") or "trend"
-                    if isinstance(sources, list) and source_name not in sources:
+                    if source_name not in sources:
                         sources.append(source_name)
                     meta_map = existing.setdefault("metadata", {})
-                    if isinstance(meta_map, dict):
-                        incoming_meta = item.get("metadata")
-                        if isinstance(incoming_meta, dict):
-                            meta_map.update(incoming_meta)
+                    if not isinstance(meta_map, dict):
+                        meta_map = {}
+                        existing["metadata"] = meta_map
+                    incoming_meta = item.get("metadata")
+                    if isinstance(incoming_meta, dict):
+                        meta_map.update(incoming_meta)
                     if SOLSCAN_API_KEY and (
                         not existing.get("name")
                         or not existing.get("symbol")
@@ -1543,10 +1712,14 @@ async def scan_tokens_async(
                         if solscan_meta:
                             existing.update(solscan_meta)
                             meta_sources = existing.setdefault("sources", [])
-                            if (
-                                isinstance(meta_sources, list)
-                                and "solscan" not in meta_sources
-                            ):
+                            if not isinstance(meta_sources, list):
+                                meta_sources = (
+                                    list(meta_sources)
+                                    if isinstance(meta_sources, (set, tuple))
+                                    else []
+                                )
+                                existing["sources"] = meta_sources
+                            if "solscan" not in meta_sources:
                                 meta_sources.append("solscan")
                             details = existing.setdefault("metadata", {})
                             if isinstance(details, dict):
@@ -1556,12 +1729,12 @@ async def scan_tokens_async(
             meta = dict(item)
             meta["address"] = mint
             sources = meta.setdefault("sources", [])
-            if isinstance(sources, list):
-                default_source = item.get("source") or "trend"
-                if default_source not in sources:
-                    sources.append(default_source)
-            else:
-                meta["sources"] = [item.get("source") or "trend"]
+            if not isinstance(sources, list):
+                sources = list(sources) if isinstance(sources, (set, tuple)) else []
+                meta["sources"] = sources
+            default_source = item.get("source") or "trend"
+            if default_source not in sources:
+                sources.append(default_source)
             meta_store = meta.setdefault("metadata", {})
             if not isinstance(meta_store, dict):
                 meta_store = {}
@@ -1582,7 +1755,14 @@ async def scan_tokens_async(
                 if solscan_meta:
                     meta.update(solscan_meta)
                     sources = meta.setdefault("sources", [])
-                    if isinstance(sources, list) and "solscan" not in sources:
+                    if not isinstance(sources, list):
+                        sources = (
+                            list(sources)
+                            if isinstance(sources, (set, tuple))
+                            else []
+                        )
+                        meta["sources"] = sources
+                    if "solscan" not in sources:
                         sources.append("solscan")
                     details = meta.setdefault("metadata", {})
                     if isinstance(details, dict):
@@ -1594,16 +1774,84 @@ async def scan_tokens_async(
         if mints:
             success = True
 
+        if ENABLE_HELIUS_TRENDING and len(mints) < requested:
+            remaining = requested - len(mints)
+            if remaining > 0:
+                helius_entries = await _helius_trending(session, limit=remaining)
+                if logger.isEnabledFor(logging.INFO):
+                    logger.info(
+                        "Helius trending returned %d candidate(s)",
+                        len(helius_entries),
+                    )
+                for entry in helius_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    mint = _normalize_mint_candidate(entry.get("address"))
+                    if not mint:
+                        continue
+                    if mint in mints:
+                        existing_meta = TRENDING_METADATA.get(mint)
+                        if isinstance(existing_meta, dict):
+                            sources = existing_meta.setdefault("sources", [])
+                            if not isinstance(sources, list):
+                                sources = (
+                                    list(sources)
+                                    if isinstance(sources, (set, tuple))
+                                    else []
+                                )
+                                existing_meta["sources"] = sources
+                            if "helius" not in sources:
+                                sources.append("helius")
+                            meta_store = existing_meta.setdefault("metadata", {})
+                            if not isinstance(meta_store, dict):
+                                meta_store = {}
+                                existing_meta["metadata"] = meta_store
+                            incoming_meta = entry.get("metadata")
+                            if isinstance(incoming_meta, dict):
+                                current_meta = meta_store.get("helius")
+                                if isinstance(current_meta, dict):
+                                    current_meta.update(incoming_meta)
+                                else:
+                                    meta_store["helius"] = incoming_meta
+                        continue
+                    meta = dict(entry)
+                    meta["address"] = mint
+                    meta.setdefault("source", entry.get("source") or "helius")
+                    sources = meta.setdefault("sources", [])
+                    if not isinstance(sources, list):
+                        sources = (
+                            list(sources)
+                            if isinstance(sources, (set, tuple))
+                            else []
+                        )
+                        meta["sources"] = sources
+                    if "helius" not in sources:
+                        sources.append("helius")
+                    meta_store = meta.setdefault("metadata", {})
+                    if not isinstance(meta_store, dict):
+                        meta_store = {}
+                        meta["metadata"] = meta_store
+                    incoming_meta = entry.get("metadata")
+                    if isinstance(incoming_meta, dict):
+                        meta_store["helius"] = incoming_meta
+                    meta.setdefault("rank", len(TRENDING_METADATA))
+                    TRENDING_METADATA[mint] = meta
+                    mints.append(mint)
+                    if len(mints) >= requested:
+                        break
+                if helius_entries:
+                    success = True
+
         offset = 0
         allow_partial = (
-            _ALLOW_PARTIAL_RESULTS
-            and len(mints) >= min(_PARTIAL_THRESHOLD, requested)
+            _ALLOW_PARTIAL_RESULTS and len(mints) >= threshold
         )
         if allow_partial and len(mints) < requested:
             logger.debug(
-                "Token scan fast-mode returning partial result (%d/%d)",
+                "Token scan fast-mode returning partial result (%d/%d, fast_mode=%s)",
                 len(mints),
                 requested,
+                FAST_MODE,
             )
 
         while birdeye_allowed and not allow_partial and len(mints) < requested:
@@ -1658,7 +1906,14 @@ async def scan_tokens_async(
                     )
                     if isinstance(existing, dict):
                         sources = existing.setdefault("sources", [])
-                        if isinstance(sources, list) and "birdeye" not in sources:
+                        if not isinstance(sources, list):
+                            sources = (
+                                list(sources)
+                                if isinstance(sources, (set, tuple))
+                                else []
+                            )
+                            existing["sources"] = sources
+                        if "birdeye" not in sources:
                             sources.append("birdeye")
                     continue
                 mints.append(mint)
@@ -1670,12 +1925,13 @@ async def scan_tokens_async(
                 }
                 success = True
             offset += len(batch)
-            if _ALLOW_PARTIAL_RESULTS and len(mints) >= min(_PARTIAL_THRESHOLD, requested):
+            if _ALLOW_PARTIAL_RESULTS and len(mints) >= threshold:
                 if len(mints) < requested:
                     logger.debug(
-                        "Token scan fast-mode returning partial result (%d/%d)",
+                        "Token scan fast-mode returning partial result (%d/%d, fast_mode=%s)",
                         len(mints),
                         requested,
+                        FAST_MODE,
                     )
                 break
             if len(batch) < page_size or len(mints) >= requested:
@@ -1715,7 +1971,14 @@ async def scan_tokens_async(
                     if solscan_meta:
                         meta.update(solscan_meta)
                         sources = meta.setdefault("sources", [])
-                        if isinstance(sources, list) and "solscan" not in sources:
+                        if not isinstance(sources, list):
+                            sources = (
+                                list(sources)
+                                if isinstance(sources, (set, tuple))
+                                else []
+                            )
+                            meta["sources"] = sources
+                        if "solscan" not in sources:
                             sources.append("solscan")
                         details = meta.setdefault("metadata", {})
                         if isinstance(details, dict):
@@ -1758,29 +2021,61 @@ async def scan_tokens_async(
             _LAST_TRENDING_RESULT["metadata"] = copy.deepcopy(TRENDING_METADATA)
             _LAST_TRENDING_RESULT["timestamp"] = now
 
+        cooldown_reason_to_set: str | None = None
         if forced_cooldown_reason:
             _FAILURE_COUNT = _FAILURE_THRESHOLD
             cooldown_window = forced_cooldown_seconds or _FAILURE_COOLDOWN
             _COOLDOWN_UNTIL = now + cooldown_window
+            cooldown_reason_to_set = forced_cooldown_reason
+            logger.warning(
+                "Trending scan entering cooldown for %.1fs (reason=%s)",
+                cooldown_window,
+                forced_cooldown_reason,
+            )
         elif failure or not success:
             _FAILURE_COUNT += 1
             if _FAILURE_COUNT >= _FAILURE_THRESHOLD:
-                _COOLDOWN_UNTIL = now + _FAILURE_COOLDOWN
+                cooldown_window = _FAILURE_COOLDOWN
+                _COOLDOWN_UNTIL = now + cooldown_window
+                cooldown_reason_to_set = "failure"
+                logger.warning(
+                    "Trending scan entering cooldown for %.1fs (reason=%s)",
+                    cooldown_window,
+                    cooldown_reason_to_set,
+                )
         else:
             _FAILURE_COUNT = 0
             _COOLDOWN_UNTIL = 0.0
+            _LAST_TRENDING_RESULT.pop("cooldown_reason", None)
+            _LAST_TRENDING_RESULT.pop("cooldown_until", None)
+
+        if cooldown_reason_to_set:
+            _LAST_TRENDING_RESULT["cooldown_reason"] = cooldown_reason_to_set
+            _LAST_TRENDING_RESULT["cooldown_until"] = _COOLDOWN_UNTIL
+
+        cooldown_status = _LAST_TRENDING_RESULT.get("cooldown_reason") or "none"
+        cooldown_until = _LAST_TRENDING_RESULT.get("cooldown_until")
+        ttl_remaining = (
+            max(0.0, float(cooldown_until) - now)
+            if isinstance(cooldown_until, (int, float)) and cooldown_status != "none"
+            else 0.0
+        )
+        logger.info(
+            "Trending scan result: %d/%d requested (partial=%s, fast_mode=%s, cooldown=%s, ttl=%.1fs)",
+            len(result),
+            requested,
+            "yes" if len(result) < requested else "no",
+            FAST_MODE,
+            cooldown_status,
+            ttl_remaining,
+        )
 
         return result
     finally:
-        close_fn = getattr(session, "close", None)
-        if close_fn:
-            try:
-                if asyncio.iscoroutinefunction(close_fn):
-                    await close_fn()
-                else:
-                    close_fn()
-            except Exception:
-                pass
+        try:
+            await session.close()
+        except Exception:
+            pass
 
 
 async def _rpc_get_multiple_accounts(
@@ -1794,6 +2089,7 @@ async def _rpc_get_multiple_accounts(
     """
     result: Dict[str, dict] = {}
     CHUNK = 50
+    base_url = rpc_url.split("?", 1)[0]
     for i in range(0, len(mints), CHUNK):
         chunk = mints[i : i + CHUNK]
         payload = {
@@ -1802,13 +2098,25 @@ async def _rpc_get_multiple_accounts(
             "method": "getMultipleAccounts",
             "params": [list(chunk), {"encoding": "jsonParsed"}],
         }
-        async with session.post(rpc_url, json=payload, timeout=20) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            value = ((data or {}).get("result") or {}).get("value") or []
-            for mint, acc in zip(chunk, value):
-                if acc:
-                    result[mint] = acc
+        try:
+            async with session.post(rpc_url, json=payload, timeout=20) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        except Exception as exc:
+            warn_once_per(
+                60.0,
+                f"rpc-mget-{base_url}",
+                "RPC getMultipleAccounts chunk (%d) failed via %s: %s",
+                len(chunk),
+                base_url,
+                exc,
+                logger=logger,
+            )
+            continue
+        value = ((data or {}).get("result") or {}).get("value") or []
+        for mint, acc in zip(chunk, value):
+            if acc:
+                result[mint] = acc
     return result
 
 
