@@ -60,6 +60,7 @@ class _WebsocketState:
         "thread",
         "port",
         "name",
+        "host",
     )
 
     def __init__(self, name: str) -> None:
@@ -71,6 +72,7 @@ class _WebsocketState:
         self.thread: threading.Thread | None = None
         self.port: int = 0
         self.name = name
+        self.host: str | None = None
 
 
 _WS_CHANNELS: dict[str, _WebsocketState] = {
@@ -177,11 +179,6 @@ def push_log(payload: Any) -> bool:
     return _enqueue_message("logs", payload)
 
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
 def _normalize_ws_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -285,18 +282,6 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
     ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
     manifest["ui_port"] = _parse_port(ui_port_value, 5000)
     return manifest
-
-
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 def _shutdown_state(state: _WebsocketState) -> None:
     loop = state.loop
     if loop is None:
@@ -310,6 +295,7 @@ def _shutdown_state(state: _WebsocketState) -> None:
     if thread is not None:
         thread.join(timeout=2)
     state.thread = None
+    state.host = None
 
 
 def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> None:
@@ -342,6 +328,7 @@ def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> No
     state.loop = None
     state.thread = None
     state.port = 0
+    state.host = None
 
 
 def _start_channel(
@@ -364,6 +351,7 @@ def _start_channel(
         asyncio.set_event_loop(loop)
         state.loop = loop
         state.port = 0
+        state.host = host
 
         if channel == "rl":
             rl_ws_loop = loop
@@ -447,6 +435,7 @@ def _start_channel(
                     continue
                 ready.put(exc)
                 state.loop = None
+                state.host = None
                 if channel == "rl":
                     rl_ws_loop = None
                     _RL_WS_PORT = _RL_WS_PORT_DEFAULT
@@ -464,6 +453,7 @@ def _start_channel(
             except Exception as exc:  # pragma: no cover - unexpected startup failure
                 ready.put(exc)
                 state.loop = None
+                state.host = None
                 if channel == "rl":
                     rl_ws_loop = None
                     _RL_WS_PORT = _RL_WS_PORT_DEFAULT
@@ -516,6 +506,7 @@ def _start_channel(
         if server is None:
             ready.put(last_exc or RuntimeError(f"Unable to start {channel} websocket"))
             state.loop = None
+            state.host = None
             if channel == "rl":
                 rl_ws_loop = None
                 _RL_WS_PORT = _RL_WS_PORT_DEFAULT
@@ -615,11 +606,6 @@ def start_websockets() -> dict[str, threading.Thread]:
             _shutdown_state(state)
         raise
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     events_url = f"{scheme}://{url_host}:{_EVENT_WS_PORT}{_channel_path('events')}"
     rl_url = f"{scheme}://{url_host}:{_RL_WS_PORT}{_channel_path('rl')}"
     logs_url = f"{scheme}://{url_host}:{_LOG_WS_PORT}{_channel_path('logs')}"
@@ -635,31 +621,6 @@ def start_websockets() -> dict[str, threading.Thread]:
     }
     for key, value in defaults.items():
         os.environ.setdefault(key, value)
-=======
-    os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
-    os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
-    os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
->>>>>>> Stashed changes
-=======
-    os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
-    os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
-    os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
->>>>>>> Stashed changes
-=======
-    os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
-    os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
-    os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
->>>>>>> Stashed changes
-=======
-    os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
-    os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
-    os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
->>>>>>> Stashed changes
-=======
-    os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
-    os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
-    os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
->>>>>>> Stashed changes
     log.info(
         "UI websockets listening on rl=%s events=%s logs=%s",
         _RL_WS_PORT,
@@ -2352,11 +2313,6 @@ def create_app(state: UIState | None = None) -> Flask:
             kpis=kpis,
         )
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     def _ws_config_payload() -> Dict[str, str]:
         manifest = build_ui_manifest(request)
         return {
@@ -2376,17 +2332,6 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.get("/ws-config")
     def ws_config() -> Any:
         return jsonify(_ws_config_payload())
-
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
     @app.get("/health")
     def health() -> Any:
         status = state.snapshot_status()
