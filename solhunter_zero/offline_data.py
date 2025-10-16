@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-import datetime
-import os
-import json
 import asyncio
+import datetime
+import json
 import mmap
+import os
+import time
 from contextlib import suppress
-from sqlalchemy import (
-    Column,
-    Integer,
-    Float,
-    String,
-    DateTime,
-    select,
-    insert,
-)
+
+import sqlalchemy as sa
+from sqlalchemy import Column, DateTime, Float, Integer, String, insert, select
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -57,6 +52,18 @@ class MarketTrade(Base):
     timestamp = Column(DateTime, default=utcnow)
 
 
+_sqlalchemy_index = getattr(sa, "Index", None)
+if _sqlalchemy_index is not None:
+    _sqlalchemy_index(
+        "ix_market_snapshots_token_ts", MarketSnapshot.token, MarketSnapshot.timestamp
+    )
+    _sqlalchemy_index(
+        "ix_market_trades_token_ts", MarketTrade.token, MarketTrade.timestamp
+    )
+    _sqlalchemy_index("ix_market_snapshots_ts", MarketSnapshot.timestamp)
+    _sqlalchemy_index("ix_market_trades_ts", MarketTrade.timestamp)
+
+
 class OfflineData:
     """Store order book snapshots and trade metrics for offline training."""
 
@@ -70,12 +77,19 @@ class OfflineData:
         self._batch_size = 100
         self._interval = 1.0
         self._flush_max_batch: int | None = None
+        self._queue_maxsize = int(os.getenv("OFFLINE_QUEUE_MAXSIZE", "10000") or 0)
+        drop_oldest = os.getenv("OFFLINE_DROP_OLDEST", "0").lower()
+        self._drop_oldest = drop_oldest in {"1", "true", "yes", "on"}
+        self._coalesce_ms = float(os.getenv("OFFLINE_COALESCE_MS", "0") or 0.0)
+        self._coalesce: dict[str, tuple[float, dict | None]] = {}
         self._memmap: mmap.mmap | None = None
         self._memmap_fd: int | None = None
         self._memmap_pos = 0
         self._memmap_size = 0
         self._memmap_flush_rows = 5000
         self._memmap_count = 0
+        self._memmap_flush_ms = float(os.getenv("OFFLINE_MEMMAP_FLUSH_MS", "0") or 0.0)
+        self._last_memmap_flush = time.monotonic()
         import asyncio
         async def _init_models():
             async with self.engine.begin() as conn:
@@ -106,6 +120,7 @@ class OfflineData:
         env_max = os.getenv("OFFLINE_FLUSH_MAX_BATCH")
         env_mmap_path = os.getenv("OFFLINE_MEMMAP_PATH")
         env_mmap_size = os.getenv("OFFLINE_MEMMAP_SIZE")
+        env_mmap_flush_rows = os.getenv("OFFLINE_MEMMAP_FLUSH_ROWS")
         if env_batch is not None:
             batch_size = int(env_batch)
         if env_interval is not None:
@@ -116,6 +131,10 @@ class OfflineData:
             memmap_path = env_mmap_path
         if env_mmap_size is not None:
             memmap_size = int(env_mmap_size)
+        if env_mmap_flush_rows is not None:
+            self._memmap_flush_rows = int(env_mmap_flush_rows)
+        if self._writer_task and not self._writer_task.done():
+            return
         self._batch_size = batch_size
         self._interval = interval
         self._flush_max_batch = max_batch
@@ -129,7 +148,9 @@ class OfflineData:
             self._memmap = None
             self._memmap_fd = None
             self._memmap_size = 0
-        self._queue = asyncio.Queue()
+        queue_size = max(self._queue_maxsize, 0)
+        self._queue = asyncio.Queue(maxsize=queue_size)
+        self._last_memmap_flush = time.monotonic()
         loop = asyncio.get_event_loop()
         self._writer_task = loop.create_task(self._writer())
 
@@ -144,23 +165,20 @@ class OfflineData:
                     )
                     pending.append(item)
                     if len(pending) >= self._batch_size:
-                        await self._handle_batch(pending)
-                        pending.clear()
+                        await self._process_pending(pending)
                 except asyncio.TimeoutError:
                     if pending:
-                        await self._handle_batch(pending)
-                        pending.clear()
+                        await self._process_pending(pending)
         except asyncio.CancelledError:
             pass
         finally:
             if pending:
-                await self._handle_batch(pending)
+                await self._process_pending(pending)
             # drain remaining items
             while self._queue and not self._queue.empty():
                 pending.append(self._queue.get_nowait())
-                self._queue.task_done()
             if pending:
-                await self._handle_batch(pending)
+                await self._process_pending(pending)
             if self._memmap is not None and self._memmap_pos:
                 await self._flush_memmap()
             if self._memmap is not None:
@@ -169,20 +187,46 @@ class OfflineData:
                     os.close(self._memmap_fd)
                 self._memmap = None
                 self._memmap_fd = None
+            self._queue = None
+
+    async def _process_pending(self, pending: list[tuple[str, dict]]) -> None:
+        if not pending:
+            return
+        await self._handle_batch(pending)
+        if self._queue is not None:
+            for _ in range(len(pending)):
+                self._queue.task_done()
+        pending.clear()
 
     async def _handle_batch(self, items: list[tuple[str, dict]]) -> None:
         if self._memmap is None:
             await self._flush(items)
             return
+        loop = asyncio.get_event_loop()
         for t, d in items:
             line = json.dumps([t, d]).encode() + b"\n"
+            if self._memmap_size and len(line) > self._memmap_size:
+                if self._memmap_count:
+                    await self._flush_memmap()
+                await self._flush([(t, d)])
+                continue
             if self._memmap_pos + len(line) > self._memmap_size:
                 await self._flush_memmap()
             self._memmap[self._memmap_pos : self._memmap_pos + len(line)] = line
             self._memmap_pos += len(line)
             self._memmap_count += 1
-            if self._memmap_count >= self._memmap_flush_rows:
+            now = loop.time()
+            if self._memmap_count >= self._memmap_flush_rows or (
+                self._memmap_flush_ms
+                and (now - self._last_memmap_flush) * 1000.0 >= self._memmap_flush_ms
+            ):
                 await self._flush_memmap()
+                self._last_memmap_flush = now
+            else:
+                try:
+                    self._memmap.flush()
+                except Exception:
+                    pass
 
     async def _flush_memmap(self) -> None:
         if self._memmap is None or self._memmap_pos == 0:
@@ -194,6 +238,13 @@ class OfflineData:
         self._memmap_count = 0
         self._memmap.seek(0)
         await self._flush(items)
+        try:
+            self._memmap.flush()
+            if self._memmap_fd is not None:
+                os.fsync(self._memmap_fd)
+        except Exception:
+            pass
+        self._last_memmap_flush = asyncio.get_event_loop().time()
 
     async def _flush(self, items: list[tuple[str, dict]]) -> None:
         max_batch = self._flush_max_batch or len(items)
@@ -237,7 +288,7 @@ class OfflineData:
             sentiment=sentiment,
         )
         if self._queue is not None:
-            await self._queue.put(("snap", data))
+            await self._maybe_coalesce_snapshot(token, data)
         else:
             async with self.Session() as session:
                 session.add(MarketSnapshot(**data))
@@ -254,7 +305,7 @@ class OfflineData:
         await self._init_task
         data = dict(token=token, side=side, price=price, amount=amount)
         if self._queue is not None:
-            await self._queue.put(("trade", data))
+            await self._enqueue_queue(("trade", data))
         else:
             async with self.Session() as session:
                 session.add(MarketTrade(**data))
@@ -290,7 +341,10 @@ class OfflineData:
         token:
             Optional token filter.
         """
-        import numpy as np
+        try:
+            import numpy as np
+        except Exception as exc:  # pragma: no cover - dependency guard
+            raise RuntimeError("NumPy is required for export_npz") from exc
 
         snaps = await self.list_snapshots(token)
         trades = await self.list_trades(token)
@@ -352,7 +406,8 @@ class OfflineData:
         trade_arr = np.fromiter(trade_iter, dtype=trade_dtype, count=len(trades))
 
         np.savez_compressed(out_path, snapshots=snap_arr, trades=trade_arr)
-        return np.load(out_path, mmap_mode="r")
+        with np.load(out_path, mmap_mode="r") as npz_file:
+            return {name: npz_file[name] for name in npz_file.files}
 
     async def close(self) -> None:
         """Flush pending items and dispose engine."""
@@ -363,7 +418,18 @@ class OfflineData:
                 await self._writer_task
             self._writer_task = None
         if self._queue and not self._queue.empty():
-            await self._handle_batch([self._queue.get_nowait() for _ in range(self._queue.qsize())])
+            pending = [self._queue.get_nowait() for _ in range(self._queue.qsize())]
+            await self._handle_batch(pending)
+            for _ in pending:
+                self._queue.task_done()
+        coalesced = [
+            ("snap", latest)
+            for _, latest in self._coalesce.values()
+            if latest is not None
+        ]
+        if coalesced:
+            await self._flush(coalesced)
+        self._coalesce.clear()
         if self._memmap is not None and self._memmap_pos:
             await self._flush_memmap()
             self._memmap.close()
@@ -371,4 +437,40 @@ class OfflineData:
                 os.close(self._memmap_fd)
             self._memmap = None
             self._memmap_fd = None
+        self._queue = None
         await self.engine.dispose()
+
+    @property
+    def is_running(self) -> bool:
+        return self._writer_task is not None and not self._writer_task.done()
+
+    async def _enqueue_queue(self, item: tuple[str, dict]) -> None:
+        assert self._queue is not None
+        try:
+            self._queue.put_nowait(item)
+            return
+        except asyncio.QueueFull:
+            if not self._drop_oldest:
+                await self._queue.put(item)
+                return
+        if self._drop_oldest:
+            with suppress(asyncio.QueueEmpty):
+                self._queue.get_nowait()
+                self._queue.task_done()
+            with suppress(asyncio.QueueFull):
+                self._queue.put_nowait(item)
+
+    async def _maybe_coalesce_snapshot(self, token: str, data: dict) -> None:
+        if self._coalesce_ms <= 0:
+            await self._enqueue_queue(("snap", data))
+            return
+        loop = asyncio.get_event_loop()
+        now = loop.time()
+        deadline, latest = self._coalesce.get(token, (0.0, None))
+        if now < deadline:
+            self._coalesce[token] = (deadline, data)
+            return
+        if latest is not None:
+            await self._enqueue_queue(("snap", latest))
+        await self._enqueue_queue(("snap", data))
+        self._coalesce[token] = (now + self._coalesce_ms / 1000.0, None)
