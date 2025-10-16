@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, MutableMapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 TREND_CACHE_TTL = float(os.getenv("TREND_CACHE_TTL", "45") or 45.0)
 TREND_CACHE: TTLCache = TTLCache(maxsize=1, ttl=TREND_CACHE_TTL)
 _TREND_CACHE_KEY = "trending_tokens"
+
+HEADERS: Dict[str, str] = {}
 
 
 def _derive_ws_from_rpc(rpc_url: str | None) -> str | None:
@@ -69,15 +71,36 @@ def refresh_runtime_values() -> None:
         api_key = DEFAULT_BIRDEYE_API_KEY
     BIRDEYE_API_KEY = api_key
 
-    HEADERS = {
-        "accept": "application/json",
-        "X-API-KEY": BIRDEYE_API_KEY,
-        "x-chain": os.getenv("BIRDEYE_CHAIN", "solana"),
-    }
+    headers: MutableMapping[str, str]
+    if isinstance(globals().get("HEADERS"), MutableMapping):
+        headers = globals()["HEADERS"]  # type: ignore[assignment]
+        headers.clear()
+    else:
+        headers = {}
+    headers.update(
+        {
+            "accept": "application/json",
+            "X-API-KEY": BIRDEYE_API_KEY,
+            "x-chain": os.getenv("BIRDEYE_CHAIN", "solana"),
+        }
+    )
+    globals()["HEADERS"] = headers
 
 
 def get_solana_ws_url() -> str:
     return SOLANA_WS_URL
+
+
+def _coerce_limit(limit: Any) -> Optional[int]:
+    if limit is None:
+        return None
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return 0
+    return value
 
 # ---------------------------------------------------------------------
 # BirdEye config – hardwire your key if desired
@@ -172,6 +195,9 @@ async def fetch_trending_tokens_async(limit: int = 50) -> List[str]:
 
 
 def scan_tokens_from_file(path: str | os.PathLike | None, *, limit: int | None = None) -> List[str]:
+    limit_value = _coerce_limit(limit)
+    if limit_value == 0:
+        return []
     if not path:
         return []
     file_path = Path(path).expanduser()
@@ -183,20 +209,30 @@ def scan_tokens_from_file(path: str | os.PathLike | None, *, limit: int | None =
         if not mint:
             continue
         tokens.append(mint)
-        if limit is not None and len(tokens) >= limit:
-            return tokens[:limit]
-    return tokens
+        if limit_value is not None and len(tokens) >= limit_value:
+            break
+    if limit_value is None:
+        return tokens
+    return tokens[:limit_value]
 
 
 def scan_tokens_from_directory(directory: str | os.PathLike, *, limit: int | None = None) -> List[str]:
     base = Path(directory).expanduser()
+    limit_value = _coerce_limit(limit)
+    if limit_value == 0:
+        return []
     if not base.exists() or not base.is_dir():
         return []
     tokens: List[str] = []
     for child in sorted(base.iterdir()):
         if not child.is_file():
             continue
-        tokens.extend(scan_tokens_from_file(child, limit=limit))
-        if limit is not None and len(tokens) >= limit:
-            return tokens[:limit]
-    return tokens
+        if limit_value is not None and len(tokens) >= limit_value:
+            break
+        remaining = None if limit_value is None else limit_value - len(tokens)
+        tokens.extend(scan_tokens_from_file(child, limit=remaining))
+        if limit_value is not None and len(tokens) >= limit_value:
+            break
+    if limit_value is None:
+        return tokens
+    return tokens[:limit_value]
