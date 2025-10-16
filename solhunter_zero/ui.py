@@ -181,6 +181,7 @@ def push_log(payload: Any) -> bool:
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 def _normalize_ws_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -286,6 +287,8 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
     return manifest
 
 
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 =======
@@ -616,6 +619,7 @@ def start_websockets() -> dict[str, threading.Thread]:
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     events_url = f"{scheme}://{url_host}:{_EVENT_WS_PORT}{_channel_path('events')}"
     rl_url = f"{scheme}://{url_host}:{_RL_WS_PORT}{_channel_path('rl')}"
     logs_url = f"{scheme}://{url_host}:{_LOG_WS_PORT}{_channel_path('logs')}"
@@ -631,6 +635,11 @@ def start_websockets() -> dict[str, threading.Thread]:
     }
     for key, value in defaults.items():
         os.environ.setdefault(key, value)
+=======
+    os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
+    os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
+    os.environ.setdefault("UI_LOG_WS_URL", f"ws://{url_host}:{_LOG_WS_PORT}/ws")
+>>>>>>> Stashed changes
 =======
     os.environ.setdefault("UI_WS_URL", f"ws://{url_host}:{_EVENT_WS_PORT}/ws")
     os.environ.setdefault("UI_RL_WS_URL", f"ws://{url_host}:{_RL_WS_PORT}/ws")
@@ -2347,6 +2356,7 @@ def create_app(state: UIState | None = None) -> Flask:
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     def _ws_config_payload() -> Dict[str, str]:
         manifest = build_ui_manifest(request)
         return {
@@ -2367,6 +2377,8 @@ def create_app(state: UIState | None = None) -> Flask:
     def ws_config() -> Any:
         return jsonify(_ws_config_payload())
 
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 =======
