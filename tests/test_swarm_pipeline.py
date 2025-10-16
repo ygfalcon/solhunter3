@@ -11,6 +11,13 @@ from solhunter_zero import prices
 from solhunter_zero.portfolio import Portfolio, Position
 
 
+@pytest.fixture(autouse=True)
+def _stub_base58(monkeypatch):
+    module = types.SimpleNamespace(b58decode=lambda value: b"\x00" * 32)
+    monkeypatch.setitem(sys.modules, "base58", module)
+    return module
+
+
 def _install_torch_stub(monkeypatch):
     torch_mod = types.ModuleType("torch")
     torch_mod.Tensor = type("_Tensor", (), {})
@@ -158,7 +165,7 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
         sys.modules, "solhunter_zero.datasets.sample_ticks", sample_ticks_module
     )
 
-    from solhunter_zero.swarm_pipeline import DiscoveryStage, SwarmPipeline
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
 
     token = "Tok"
     raw_action = {
@@ -193,10 +200,11 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
     async def _run() -> None:
         pipeline = SwarmPipeline(agent_manager, portfolio, dry_run=True)
 
-        discovery = DiscoveryStage(tokens=[token], discovered=[token], limit=1)
-        discovery.scores = {token: 1.0}
+        token_queue: asyncio.Queue[tuple[str, float] | None] = asyncio.Queue()
+        await token_queue.put((token, 1.0))
+        await token_queue.put(None)
 
-        evaluation = await pipeline._run_evaluation(discovery)
+        evaluation = await pipeline._run_evaluation_stream(token_queue)
         assert captured["token"] == token
         assert captured["portfolio"] is portfolio
         assert evaluation.records
@@ -204,8 +212,10 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
         assert record.actions
         action = record.actions[0]
         assert action.price == pytest.approx(1.23)
-        assert action.metadata["price_context"]["source"] == "history"
-        assert action.metadata.get("price_fallback") == "history"
+        context = action.metadata.get("price_context")
+        assert context["source"] == "history"
+        assert context.get("hydrated_by") == "pipeline"
+        assert "price_missing" not in action.metadata
         cached = prices.get_cached_price(token)
         assert cached == pytest.approx(1.23)
 
@@ -213,7 +223,7 @@ def test_evaluation_hydrates_action_prices(monkeypatch):
 
 
 def test_swarm_pipeline_marks_missing_price(monkeypatch):
-    from solhunter_zero.swarm_pipeline import DiscoveryStage, SwarmPipeline
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
 
     token = "Tok"
     raw_action = {
@@ -235,10 +245,11 @@ def test_swarm_pipeline_marks_missing_price(monkeypatch):
 
     async def _run() -> None:
         pipeline = SwarmPipeline(agent_manager, portfolio, dry_run=True)
-        discovery = DiscoveryStage(tokens=[token], discovered=[token], limit=1)
-        discovery.scores = {token: 1.0}
+        token_queue: asyncio.Queue[tuple[str, float] | None] = asyncio.Queue()
+        await token_queue.put((token, 1.0))
+        await token_queue.put(None)
 
-        evaluation = await pipeline._run_evaluation(discovery)
+        evaluation = await pipeline._run_evaluation_stream(token_queue)
         record = evaluation.records[0]
         action = record.actions[0]
         assert action.price == 0.0
@@ -249,7 +260,7 @@ def test_swarm_pipeline_marks_missing_price(monkeypatch):
 
 
 def test_swarm_pipeline_uses_entry_price_fallback(monkeypatch):
-    from solhunter_zero.swarm_pipeline import DiscoveryStage, SwarmPipeline
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
 
     token = "Tok"
     raw_action = {
@@ -272,15 +283,17 @@ def test_swarm_pipeline_uses_entry_price_fallback(monkeypatch):
 
     async def _run() -> None:
         pipeline = SwarmPipeline(agent_manager, portfolio, dry_run=True)
-        discovery = DiscoveryStage(tokens=[token], discovered=[token], limit=1)
-        discovery.scores = {token: 1.0}
+        token_queue: asyncio.Queue[tuple[str, float] | None] = asyncio.Queue()
+        await token_queue.put((token, 1.0))
+        await token_queue.put(None)
 
-        evaluation = await pipeline._run_evaluation(discovery)
+        evaluation = await pipeline._run_evaluation_stream(token_queue)
         record = evaluation.records[0]
         action = record.actions[0]
         assert action.price == pytest.approx(2.5)
-        assert action.metadata.get("price_fallback") == "entry_price"
-        assert action.metadata["price_context"]["entry_price"] == pytest.approx(2.5)
+        context = action.metadata.get("price_context")
+        assert context["source"] == "entry_price"
+        assert context["entry_price"] == pytest.approx(2.5)
 
     asyncio.run(_run())
 
@@ -405,11 +418,11 @@ def test_execution_skips_missing_price(monkeypatch, caplog):
     execution = asyncio.run(pipeline._run_execution(simulation))
 
     assert execution.executed == []
-    assert execution.skipped == {"missing_price": 1}
-    assert "execution:missing_price" in execution.errors
-    assert record.errors == ["missing_price"]
+    assert execution.skipped == {"invalid_order": 1}
+    assert "execution:invalid_order" in execution.errors
+    assert record.errors == ["invalid_order"]
     assert not call_flag["called"]
-    assert "missing price" in caplog.text
+    assert "invalid order" in caplog.text
 
 
 def test_dispatcher_enriches_realized_metrics(monkeypatch):

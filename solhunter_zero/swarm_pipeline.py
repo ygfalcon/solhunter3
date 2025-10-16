@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 import asyncio
 import contextlib
+import hashlib
 import logging
 import math
 import os
@@ -262,6 +263,11 @@ class ExecutionDispatcher:
         self._queues: Dict[str, asyncio.Queue] = {}
         self._tasks: Dict[str, List[asyncio.Task]] = {}
         self._closing = False
+        try:
+            lane_cap = int(os.getenv("EXEC_LANE_MAX_QSIZE", "0") or 0)
+        except Exception:
+            lane_cap = 0
+        self._lane_max_qsize = max(0, lane_cap)
 
     def lane_snapshot(self) -> Dict[str, int]:
         return {lane: queue.qsize() for lane, queue in self._queues.items()}
@@ -285,6 +291,13 @@ class ExecutionDispatcher:
         queue = self._ensure_lane(lane)
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
+        if self._lane_max_qsize > 0 and queue.qsize() >= self._lane_max_qsize:
+            log.debug(
+                "lane_backlog_surge lane=%s size=%s cap=%s",
+                lane,
+                queue.qsize(),
+                self._lane_max_qsize,
+            )
         await queue.put((request, fut))
         return fut
 
@@ -338,6 +351,7 @@ class ExecutionDispatcher:
         return request.record
 
     async def close(self) -> None:
+        """Shut down all lanes; dispatcher cannot be reused once closed."""
         self._closing = True
         sentinels = []
         for lane, queue in self._queues.items():
@@ -589,11 +603,12 @@ def _resolve_lane(action: Dict[str, Any]) -> str:
 
 
 def _score_token(token: str, portfolio: Portfolio) -> float:
+    canonical = canonical_mint(token)
     score = 0.0
     balances = getattr(portfolio, "balances", {}) or {}
-    if token in balances:
+    if canonical in balances:
         score += 10.0
-    history = getattr(portfolio, "price_history", {}).get(token) or []
+    history = getattr(portfolio, "price_history", {}).get(canonical) or []
     if history:
         window = history[-min(len(history), 10) :]
         if len(window) >= 2:
@@ -607,10 +622,12 @@ def _score_token(token: str, portfolio: Portfolio) -> float:
                 score += math.sqrt(var) / (abs(mean) or 1.0)
     else:
         score -= 2.0
-    prefix = token[:3]
-    if prefix == "111" and token != "11111111111111111111111111111111":
+    prefix = canonical[:3]
+    if prefix == "111" and canonical != "11111111111111111111111111111111":
         score -= 3.0
-    score += os.urandom(2)[0] / 65535.0
+    digest = hashlib.blake2s(canonical.encode("utf-8"), digest_size=4).digest()
+    jitter = (int.from_bytes(digest, "big") % 997) / 1_000_000_000
+    score += jitter
     return score
 
 
@@ -750,6 +767,20 @@ class SwarmPipeline:
         remaining = self.time_budget - elapsed
         return remaining if remaining > 0 else 0.0
 
+    def _has_budget(self, slice_ratio: float) -> bool:
+        remaining = self._remaining_budget()
+        if remaining is None:
+            return True
+        if remaining <= 0:
+            return False
+        if not self.time_budget or self.time_budget <= 0:
+            return True
+        ratio = max(0.0, min(1.0, float(slice_ratio)))
+        if ratio >= 1.0:
+            return remaining > 0.0
+        reserve = self.time_budget * max(0.0, 1.0 - ratio)
+        return remaining > reserve
+
     def _ensure_discovery_agent(self) -> DiscoveryAgent:
         if self._discovery_agent is None:
             self._discovery_agent = DiscoveryAgent()
@@ -772,7 +803,7 @@ class SwarmPipeline:
         for token in tokens:
             if not isinstance(token, str):
                 continue
-            candidate = token.strip()
+            candidate = canonical_mint(token.strip())
             if not candidate or candidate in seen:
                 continue
             ordered.append(candidate)
@@ -782,20 +813,42 @@ class SwarmPipeline:
             return
 
         for token in self._discovery_cache_tokens:
-            if token not in seen:
-                ordered.append(token)
-                seen.add(token)
+            canonical = canonical_mint(token)
+            if not canonical or canonical in seen:
+                continue
+            ordered.append(canonical)
+            seen.add(canonical)
             if len(ordered) >= self.discovery_cache_limit:
                 break
 
         if len(ordered) > self.discovery_cache_limit:
             ordered = ordered[: self.discovery_cache_limit]
 
-        merged_scores = dict(self._discovery_cache_scores)
+        merged_scores: Dict[str, float] = {}
+        for tok, value in self._discovery_cache_scores.items():
+            canonical = canonical_mint(tok)
+            if not canonical:
+                continue
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                merged_scores[canonical] = numeric
+
         if scores:
             for tok, value in scores.items():
-                if isinstance(value, (int, float)) and math.isfinite(float(value)):
-                    merged_scores[tok] = float(value)
+                if not isinstance(tok, str):
+                    continue
+                canonical = canonical_mint(tok)
+                if not canonical:
+                    continue
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(numeric):
+                    merged_scores[canonical] = numeric
 
         for tok in ordered:
             if tok not in merged_scores:
@@ -816,6 +869,15 @@ class SwarmPipeline:
         """Ensure ``action`` carries a positive price using the shared cache."""
 
         if action.price and action.price > 0 and math.isfinite(action.price):
+            metadata = action.metadata
+            nested_meta = (
+                metadata.get("metadata") if isinstance(metadata.get("metadata"), dict) else None
+            )
+            metadata.pop("price_missing", None)
+            if nested_meta is not None:
+                nested_meta.pop("price_missing", None)
+            if nested_meta is not None and not nested_meta:
+                metadata.pop("metadata", None)
             return
         token = action.token
         if not token:
@@ -824,64 +886,48 @@ class SwarmPipeline:
         metadata = action.metadata
         nested_meta = metadata.get("metadata") if isinstance(metadata.get("metadata"), dict) else None
 
-        def _meta_get(key: str) -> Any:
-            if key != "metadata" and key in metadata:
-                return metadata[key]
-            if nested_meta and key in nested_meta:
-                return nested_meta[key]
-            return None
+        def _merge_existing_context() -> Dict[str, Any]:
+            merged: Dict[str, Any] = {}
+            for container in (metadata, nested_meta):
+                if isinstance(container, dict):
+                    ctx = container.get("price_context")
+                    if isinstance(ctx, dict):
+                        merged.update(ctx)
+            return merged
 
-        def _meta_set(key: str, value: Any) -> None:
-            if key != "metadata":
-                metadata[key] = value
-            if nested_meta is not None:
-                nested_meta[key] = value
+        def _set_price_context(context: Dict[str, Any]) -> None:
+            if context:
+                metadata["price_context"] = context
+                if nested_meta is not None:
+                    nested_meta["price_context"] = context
+            else:
+                metadata.pop("price_context", None)
+                if nested_meta is not None:
+                    nested_meta.pop("price_context", None)
 
-        def _meta_setdefault(key: str, value: Any) -> Any:
-            existing = _meta_get(key)
-            if existing is None:
-                _meta_set(key, value)
-                return value
-            return existing
+        def _set_price_missing(flag: bool) -> None:
+            if flag:
+                metadata["price_missing"] = True
+                if nested_meta is not None:
+                    nested_meta["price_missing"] = True
+            else:
+                metadata.pop("price_missing", None)
+                if nested_meta is not None:
+                    nested_meta.pop("price_missing", None)
 
-        def _meta_pop(key: str) -> None:
-            if key != "metadata":
-                metadata.pop(key, None)
-            if nested_meta is not None:
-                nested_meta.pop(key, None)
-
-        existing_context: Dict[str, Any] = {}
-        for container in (metadata, nested_meta):
-            if isinstance(container, dict):
-                ctx = container.get("price_context")
-                if isinstance(ctx, dict):
-                    existing_context.update(ctx)
-
-        needs_price_agents_raw = _meta_get("needs_price_agents")
-        hydrated_agents: list[str] = []
-        if isinstance(needs_price_agents_raw, (list, tuple, set)):
-            hydrated_agents = sorted(
-                {
-                    str(agent).strip()
-                    for agent in needs_price_agents_raw
-                    if str(agent).strip()
-                }
-            )
-        elif isinstance(needs_price_agents_raw, str):
-            agent = needs_price_agents_raw.strip()
-            if agent:
-                hydrated_agents = [agent]
-
-        needs_price_flag = bool(_meta_get("needs_price"))
+        existing_context = _merge_existing_context()
 
         try:
             resolved_price, price_context = await resolve_price(token, self.portfolio)
         except Exception as exc:  # pragma: no cover - unexpected resolve failures
             log.debug("resolve_price failed for %s: %s", token, exc)
-            _meta_setdefault("price_missing", True)
+            _set_price_missing(True)
+            if nested_meta is not None and not nested_meta:
+                metadata.pop("metadata", None)
             return
 
         merged_context = {**existing_context, **price_context}
+        merged_context.setdefault("hydrated_by", "pipeline")
         price_value = float(resolved_price)
 
         if (price_value <= 0 or not math.isfinite(price_value)) and action.side == "sell":
@@ -889,30 +935,18 @@ class SwarmPipeline:
             entry_price = getattr(position, "entry_price", 0.0) if position else 0.0
             if isinstance(entry_price, (int, float)) and entry_price > 0:
                 price_value = float(entry_price)
-                merged_context.setdefault("entry_price", price_value)
                 merged_context.setdefault("source", "entry_price")
-                _meta_setdefault("price_fallback", "entry_price")
+                merged_context.setdefault("entry_price", price_value)
 
         if price_value <= 0 or not math.isfinite(price_value):
-            if merged_context:
-                _meta_set("price_context", merged_context)
-            _meta_setdefault("price_missing", True)
+            _set_price_missing(True)
+            _set_price_context(merged_context)
+            if nested_meta is not None and not nested_meta:
+                metadata.pop("metadata", None)
             return
 
-        source = merged_context.get("source")
-        if source in {"history", "cache"}:
-            _meta_setdefault("price_fallback", source)
-
-        if needs_price_flag:
-            _meta_pop("needs_price")
-        if needs_price_agents_raw is not None:
-            _meta_pop("needs_price_agents")
-        if hydrated_agents:
-            merged_context.setdefault("hydrated_agents", hydrated_agents)
-        merged_context.setdefault("hydrated_by", "pipeline")
-
-        if merged_context:
-            _meta_set("price_context", merged_context)
+        _set_price_missing(False)
+        _set_price_context(merged_context)
 
         action.price = price_value
         try:
@@ -1164,23 +1198,37 @@ class SwarmPipeline:
                     if 0 < self.discovery_cache_limit <= len(stage.tokens):
                         break
 
-        limit = max(int(self.chunk_size * 6), 12)
-        fast_limit = os.getenv("PIPELINE_TOKEN_LIMIT")
-        if fast_limit:
+        chunk_size = self.chunk_size
+        default_limit = max(int(chunk_size * 6), 12)
+        if self.fast_mode:
+            default_limit = min(default_limit, max(10, int(chunk_size * 3)))
+        env_limit_raw = os.getenv("PIPELINE_TOKEN_LIMIT")
+        configured_limit: Optional[int] = None
+        if env_limit_raw:
             try:
-                configured = max(1, int(fast_limit))
-                limit = min(limit, configured)
+                configured_limit = max(1, int(env_limit_raw))
             except Exception:
-                pass
-        elif self.fast_mode:
-            default_cap = max(10, int(self.chunk_size * 3))
-            limit = min(limit, default_cap)
+                configured_limit = None
+        limit = configured_limit or default_limit
+        budget_cap = None
         if self.time_budget:
-            limit = min(limit, max(6, int(self.time_budget / 3)))
-        if self.discovery_cache_limit:
-            limit = min(limit, self.discovery_cache_limit)
+            budget_cap = max(6, int(self.time_budget / 3))
+            limit = min(limit, budget_cap)
+        cache_cap = self.discovery_cache_limit or 0
+        if cache_cap:
+            limit = min(limit, cache_cap)
         limit = max(limit, 1)
         stage.limit = limit
+        log.debug(
+            "discovery_limit_decision %s",
+            {
+                "limit": limit,
+                "chunk": chunk_size,
+                "budget": budget_cap,
+                "cache_limit": cache_cap or None,
+                "fast": self.fast_mode,
+            },
+        )
 
         deduped: list[str] = []
         seen_tokens: set[str] = set()
@@ -1192,7 +1240,7 @@ class SwarmPipeline:
 
         scores = {mint: _score_token(mint, self.portfolio) for mint in stage.tokens}
         stage.scores = scores
-        ranked = sorted(stage.tokens, key=lambda t: scores.get(t, 0.0), reverse=True)
+        ranked = sorted(stage.tokens, key=lambda t: (-scores.get(t, 0.0), t))
         stage.tokens = ranked[:limit]
         if token_queue is not None and stage.tokens:
             for tok in stage.tokens:
@@ -1200,6 +1248,19 @@ class SwarmPipeline:
         publish(
             "runtime.log",
             RuntimeLog(stage="pipeline", detail=f"queue:{len(stage.tokens)}/{len(scores)}"),
+        )
+        publish(
+            "runtime.log",
+            RuntimeLog(
+                stage="discovery",
+                detail={
+                    "decisions": {
+                        "limit": stage.limit,
+                        "cache_hit": cache_hit,
+                        "fallback": stage.fallback_used,
+                    }
+                },
+            ),
         )
         refresh_ttl = not cache_hit and not cache_refreshed
         ttl_override = None
@@ -1222,23 +1283,17 @@ class SwarmPipeline:
         self, token_queue: asyncio.Queue[tuple[str, float] | None]
     ) -> EvaluationStage:
         stage = EvaluationStage()
-        start_time = time.perf_counter()
         sem = asyncio.Semaphore(self.chunk_size)
         records: List[EvaluationRecord] = []
         errors: List[str] = []
         active: set[asyncio.Task[None]] = set()
 
         async def evaluate_token(token: str, score: float) -> None:
-            remaining_before = self._remaining_budget()
-            if remaining_before is not None and remaining_before <= 0:
+            if not self._has_budget(0.4):
                 stage.budget_hit = True
                 return
             async with sem:
-                remaining_total = self._remaining_budget()
-                if remaining_total is not None and remaining_total <= 0:
-                    stage.budget_hit = True
-                    return
-                if self.time_budget and time.perf_counter() - start_time > self.time_budget:
+                if not self._has_budget(0.4):
                     stage.budget_hit = True
                     return
                 cached_expiry = (
@@ -1268,6 +1323,7 @@ class SwarmPipeline:
                 ctx: EvaluationContext | None = None
                 actions: List[SwarmAction] = []
                 token_errors: List[str] = []
+                remaining_total = self._remaining_budget()
                 try:
                     eval_coro = self.agent_manager.evaluate_with_swarm(
                         token, self.portfolio
@@ -1294,8 +1350,6 @@ class SwarmPipeline:
                         await asyncio.gather(
                             *(self._ensure_action_price(act) for act in actions)
                         )
-                    if not actions and self.no_action_ttl:
-                        self._no_action_cache[token] = time.time() + self.no_action_ttl
                 except asyncio.TimeoutError:
                     token_errors.append("evaluation:timeout")
                     publish(
@@ -1318,6 +1372,8 @@ class SwarmPipeline:
                         detail=f"done:{token} actions={len(actions)} latency={latency:.2f}s",
                     ),
                 )
+                if not actions and not token_errors and self.no_action_ttl:
+                    self._no_action_cache[token] = time.time() + self.no_action_ttl
                 records.append(
                     EvaluationRecord(
                         token=token,
@@ -1343,126 +1399,28 @@ class SwarmPipeline:
             await asyncio.gather(*active)
 
         stage.records = records
+        timeouts = sum(
+            1 for rec in records for err in rec.errors if err == "evaluation:timeout"
+        )
+        no_action = sum(1 for rec in records if not rec.actions)
         if errors:
             publish(
                 "runtime.log",
                 RuntimeLog(stage="evaluation", detail=f"errors:{len(errors)}"),
             )
-        return stage
-
-    async def _run_evaluation(self, discovery: DiscoveryStage) -> EvaluationStage:
-        stage = EvaluationStage()
-        if not discovery.tokens:
-            return stage
-
-        start_time = time.perf_counter()
-        sem = asyncio.Semaphore(self.chunk_size)
-        records: List[EvaluationRecord] = []
-        errors: List[str] = []
-
-        async def evaluate_token(token: str, score: float) -> None:
-            nonlocal start_time
-            remaining_before = self._remaining_budget()
-            if remaining_before is not None and remaining_before <= 0:
-                stage.budget_hit = True
-                return
-            async with sem:
-                remaining_total = self._remaining_budget()
-                if remaining_total is not None and remaining_total <= 0:
-                    stage.budget_hit = True
-                    return
-                if self.time_budget and time.perf_counter() - start_time > self.time_budget:
-                    stage.budget_hit = True
-                    return
-                cached_expiry = self._no_action_cache.get(token) if self.no_action_ttl else None
-                if cached_expiry is not None:
-                    publish(
-                        "runtime.log",
-                        RuntimeLog(stage="evaluation", detail=f"cached-skip:{token}"),
-                    )
-                    records.append(
-                        EvaluationRecord(
-                            token=token,
-                            score=score,
-                            latency=0.0,
-                            actions=[],
-                            context=None,
-                            errors=["cached:no-action"],
-                        )
-                    )
-                    return
-                publish(
-                    "runtime.log",
-                    RuntimeLog(stage="evaluation", detail=f"start:{token} score={score:.3f}"),
-                )
-                t0 = time.perf_counter()
-                ctx: EvaluationContext | None = None
-                actions: List[SwarmAction] = []
-                token_errors: List[str] = []
-                try:
-                    eval_coro = self.agent_manager.evaluate_with_swarm(token, self.portfolio)
-                    eval_timeout = self.token_timeout
-                    if remaining_total is not None:
-                        budget_slice = max(0.1, remaining_total * 0.4)
-                        if eval_timeout > 0:
-                            eval_timeout = min(eval_timeout, budget_slice)
-                        else:
-                            eval_timeout = budget_slice
-                    if eval_timeout and eval_timeout > 0:
-                        ctx = await asyncio.wait_for(eval_coro, timeout=eval_timeout)
-                    else:
-                        ctx = await eval_coro
-                    raw_actions = list(ctx.actions)
-                    for raw in raw_actions:
-                        if not isinstance(raw, dict):
-                            continue
-                        act = SwarmAction.from_raw(raw)
-                        if act is not None:
-                            actions.append(act)
-                    if actions:
-                        await asyncio.gather(
-                            *(self._ensure_action_price(act) for act in actions)
-                        )
-                    if not actions and self.no_action_ttl:
-                        self._no_action_cache[token] = time.time() + self.no_action_ttl
-                except asyncio.TimeoutError:
-                    token_errors.append("evaluation:timeout")
-                    publish(
-                        "runtime.log",
-                        RuntimeLog(stage="evaluation", detail=f"timeout:{token}"),
-                    )
-                except Exception as exc:
-                    token_errors.append(f"evaluation:{exc}")
-                    publish(
-                        "runtime.log",
-                        RuntimeLog(stage="evaluation", detail=f"error:{token}:{exc}"),
-                    )
-                    log.exception("Evaluation failed for %s", token)
-                latency = time.perf_counter() - t0
-                stage.latencies.append(latency)
-                publish(
-                    "runtime.log",
-                    RuntimeLog(stage="evaluation", detail=f"done:{token} actions={len(actions)} latency={latency:.2f}s"),
-                )
-                records.append(
-                    EvaluationRecord(
-                        token=token,
-                        score=score,
-                        latency=latency,
-                        actions=actions,
-                        context=ctx,
-                        errors=token_errors,
-                    )
-                )
-                errors.extend(token_errors)
-
-        await asyncio.gather(*(evaluate_token(tok, discovery.scores.get(tok, 0.0)) for tok in discovery.tokens))
-        stage.records = records
-        if errors:
-            publish(
-                "runtime.log",
-                RuntimeLog(stage="evaluation", detail=f"errors:{len(errors)}"),
-            )
+        publish(
+            "runtime.log",
+            RuntimeLog(
+                stage="evaluation",
+                detail={
+                    "summary": {
+                        "completed": len(records),
+                        "timeouts": timeouts,
+                        "no_action": no_action,
+                    }
+                },
+            ),
+        )
         return stage
 
     async def _run_simulation(self, evaluation: EvaluationStage) -> SimulationStage:
@@ -1478,6 +1436,10 @@ class SwarmPipeline:
         async def simulate(record: EvaluationRecord) -> None:
             actions = record.actions
             if not actions:
+                return
+            if not self._has_budget(0.6):
+                stage.rejected[record.token] = len(actions)
+                record.actions = []
                 return
             remaining_sim = self._remaining_budget()
             if remaining_sim is not None and remaining_sim <= 0:
@@ -1603,7 +1565,7 @@ class SwarmPipeline:
                     continue
                 filtered.append(act)
             if max_actions and len(filtered) > max_actions:
-                filtered.sort(key=lambda a: a.score, reverse=True)
+                filtered.sort(key=lambda a: (-a.score, a.token))
                 priority = _score_priority(record.score)
                 allowed = int(math.ceil(max_actions * priority))
                 allowed = max(1, min(len(filtered), allowed))
@@ -1626,6 +1588,13 @@ class SwarmPipeline:
                     }
 
         await asyncio.gather(*(simulate(rec) for rec in evaluation.records))
+        publish(
+            "runtime.log",
+            RuntimeLog(
+                stage="simulation",
+                detail={"summary": {"tokens": len(stage.records), "rejected": dict(stage.rejected)}},
+            ),
+        )
         return stage
 
     async def _run_execution(self, simulation: SimulationStage) -> ExecutionStage:
@@ -1667,6 +1636,30 @@ class SwarmPipeline:
                     price_value = float(price_value_raw)
                 except Exception:
                     price_value = 0.0
+                try:
+                    amount_value = float(order.get("amount", 0.0))
+                except Exception:
+                    amount_value = float("nan")
+                if (
+                    side not in {"buy", "sell"}
+                    or not math.isfinite(price_value)
+                    or price_value <= 0
+                    or not math.isfinite(amount_value)
+                    or amount_value < 0
+                ):
+                    if "invalid_order" not in token_payload["errors"]:
+                        token_payload["errors"].append("invalid_order")
+                    if "execution:invalid_order" not in stage.errors:
+                        stage.errors.append("execution:invalid_order")
+                    stage.skipped["invalid_order"] = stage.skipped.get("invalid_order", 0) + 1
+                    log.warning(
+                        "Skipping execution for %s due to invalid order side=%s amount=%s price=%s",
+                        record.token,
+                        side,
+                        order.get("amount"),
+                        order.get("price"),
+                    )
+                    continue
                 balances = getattr(self.portfolio, "balances", {}) or {}
                 entry_price: float | None = None
                 if (
@@ -1941,6 +1934,19 @@ class SwarmPipeline:
                 if isinstance(res, Exception):
                     stage.errors.append(str(res))
         stage.lane_metrics = dispatcher.lane_snapshot()
+        publish(
+            "runtime.log",
+            RuntimeLog(
+                stage="execution",
+                detail={
+                    "summary": {
+                        "submitted": len(stage.executed),
+                        "errors": len(stage.errors),
+                        "lanes": stage.lane_metrics,
+                    }
+                },
+            ),
+        )
         await dispatcher.close()
 
         # Feed execution feedback back into swarms
@@ -1973,9 +1979,19 @@ class SwarmPipeline:
                 continue
             token = rec.get("token")
             side = rec.get("side")
-            amount = float(rec.get("amount", 0.0))
-            price = float(rec.get("price", 0.0))
+            try:
+                amount = float(rec.get("amount", 0.0))
+            except Exception:
+                continue
+            try:
+                price = float(rec.get("price", 0.0))
+            except Exception:
+                price = 0.0
             if not token or not side:
+                continue
+            if not math.isfinite(price) or price <= 0:
+                continue
+            if not math.isfinite(amount):
                 continue
             delta = amount if side == "buy" else -amount
             if delta == 0:
@@ -1987,10 +2003,11 @@ class SwarmPipeline:
             except Exception as exc:
                 log.warning("portfolio update failed for %s: %s", token, exc)
         if prices:
-            try:
-                self.portfolio.record_prices(prices)
-            except Exception:
-                pass
+            for tok, price in prices.items():
+                try:
+                    self.portfolio.record_prices({tok: price})
+                except Exception as exc:
+                    log.debug("record_prices failed for %s: %s", tok, exc)
             try:
                 self.portfolio.update_risk_metrics()
             except Exception:
