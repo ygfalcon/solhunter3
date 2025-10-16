@@ -59,6 +59,7 @@ class ExecutionReceipt:
     started_at: float
     finished_at: float
     lane: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
