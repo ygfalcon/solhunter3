@@ -11,6 +11,7 @@ import aiohttp
 from solhunter_zero.lru import TTLCache
 from .async_utils import run_async
 from .http import get_session
+from .logging_utils import warn_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -248,18 +249,6 @@ def store_quote(token: str, quote: PriceQuote) -> None:
     PRICE_CACHE.set(token, quote.price_usd)
 
 
-class ProviderUnavailableError(RuntimeError):
-    def __init__(self, provider: str, *, error: BaseException | None = None) -> None:
-        message = provider
-        if error is not None:
-            message = f"{provider} unavailable: {error}"
-        else:
-            message = f"{provider} unavailable"
-        super().__init__(message)
-        self.provider = provider
-        self.error = error
-
-
 async def _request_json(
     session: aiohttp.ClientSession,
     url: str,
@@ -269,35 +258,9 @@ async def _request_json(
     headers: Dict[str, str] | None = None,
     json: Any | None = None,
     method: str = "GET",
-    allow_unavailable: bool = False,
 ) -> Any:
-    if not allow_unavailable:
-        last_error: BaseException | None = None
-        for attempt in range(PRICE_RETRY_ATTEMPTS):
-            try:
-                async with session.request(
-                    method,
-                    url,
-                    params=params,
-                    headers=headers,
-                    json=json,
-                    timeout=10,
-                ) as resp:
-                    resp.raise_for_status()
-                    return await resp.json()
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                last_error = exc
-                if attempt == PRICE_RETRY_ATTEMPTS - 1:
-                    break
-                delay = PRICE_RETRY_BACKOFF * (2 ** attempt)
-                await asyncio.sleep(delay)
-        if last_error:
-            raise last_error
-        return None
-
-    delays = (0.5, 1.0, 2.0)
     last_error: BaseException | None = None
-    for idx, delay in enumerate(delays):
+    for attempt in range(PRICE_RETRY_ATTEMPTS):
         try:
             async with session.request(
                 method,
@@ -305,26 +268,19 @@ async def _request_json(
                 params=params,
                 headers=headers,
                 json=json,
-                timeout=3,
+                timeout=10,
             ) as resp:
                 resp.raise_for_status()
                 return await resp.json()
-        except asyncio.CancelledError:
-            raise
-        except aiohttp.ClientResponseError as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             last_error = exc
-            status = exc.status
-            if status in {429} or (status is not None and status >= 500):
-                if idx < len(delays) - 1:
-                    await asyncio.sleep(delay)
-                    continue
-            break
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-            last_error = exc
-            if idx < len(delays) - 1:
-                await asyncio.sleep(delay)
-                continue
-    raise ProviderUnavailableError(provider, error=last_error)
+            if attempt == PRICE_RETRY_ATTEMPTS - 1:
+                break
+            delay = PRICE_RETRY_BACKOFF * (2 ** attempt)
+            await asyncio.sleep(delay)
+    if last_error:
+        raise last_error
+    return None
 
 
 def _extract_price(value: Any) -> float | None:
@@ -365,13 +321,7 @@ async def _fetch_quotes_jupiter(
     quotes: Dict[str, PriceQuote] = {}
     for chunk in _chunked(tokens, JUPITER_BATCH_SIZE):
         params = {"ids": ",".join(chunk)}
-        payload = await _request_json(
-            session,
-            url,
-            "jupiter",
-            params=params,
-            allow_unavailable=True,
-        )
+        payload = await _request_json(session, url, "Jupiter", params=params)
         if not isinstance(payload, MutableMapping):
             continue
         data = payload.get("data") if isinstance(payload.get("data"), MutableMapping) else payload
@@ -445,8 +395,7 @@ async def _fetch_quotes_birdeye(
         "x-chain": BIRDEYE_CHAIN,
     }
     quotes: Dict[str, PriceQuote] = {}
-    chunks = _chunked(tokens, min(BIRDEYE_MAX_BATCH, 100))
-    for idx, chunk in enumerate(chunks):
+    for chunk in _chunked(tokens, min(BIRDEYE_MAX_BATCH, 100)):
         params = {"list_address": ",".join(chunk), "chain": BIRDEYE_CHAIN}
         payload = await _request_json(session, url, "Birdeye", params=params, headers=headers)
         if not isinstance(payload, MutableMapping):
@@ -475,8 +424,6 @@ async def _fetch_quotes_birdeye(
                     asof=asof,
                     quality="aggregate",
                 )
-        if idx + 1 < len(chunks):
-            await asyncio.sleep(1.0)
     return quotes
 
 
@@ -508,13 +455,7 @@ async def _fetch_quotes_pyth(
     if not ids:
         return {}
     params = {"ids": ",".join(ids)}
-    payload = await _request_json(
-        session,
-        PYTH_PRICE_URL,
-        "pyth",
-        params=params,
-        allow_unavailable=True,
-    )
+    payload = await _request_json(session, PYTH_PRICE_URL, "Pyth", params=params)
     if not isinstance(payload, MutableMapping):
         return {}
     records: List[MutableMapping[str, Any]] = []
@@ -646,11 +587,23 @@ def _record_provider_failure(name: str, exc: BaseException, latency_ms: float) -
     PROVIDER_HEALTH[name].record_failure(status, cooldown=cooldown)
     PROVIDER_STATS[name].record_failure(status, latency_ms, exc)
     if isinstance(exc, aiohttp.ClientResponseError):
-        logger.warning(
-            "Prices: %s HTTP error %s", name, exc.status,
+        warn_once_per(
+            1.0,
+            f"prices-http:{name}:{exc.status}",
+            "Prices: %s HTTP error %s",
+            name,
+            exc.status,
+            logger=logger,
         )
     else:
-        logger.warning("Prices: %s failure %s", name, exc)
+        warn_once_per(
+            1.0,
+            f"prices-failure:{name}:{exc.__class__.__name__}",
+            "Prices: %s failure %s",
+            name,
+            exc,
+            logger=logger,
+        )
 
 
 async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
@@ -676,14 +629,6 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
         start = _monotonic()
         try:
             quotes = await fetcher(session, tuple(pending))
-        except ProviderUnavailableError as exc:
-            latency_ms = (_monotonic() - start) * 1000.0
-            state.record_failure(None, cooldown=2.0)
-            PROVIDER_STATS[provider_name].record_failure(None, latency_ms, exc)
-            logger.info(
-                "Prices: provider %s unavailable; skipping", provider_name
-            )
-            continue
         except Exception as exc:  # noqa: BLE001 - deliberate broad catch
             latency_ms = (_monotonic() - start) * 1000.0
             _record_provider_failure(provider_name, exc, latency_ms)
