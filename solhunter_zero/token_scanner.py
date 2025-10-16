@@ -1269,8 +1269,7 @@ async def _helius_search_assets(
             "tokenType": "fungible",
             "page": page,
             "limit": per_page,
-            "sortBy": "created",
-            "sortDirection": "desc",
+            "sortBy": {"field": "created", "direction": "desc"},
         }
 
         payload = {

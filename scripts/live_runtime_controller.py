@@ -30,11 +30,6 @@ def setup_logging() -> None:
     setup_stdout_logging(
         fmt="%(asctime)s %(levelname)s [live-runtime] %(message)s",
     )
-    print(
-        "HANDLERS:",
-        [type(handler).__name__ for handler in logging.getLogger().handlers],
-        flush=True,
-    )
 
 
 def _set_runtime_env(args: argparse.Namespace) -> None:

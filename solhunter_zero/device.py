@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from .cache_paths import MPS_SENTINEL
+from .logging_utils import warn_once_per
 
 logger = logging.getLogger(__name__)
 
@@ -52,18 +53,24 @@ def load_torch_metal_versions() -> tuple[str, str]:
             from .macos_setup import _resolve_metal_versions
 
             torch_ver, vision_ver = _resolve_metal_versions()
-            logger.warning(
+            warn_once_per(
+                float("inf"),
+                "torch-metal-resolved",
                 "Torch Metal versions not specified; using resolved versions %s/%s",
                 torch_ver,
                 vision_ver,
+                logger=logger,
             )
         except Exception:  # pragma: no cover - network failure fallback
             torch_ver = DEFAULT_TORCH_METAL_VERSION
             vision_ver = DEFAULT_TORCHVISION_METAL_VERSION
-            logger.warning(
+            warn_once_per(
+                float("inf"),
+                "torch-metal-defaults",
                 "Torch Metal versions not specified; falling back to defaults %s/%s",
                 torch_ver,
                 vision_ver,
+                logger=logger,
             )
 
     return torch_ver, vision_ver

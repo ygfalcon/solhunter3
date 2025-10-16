@@ -220,8 +220,7 @@ async def search_fungible_recent(
         "tokenType": "fungible",
         "page": page_number,
         "limit": resolved_limit,
-        "sortBy": "created",
-        "sortDirection": sort_direction,
+        "sortBy": {"field": "created", "direction": sort_direction},
     }
     payload = _clean_payload(params)
     data = await _post_rpc(
