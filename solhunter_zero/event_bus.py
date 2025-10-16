@@ -414,6 +414,51 @@ _EVENT_BATCH_MS = int(os.getenv("EVENT_BATCH_MS", "10") or 10)
 _BATCH_MAGIC = b"EBAT"
 _MP_BATCH_MAGIC = b"EBMP"
 
+# ---------------------------------------------------------------------------
+#  Outgoing queue backpressure controls
+# ---------------------------------------------------------------------------
+_OUTGOING_QUEUE_MAX = int(os.getenv("EVENT_OUTGOING_QUEUE_MAX", "2000") or 2000)
+_OUTGOING_QUEUE_POLICY = (os.getenv("EVENT_OUTGOING_QUEUE_POLICY", "drop_oldest") or "drop_oldest").lower()
+_OUTGOING_QUEUE_DROP_COUNT = 0
+_OUTGOING_QUEUE_LOG_EVERY = 200  # log a line every N drops to avoid spam
+
+
+def _enqueue_outgoing(msg: Any) -> None:
+    """Enqueue an outgoing frame with bounded backpressure and drop policy."""
+
+    global _OUTGOING_QUEUE_DROP_COUNT
+    q = _outgoing_queue
+    if q is None:
+        return
+    try:
+        q.put_nowait(msg)
+        return
+    except asyncio.QueueFull:
+        pass
+    # queue is full; apply drop policy
+    try:
+        if _OUTGOING_QUEUE_POLICY == "drop_newest":
+            # drop the new frame (do nothing)
+            _OUTGOING_QUEUE_DROP_COUNT += 1
+        else:
+            # default: drop_oldest -> remove one and enqueue the new one
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            q.put_nowait(msg)
+            _OUTGOING_QUEUE_DROP_COUNT += 1
+    except Exception:
+        # as a last resort, drop silently to keep the bus alive
+        _OUTGOING_QUEUE_DROP_COUNT += 1
+    if _OUTGOING_QUEUE_DROP_COUNT % _OUTGOING_QUEUE_LOG_EVERY == 0:
+        logging.getLogger(__name__).warning(
+            "event bus dropped %d outgoing frame(s) (policy=%s, max=%d)",
+            _OUTGOING_QUEUE_DROP_COUNT,
+            _OUTGOING_QUEUE_POLICY,
+            _OUTGOING_QUEUE_MAX,
+        )
+
 
 def _pack_batch(msgs: List[Any]) -> Any:
     """Return a single frame containing all ``msgs``."""
@@ -503,6 +548,17 @@ _ws_health_port: int | None = None
 async def _health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """Simple HTTP handler returning websocket health metrics."""
 
+    # Helper to return bytes for JSON regardless of backend (orjson vs stdlib)
+    def _json_bytes(obj) -> bytes:
+        try:
+            # orjson.dumps -> bytes
+            data = json.dumps(obj)  # type: ignore[attr-defined]
+            return data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+        except Exception:
+            # stdlib json.dumps -> str
+            import json as _stdlib_json  # type: ignore
+            return _stdlib_json.dumps(obj).encode("utf-8")
+
     status = {
         "status": "ok",
         "clients": len(_ws_clients),
@@ -511,7 +567,7 @@ async def _health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWr
         "ws_host": _WS_LISTEN_HOST,
         "ws_port": _WS_LISTEN_PORT,
     }
-    body = json.dumps(status).encode("utf-8")
+    body = _json_bytes(status)
     headers = [
         b"HTTP/1.1 200 OK",
         b"Content-Type: application/json",
@@ -985,7 +1041,7 @@ def _publish_impl(topic: str, payload: Any, *, _broadcast: bool = True) -> None:
         assert msg is not None
         if loop:
             if _outgoing_queue is not None:
-                _outgoing_queue.put_nowait(msg)
+                _enqueue_outgoing(msg)
             else:
                 loop.create_task(broadcast_ws(msg))
         else:
@@ -1133,8 +1189,11 @@ async def _flush_outgoing() -> None:
         return
     loop = asyncio.get_running_loop()
     while True:
-        # wait for at least one message
-        msg = await q.get()
+        try:
+            # wait for at least one message
+            msg = await q.get()
+        except asyncio.CancelledError:
+            break
         msgs: list[Any] = [msg]
         delay = _EVENT_BATCH_MS / 1000.0
         if delay > 0:
@@ -1439,7 +1498,7 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
 
     if os.getenv("EVENT_BUS_DISABLE_LOCAL", "").lower() in {"1", "true", "yes"}:
         if _outgoing_queue is None:
-            _outgoing_queue = Queue()
+            _outgoing_queue = Queue(maxsize=max(1, _OUTGOING_QUEUE_MAX))
         return None
     if not websockets:
         raise RuntimeError("websockets library required")
@@ -1488,7 +1547,8 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
             _ws_client_topics.pop(ws, None)
 
     if _outgoing_queue is None:
-        _outgoing_queue = Queue()
+        # bounded queue for backpressure
+        _outgoing_queue = Queue(maxsize=max(1, _OUTGOING_QUEUE_MAX))
     if _flush_task is None or _flush_task.done():
         loop = asyncio.get_running_loop()
         _flush_task = loop.create_task(_flush_outgoing())
@@ -1559,6 +1619,10 @@ async def stop_ws_server() -> None:
     await _stop_ws_health_server()
     if _flush_task is not None:
         _flush_task.cancel()
+        try:
+            await _flush_task
+        except Exception:
+            pass
         _flush_task = None
     drained = 0
     if _outgoing_queue is not None:
@@ -1621,7 +1685,7 @@ async def connect_ws(url: str):
     _peer_urls.add(url)
     global _outgoing_queue, _flush_task
     if _outgoing_queue is None:
-        _outgoing_queue = Queue()
+        _outgoing_queue = Queue(maxsize=max(1, _OUTGOING_QUEUE_MAX))
     if _flush_task is None or _flush_task.done():
         loop = asyncio.get_running_loop()
         _flush_task = loop.create_task(_flush_outgoing())
