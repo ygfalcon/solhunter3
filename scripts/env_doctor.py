@@ -205,8 +205,7 @@ def check_helius_das(*, timeout: float = 5.0) -> CheckResult:
                 "tokenType": "fungible",
                 "page": 1,
                 "limit": 1,
-                "sortBy": "created",
-                "sortDirection": "desc",
+                "sortBy": {"field": "created", "direction": "desc"},
             },
         }
     ).encode("utf-8")
