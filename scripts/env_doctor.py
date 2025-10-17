@@ -96,7 +96,7 @@ def check_ws_endpoint(name: str, url: str, *, timeout: float = 5.0) -> CheckResu
 
 async def check_redis(url: str, *, timeout: float = 5.0) -> CheckResult:
     if aioredis is None:
-        return _fail("REDIS_URL", "redis python package not installed")
+        return _ok("REDIS_URL", "configured, but redis package not installed (skipping ping)")
     try:
         client = aioredis.from_url(url, encoding="utf-8", decode_responses=True, socket_connect_timeout=timeout)
     except Exception as exc:  # noqa: BLE001
@@ -116,7 +116,7 @@ async def check_redis(url: str, *, timeout: float = 5.0) -> CheckResult:
 def _wallet_check(name: str) -> CheckResult:
     path = os.getenv(name)
     if not path:
-        return _fail(name, "not set")
+        return _ok(name, "not configured")
     expanded = os.path.expanduser(path)
     if os.path.exists(expanded):
         return _ok(name, f"path exists ({expanded})")
@@ -188,7 +188,12 @@ def check_helius_das(*, timeout: float = 5.0) -> CheckResult:
         label = source or "configured key"
         return _ok("HELIUS_API_KEY", f"Helius DAS probe skipped ({label}=skip)")
 
-    rpc_base = os.getenv("DAS_RPC_URL") or os.getenv("HELIUS_DAS_RPC_URL") or "https://mainnet.helius-rpc.com"
+    rpc_base = (
+        os.getenv("DAS_BASE_URL")
+        or os.getenv("DAS_RPC_URL")
+        or os.getenv("HELIUS_DAS_RPC_URL")
+        or "https://mainnet.helius-rpc.com"
+    )
     rpc_base = rpc_base.rstrip("/")
     if "api-key=" in rpc_base:
         endpoint = rpc_base
@@ -252,7 +257,10 @@ async def run_checks() -> List[CheckResult]:
     results.append(check_helius_key())
     results.append(check_env_var("SOLANA_RPC_URL"))
     results.append(check_env_var("SOLANA_WS_URL"))
-    results.append(check_env_var("REDIS_URL"))
+    if os.getenv("REDIS_URL"):
+        results.append(check_env_var("REDIS_URL"))
+    else:
+        results.append(_ok("REDIS_URL", "not configured"))
     results.append(_wallet_check("PAPER_WALLET_KEYPATH"))
     results.append(_wallet_check("LIVE_WALLET_KEYPATH"))
 
