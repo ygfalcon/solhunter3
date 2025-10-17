@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -97,22 +98,37 @@ def setup_stdout_logging(
     root = logging.getLogger()
     root.setLevel(level)
 
+    stdout_aliases = {sys.stdout}
+    stderr_aliases = {sys.stderr}
+    for attr in ("__stdout__", "__stderr__"):
+        extra = getattr(sys, attr, None)
+        if extra is None:
+            continue
+        if attr == "__stdout__":
+            stdout_aliases.add(extra)
+        else:
+            stderr_aliases.add(extra)
+
     stream_handler: logging.StreamHandler | None = None
     for handler in list(root.handlers):
         if not isinstance(handler, logging.StreamHandler):
             continue
 
         stream = getattr(handler, "stream", None)
-        if stream is sys.stdout and stream_handler is None:
+        resolved_stream = stream if stream is not None else sys.stderr
+
+        if resolved_stream in stdout_aliases and stream_handler is None:
             stream_handler = handler
             continue
 
-        # ``logging.basicConfig`` may have already attached stream handlers that
-        # duplicate stdout/stderr. These extra handlers cause every log record
-        # to be emitted multiple times. Remove only the duplicates while keeping
-        # custom user-provided streams intact.
-        if stream in {sys.stdout, sys.stderr}:
+        # ``logging.basicConfig`` may have attached stream handlers that point to
+        # stdout/stderr (or their ``sys.__stdout__/sys.__stderr__`` fallbacks).
+        # These extra handlers cause duplicate log emission. Remove only the
+        # duplicates while keeping custom user-provided streams intact.
+        if resolved_stream in stdout_aliases or resolved_stream in stderr_aliases:
             root.removeHandler(handler)
+            with contextlib.suppress(Exception):  # pragma: no cover - best effort
+                handler.close()
 
     if stream_handler is None:
         stream_handler = logging.StreamHandler(sys.stdout)

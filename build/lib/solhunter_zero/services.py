@@ -93,10 +93,11 @@ def start_depth_service(cfg: dict) -> subprocess.Popen | None:
     logging.debug("Launching depth_service with args: %s", " ".join(args))
     proc = subprocess.Popen(args)
 
-    timeout = float(os.getenv("DEPTH_START_TIMEOUT", "60") or 60)
+    timeout_env = os.getenv("DEPTH_START_TIMEOUT")
+    timeout = float(timeout_env) if timeout_env not in (None, "") else 60.0
 
     # Synchronous wait for unix socket so we don't nest event loops
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout <= 0 else time.monotonic() + timeout
     while True:
         try:
             s = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
@@ -105,7 +106,7 @@ def start_depth_service(cfg: dict) -> subprocess.Popen | None:
             s.close()
             break
         except OSError:
-            if time.monotonic() > deadline:
+            if deadline is not None and time.monotonic() > deadline:
                 with contextlib.suppress(Exception):
                     proc.terminate()
                 with contextlib.suppress(Exception):
