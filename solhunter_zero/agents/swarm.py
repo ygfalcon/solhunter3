@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 from typing import Iterable, List, Dict, Any, Optional, Set
 
 from .. import order_book_ws
@@ -19,9 +20,22 @@ def _as_float(value: Any) -> Optional[float]:
     try:
         if value is None:
             return None
-        return float(value)
+        result = float(value)
+        if not math.isfinite(result):
+            return None
+        return result
     except (TypeError, ValueError):
         return None
+
+
+def _safe_number(value: Any, default: float = 0.0) -> float:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(num):
+        return default
+    return num
 
 
 def _summarise_proposals(proposals: List[Dict[str, Any]]) -> Dict[str, float]:
@@ -182,7 +196,12 @@ class AgentSwarm:
             their decision thresholds accordingly.
         """
 
-        depth, imbalance, _ = order_book_ws.snapshot(token)
+        # Snapshot may fail transiently; keep the round alive.
+        try:
+            depth, imbalance, _ = order_book_ws.snapshot(token)
+        except Exception:
+            logger.warning("Swarm: order book snapshot failed for %s", token, exc_info=True)
+            depth, imbalance = None, None
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "Swarm: order book snapshot for %s -> %s",
@@ -261,17 +280,21 @@ class AgentSwarm:
                 "proposals": count,
             }
             if weights and agent.name in weights:
+                raw_weight = weights.get(agent.name, 1.0)
                 try:
-                    detail["weight"] = float(weights.get(agent.name, 1.0))
+                    w_detail = float(raw_weight)
                 except (TypeError, ValueError):
-                    detail["weight"] = 1.0
+                    w_detail = 1.0
+                if not math.isfinite(w_detail) or w_detail < 0.0:
+                    w_detail = 0.0
+                detail["weight"] = w_detail
             if isinstance(raw, Exception):
                 detail["error"] = str(raw)
             elif res:
                 detail["sample"] = res[:3]
                 metrics = _summarise_proposals(res)
                 if metrics:
-                    detail["metrics"] = metrics
+                    detail["metrics"] = {k: _safe_number(v) for k, v in metrics.items()}
                 sides: Set[str] = {
                     str(entry.get("side")).lower()
                     for entry in res
@@ -303,7 +326,18 @@ class AgentSwarm:
         self._last_total_proposals = total_proposals
         self._last_agent_details = agent_details
 
-        weights_map = {a.name: float(weights.get(a.name, 1.0)) for a in self.agents} if weights else {}
+        # Sanitize weights (no NaN/negative values)
+        weights_map: Dict[str, float] = {}
+        if weights:
+            for a in self.agents:
+                raw_weight = weights.get(a.name, 1.0)
+                try:
+                    w = float(raw_weight)
+                except (TypeError, ValueError):
+                    w = 1.0
+                if not math.isfinite(w) or w < 0.0:
+                    w = 0.0
+                weights_map[a.name] = w
 
         merged: Dict[tuple[str, str], Dict[str, Any]] = {}
         for agent, res in zip(self.agents, results):
@@ -312,21 +346,34 @@ class AgentSwarm:
                 continue
             for r in res:
                 r.setdefault("agent", agent.name)
-                token = r.get("token")
-                side = r.get("side")
-                if not token or not side:
+                r_tok = r.get("token")
+                side_raw = r.get("side")
+                side = str(side_raw).lower() if side_raw else ""
+                if side not in {"buy", "sell"} or not r_tok:
                     continue
-                amt = float(r.get("amount", 0.0)) * weight
-                price = float(r.get("price", 0.0))
-                key = (token, side)
+                try:
+                    amt = float(r.get("amount", 0.0)) * float(weight)
+                except (TypeError, ValueError):
+                    amt = 0.0
+                if not math.isfinite(amt) or amt < 0.0:
+                    continue
+                try:
+                    price = float(r.get("price", 0.0))
+                except (TypeError, ValueError):
+                    price = 0.0
+                if not math.isfinite(price) or price <= 0.0:
+                    price = 0.0
+                key = (r_tok, side)
                 m = merged.setdefault(
                     key,
                     {
-                        "token": token,
+                        "token": r_tok,
                         "side": side,
                         "amount": 0.0,
                         "price": 0.0,
                         "metadata": {},
+                        "_price_amt": 0.0,
+                        "_any_price": False,
                     },
                 )
                 for extra in ("conviction_delta", "regret", "misfires", "agent", "bias"):
@@ -348,13 +395,17 @@ class AgentSwarm:
                 metadata = m.setdefault("metadata", {})
                 contributors: Set[str] = metadata.setdefault("contributors", set())
                 contributors.add(agent.name)
-                if price <= 0:
-                    metadata["needs_price"] = True
-                    agents = metadata.setdefault("needs_price_agents", set())
-                    agents.add(agent.name)
+                if price <= 0.0:
+                    agents_np = metadata.setdefault("needs_price_agents", set())
+                    agents_np.add(agent.name)
+                else:
+                    m["_any_price"] = True
                 old_amt = m["amount"]
                 if old_amt + amt > 0:
-                    m["price"] = (m["price"] * old_amt + price * amt) / (old_amt + amt)
+                    denom = m["_price_amt"] + (amt if price > 0.0 else 0.0)
+                    if denom > 0.0:
+                        m["price"] = (m["price"] * m["_price_amt"] + price * amt) / denom
+                        m["_price_amt"] = denom
                 m["amount"] += amt
 
         if logger.isEnabledFor(logging.INFO):
@@ -375,6 +426,8 @@ class AgentSwarm:
             buy = merged.get((tok, "buy"), {"amount": 0.0, "price": 0.0})
             sell = merged.get((tok, "sell"), {"amount": 0.0, "price": 0.0})
             net = buy["amount"] - sell["amount"]
+            if abs(net) < 1e-12:
+                continue
             if net > 0:
                 entry = {"token": tok, "side": "buy", "amount": net, "price": buy["price"]}
                 for extra in ("conviction_delta", "regret", "misfires", "agent", "bias", "simulated", "dry_run"):
@@ -388,6 +441,8 @@ class AgentSwarm:
                     contributors_meta = meta.get("contributors")
                     if isinstance(contributors_meta, set):
                         meta["contributors"] = sorted(contributors_meta)
+                    if not buy.get("_any_price", False) and "needs_price_agents" in meta:
+                        meta["needs_price"] = True
                     entry["metadata"] = meta
                 final.append(entry)
             elif net < 0:
@@ -403,6 +458,8 @@ class AgentSwarm:
                     contributors_meta = meta.get("contributors")
                     if isinstance(contributors_meta, set):
                         meta["contributors"] = sorted(contributors_meta)
+                    if not sell.get("_any_price", False) and "needs_price_agents" in meta:
+                        meta["needs_price"] = True
                     entry["metadata"] = meta
                 final.append(entry)
 
