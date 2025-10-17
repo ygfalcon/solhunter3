@@ -177,6 +177,17 @@ def _summarize_params(params: Dict[str, Any], *, limit: int = 256) -> str:
     return rendered
 
 
+_LAST_SUCCESSFUL_SEARCH_PAYLOAD: str | None = None
+
+
+def _log_success_payload(payload: Dict[str, Any]) -> None:
+    global _LAST_SUCCESSFUL_SEARCH_PAYLOAD
+    summary = _summarize_params(payload, limit=512)
+    if summary != _LAST_SUCCESSFUL_SEARCH_PAYLOAD:
+        log.info("Helius DAS searchAssets succeeded with payload=%s", summary)
+        _LAST_SUCCESSFUL_SEARCH_PAYLOAD = summary
+
+
 async def _post_rpc(
     session: aiohttp.ClientSession,
     method: str,
@@ -365,6 +376,7 @@ async def search_fungible_recent(
                 payload,
                 op="searchAssets",
             )
+            _log_success_payload(payload)
             break
         except RuntimeError as exc:
             last_error = exc

@@ -105,10 +105,26 @@ main() {
         fi
         das_url="${das_url}${delimiter}api-key=${helius_key}"
       fi
-      local das_payload='{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"interface":"FungibleToken","limit":1,"sortBy":{"field":"recentAction","direction":"desc"}}}'
-      if run_with_timeout 5 curl -fsS -X POST "$das_url" \
+      local das_payload='{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"query":{"tokenType":"fungible"},"page":1,"limit":1,"sortBy":{"field":"created","direction":"desc"}}}'
+      local das_output=""
+      local das_status=0
+      if ! das_output=$(run_with_timeout 5 curl -sS -X POST "$das_url" \
         -H "Content-Type: application/json" \
-        -d "$das_payload" | jq -re '
+        -d "$das_payload" -w '\n%{http_code}'); then
+        das_status=$?
+      fi
+      local http_status="${das_output##*$'\n'}"
+      local das_body="$das_output"
+      if [[ $das_output == *$'\n'* ]]; then
+        das_body="${das_output%$'\n'$http_status}"
+      fi
+      if [[ ! $http_status =~ ^[0-9][0-9][0-9]$ ]]; then
+        http_status="000"
+      fi
+
+      local das_ok=0
+      if [[ $das_status -eq 0 && $http_status =~ ^2 ]]; then
+        if jq -re '
           def items_from:
             if type == "array" then .
             elif type == "object" then (
@@ -119,13 +135,23 @@ main() {
             )
             else empty end;
           .result? as $result | ($result | items_from) | length > 0
-        ' >/dev/null; then
+        ' <<<"$das_body" >/dev/null 2>&1; then
+          das_ok=1
+        fi
+      fi
+
+      local req_preview="${das_payload:0:240}"
+      [[ ${#das_payload} -gt 240 ]] && req_preview+="..."
+      local resp_preview="${das_body:0:240}"
+      [[ ${#das_body} -gt 240 ]] && resp_preview+="..."
+
+      if (( das_ok )); then
         pass "DAS reachable (JSON-RPC)"
-        check_details+=("$(jq -n '{type:"das",status:"pass"}')")
+        check_details+=("$(jq -n --arg status "$http_status" '{type:"das",status:"pass",http_status:$status}')")
         record_audit pass "helius:jsonrpc"
       else
-        fail "DAS probe failed (JSON-RPC)"
-        check_details+=("$(jq -n '{type:"das",status:"fail"}')")
+        fail "DAS probe failed (JSON-RPC): status=$http_status request=$req_preview response=$resp_preview next=try fallback sortBy variant"
+        check_details+=("$(jq -n --arg status "$http_status" --arg payload "$das_payload" --arg response "$resp_preview" '{type:"das",status:"fail",http_status:$status,payload:$payload,response:$response}')")
         record_audit fail "helius:jsonrpc"
         ((failures++))
       fi

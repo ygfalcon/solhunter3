@@ -56,6 +56,8 @@ def configure_environment(root: Path | None = None) -> dict[str, str]:
         lower = value.lower()
         if "your_" in lower or "example" in lower:
             return True
+        if "invalid" in lower or "fake" in lower:
+            return True
         if value.startswith("be_") and all(ch in "xX" for ch in value[3:]):
             return True
         if lower.startswith("bd"):
@@ -118,8 +120,12 @@ def configure_environment(root: Path | None = None) -> dict[str, str]:
             del os.environ[env_name]
             applied[env_name] = ""
     for name in removed_placeholders:
-        os.environ[name] = ""
-        applied.setdefault(name, "")
+        if name == "SOLANA_RPC_URL":
+            os.environ[name] = DEFAULTS.get(name, "")
+            applied.setdefault(name, os.environ[name])
+        else:
+            os.environ[name] = ""
+            applied.setdefault(name, "")
     file_updates: dict[str, str] = {}
 
     for env_key in ("AGENTS", "AGENT_WEIGHTS"):

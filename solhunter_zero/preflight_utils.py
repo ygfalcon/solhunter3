@@ -296,6 +296,8 @@ def check_required_env(keys: List[str] | None = None) -> Check:
         placeholder = (
             "your_" in lower
             or "example" in lower
+            or "invalid" in lower
+            or "fake" in lower
             or (bird_key.startswith("be_") and all(ch in "xX" for ch in bird_key[3:]))
             or lower.startswith("bd")
         )

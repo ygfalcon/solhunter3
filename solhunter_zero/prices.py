@@ -3,8 +3,12 @@ import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Sequence, Tuple, Union
 
 import aiohttp
@@ -44,6 +48,11 @@ OFFLINE_PRICE_DEFAULT = os.getenv("OFFLINE_PRICE_DEFAULT")
 
 _LAST_BIRDEYE_KEY: str | None = None
 _LAST_BIRDEYE_FAILURE_KEY: str | None = None
+_BIRDEYE_KEY_FINGERPRINT: str | None = None
+
+_PYTH_BOOT_TIMEOUT = max(0.5, float(os.getenv("PYTH_BOOT_TIMEOUT", "3.0") or 3.0))
+_PYTH_VALIDATE_FLAG = (os.getenv("PYTH_VALIDATE_ON_BOOT") or "1").strip().lower()
+_PYTH_VALIDATE_ENABLED = _PYTH_VALIDATE_FLAG not in {"0", "false", "no", "off"}
 
 
 def _monotonic() -> float:
@@ -144,6 +153,10 @@ def _init_provider_stats() -> Dict[str, ProviderStats]:
 PROVIDER_HEALTH: Dict[str, ProviderHealth] = _init_provider_health()
 PROVIDER_STATS: Dict[str, ProviderStats] = _init_provider_stats()
 
+# Treat Jupiter as unverified until a quote succeeds.
+if "jupiter" in PROVIDER_HEALTH:
+    PROVIDER_HEALTH["jupiter"].healthy = False
+
 
 PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
     "birdeye": ProviderConfig(
@@ -186,11 +199,24 @@ def _is_valid_birdeye_key(value: str | None) -> str | None:
     return candidate
 
 
+def _log_birdeye_key_fingerprint(key: str) -> None:
+    global _BIRDEYE_KEY_FINGERPRINT
+    fingerprint = key[-4:] if len(key) >= 4 else key
+    if fingerprint == _BIRDEYE_KEY_FINGERPRINT:
+        return
+    _BIRDEYE_KEY_FINGERPRINT = fingerprint
+    logger.info("Birdeye API key configured (…%s)", fingerprint)
+
+
 def _get_birdeye_api_key() -> str | None:
-    global _LAST_BIRDEYE_KEY, _LAST_BIRDEYE_FAILURE_KEY
+    global _LAST_BIRDEYE_KEY, _LAST_BIRDEYE_FAILURE_KEY, _BIRDEYE_KEY_FINGERPRINT
     key = _is_valid_birdeye_key(os.getenv("BIRDEYE_API_KEY"))
     if key != _LAST_BIRDEYE_KEY:
         _LAST_BIRDEYE_KEY = key
+        if key:
+            _log_birdeye_key_fingerprint(key)
+        else:
+            _BIRDEYE_KEY_FINGERPRINT = None
         if key and key != _LAST_BIRDEYE_FAILURE_KEY:
             PROVIDER_HEALTH["birdeye"].clear()
             _LAST_BIRDEYE_FAILURE_KEY = None
@@ -574,33 +600,85 @@ async def _fetch_quotes_birdeye(
     return quotes
 
 
-def _parse_pyth_mapping() -> Tuple[Dict[str, str], List[str]]:
+def _load_custom_pyth_ids() -> Tuple[Dict[str, str], List[str]]:
     env_value = os.getenv("PYTH_PRICE_IDS")
     mapping: Dict[str, str] = {}
     extras: List[str] = []
-    if env_value:
-        try:
-            loaded = json.loads(env_value)
-            if isinstance(loaded, MutableMapping):
-                mapping.update({str(k): str(v) for k, v in loaded.items()})
-            elif isinstance(loaded, list):
-                for item in loaded:
-                    if isinstance(item, str):
-                        extras.append(item)
-                    elif isinstance(item, MutableMapping):
-                        mint = item.get("mint") or item.get("token") or item.get("address")
-                        price_id = item.get("price_id") or item.get("id")
-                        if isinstance(mint, str) and isinstance(price_id, str):
-                            mapping[canonical_mint(mint)] = price_id
-        except json.JSONDecodeError:
-            logger.warning("Failed to decode PYTH_PRICE_IDS env; ignoring")
+    if not env_value:
+        return mapping, extras
+    try:
+        loaded = json.loads(env_value)
+    except json.JSONDecodeError:
+        logger.warning("Failed to decode PYTH_PRICE_IDS env; ignoring")
+        return mapping, extras
+    if isinstance(loaded, MutableMapping):
+        for raw_mint, raw_id in loaded.items():
+            if not isinstance(raw_mint, str) or not isinstance(raw_id, str):
+                continue
+            mint = canonical_mint(raw_mint)
+            if validate_mint(mint):
+                mapping[mint] = raw_id
+    elif isinstance(loaded, list):
+        for item in loaded:
+            if isinstance(item, str):
+                extras.append(item)
+            elif isinstance(item, MutableMapping):
+                mint = item.get("mint") or item.get("token") or item.get("address")
+                price_id = item.get("price_id") or item.get("id")
+                if isinstance(mint, str) and isinstance(price_id, str):
+                    canonical = canonical_mint(mint)
+                    if validate_mint(canonical):
+                        mapping[canonical] = price_id
+    else:
+        logger.warning(
+            "Unexpected PYTH_PRICE_IDS type %s; ignoring", type(loaded).__name__
+        )
+    return mapping, extras
+
+
+def _parse_pyth_mapping() -> Tuple[Dict[str, str], List[str]]:
+    mapping, extras = _load_custom_pyth_ids()
     default_mapping = {
         "So11111111111111111111111111111111111111112": "J83JdAq8FDeC8v2WFE2QyXkJhtCmvYzu3d6PvMfo4WwS",
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9": "GkzKf5qcF6edCbnMD4HzyBbs6k8ZZrVSu2Ce279b9EcT",
         "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "7sxNXmAf6oMzFxLpyR4V6kRDeo63HgNbUsVTNff7kX2Z",
     }
-    mapping.update({k: v for k, v in default_mapping.items() if k not in mapping})
+    for mint, price_id in default_mapping.items():
+        mapping.setdefault(mint, price_id)
     return mapping, extras
+
+
+@lru_cache(maxsize=1)
+def validate_pyth_overrides_on_boot(*, network_required: bool = True) -> None:
+    if not _PYTH_VALIDATE_ENABLED or not network_required:
+        return
+    mapping, extras = _load_custom_pyth_ids()
+    ids: set[str] = {str(value) for value in mapping.values() if value}
+    ids.update(str(value) for value in extras if value)
+    if not ids:
+        return
+    base_url = PYTH_PRICE_URL.strip() or "https://hermes.pyth.network/v2/updates/price/latest"
+    for price_id in sorted(ids):
+        try:
+            encoded = urllib.parse.quote(price_id, safe="")
+            url = f"{base_url}?ids={encoded}"
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=_PYTH_BOOT_TIMEOUT) as resp:
+                resp.read(1)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 400:
+                detail = exc.read() if hasattr(exc, "read") else b""
+                preview = detail.decode("utf-8", errors="replace")[:120]
+                raise RuntimeError(
+                    f"Invalid PYTH_PRICE_IDS entry {price_id}: HTTP 400 {preview}"
+                ) from exc
+            logger.debug(
+                "Pyth override validation received HTTP %s for %s", exc.code, price_id
+            )
+        except Exception as exc:  # pragma: no cover - network best effort
+            logger.debug(
+                "Pyth override validation encountered %s for %s", exc, price_id
+            )
 
 
 async def _fetch_quotes_pyth(
@@ -613,8 +691,18 @@ async def _fetch_quotes_pyth(
     ids.update(str(value) for value in extras)
     if not ids:
         return {}
-    params = {"ids": ",".join(sorted(ids))}
-    payload = await _request_json(session, PYTH_PRICE_URL, "Pyth", params=params)
+    ids_param = ",".join(sorted(ids))
+    params = {"ids": ids_param}
+    try:
+        payload = await _request_json(session, PYTH_PRICE_URL, "Pyth", params=params)
+    except aiohttp.ClientResponseError as exc:
+        if exc.status == 400:
+            logger.error(
+                "Pyth price request returned HTTP 400 for ids=%s (tokens=%s)",
+                ids_param,
+                ",".join(sorted(requested_tokens)),
+            )
+        raise
     if not isinstance(payload, MutableMapping):
         return {}
     records: List[MutableMapping[str, Any]] = []
