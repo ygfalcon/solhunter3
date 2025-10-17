@@ -19,8 +19,9 @@ def _net_return(p0: float, p1: float, liquidity: Optional[float] = None) -> floa
         return 0.0
     raw = (p1 - p0) / p0
     slip = 0.0
-    if liquidity:
-        slip = min(0.05, 1.0 / max(liquidity, 1e-9))
+    # Treat 0 liquidity as worst case (max slippage), and None as "unknown"
+    if liquidity is not None:
+        slip = min(0.05, 1.0 / max(float(liquidity), 1e-9))
     return raw - FEE_RATE - slip
 
 
@@ -120,17 +121,7 @@ def backtest_weighted(
     if strategies is None:
         strategies = DEFAULT_STRATEGIES
 
-    weight_sum = sum(float(weights.get(n, 1.0)) for n, _ in strategies)
-    if weight_sum <= 0:
-        return StrategyResult(
-            name="weighted",
-            roi=0.0,
-            sharpe=0.0,
-            max_drawdown=0.0,
-            volatility=0.0,
-            cumulative_returns=[],
-        )
-
+    # Build list only from strategies that produced returns
     arrs = []
     for name, strat in strategies:
         rets = strat(prices, liquidity)
@@ -146,6 +137,11 @@ def backtest_weighted(
             volatility=0.0,
             cumulative_returns=[],
         )
+
+    # Normalize by the sum of weights actually included
+    weight_sum = sum(w for _, w in arrs)
+    if weight_sum <= 0:
+        weight_sum = 1.0
 
     length = min(len(a) for a, _ in arrs)
     agg = np.zeros(length, dtype=float)
