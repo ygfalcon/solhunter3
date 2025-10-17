@@ -5,6 +5,7 @@ import datetime
 import json
 import logging
 import os
+from collections import deque
 from contextlib import suppress
 from typing import Any
 
@@ -77,7 +78,15 @@ class Memory(BaseMemory):
         if url.startswith("sqlite:///"):
             url = url.replace("sqlite://", "sqlite+aiosqlite://", 1)
 
-        self.engine = create_async_engine(url, echo=False, future=True)
+        # Keep connections healthy for long-lived processes and remote DBs
+        pool_recycle = int(os.getenv("MEMORY_POOL_RECYCLE_SEC", "0") or 0) or None
+        self.engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            pool_pre_ping=True,
+            pool_recycle=pool_recycle,
+        )
         self.Session: async_sessionmaker[AsyncSession] = async_sessionmaker(
             bind=self.engine, expire_on_commit=False
         )
@@ -95,6 +104,9 @@ class Memory(BaseMemory):
 
         self._last_seen_created: dict[str, datetime.datetime] = {}
         self._recent_keys: set[tuple[str, str, float, float, int]] = set()
+        self._recent_keys_queue: deque[
+            tuple[int, tuple[str, str, float, float, int]]
+        ] | None = deque() if self._dedupe_window_sec > 0 else None
 
         self._init_task = asyncio.create_task(self._init_models())
 
@@ -124,8 +136,30 @@ class Memory(BaseMemory):
         maxsize = self._queue_max if self._queue_max > 0 else 0
         self._queue = asyncio.Queue(maxsize=maxsize)
         self._writer_started = asyncio.Event()
+        if self._recent_keys_queue is None and self._dedupe_window_sec > 0:
+            self._recent_keys_queue = deque()
         loop = asyncio.get_event_loop()
         self._writer_task = loop.create_task(self._writer())
+
+    async def _flush_with_retry(self, items: list[dict[str, Any]]) -> None:
+        """Write queued items with retry/backoff for transient errors."""
+        if not items:
+            return
+
+        backoff = 0.05
+        attempts = int(os.getenv("MEMORY_FLUSH_RETRIES", "3") or 3)
+        for attempt in range(max(1, attempts)):
+            async with self.Session() as session:
+                try:
+                    session.add_all(Trade(**d) for d in items)
+                    await session.commit()
+                    return
+                except Exception:
+                    logger.exception("memory flush attempt %s failed", attempt + 1)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 0.8)
+
+        logger.error("memory flush failed permanently; dropping %d rows", len(items))
 
     async def _writer(self) -> None:
         assert self._queue is not None
@@ -142,17 +176,17 @@ class Memory(BaseMemory):
                     pending.append(item)
                     self._queue.task_done()
                     if len(pending) >= self._batch_size:
-                        await self._flush(pending)
+                        await self._flush_with_retry(pending)
                         pending.clear()
                 except asyncio.TimeoutError:
                     if pending:
-                        await self._flush(pending)
+                        await self._flush_with_retry(pending)
                         pending.clear()
         except asyncio.CancelledError:
             pass
         finally:
             if pending:
-                await self._flush(pending)
+                await self._flush_with_retry(pending)
                 pending.clear()
             if self._queue:
                 tail: list[dict[str, Any]] = []
@@ -163,7 +197,7 @@ class Memory(BaseMemory):
                     except asyncio.QueueEmpty:
                         break
                 if tail:
-                    await self._flush(tail)
+                    await self._flush_with_retry(tail)
 
     async def wait_ready(self) -> None:
         await self._init_task
@@ -171,14 +205,8 @@ class Memory(BaseMemory):
             await self._writer_started.wait()
 
     async def _flush(self, items: list[dict[str, Any]]) -> None:
-        if not items:
-            return
-        async with self.Session() as session:
-            try:
-                session.add_all(Trade(**d) for d in items)
-                await session.commit()
-            except Exception:
-                logger.exception("memory flush failed; batch discarded")
+        """Backward compatible flush helper (delegates to retrying variant)."""
+        await self._flush_with_retry(items)
 
     async def log_trade(self, *, _broadcast: bool = True, **kwargs) -> int | None:
         await self._init_task
@@ -197,9 +225,22 @@ class Memory(BaseMemory):
                     // max(1, int(self._dedupe_window_sec))
                 ),
             )
+            if self._recent_keys_queue is not None:
+                now_bucket = key[-1]
+                with suppress(Exception):
+                    while self._recent_keys_queue:
+                        bucket, old_key = self._recent_keys_queue[0]
+                        if bucket < now_bucket - 1:
+                            self._recent_keys_queue.popleft()
+                            self._recent_keys.discard(old_key)
+                        else:
+                            break
             if key in self._recent_keys:
                 return None
             self._recent_keys.add(key)
+            if self._recent_keys_queue is not None:
+                with suppress(Exception):
+                    self._recent_keys_queue.append((key[-1], key))
 
         token = str(kwargs.get("token", ""))
         if token:
@@ -211,8 +252,11 @@ class Memory(BaseMemory):
             try:
                 if self._queue_max > 0 and self._queue.full():
                     try:
-                        _ = self._queue.get_nowait()
+                        dropped = self._queue.get_nowait()
                         self._queue.task_done()
+                        logger.warning(
+                            "memory queue full; dropping oldest trade: %s", dropped
+                        )
                     except asyncio.QueueEmpty:
                         pass
                 await self._queue.put(kwargs)
@@ -304,9 +348,7 @@ class Memory(BaseMemory):
         total = 0
         for i in range(0, len(rows), chunk):
             batch = rows[i : i + chunk]
-            async with self.Session() as session:
-                session.add_all(Trade(**r) for r in batch)
-                await session.commit()
+            await self._flush_with_retry(batch)
             if broadcast:
                 for r in batch:
                     with suppress(Exception):
