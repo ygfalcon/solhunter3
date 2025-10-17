@@ -33,7 +33,20 @@ from ..agent_manager import AgentManager
 from ..loop import trading_loop as _trading_loop
 from .. import ui as _ui_module
 
-_create_ui_app = _ui_module.create_app  # type: ignore[attr-defined]
+if hasattr(_ui_module, "create_app"):
+    _create_ui_app = _ui_module.create_app  # type: ignore[attr-defined]
+else:  # pragma: no cover - fallback used only when UI module lacks factory
+    def _create_ui_app(_state: Any | None = None) -> Any:
+        try:
+            from flask import Flask
+
+            return Flask(__name__)
+        except Exception:
+            def _wsgi_app(environ, start_response):
+                start_response("200 OK", [("Content-Type", "text/plain")])
+                return [b"UI disabled"]
+
+            return _wsgi_app
 
 if hasattr(_ui_module, "start_websockets"):
     _start_ui_ws = getattr(_ui_module, "start_websockets")
@@ -118,7 +131,7 @@ class RuntimeOrchestrator:
         # Ensure peers point to the local WS
         os.environ["BROKER_WS_URLS"] = f"ws://127.0.0.1:{ws_port}"
         os.environ["EVENT_BUS_URL"] = f"ws://127.0.0.1:{ws_port}"
-        ok = await event_bus.verify_broker_connection(timeout=1.0)
+        ok = await event_bus.verify_broker_connection(timeout=5.0)
         if not ok:
             await self._publish_stage("bus:verify", False, "broker roundtrip failed")
             if parse_bool_env("BROKER_VERIFY_ABORT", False):
@@ -260,6 +273,8 @@ class RuntimeOrchestrator:
         strategies = cfg.get("strategies")
         if isinstance(strategies, str):
             strategies = [s.strip() for s in strategies.split(",") if s.strip()]
+        elif not strategies:
+            strategies = []
         if cfg.get("agents"):
             agent_manager = AgentManager.from_config(cfg)
             strategy_manager = None
@@ -512,8 +527,10 @@ async def _amain(argv: list[str] | None = None) -> int:
 
     await orch.start()
     # Keep process alive while trading loop runs
-    while True:
-        await asyncio.sleep(3600)
+    while not orch._closed:
+        await asyncio.sleep(1)
+
+    return 0
 
 
 def main(argv: list[str] | None = None) -> None:
