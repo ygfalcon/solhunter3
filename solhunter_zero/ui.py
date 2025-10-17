@@ -931,6 +931,39 @@ _PAGE_TEMPLATE = """
             margin: 0;
             font-size: 1.9rem;
         }
+        .connection-banner {
+            border-radius: 14px;
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            background: rgba(88,166,255,0.14);
+            border: 1px solid rgba(88,166,255,0.28);
+            transition: background 0.2s ease, border-color 0.2s ease;
+        }
+        .connection-banner strong {
+            font-weight: 600;
+        }
+        .connection-banner--connecting {
+            background: rgba(88,166,255,0.14);
+            border-color: rgba(88,166,255,0.28);
+        }
+        .connection-banner--ok {
+            background: rgba(63,185,80,0.16);
+            border-color: rgba(63,185,80,0.35);
+        }
+        .connection-banner--warning {
+            background: rgba(242,204,96,0.18);
+            border-color: rgba(242,204,96,0.4);
+        }
+        .connection-banner--error {
+            background: rgba(255,123,114,0.18);
+            border-color: rgba(255,123,114,0.4);
+        }
+        .connection-detail {
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
         .status-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -1198,6 +1231,10 @@ _PAGE_TEMPLATE = """
 <body>
     <div class=\"layout\">
         <header>
+            <div id=\"connection-banner\" class=\"connection-banner connection-banner--connecting\">
+                <strong id=\"connection-status-label\">Connecting to runtime…</strong>
+                <div id=\"connection-status-detail\" class=\"connection-detail\">Fetching runtime metadata…</div>
+            </div>
             <div class=\"header-top\">
                 <div class=\"section-title\">
                     <h1>SolHunter Swarm Lifecycle</h1>
@@ -1934,6 +1971,220 @@ _PAGE_TEMPLATE = """
 
         <script>
             (function () {
+                const connectionBanner = document.getElementById('connection-banner');
+                const connectionLabel = document.getElementById('connection-status-label');
+                const connectionDetail = document.getElementById('connection-status-detail');
+                const channelOrder = ['events', 'rl', 'logs'];
+                const channelLabels = {events: 'Events', rl: 'RL', logs: 'Logs'};
+                const channelState = {
+                    events: {status: 'idle', detail: 'Waiting for metadata…', socket: null, retryTimer: null, retries: 0, url: ''},
+                    rl: {status: 'idle', detail: 'Waiting for metadata…', socket: null, retryTimer: null, retries: 0, url: ''},
+                    logs: {status: 'idle', detail: 'Waiting for metadata…', socket: null, retryTimer: null, retries: 0, url: ''}
+                };
+
+                function renderConnectionSummary() {
+                    if (!connectionBanner || !connectionLabel || !connectionDetail) {
+                        return;
+                    }
+                    let anyError = false;
+                    let anyWarn = false;
+                    let allOpen = true;
+                    const parts = [];
+                    channelOrder.forEach((name) => {
+                        const info = channelState[name];
+                        if (!info) {
+                            return;
+                        }
+                        const label = channelLabels[name] || name;
+                        parts.push(label + ': ' + info.detail);
+                        if (info.status === 'error') {
+                            anyError = true;
+                        }
+                        if (info.status === 'warn') {
+                            anyWarn = true;
+                        }
+                        if (info.status !== 'open') {
+                            allOpen = false;
+                        }
+                    });
+                    let overall = 'connecting';
+                    if (anyError) {
+                        overall = 'error';
+                    } else if (anyWarn) {
+                        overall = 'warning';
+                    } else if (allOpen && parts.length) {
+                        overall = 'ok';
+                    }
+                    const messages = {
+                        ok: 'Connected to runtime',
+                        error: 'Realtime stream disconnected',
+                        warning: 'Realtime stream degraded',
+                        connecting: 'Connecting to runtime…'
+                    };
+                    connectionLabel.textContent = messages[overall] || messages.connecting;
+                    connectionBanner.className = 'connection-banner connection-banner--' + overall;
+                    connectionDetail.textContent = parts.join(' · ');
+                }
+
+                function setChannelState(name, status, detail) {
+                    const info = channelState[name];
+                    if (!info) {
+                        return;
+                    }
+                    info.status = status;
+                    if (typeof detail === 'string' && detail) {
+                        info.detail = detail;
+                    }
+                    if (status === 'open') {
+                        info.retries = 0;
+                    }
+                    renderConnectionSummary();
+                }
+
+                function shortUrl(url) {
+                    if (typeof url !== 'string') {
+                        return '';
+                    }
+                    if (url.startsWith('wss://')) {
+                        return url.slice(6);
+                    }
+                    if (url.startsWith('ws://')) {
+                        return url.slice(5);
+                    }
+                    return url;
+                }
+
+                function scheduleReconnect(name, url, reasonText) {
+                    const info = channelState[name];
+                    if (!info) {
+                        return;
+                    }
+                    if (info.retryTimer) {
+                        return;
+                    }
+                    const attempt = info.retries || 0;
+                    const delay = Math.min(10000, 1000 * Math.pow(2, attempt));
+                    info.retryTimer = window.setTimeout(() => {
+                        info.retryTimer = null;
+                        setChannelState(name, 'connecting', 'Connecting…');
+                        connectChannel(name, url);
+                    }, delay);
+                    info.retries = attempt + 1;
+                    const retryLabel = 'retrying in ' + Math.round(delay / 1000) + 's';
+                    const prefix = reasonText ? reasonText + ' — ' : '';
+                    const suffix = url ? ' (' + shortUrl(url) + ')' : '';
+                    setChannelState(name, 'error', prefix + retryLabel + suffix);
+                }
+
+                function connectChannel(name, url) {
+                    const info = channelState[name];
+                    if (!info) {
+                        return;
+                    }
+                    if (info.retryTimer) {
+                        window.clearTimeout(info.retryTimer);
+                        info.retryTimer = null;
+                    }
+                    if (info.socket) {
+                        try {
+                            info.socket.close(1000, 'reconnecting');
+                        } catch (err) {
+                            // ignore
+                        }
+                        info.socket = null;
+                    }
+                    if (!window.WebSocket) {
+                        setChannelState(name, 'error', 'WebSocket unsupported');
+                        return;
+                    }
+                    if (!url) {
+                        setChannelState(name, 'warn', 'No endpoint provided');
+                        return;
+                    }
+                    info.url = url;
+                    setChannelState(name, 'connecting', 'Connecting…');
+                    let socket;
+                    try {
+                        socket = new WebSocket(url);
+                    } catch (err) {
+                        const message = err && err.message ? err.message : 'failed to open socket';
+                        setChannelState(name, 'error', 'Failed to open — ' + message);
+                        scheduleReconnect(name, url, 'connect error');
+                        return;
+                    }
+                    info.socket = socket;
+                    socket.addEventListener('open', () => {
+                        setChannelState(name, 'open', 'Connected');
+                    });
+                    socket.addEventListener('message', (event) => {
+                        if (!event || typeof event.data === 'undefined') {
+                            return;
+                        }
+                        const data = event.data;
+                        if (typeof data === 'string') {
+                            const trimmed = data.trim();
+                            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                                try {
+                                    JSON.parse(trimmed);
+                                } catch (err) {
+                                    console.error('ui-msg-error', err, {channel: name, payload: data});
+                                    setChannelState(name, 'warn', 'Bad frame skipped');
+                                    return;
+                                }
+                            }
+                        }
+                        if (info.status !== 'open' || info.detail === 'Connected') {
+                            setChannelState(name, 'open', 'Streaming');
+                        }
+                    });
+                    socket.addEventListener('close', (event) => {
+                        const code = event && typeof event.code === 'number' ? event.code : 1000;
+                        const reason = event && event.reason ? event.reason : '';
+                        info.socket = null;
+                        const reasonText = 'closed (' + code + (reason ? ' ' + reason : '') + ')';
+                        scheduleReconnect(name, url, reasonText);
+                    });
+                    socket.addEventListener('error', (event) => {
+                        const detail = event && event.message ? event.message : 'socket error';
+                        const suffix = info.url ? ' (' + shortUrl(info.url) + ')' : '';
+                        setChannelState(name, 'error', 'Error — ' + detail + suffix);
+                    });
+                }
+
+                async function bootRealtime() {
+                    renderConnectionSummary();
+                    let meta;
+                    try {
+                        const response = await fetch('/ui/meta', {cache: 'no-store'});
+                        if (!response.ok) {
+                            throw new Error('HTTP ' + response.status);
+                        }
+                        meta = await response.json();
+                    } catch (err) {
+                        const message = err && err.message ? err.message : 'failed to load meta';
+                        channelOrder.forEach((name) => {
+                            setChannelState(name, 'error', 'Meta fetch failed — ' + message);
+                        });
+                        return;
+                    }
+                    const mapping = {
+                        events: meta && typeof meta.events_ws === 'string' ? meta.events_ws : '',
+                        rl: meta && typeof meta.rl_ws === 'string' ? meta.rl_ws : '',
+                        logs: meta && typeof meta.logs_ws === 'string' ? meta.logs_ws : ''
+                    };
+                    channelOrder.forEach((name) => {
+                        const url = mapping[name] || '';
+                        if (url) {
+                            connectChannel(name, url);
+                        } else {
+                            setChannelState(name, 'warn', 'No endpoint provided');
+                        }
+                    });
+                }
+
+                renderConnectionSummary();
+                bootRealtime();
+
                 const suggestionRows = Array.from(document.querySelectorAll('#suggestions-panel tbody tr'));
                 const agentSelect = document.getElementById('suggestion-filter-agent');
                 const sideSelect = document.getElementById('suggestion-filter-side');
@@ -2375,9 +2626,52 @@ def create_app(state: UIState | None = None) -> Flask:
             "logs_ws": manifest["logs_ws"],
         }
 
+    def _ui_meta_payload() -> Dict[str, Any]:
+        manifest = build_ui_manifest(request)
+        base_url = (request.url_root or "").rstrip("/")
+        if not base_url:
+            scheme = getattr(request, "scheme", "http") or "http"
+            host = request.host or ""
+            if not host:
+                host = f"127.0.0.1:{manifest.get('ui_port', 5000)}"
+            base_url = f"{scheme}://{host}"
+        return {
+            "url": base_url,
+            "rl_ws": manifest["rl_ws"],
+            "events_ws": manifest["events_ws"],
+            "logs_ws": manifest["logs_ws"],
+        }
+
+    def _probe_ws(url: str | None, *, timeout: float = 1.5) -> tuple[str, Optional[str]]:
+        if not url:
+            return "fail", "missing endpoint"
+        if websockets is None:
+            return "fail", "websockets module unavailable"
+
+        async def _check() -> tuple[str, Optional[str]]:
+            try:
+                async with websockets.connect(url, ping_timeout=timeout, close_timeout=timeout):
+                    return "ok", None
+            except Exception as exc:  # pragma: no cover - network probe failures
+                log.debug("UI websocket probe failed for %s: %s", url, exc)
+                return "fail", f"{type(exc).__name__}: {exc}"
+
+        try:
+            return asyncio.run(_check())
+        except RuntimeError as exc:  # pragma: no cover - unexpected event loop state
+            log.debug("UI websocket probe unavailable for %s: %s", url, exc)
+            return "fail", f"RuntimeError: {exc}"
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("UI websocket probe crashed for %s: %s", url, exc)
+            return "fail", f"{type(exc).__name__}: {exc}"
+
     @app.get("/api/manifest")
     def api_manifest() -> Any:
         return jsonify(build_ui_manifest(request))
+
+    @app.get("/ui/meta")
+    def ui_meta() -> Any:
+        return jsonify(_ui_meta_payload())
 
     @app.get("/ui/ws-config")
     def ui_ws_config() -> Any:
@@ -2386,6 +2680,32 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.get("/ws-config")
     def ws_config() -> Any:
         return jsonify(_ws_config_payload())
+
+    @app.get("/ui/health")
+    def ui_health() -> Any:
+        urls = get_ws_urls()
+        rl_status, rl_detail = _probe_ws(urls.get("rl"))
+        events_status, events_detail = _probe_ws(urls.get("events"))
+        logs_status, logs_detail = _probe_ws(urls.get("logs"))
+        payload: Dict[str, Any] = {
+            "ui": "ok",
+            "rl_ws": rl_status,
+            "events_ws": events_status,
+            "logs_ws": logs_status,
+        }
+        details = {
+            key: detail
+            for key, detail in {
+                "rl_ws": rl_detail,
+                "events_ws": events_detail,
+                "logs_ws": logs_detail,
+            }.items()
+            if detail
+        }
+        if details:
+            payload["details"] = details
+        return jsonify(payload)
+
     @app.get("/health")
     def health() -> Any:
         status = state.snapshot_status()
