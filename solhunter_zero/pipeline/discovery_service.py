@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
+from ..token_aliases import canonical_mint, validate_mint
 from .types import TokenCandidate
 
 log = logging.getLogger(__name__)
@@ -152,16 +153,28 @@ class DiscoveryService:
     def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
         ts = time.time()
         result: list[TokenCandidate] = []
+        dropped = 0
         for tok in tokens:
             token = str(tok)
-            metadata = self._candidate_metadata(token)
+            canonical = canonical_mint(token)
+            if not validate_mint(canonical):
+                dropped += 1
+                continue
+            metadata = self._candidate_metadata(canonical)
+            if canonical != token:
+                metadata.setdefault("alias", token)
             result.append(
                 TokenCandidate(
-                    token=token,
+                    token=canonical,
                     source="discovery",
                     discovered_at=ts,
                     metadata=metadata,
                 )
+            )
+        if dropped:
+            log.debug(
+                "DiscoveryService dropped %d invalid token(s) while building candidates",
+                dropped,
             )
         return result
 
@@ -238,8 +251,25 @@ class DiscoveryService:
         return metadata
 
     async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
-        seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+        seq: list[str] = []
+        dropped = 0
+        seen: set[str] = set()
+        for tok in tokens:
+            if not isinstance(tok, str) or not tok:
+                continue
+            canonical = canonical_mint(tok)
+            if not validate_mint(canonical):
+                dropped += 1
+                continue
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            seq.append(canonical)
         if not seq:
+            if dropped:
+                log.debug(
+                    "DiscoveryService skipped %d invalid token candidate(s)", dropped
+                )
             return
         if not fresh and seq == self._last_emitted:
             log.debug(
