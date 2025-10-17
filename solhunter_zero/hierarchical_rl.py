@@ -33,7 +33,14 @@ class HighLevelPolicyNetwork(nn.Module if torch else object):
             vals: List[float] = self.weights.detach().cpu().tolist()
         else:
             vals = list(self.weights)
-        return {n: float(vals[i]) if i < len(vals) else 1.0 for i, n in enumerate(names)}
+        names = list(names)
+        vec = [max(0.0, float(vals[i]) if i < len(vals) else 1.0) for i in range(len(names))]
+        s = sum(vec)
+        if s == 0:
+            vec = [1.0 / len(names)] * len(names) if names else []
+        else:
+            vec = [v / s for v in vec]
+        return {n: vec[i] for i, n in enumerate(names)}
 
 
 def roi_by_agent(trades: Iterable[Any], names: Iterable[str]) -> Dict[str, float]:
@@ -66,8 +73,18 @@ def train_policy(
 
     names = list(names)
     rois = roi_by_agent(trades, names)
+
+    def _target_for(n: str) -> float:
+        r = float(rois.get(n, 0.0))
+        r = max(-1.0, min(1.0, r))
+        return r + 1.0
+
     if torch and isinstance(model.weights, torch.Tensor):
-        target = torch.tensor([rois.get(n, 1.0) for n in names], dtype=torch.float32)
+        target = torch.tensor(
+            [_target_for(n) for n in names],
+            dtype=torch.float32,
+            device=model.weights.device,
+        )
         opt = torch.optim.SGD([model.weights], lr=lr)
         for _ in range(max(1, int(epochs))):
             opt.zero_grad()
@@ -76,7 +93,7 @@ def train_policy(
             opt.step()
     else:  # pragma: no cover - lightweight fallback
         for i, n in enumerate(names):
-            target = rois.get(n, 1.0)
+            target = _target_for(n)
             model.weights[i] += lr * (target - model.weights[i])
     return model.predict(names)
 
@@ -87,8 +104,10 @@ def save_policy(model: HighLevelPolicyNetwork, path: str) -> None:
         data = model.weights.detach().cpu().tolist()
     else:  # pragma: no cover - lightweight fallback
         data = list(model.weights)
-    with open(path, "w", encoding="utf-8") as fh:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh)
+    os.replace(tmp, path)
 
 
 def load_policy(path: str, num_agents: int) -> HighLevelPolicyNetwork:
@@ -150,15 +169,35 @@ class SupervisorAgent(BaseAgent):
         if self.model is not None and torch is not None:
             try:
                 with torch.no_grad():  # pragma: no cover - simple inference
-                    x = torch.zeros((1, len(names)), dtype=torch.float32)
+                    try:
+                        device_obj = torch.device(self.device)
+                    except Exception:
+                        device_obj = torch.device("cpu")
+                    x = torch.zeros((1, len(names)), dtype=torch.float32, device=device_obj)
                     out = self.model(x)
-                vals = out.squeeze().tolist()
-                if not isinstance(vals, list):
-                    vals = [float(vals)] * len(names)
-                return {n: float(vals[i]) for i, n in enumerate(names)}
+                if isinstance(out, torch.Tensor):
+                    vals = out.detach().flatten().cpu().tolist()
+                else:
+                    vals = [float(out)]
+                if len(vals) < len(names):
+                    vals += [1.0] * (len(names) - len(vals))
+                vals = vals[: len(names)]
+                vec = [max(0.0, float(v)) for v in vals]
+                s = sum(vec)
+                if s == 0:
+                    vec = [1.0 / len(names)] * len(names) if names else []
+                else:
+                    vec = [v / s for v in vec]
+                return {n: vec[i] for i, n in enumerate(names)}
             except Exception:  # pragma: no cover - inference failure
                 pass
-        return {n: self.policy.get(n, 1.0) for n in names}
+        raw = [max(0.0, float(self.policy.get(n, 1.0))) for n in names]
+        s = sum(raw)
+        if s == 0:
+            vec = [1.0 / len(names)] * len(names) if names else []
+        else:
+            vec = [v / s for v in raw]
+        return {n: vec[i] for i, n in enumerate(names)}
 
     async def propose_trade(
         self,
