@@ -57,7 +57,8 @@ class ExecutionAgent(BaseAgent):
         self.dry_run = dry_run
         self.keypair = keypair
         self.retries = retries
-        self._sem = asyncio.Semaphore(concurrency)
+        self._current_concurrency = self._base_concurrency
+        self._sem = asyncio.Semaphore(self._base_concurrency)
         self._rate_lock = asyncio.Lock()
         self._last = 0.0
         self.depth_service = depth_service
@@ -96,6 +97,14 @@ class ExecutionAgent(BaseAgent):
         self.__dict__.update(state)
         if "threshold" not in self.__dict__:
             self.threshold = 0.0
+        if not getattr(self, "_resource_subs", None):
+            self._resource_subs = []
+        if not getattr(self, "_current_concurrency", None):
+            self._current_concurrency = max(1, int(getattr(self, "_base_concurrency", 1)))
+        if not isinstance(getattr(self, "_sem", None), asyncio.Semaphore):
+            self._sem = asyncio.Semaphore(self._current_concurrency)
+        if not isinstance(getattr(self, "_rate_lock", None), asyncio.Lock):
+            self._rate_lock = asyncio.Lock()
 
     def _on_resource_update(self, payload: Any) -> None:
         """Update resource usage and adjust concurrency and rate limit."""
@@ -116,11 +125,26 @@ class ExecutionAgent(BaseAgent):
         except Exception:
             return
         frac = max(0.0, min(1.0, self._cpu_smoothed / 100.0))
-        target = _target_concurrency(self._cpu_smoothed, self._base_concurrency, 0.0, 100.0)
-        conc = _step_limit(self._sem._value, target, self._base_concurrency)
-        if conc != self._sem._value:
+        target = _target_concurrency(
+            self._cpu_smoothed, self._base_concurrency, 0.0, 100.0
+        )
+        conc = _step_limit(self._current_concurrency, target, self._base_concurrency)
+        if conc != self._current_concurrency and not self._sem.locked():
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "ExecutionAgent: adjusting concurrency from %s to %s",
+                    self._current_concurrency,
+                    conc,
+                )
             self._sem = asyncio.Semaphore(conc)
+            self._current_concurrency = conc
         self.rate_limit = self.min_rate + (self.max_rate - self.min_rate) * frac
+
+    async def __aenter__(self) -> "ExecutionAgent":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        self.close()
 
     async def _create_signed_tx(
         self,
@@ -146,7 +170,18 @@ class ExecutionAgent(BaseAgent):
         try:
             async with session.post(endpoint, json=payload, timeout=10) as resp:
                 resp.raise_for_status()
-                data = await resp.json()
+                try:
+                    data = await resp.json()
+                except Exception:
+                    text = await resp.text()
+                    if logger.isEnabledFor(logging.WARNING):
+                        logger.warning(
+                            "ExecutionAgent: swap endpoint returned non-JSON token=%s endpoint=%s payload=%s",
+                            token,
+                            endpoint,
+                            serialize_for_log(text[:256]),
+                        )
+                    return None
         except aiohttp.ClientError as exc:
             if logger.isEnabledFor(logging.WARNING):
                 logger.warning(
@@ -191,7 +226,8 @@ class ExecutionAgent(BaseAgent):
                 sub.__exit__(None, None, None)
 
     async def execute(self, action: Dict[str, Any]) -> Any:
-        token = str(action.get("token", ""))
+        token = str(action.get("token", "")).strip()
+        amount = float(action.get("amount", 0.0))
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "ExecutionAgent: received action -> %s",
@@ -215,7 +251,7 @@ class ExecutionAgent(BaseAgent):
             # Read current mempool transaction rate
             from ..depth_client import snapshot
 
-            _depth, tx_rate = snapshot(action["token"])
+            _depth, tx_rate = snapshot(token)
             dry_run_flag = bool(self.dry_run or action_dry_run)
             if logger.isEnabledFor(logging.INFO):
                 logger.info(
@@ -228,7 +264,13 @@ class ExecutionAgent(BaseAgent):
                 )
 
             priority_fee: int | None = None
-            pri_idx = int(action.get("priority", 0))
+            pri_idx = max(
+                0,
+                min(
+                    int(action.get("priority", 0)),
+                    (len(self.priority_fees or []) - 1) if self.priority_fees else 0,
+                ),
+            )
             if self.priority_fees and 0 <= pri_idx < len(self.priority_fees):
                 from ..gas import adjust_priority_fee
 
@@ -292,7 +334,9 @@ class ExecutionAgent(BaseAgent):
 
             if not endpoints:
                 primary_base = str(DEX_BASE_URL)
-                endpoints.append(resolve_swap_endpoint(primary_base))
+                fallback = resolve_swap_endpoint(primary_base)
+                if fallback:
+                    endpoints.append(fallback)
 
             if logger.isEnabledFor(logging.INFO):
                 logger.info(
@@ -309,9 +353,9 @@ class ExecutionAgent(BaseAgent):
             for endpoint in endpoints:
                 last_endpoint = endpoint
                 tx = await self._create_signed_tx(
-                    action["token"],
+                    token,
                     action["side"],
-                    action.get("amount", 0.0),
+                    amount,
                     action.get("price", 0.0),
                     endpoint,
                     priority_fee=priority_fee,
@@ -324,7 +368,7 @@ class ExecutionAgent(BaseAgent):
                             endpoint,
                             serialize_for_log({"priority_fee": priority_fee, "tx": tx}),
                         )
-                    execer = self._executors.get(action["token"])
+                    execer = self._executors.get(token)
                     if execer:
                         if logger.isEnabledFor(logging.INFO):
                             logger.info(
@@ -397,7 +441,7 @@ class ExecutionAgent(BaseAgent):
                     len(endpoints),
                 )
 
-            amount = action.get("amount", 0.0)
+            amount = float(action.get("amount", 0.0))
             pri_idx = int(action.get("priority", 0))
             if (
                 self.priority_fees
@@ -424,8 +468,8 @@ class ExecutionAgent(BaseAgent):
             )
 
         result = await place_order_async(
-                action["token"],
-                action["side"],
+            token,
+            action["side"],
             amount,
             action.get("price", 0.0),
             testnet=self.testnet,
