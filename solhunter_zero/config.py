@@ -878,10 +878,12 @@ def reload_active_config() -> dict:
 
 def get_event_bus_url(cfg: Mapping[str, Any] | None = None) -> str:
     """
-    Return websocket URL of the external event bus.
+    Return broker URL of the external event bus.
 
-    Only ``ws://`` and ``wss://`` schemes are accepted. Falls back to the
-    built-in default when neither env nor config provide it.
+    ``ws://``/``wss://`` URLs keep the legacy websocket bus, while
+    ``redis://``/``rediss://`` allows the runtime to connect to Redis-backed
+    transports. Falls back to the built-in default when neither env nor config
+    provide it.
     """
     if "EVENT_BUS_URL" in _VALIDATED_URLS:
         os.environ.setdefault("EVENT_BUS_URL", _VALIDATED_URLS["EVENT_BUS_URL"])
@@ -891,7 +893,9 @@ def get_event_bus_url(cfg: Mapping[str, Any] | None = None) -> str:
     url = os.getenv("EVENT_BUS_URL") or str(cfg.get("event_bus_url", ""))
     if url:
         try:
-            return _validate_and_store_url("EVENT_BUS_URL", url, {"ws", "wss"})
+            return _validate_and_store_url(
+                "EVENT_BUS_URL", url, {"ws", "wss", "redis", "rediss"}
+            )
         except ValueError as exc:
             logger.error(str(exc))
 

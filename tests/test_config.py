@@ -174,6 +174,15 @@ def test_apply_env_overrides_invalid_values(monkeypatch):
         apply_env_overrides(cfg)
 
 
+def test_get_event_bus_url_accepts_redis(monkeypatch):
+    from solhunter_zero import config as cfg
+
+    monkeypatch.delenv("EVENT_BUS_URL", raising=False)
+    cfg._VALIDATED_URLS.pop("EVENT_BUS_URL", None)
+    monkeypatch.setenv("EVENT_BUS_URL", "redis://localhost:6399/0")
+    assert cfg.get_event_bus_url({}) == "redis://localhost:6399/0"
+
+
 def test_llm_env_overrides(monkeypatch):
     cfg = {
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
