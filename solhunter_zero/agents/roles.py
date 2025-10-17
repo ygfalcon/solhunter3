@@ -32,7 +32,6 @@ _CLASS_ROLE_HINTS: dict[str, RoleLiteral] = {
     "CrossDEXRebalancer": "helper",
     "OpportunityCostAgent": "seller",
     "ExitAgent": "seller",
-    "HedgingAgent": "helper",
     "FlashloanSandwichAgent": "buyer",
     "MEVSandwichAgent": "buyer",
     "MempoolSniperAgent": "buyer",

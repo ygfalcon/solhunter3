@@ -32,6 +32,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from .device import get_default_device
 from .event_bus import publish
+from .schemas import TOPIC_RL_CHECKPOINT, TOPIC_RL_WEIGHTS
 
 logger = logging.getLogger(__name__)
 
@@ -456,7 +457,7 @@ def fit(
     torch.save(state_dict, tmp)
     tmp.replace(path)
 
-    publish("rl_checkpoint", {"time": time.time(), "path": str(path)})
+    publish(TOPIC_RL_CHECKPOINT, {"time": time.time(), "path": str(path)})
     publish(
         "runtime.log",
         {
@@ -600,7 +601,7 @@ class MultiAgentRL:
                 json.dump(mapping, fh, indent=2)
         except Exception:  # pragma: no cover - disk failures
             logger.warning("Failed to persist RL controller", exc_info=True)
-        publish("rl_weights", {"weights": mapping})
+        publish(TOPIC_RL_WEIGHTS, {"weights": mapping})
         return mapping
 
 

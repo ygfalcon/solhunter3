@@ -51,7 +51,6 @@ if TYPE_CHECKING:  # Imports for type checking only to avoid circular imports
 
     from .alien_cipher_agent import AlienCipherAgent
     from .llm_reasoner import LLMReasoner
-    from .opportunity_cost import OpportunityCostAgent
 
 
 
