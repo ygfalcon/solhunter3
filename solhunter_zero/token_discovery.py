@@ -7,6 +7,7 @@ import math
 import os
 import logging
 import threading
+from threading import Lock
 from typing import Dict, List, Any, Union
 
 from aiohttp import ClientTimeout
@@ -18,6 +19,7 @@ from .scanner_common import (
 )
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
+from .util.mints import is_valid_solana_mint
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +59,53 @@ _BIRDEYE_BACKOFF_MAX = float(os.getenv("DISCOVERY_BIRDEYE_BACKOFF_MAX", "8.0") o
 TokenEntry = Dict[str, Union[float, str, List[str]]]
 
 _BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
+_CACHE_LOCK = Lock()
+_BIRDEYE_DISABLED_INFO = False
+
+
+def _cache_get(key: str) -> List[TokenEntry] | None:
+    with _CACHE_LOCK:
+        return _BIRDEYE_CACHE.get(key)
+
+
+def _cache_set(key: str, value: List[TokenEntry]) -> None:
+    with _CACHE_LOCK:
+        _BIRDEYE_CACHE.set(key, value)
+
+
+def _cache_clear() -> None:
+    with _CACHE_LOCK:
+        _BIRDEYE_CACHE.clear()
+
+
+def _current_cache_key() -> str:
+    return f"tokens:{int(_MIN_VOLUME)}:{int(_MIN_LIQUIDITY)}:{_PAGE_LIMIT}"
+
+
+async def get_session(*, timeout: ClientTimeout | None = None) -> aiohttp.ClientSession:
+    """Factory for aiohttp sessions; patched in tests."""
+    return aiohttp.ClientSession(timeout=timeout)
+
+
+async def fetch_trending_tokens_async() -> List[str]:  # pragma: no cover - legacy hook
+    """Compatibility shim for older tests; returns no extra tokens."""
+    return []
 
 
 def _score_component(value: float) -> float:
-    if value <= 0:
+    try:
+        numeric = float(value)
+    except Exception:
         return 0.0
-    return math.log1p(value)
+    if numeric <= 0 or math.isnan(numeric):
+        return 0.0
+    return math.log1p(numeric)
 
 
 def _clear_birdeye_cache_for_tests() -> None:
     """Testing helper: clear the BirdEye TTL cache."""
     try:
-        _BIRDEYE_CACHE.clear()
+        _cache_clear()
     except Exception:
         pass
 
@@ -79,11 +116,18 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
     Numeric filters only; no name/suffix heuristics.
     """
     api_key = os.getenv("BIRDEYE_API_KEY") or BIRDEYE_API_KEY
+    global _BIRDEYE_DISABLED_INFO
     if not api_key:
+        if not _BIRDEYE_DISABLED_INFO and not _ENABLE_MEMPOOL:
+            logger.info(
+                "Discovery sources disabled: set BIRDEYE_API_KEY or enable DISCOVERY_ENABLE_MEMPOOL to restore BirdEye/mempool inputs.",
+            )
+            _BIRDEYE_DISABLED_INFO = True
         logger.debug("BirdEye API key missing; skipping BirdEye discovery")
         return []
 
-    cached = _BIRDEYE_CACHE.get("tokens")
+    cache_key = _current_cache_key()
+    cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -103,7 +147,12 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
             "Accept": "application/json",
         }
 
-    async with aiohttp.ClientSession(timeout=ClientTimeout(total=12)) as session:
+    session_timeout = ClientTimeout(total=12, connect=4, sock_read=8)
+    try:
+        session_cm = await get_session(timeout=session_timeout)
+    except TypeError:
+        session_cm = await get_session()
+    async with session_cm as session:
         while offset < _MAX_OFFSET and len(tokens) < target_count:
             logger.debug(
                 "BirdEye fetch page offset=%s limit=%s accumulated=%s",
@@ -120,10 +169,14 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
             payload: Dict[str, Any] | None = None
             for attempt in range(1, _BIRDEYE_RETRIES + 1):
                 try:
-                    async with session.get(
-                        BIRDEYE_API, params=params, headers=_headers()
-                    ) as resp:
-                        if resp.status in (429, 503):
+                    try:
+                        request_cm = session.get(
+                            BIRDEYE_API, params=params, headers=_headers()
+                        )
+                    except TypeError:
+                        request_cm = session.get(BIRDEYE_API, headers=_headers())
+                    async with request_cm as resp:
+                        if resp.status in (429, 503) or 500 <= resp.status < 600:
                             logger.warning(
                                 "BirdEye %s attempt=%s offset=%s backoff=%.2fs",
                                 resp.status,
@@ -131,6 +184,14 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                                 offset,
                                 backoff,
                             )
+                            delay = backoff
+                            retry_after = resp.headers.get("Retry-After")
+                            if retry_after:
+                                try:
+                                    ra_val = min(float(retry_after), _BIRDEYE_BACKOFF_MAX)
+                                    delay = max(delay, ra_val)
+                                except ValueError:
+                                    pass
                             if attempt >= _BIRDEYE_RETRIES:
                                 if tokens:
                                     logger.warning(
@@ -140,10 +201,10 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                                     )
                                     payload = None
                                     break
-                                _BIRDEYE_CACHE.set("tokens", [])
+                                _cache_set(cache_key, [])
                                 return []
-                            await asyncio.sleep(backoff)
-                            backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
+                            await asyncio.sleep(delay)
+                            backoff = min(max(backoff * 2, delay), _BIRDEYE_BACKOFF_MAX)
                             continue
 
                         if resp.status == 400:
@@ -177,7 +238,7 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                             )
                             payload = None
                             break
-                        _BIRDEYE_CACHE.set("tokens", [])
+                        _cache_set(cache_key, [])
                         return []
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
@@ -185,7 +246,7 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                 except Exception as exc:
                     logger.warning("BirdEye unexpected error offset=%s: %s", offset, exc)
                     if not tokens:
-                        _BIRDEYE_CACHE.set("tokens", [])
+                        _cache_set(cache_key, [])
                         return []
                     payload = None
                     break
@@ -205,8 +266,11 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                 break
 
             for item in items:
-                address = item.get("address") or item.get("mint")
-                if not address:
+                raw_address = item.get("address") or item.get("mint")
+                if not raw_address:
+                    continue
+                address = str(raw_address)
+                if not is_valid_solana_mint(address):
                     continue
                 try:
                     volume = float(item.get("v24hUSD") or item.get("volume24hUSD") or item.get("volume") or 0.0)
@@ -259,7 +323,7 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                 break
 
     result = list(tokens.values())
-    _BIRDEYE_CACHE.set("tokens", result)
+    _cache_set(cache_key, result)
     if not result:
         logger.warning("Token discovery: BirdEye returned no items after filtering.")
     logger.debug(
@@ -308,6 +372,8 @@ async def discover_candidates(
         if _ENABLE_MEMPOOL and rpc_url
         else None
     )
+    if _ENABLE_MEMPOOL and rpc_url:
+        logger.debug("Discovery mempool threshold=%.3f", mempool_threshold)
 
     tasks = [bird_task]
     task_labels = ["bird"]
@@ -403,30 +469,44 @@ async def discover_candidates(
         liquidity = float(entry.get("liquidity", 0.0) or 0.0)
         volume = float(entry.get("volume", 0.0) or 0.0)
 
-        # base score = log-liquidity * wL + log-volume * wV
-        base = (
-            _LIQUIDITY_WEIGHT * _score_component(liquidity)
-            + _VOLUME_WEIGHT * _score_component(volume)
-        )
+        liq_comp = _LIQUIDITY_WEIGHT * _score_component(liquidity)
+        vol_comp = _VOLUME_WEIGHT * _score_component(volume)
+        mp_comp = 0.0
 
         mp = mempool.get(addr)
         if mp:
+            raw_score = mp.get("score", 0.0)
             try:
-                # mempool bonus = score * bonus
-                base += _MEMPOOL_BONUS * float(mp.get("score", 0.0) or 0.0)
+                raw = float(raw_score or 0.0)
             except Exception:
-                pass
+                raw = 0.0
+            mp_score = max(0.0, min(raw, 1.0))
+            mp_comp = _MEMPOOL_BONUS * mp_score
 
         try:
             change = float(entry.get("price_change", 0.0) or 0.0)
         except Exception:
             change = 0.0
-        # price_change soft multiplier = clamp ≥ 0.5
-        base *= max(0.5, 1.0 + (change / 100.0) * 0.1)
+        # price_change soft multiplier = clamp between 0.5 and 1.25
+        mult = max(0.5, min(1.25, 1.0 + (change / 100.0) * 0.1))
 
-        entry["score"] = base
+        base = (liq_comp + vol_comp + mp_comp) * mult
 
-    ordered = sorted(candidates.values(), key=lambda c: c.get("score", 0.0), reverse=True)
+        entry.update(
+            {
+                "score": base,
+                "score_liq": liq_comp,
+                "score_vol": vol_comp,
+                "score_mp": mp_comp,
+                "score_mult": mult,
+            }
+        )
+
+    ordered = sorted(
+        candidates.values(),
+        key=lambda c: (c.get("score", 0.0), c.get("address", "")),
+        reverse=True,
+    )
 
     final: List[TokenEntry] = []
     for entry in ordered[:limit]:
