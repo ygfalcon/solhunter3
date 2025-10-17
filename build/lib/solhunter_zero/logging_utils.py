@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, WatchedFileHandler
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -24,7 +24,8 @@ RUNTIME_LOG = ROOT / "logs" / "live_main.log"
 DEFAULT_RUNTIME_MAX_BYTES = 5_000_000
 DEFAULT_RUNTIME_BACKUP_COUNT = 3
 DEFAULT_RUNTIME_FORMAT = (
-    "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d | %(message)s"
+    "%(asctime)sZ [%(levelname)s] %(name)s:%(lineno)d "
+    "(pid=%(process)d tid=%(threadName)s) | %(message)s"
 )
 DEFAULT_RUNTIME_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
@@ -38,6 +39,50 @@ _NOISY_LOGGERS: tuple[str, ...] = (
 
 _warn_once_lock = threading.Lock()
 _warn_once_last_emit: dict[str, float] = {}
+
+try:  # pragma: no cover - optional dependency
+    import orjson as _ORJSON  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - optional dependency
+    _ORJSON = None
+
+
+class _UTCFormatter(logging.Formatter):
+    """Formatter that renders timestamps in UTC."""
+
+    converter = time.gmtime
+
+
+_LOG_RECORD_RESERVED = set(logging.LogRecord(None, 0, "", 0, "", (), None).__dict__.keys())
+
+
+class JsonFormatter(logging.Formatter):
+    """Structured logging formatter producing JSON payloads."""
+
+    def format(self, record: logging.LogRecord) -> str:  # noqa: D401 - short summary sufficient
+        payload: dict[str, Any] = {
+            "ts": datetime.utcfromtimestamp(record.created).isoformat(timespec="milliseconds")
+            + "Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "line": record.lineno,
+            "msg": record.getMessage(),
+            "process": record.process,
+            "thread": record.threadName,
+        }
+
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            payload["stack_info"] = record.stack_info
+
+        for key, value in record.__dict__.items():
+            if key in payload or key.startswith("_") or key in _LOG_RECORD_RESERVED:
+                continue
+            payload[key] = value
+
+        if _ORJSON is not None:
+            return _ORJSON.dumps(payload).decode()
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def setup_stdout_logging(
@@ -62,11 +107,12 @@ def setup_stdout_logging(
             stream_handler = handler
             continue
 
-        # ``logging.basicConfig`` may have already attached a ``StreamHandler``
-        # pointing at ``stderr`` or a duplicate ``stdout`` handler. These extra
-        # handlers cause every log record to be emitted multiple times. Remove
-        # them so we end up with a single ``stdout`` handler that we control.
-        root.removeHandler(handler)
+        # ``logging.basicConfig`` may have already attached stream handlers that
+        # duplicate stdout/stderr. These extra handlers cause every log record
+        # to be emitted multiple times. Remove only the duplicates while keeping
+        # custom user-provided streams intact.
+        if stream in {sys.stdout, sys.stderr}:
+            root.removeHandler(handler)
 
     if stream_handler is None:
         stream_handler = logging.StreamHandler(sys.stdout)
@@ -124,12 +170,15 @@ def setup_logging(
     *,
     path: Path | None = None,
     max_bytes: int | None = None,
+    backup_count: int = 1,
 ) -> Path:
     """Prepare a log file for writing.
 
     ``log_name`` identifies the log (e.g. ``"startup"`` or ``"preflight"``). The
     corresponding ``<log_name>.log`` file is rotated if it exceeds ``max_bytes``;
-    otherwise it is truncated. The resolved log ``Path`` is returned.
+    otherwise it is truncated. When rotated, up to ``backup_count`` historical
+    files are preserved (e.g. ``startup.log.1``). The resolved log ``Path`` is
+    returned.
     """
 
     if path is None:
@@ -153,8 +202,25 @@ def setup_logging(
     if path.exists():
         try:
             if path.stat().st_size > max_bytes:
-                backup = path.with_suffix(path.suffix + ".1")
-                path.replace(backup)
+                if backup_count > 0:
+                    highest = path.with_suffix(path.suffix + f".{backup_count}")
+                    if highest.exists():
+                        try:
+                            highest.unlink()
+                        except OSError:
+                            pass
+                    for index in range(backup_count - 1, 0, -1):
+                        src = path.with_suffix(path.suffix + f".{index}")
+                        if src.exists():
+                            dst = path.with_suffix(path.suffix + f".{index + 1}")
+                            try:
+                                src.replace(dst)
+                            except OSError:
+                                pass
+                    first_backup = path.with_suffix(path.suffix + ".1")
+                    path.replace(first_backup)
+                else:
+                    path.write_text("")
             else:
                 path.write_text("")
         except OSError:
@@ -164,19 +230,23 @@ def setup_logging(
 
 
 def rotate_startup_log(
-    path: Path = STARTUP_LOG, max_bytes: int = MAX_STARTUP_LOG_SIZE
+    path: Path = STARTUP_LOG,
+    max_bytes: int = MAX_STARTUP_LOG_SIZE,
+    backup_count: int = 1,
 ) -> None:
     """Rotate or truncate the startup log before writing new output."""
 
-    setup_logging("startup", path=path, max_bytes=max_bytes)
+    setup_logging("startup", path=path, max_bytes=max_bytes, backup_count=backup_count)
 
 
 def rotate_preflight_log(
-    path: Path = PREFLIGHT_LOG, max_bytes: int = MAX_PREFLIGHT_LOG_SIZE
+    path: Path = PREFLIGHT_LOG,
+    max_bytes: int = MAX_PREFLIGHT_LOG_SIZE,
+    backup_count: int = 1,
 ) -> None:
     """Rotate or truncate the preflight log before writing new output."""
 
-    setup_logging("preflight", path=path, max_bytes=max_bytes)
+    setup_logging("preflight", path=path, max_bytes=max_bytes, backup_count=backup_count)
 
 
 def log_startup(message: str, path: Path = STARTUP_LOG) -> None:
@@ -214,6 +284,9 @@ def configure_runtime_logging(
     datefmt: str | None = None,
     max_bytes: int | None = None,
     backup_count: int | None = None,
+    json_logs: bool | None = None,
+    use_utc: bool = True,
+    runtime_handler: str | None = None,
     force: bool = False,
 ) -> Path:
     """Configure global logging handlers for the trading runtime."""
@@ -247,6 +320,17 @@ def configure_runtime_logging(
         except ValueError:
             backup_count = DEFAULT_RUNTIME_BACKUP_COUNT
 
+    env_json = os.getenv("LOG_JSON")
+    if json_logs is None and env_json is not None:
+        json_logs = env_json.strip().lower() in {"1", "true", "yes", "on"}
+    json_logs = bool(json_logs)
+
+    env_handler = os.getenv("LOG_RUNTIME_HANDLER")
+    handler_choice_source = runtime_handler if runtime_handler is not None else env_handler
+    handler_choice = (handler_choice_source or "rotating").strip().lower()
+    if handler_choice not in {"rotating", "watched"}:
+        handler_choice = "rotating"
+
     log_path = Path(logfile or os.getenv("LOG_FILE") or RUNTIME_LOG)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path = log_path.resolve()
@@ -258,21 +342,40 @@ def configure_runtime_logging(
 
     root.setLevel(resolved_level)
 
-    formatter = logging.Formatter(resolved_format, datefmt=resolved_datefmt)
+    if json_logs:
+        formatter: logging.Formatter = JsonFormatter()
+    elif use_utc:
+        formatter = _UTCFormatter(resolved_format, datefmt=resolved_datefmt)
+    else:
+        formatter = logging.Formatter(resolved_format, datefmt=resolved_datefmt)
 
-    file_handler: RotatingFileHandler | None = None
+    file_handler: logging.Handler | None = None
     for handler in root.handlers:
-        if isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename) == log_path:
+        base = getattr(handler, "baseFilename", None)
+        if base is None:
+            continue
+        if Path(base) == log_path:
+            if handler_choice == "watched" and not isinstance(handler, WatchedFileHandler):
+                root.removeHandler(handler)
+                handler.close()
+                continue
+            if handler_choice == "rotating" and not isinstance(handler, RotatingFileHandler):
+                root.removeHandler(handler)
+                handler.close()
+                continue
             file_handler = handler
             break
 
     if file_handler is None:
-        file_handler = RotatingFileHandler(
-            log_path,
-            maxBytes=max_bytes or DEFAULT_RUNTIME_MAX_BYTES,
-            backupCount=backup_count or DEFAULT_RUNTIME_BACKUP_COUNT,
-            encoding="utf-8",
-        )
+        if handler_choice == "watched":
+            file_handler = WatchedFileHandler(log_path, encoding="utf-8")
+        else:
+            file_handler = RotatingFileHandler(
+                log_path,
+                maxBytes=max_bytes or DEFAULT_RUNTIME_MAX_BYTES,
+                backupCount=backup_count or DEFAULT_RUNTIME_BACKUP_COUNT,
+                encoding="utf-8",
+            )
         root.addHandler(file_handler)
 
     file_handler.setLevel(resolved_level)
@@ -282,13 +385,17 @@ def configure_runtime_logging(
     if console:
         stream_handler = setup_stdout_logging(
             level=resolved_level,
-            fmt=resolved_format,
-            datefmt=resolved_datefmt,
+            fmt=None if json_logs else resolved_format,
+            datefmt=None if json_logs else resolved_datefmt,
         )
 
     if stream_handler is not None:
         stream_handler.setLevel(resolved_level)
-        # ``setup_stdout_logging`` already applies the formatter
+        if json_logs:
+            stream_handler.setFormatter(JsonFormatter())
+        elif use_utc:
+            stream_handler.setFormatter(_UTCFormatter(resolved_format, datefmt=resolved_datefmt))
+        # otherwise ``setup_stdout_logging`` already applies the formatter
 
     root.debug("Logging initialised", extra={"log_file": str(log_path)})
     return log_path
@@ -326,9 +433,13 @@ def serialize_for_log(value: Any, *, max_string: int = 256) -> str:
     """Return a JSON-formatted string safe for logging."""
     try:
         normalized = _normalize_for_log(value, max_string=max_string)
+        if _ORJSON is not None:
+            return _ORJSON.dumps(normalized).decode()
         return json.dumps(normalized, ensure_ascii=True, sort_keys=True)
     except Exception:
         try:
+            if _ORJSON is not None:
+                return _ORJSON.dumps(str(value)).decode()
             return json.dumps(str(value), ensure_ascii=True)
         except Exception:
             return repr(value)

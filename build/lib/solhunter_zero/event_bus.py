@@ -124,6 +124,7 @@ _PB_MAP = {
     "risk_metrics": getattr(pb, "RiskMetrics", None),
     "risk_updated": getattr(pb, "RiskUpdated", None),
     "system_metrics_combined": getattr(pb, "SystemMetricsCombined", None),
+    "runtime.log": getattr(pb, "RuntimeLog", None),
     "token_discovered": getattr(pb, "TokenDiscovered", None),
     "memory_sync_request": getattr(pb, "MemorySyncRequest", None),
     "memory_sync_response": getattr(pb, "MemorySyncResponse", None),
@@ -398,10 +399,11 @@ except Exception:  # pragma: no cover - optional dependency
 
 # compression algorithm for websockets
 _WS_COMPRESSION: str | None = os.getenv("EVENT_BUS_COMPRESSION")
-if _WS_COMPRESSION:
+if not _WS_COMPRESSION:
+    _WS_COMPRESSION = None
+else:
     comp = _WS_COMPRESSION.lower()
-    if comp in {"", "none", "0"}:
-        _WS_COMPRESSION = None
+    _WS_COMPRESSION = None if comp in {"", "none", "0"} else comp
 
 # ping interval and timeout for websocket connections
 _WS_PING_INTERVAL = float(os.getenv("WS_PING_INTERVAL", "20") or 20)
@@ -414,12 +416,57 @@ _EVENT_BATCH_MS = int(os.getenv("EVENT_BATCH_MS", "10") or 10)
 _BATCH_MAGIC = b"EBAT"
 _MP_BATCH_MAGIC = b"EBMP"
 
+# ---------------------------------------------------------------------------
+#  Outgoing queue backpressure controls
+# ---------------------------------------------------------------------------
+_OUTGOING_QUEUE_MAX = int(os.getenv("EVENT_OUTGOING_QUEUE_MAX", "2000") or 2000)
+_OUTGOING_QUEUE_POLICY = (os.getenv("EVENT_OUTGOING_QUEUE_POLICY", "drop_oldest") or "drop_oldest").lower()
+_OUTGOING_QUEUE_DROP_COUNT = 0
+_OUTGOING_QUEUE_LOG_EVERY = 200  # log a line every N drops to avoid spam
+
+
+def _enqueue_outgoing(msg: Any) -> None:
+    """Enqueue an outgoing frame with bounded backpressure and drop policy."""
+
+    global _OUTGOING_QUEUE_DROP_COUNT
+    q = _outgoing_queue
+    if q is None:
+        return
+    try:
+        q.put_nowait(msg)
+        return
+    except asyncio.QueueFull:
+        pass
+    # queue is full; apply drop policy
+    try:
+        if _OUTGOING_QUEUE_POLICY == "drop_newest":
+            # drop the new frame (do nothing)
+            _OUTGOING_QUEUE_DROP_COUNT += 1
+        else:
+            # default: drop_oldest -> remove one and enqueue the new one
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            q.put_nowait(msg)
+            _OUTGOING_QUEUE_DROP_COUNT += 1
+    except Exception:
+        # as a last resort, drop silently to keep the bus alive
+        _OUTGOING_QUEUE_DROP_COUNT += 1
+    if _OUTGOING_QUEUE_DROP_COUNT % _OUTGOING_QUEUE_LOG_EVERY == 0:
+        logging.getLogger(__name__).warning(
+            "event bus dropped %d outgoing frame(s) (policy=%s, max=%d)",
+            _OUTGOING_QUEUE_DROP_COUNT,
+            _OUTGOING_QUEUE_POLICY,
+            _OUTGOING_QUEUE_MAX,
+        )
+
 
 def _pack_batch(msgs: List[Any]) -> Any:
     """Return a single frame containing all ``msgs``."""
     if not msgs:
         return b""
-    if _WS_COMPRESSION and msgpack is not None:
+    if msgpack is not None:
         return _MP_BATCH_MAGIC + msgpack.packb(msgs)
     first = msgs[0]
     if isinstance(first, bytes):
@@ -503,6 +550,17 @@ _ws_health_port: int | None = None
 async def _health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """Simple HTTP handler returning websocket health metrics."""
 
+    # Helper to return bytes for JSON regardless of backend (orjson vs stdlib)
+    def _json_bytes(obj) -> bytes:
+        try:
+            # orjson.dumps -> bytes
+            data = json.dumps(obj)  # type: ignore[attr-defined]
+            return data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+        except Exception:
+            # stdlib json.dumps -> str
+            import json as _stdlib_json  # type: ignore
+            return _stdlib_json.dumps(obj).encode("utf-8")
+
     status = {
         "status": "ok",
         "clients": len(_ws_clients),
@@ -511,7 +569,7 @@ async def _health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWr
         "ws_host": _WS_LISTEN_HOST,
         "ws_port": _WS_LISTEN_PORT,
     }
-    body = json.dumps(status).encode("utf-8")
+    body = _json_bytes(status)
     headers = [
         b"HTTP/1.1 200 OK",
         b"Content-Type: application/json",
@@ -605,9 +663,10 @@ _BROKER_HEARTBEAT_TASK: asyncio.Task | None = None
 def _encode_event(topic: str, payload: Any) -> Any:
     cls = _PB_MAP.get(topic)
     if cls is None:
-        event = pb.Event(topic=topic)
-        data = event.SerializeToString()
-        return _compress_event(data)
+        # Preserve payloads for unknown topics using JSON serialization so
+        # downstream consumers receive the original data instead of an empty
+        # protobuf envelope.
+        return _dumps({"topic": topic, "payload": to_dict(payload)})
 
     if topic == "action_executed":
         event = pb.Event(
@@ -705,6 +764,25 @@ def _encode_event(topic: str, payload: Any) -> Any:
                 memory=float(data.get("memory", 0.0)),
             ),
         )
+    elif topic == "runtime.log":
+        data = to_dict(payload)
+        runtime_log = pb.RuntimeLog(
+            stage=str(data.get("stage", "")),
+            detail=str(data.get("detail", "")),
+        )
+        if data.get("ts") is not None:
+            try:
+                runtime_log.ts = float(data.get("ts"))
+            except (TypeError, ValueError):
+                runtime_log.ts = 0.0
+        if data.get("level") is not None:
+            runtime_log.level = str(data.get("level"))
+        if data.get("actions") is not None:
+            try:
+                runtime_log.actions = int(data.get("actions") or 0)
+            except (TypeError, ValueError):
+                runtime_log.actions = 0
+        event = pb.Event(topic=topic, runtime_log=runtime_log)
     elif topic == "price_update":
         data = to_dict(payload)
         event = pb.Event(
@@ -775,6 +853,7 @@ def _encode_event(topic: str, payload: Any) -> Any:
             system_metrics_combined=pb.SystemMetricsCombined(
                 cpu=float(data.get("cpu", 0.0)),
                 memory=float(data.get("memory", 0.0)),
+                iter_ms=float(data.get("iter_ms", 0.0)),
             ),
         )
     elif topic == "token_discovered":
@@ -870,6 +949,14 @@ def _decode_payload(ev: Any) -> Any:
         return {"loss": msg.loss, "reward": msg.reward}
     if field == "system_metrics":
         return {"cpu": msg.cpu, "memory": msg.memory}
+    if field == "runtime_log":
+        return {
+            "stage": msg.stage,
+            "detail": msg.detail,
+            "ts": msg.ts,
+            "level": msg.level,
+            "actions": msg.actions,
+        }
     if field == "price_update":
         return {
             "venue": msg.venue,
@@ -901,7 +988,7 @@ def _decode_payload(ev: Any) -> Any:
     if field == "risk_updated":
         return {"multiplier": msg.multiplier}
     if field == "system_metrics_combined":
-        return {"cpu": msg.cpu, "memory": msg.memory}
+        return {"cpu": msg.cpu, "memory": msg.memory, "iter_ms": msg.iter_ms}
     if field == "token_discovered":
         return list(msg.tokens)
     if field == "memory_sync_request":
@@ -985,7 +1072,7 @@ def _publish_impl(topic: str, payload: Any, *, _broadcast: bool = True) -> None:
         assert msg is not None
         if loop:
             if _outgoing_queue is not None:
-                _outgoing_queue.put_nowait(msg)
+                _enqueue_outgoing(msg)
             else:
                 loop.create_task(broadcast_ws(msg))
         else:
@@ -1133,8 +1220,11 @@ async def _flush_outgoing() -> None:
         return
     loop = asyncio.get_running_loop()
     while True:
-        # wait for at least one message
-        msg = await q.get()
+        try:
+            # wait for at least one message
+            msg = await q.get()
+        except asyncio.CancelledError:
+            break
         msgs: list[Any] = [msg]
         delay = _EVENT_BATCH_MS / 1000.0
         if delay > 0:
@@ -1352,7 +1442,7 @@ async def disconnect_broker() -> None:
 
 
 async def verify_broker_connection(
-    urls: Sequence[str] | str | None = None, *, timeout: float = 1.0
+    urls: Sequence[str] | str | None = None, *, timeout: float = 3.0
 ) -> bool:
     """Return ``True`` if a publish/subscribe round-trip succeeds.
 
@@ -1439,7 +1529,7 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
 
     if os.getenv("EVENT_BUS_DISABLE_LOCAL", "").lower() in {"1", "true", "yes"}:
         if _outgoing_queue is None:
-            _outgoing_queue = Queue()
+            _outgoing_queue = Queue(maxsize=max(1, _OUTGOING_QUEUE_MAX))
         return None
     if not websockets:
         raise RuntimeError("websockets library required")
@@ -1452,18 +1542,15 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
             f"Event bus websocket already running on {_WS_LISTEN_HOST}:{_WS_LISTEN_PORT}"
         )
 
-    async def handler(ws):
+    async def handler(ws, path):
         allowed: Set[str] | None = None
         try:
             import urllib.parse as _urlparse
-            path = getattr(ws, "request", None)
-            if path is not None:
-                p = getattr(path, "path", "")
-                if "?" in p:
-                    qs = _urlparse.parse_qs(p.split("?", 1)[1])
-                    topics = qs.get("topics")
-                    if topics:
-                        allowed = {t for t in topics[0].split(",") if t}
+            parsed = _urlparse.urlparse(path or "")
+            qs = _urlparse.parse_qs(parsed.query)
+            topics = qs.get("topics")
+            if topics:
+                allowed = {t for t in topics[0].split(",") if t}
         except Exception:
             allowed = None
         _ws_clients.add(ws)
@@ -1488,7 +1575,8 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
             _ws_client_topics.pop(ws, None)
 
     if _outgoing_queue is None:
-        _outgoing_queue = Queue()
+        # bounded queue for backpressure
+        _outgoing_queue = Queue(maxsize=max(1, _OUTGOING_QUEUE_MAX))
     if _flush_task is None or _flush_task.done():
         loop = asyncio.get_running_loop()
         _flush_task = loop.create_task(_flush_outgoing())
@@ -1559,6 +1647,10 @@ async def stop_ws_server() -> None:
     await _stop_ws_health_server()
     if _flush_task is not None:
         _flush_task.cancel()
+        try:
+            await _flush_task
+        except Exception:
+            pass
         _flush_task = None
     drained = 0
     if _outgoing_queue is not None:
@@ -1621,7 +1713,7 @@ async def connect_ws(url: str):
     _peer_urls.add(url)
     global _outgoing_queue, _flush_task
     if _outgoing_queue is None:
-        _outgoing_queue = Queue()
+        _outgoing_queue = Queue(maxsize=max(1, _OUTGOING_QUEUE_MAX))
     if _flush_task is None or _flush_task.done():
         loop = asyncio.get_running_loop()
         _flush_task = loop.create_task(_flush_outgoing())
@@ -1650,6 +1742,10 @@ async def disconnect_ws() -> None:
     _watch_tasks.clear()
     if _flush_task is not None:
         _flush_task.cancel()
+        try:
+            await _flush_task
+        except Exception:
+            pass
         _flush_task = None
     _outgoing_queue = None
     try:

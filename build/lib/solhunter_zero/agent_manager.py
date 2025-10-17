@@ -8,6 +8,7 @@ import os
 import random
 import inspect
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Dict, Any, List, Mapping, MutableMapping
@@ -331,7 +332,7 @@ class AgentManager:
 
         self.use_attention_swarm = bool(cfg.use_attention_swarm)
         self.attention_swarm: AttentionSwarm | None = None
-        self._attn_history: list[list[float]] = []
+        self._attn_history: dict[str, list[list[float]]] = {}
         if self.use_attention_swarm and cfg.attention_model_path:
             try:
                 attn_device = os.getenv(
@@ -352,7 +353,7 @@ class AgentManager:
         self._rl_window_sec = max(vote_window_ms / 1000.0, 0.1)
         self._rl_last_meta: Dict[str, Any] = {}
         self._rl_last_hash: str | None = None
-        self._rl_disabled = _parse_bool_env("RL_WEIGHTS_DISABLED", True)
+        self._rl_disabled = _parse_bool_env("RL_WEIGHTS_DISABLED", False)
 
         self.use_rl_weights = bool(cfg.use_rl_weights) and not self._rl_disabled
         self.rl_weight_agent: RLWeightAgent | None = None
@@ -589,6 +590,13 @@ class AgentManager:
             self._rl_last_meta = meta
             return
 
+        window_ms_val = meta.get("vote_window_ms")
+        if window_ms_val is None and hasattr(payload, "vote_window_ms"):
+            window_ms_val = getattr(payload, "vote_window_ms")
+        window_ms = _as_float(window_ms_val)
+        if window_ms is not None:
+            self._rl_window_sec = max(window_ms / 1000.0, 0.1)
+
         asof = meta.get("asof")
         try:
             asof_val = float(asof) if asof is not None else None
@@ -599,12 +607,13 @@ class AgentManager:
         meta["asof"] = asof_val
         age = max(0.0, now - asof_val)
         meta["age_seconds"] = age
-        if age > self._rl_window_sec * 2.0:
+        staleness_gate = 2.0 * self._rl_window_sec
+        if age > staleness_gate:
             meta["ignored_reason"] = "stale"
             logger.info(
                 "stale RL ignored (age=%.3fs gate=%.3fs)",
                 age,
-                self._rl_window_sec * 2.0,
+                staleness_gate,
             )
             self._rl_last_meta = meta
             return
@@ -632,7 +641,9 @@ class AgentManager:
         meta["applied"] = True
         meta["applied_at"] = now
         meta["window_hash"] = hash_source
+        meta["applied_asof"] = asof_val
         self._rl_last_meta = meta
+        self._rl_last_meta["applied_asof"] = asof_val
 
     def set_rl_disabled(self, disabled: bool, *, reason: str | None = None) -> None:
         """Toggle the RL weight gate and clear cached policies when disabled."""
@@ -811,11 +822,25 @@ class AgentManager:
                 else 0.0
             )
             reg_val = 1.0 if regime == "bull" else -1.0 if regime == "bear" else 0.0
-            self._attn_history.append(
+            history = self._attn_history.setdefault(token, [])
+            history.append(
                 [rois.get(a.name, 0.0) for a in agents] + [reg_val, vol]
             )
-            if len(self._attn_history) >= self.attention_swarm.seq_len:
-                seq = self._attn_history[-self.attention_swarm.seq_len :]
+            limit = getattr(self.attention_swarm, "seq_len", 64)
+            try:
+                limit = int(limit)
+            except (TypeError, ValueError):
+                limit = 64
+            limit = max(limit, 1) * 4
+            if len(history) > limit:
+                del history[:-limit]
+            seq_len = getattr(self.attention_swarm, "seq_len", 0) or 0
+            try:
+                seq_len = int(seq_len)
+            except (TypeError, ValueError):
+                seq_len = 0
+            if seq_len > 0 and len(history) >= seq_len:
+                seq = history[-seq_len:]
                 pred = self.attention_swarm.predict(seq)
                 weights = {a.name: float(pred[i]) for i, a in enumerate(agents)}
                 publish("weights_updated", WeightsUpdated(weights=dict(weights)))
@@ -873,6 +898,7 @@ class AgentManager:
             "regime": regime,
             "proposals": proposal_counts,
         }
+        ctx.metadata["token"] = token
         if total_proposals is not None:
             ctx.metadata["total_proposals"] = total_proposals
         if getattr(swarm, "_last_agent_details", None):
@@ -881,6 +907,9 @@ class AgentManager:
             except Exception:
                 ctx.metadata["agents"] = swarm._last_agent_details
         self._update_weight_snapshot(agents, weights, proposal_counts, ctx.metadata)
+        timestamp_epoch = time.time()
+        ctx.metadata["timestamp_epoch"] = timestamp_epoch
+        ctx.metadata["timestamp"] = datetime.utcnow().isoformat() + "Z"
         if _LOG_AGENT_INPUTS:
             try:
                 self._log_agent_inputs(ctx.metadata)
@@ -912,6 +941,13 @@ class AgentManager:
             ),
         )
         if swarm is not None:
+            if len(self._active_swarms) >= 64:
+                try:
+                    oldest_key = next(iter(self._active_swarms))
+                except StopIteration:
+                    oldest_key = None
+                if oldest_key:
+                    self._active_swarms.pop(oldest_key, None)
             self._active_swarms[token] = swarm
         return ctx
 
@@ -1059,35 +1095,6 @@ class AgentManager:
         metadata["agents"] = enriched_agents
         metadata["roles"] = role_snapshot
 
-    def _log_agent_inputs(self, metadata: Mapping[str, Any]) -> None:
-        if not isinstance(metadata, Mapping):
-            return
-        agents = metadata.get("agents")
-        if not isinstance(agents, list):
-            return
-        token = metadata.get("token")
-        summary: Dict[str, Any] = {
-            "token": token,
-            "agents": [],
-        }
-        for entry in agents:
-            if not isinstance(entry, Mapping):
-                continue
-            summary["agents"].append(
-                {
-                    "agent": entry.get("agent"),
-                    "weight": entry.get("weight"),
-                    "proposals": entry.get("proposals"),
-                    "metrics": entry.get("metrics"),
-                    "requirements": entry.get("requirements"),
-                    "needs_attention": entry.get("needs_attention"),
-                    "blocked_reason": entry.get("blocked_reason"),
-                    "error": entry.get("error"),
-                }
-            )
-        if summary["agents"]:
-            logger.debug("Agent inputs snapshot: %s", serialize_for_log(summary))
-
         snapshot_agents: Dict[str, Dict[str, Any]] = {}
         for entry in enriched_agents:
             name = entry.get("agent")
@@ -1104,7 +1111,7 @@ class AgentManager:
                 "sides": entry.get("sides") or [],
                 "active": True,
                 "requirements": entry.get("requirements") or [],
-                "needs_attention": entry.get("needs_attention"),
+                "needs_attention": bool(entry.get("needs_attention")),
                 "blocked_reason": entry.get("blocked_reason"),
                 "simulation": entry.get("simulation") or {},
             }
@@ -1134,10 +1141,38 @@ class AgentManager:
 
         self._weight_snapshot = {
             "updated_at": time.time(),
-            "total_weight": total_weight,
+            "total_weight": float(total_weight),
             "roles": copy.deepcopy(role_snapshot),
-            "agents": snapshot_agents,
+            "agents": copy.deepcopy(snapshot_agents),
         }
+
+    def _log_agent_inputs(self, metadata: Mapping[str, Any]) -> None:
+        if not isinstance(metadata, Mapping):
+            return
+        agents = metadata.get("agents")
+        if not isinstance(agents, list):
+            return
+        summary_agents: list[dict[str, Any]] = []
+        for entry in agents:
+            if not isinstance(entry, Mapping):
+                continue
+            name = entry.get("agent")
+            if not name:
+                continue
+            summary_agents.append(
+                {
+                    "agent": name,
+                    "weight": entry.get("weight"),
+                    "proposals": entry.get("proposals"),
+                    "needs_attention": entry.get("needs_attention"),
+                }
+            )
+        if summary_agents:
+            summary = {
+                "token": metadata.get("token"),
+                "agents": summary_agents,
+            }
+            logger.debug("Agent inputs snapshot: %s", serialize_for_log(summary))
 
     def weight_snapshot(self) -> Dict[str, Any]:
         """Return the latest computed weight telemetry."""
@@ -1208,7 +1243,9 @@ class AgentManager:
         include_set = _parse_list(include_env)
         exclude_set = _parse_list(exclude_env)
 
-        if not include_set:
+        if not include_set and not exclude_set:
+            include_set = {"simulation"}
+        elif not include_set:
             # Default fast-mode agent mix keeps a very small async-friendly core.
             include_set = {
                 "simulation",
@@ -1286,7 +1323,7 @@ class AgentManager:
                 if len(deduped) >= limit:
                     break
             if deduped:
-                return deduped
+                return deduped[:limit]
             return filtered[:limit]
         return agents
 
@@ -1313,6 +1350,38 @@ class AgentManager:
             )
         results = []
         if self.depth_service and token not in self._event_executors:
+            try:
+                max_executors = int(os.getenv("EVENT_EXECUTOR_LIMIT", "64") or 64)
+            except (TypeError, ValueError):
+                max_executors = 64
+            if max_executors > 0 and len(self._event_executors) >= max_executors:
+                try:
+                    old_token, old_task = next(iter(self._event_tasks.items()))
+                except StopIteration:
+                    old_token = None
+                    old_task = None
+                if old_token:
+                    if old_task and not old_task.done():
+                        old_task.cancel()
+                    self._event_tasks.pop(old_token, None)
+                    old_exec = self._event_executors.pop(old_token, None)
+                    try:
+                        getattr(self.executor, "_executors", {}).pop(old_token, None)
+                    except Exception:
+                        logger.debug(
+                            "AgentManager: failed to remove executor mapping for %s",
+                            old_token,
+                            exc_info=True,
+                        )
+                    if old_exec and hasattr(old_exec, "stop"):
+                        try:
+                            stop_result = old_exec.stop()
+                            if inspect.isawaitable(stop_result):
+                                run_coro(stop_result)
+                        except Exception:
+                            logger.debug(
+                                "AgentManager: failed to stop executor for %s", old_token, exc_info=True
+                            )
             execer = EventExecutor(
                 token,
                 priority_rpc=getattr(self.executor, "priority_rpc", None),
@@ -1372,7 +1441,10 @@ class AgentManager:
                 )
             results.append(result)
             if self.memory_agent:
-                await self.memory_agent.log(action)
+                try:
+                    await self.memory_agent.log(action)
+                except Exception:
+                    logger.debug("memory log failed", exc_info=True)
             publish("action_executed", ActionExecuted(action=action, result=result))
         swarm = self.consume_swarm(token, ctx.swarm)
         if swarm is not None:
@@ -1814,23 +1886,40 @@ class AgentManager:
             return {}
         if not isinstance(data, dict):
             return {}
-        return {str(k): float(v) for k, v in data.items()}
+        weights: Dict[str, float] = {}
+        for k, v in data.items():
+            fv = _as_float(v)
+            if fv is None:
+                continue
+            weights[str(k)] = fv
+        return weights
 
     def _load_weight_configs(self, paths: Iterable[str]) -> Dict[str, Dict[str, float]]:
         configs: Dict[str, Dict[str, float]] = {}
         for p in paths:
             w = self._load_weights(p)
             if w:
-                configs[os.path.basename(p)] = w
+                abs_path = os.path.abspath(os.fspath(p))
+                try:
+                    key = os.path.relpath(abs_path, os.fspath(ROOT))
+                except Exception:
+                    key = os.path.basename(abs_path)
+                configs[key] = w
         return configs
 
     def save_weights(self, path: str | os.PathLike | None = None) -> None:
         path = path or self.weights_path
         if not path:
+            logger.info("No weights_path configured; skipping weight save")
             return
         if str(path).endswith(".toml"):
-            lines = [f"{k} = {v}" for k, v in self.weights.items()]
-            content = "\n".join(lines) + "\n"
+            lines = []
+            for k, v in self.weights.items():
+                fv = _as_float(v)
+                if fv is None:
+                    continue
+                lines.append(f"{k} = {fv}")
+            content = ("\n".join(lines) + "\n") if lines else ""
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(content)
         else:
@@ -2040,10 +2129,31 @@ class AgentManager:
             if close_fn:
                 try:
                     if inspect.iscoroutinefunction(close_fn):
-                        from .util import run_coro
-
                         run_coro(close_fn())
                     else:
                         close_fn()
                 except Exception:
                     pass
+
+        tasks = getattr(self, "_event_tasks", None)
+        if isinstance(tasks, dict):
+            for task in list(tasks.values()):
+                try:
+                    task.cancel()
+                except Exception:
+                    pass
+            tasks.clear()
+
+        executors = getattr(self, "_event_executors", None)
+        if isinstance(executors, dict):
+            for executor in list(executors.values()):
+                stop_fn = getattr(executor, "stop", None) or getattr(executor, "close", None)
+                if not stop_fn:
+                    continue
+                try:
+                    result = stop_fn()
+                    if inspect.isawaitable(result):
+                        run_coro(result)
+                except Exception:
+                    pass
+            executors.clear()

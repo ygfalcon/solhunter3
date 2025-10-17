@@ -35,6 +35,9 @@ _MMAP_SIZE: int = 0
 # Cached token offsets from the IDX1 header
 TOKEN_OFFSETS: Dict[str, Tuple[int, int]] = {}
 _TOKEN_MAP_SIZE: int = 0
+_IDX1_MAGIC = b"IDX1"
+_WS_CACHE_TTL = float(os.getenv("DEPTH_WS_CACHE_TTL", "0.5") or 0.5)
+_WS_UPDATED_AT: Dict[str, float] = {}
 
 
 def open_mmap() -> mmap.mmap | None:
@@ -89,7 +92,7 @@ def _build_token_offsets(buf: memoryview) -> None:
     """Parse IDX1 header and populate :data:`TOKEN_OFFSETS`."""
     global TOKEN_OFFSETS, _TOKEN_MAP_SIZE
     TOKEN_OFFSETS.clear()
-    if len(buf) < 8 or bytes(buf[:4]) != b"IDX1":
+    if len(buf) < 8 or bytes(buf[:4]) != _IDX1_MAGIC:
         _TOKEN_MAP_SIZE = _MMAP_SIZE
         return
     count = int.from_bytes(buf[4:8], "little")
@@ -179,11 +182,12 @@ def _decode_adj_matrix_py(buf: bytes) -> tuple[list[str], list[float]]:
     return venues, matrix
 
 
-_decode_adj_matrix = _decode_adj_matrix_py
+# Prefer the Rust FFI if available, fall back to Python decoder
+_decode_adj_matrix = getattr(routeffi, "decode_adj_matrix", None) or _decode_adj_matrix_py
 
 
 # Depth snapshot caching
-DEPTH_CACHE_TTL = float(os.getenv("DEPTH_CACHE_TTL", "0.5"))
+DEPTH_CACHE_TTL = float(os.getenv("DEPTH_CACHE_TTL", "0.5") or 0.5)
 SNAPSHOT_CACHE: Dict[str, Tuple[float, float, Dict[str, Dict[str, float]]]] = {}
 WS_SNAPSHOT: Dict[str, Dict[str, Any]] = {}
 
@@ -211,11 +215,15 @@ class _IPCClient:
         data = dumps(payload)
         writer.write(data if isinstance(data, (bytes, bytearray)) else data.encode())
         await writer.drain()
-        if timeout is not None:
-            data = await asyncio.wait_for(reader.read(), timeout)
-        else:
-            data = await reader.read()
-        return data
+        # Depth service responds per-request without closing the socket.
+        # Use a bounded read + timeout to avoid hangs.
+        try:
+            if timeout is not None:
+                return await asyncio.wait_for(reader.read(10 * 1024 * 1024), timeout)
+            return await reader.read(10 * 1024 * 1024)
+        except asyncio.TimeoutError:
+            # Leave connection open; caller may retry
+            return b""
 
     async def close(self) -> None:
         if (
@@ -230,6 +238,8 @@ class _IPCClient:
 
 
 async def get_ipc_client(socket_path: str = DEPTH_SERVICE_SOCKET) -> _IPCClient:
+    # Key the pool by absolute path to avoid duplicates
+    socket_path = os.path.abspath(socket_path)
     client = _CONNECTIONS.get(socket_path)
     if client is None:
         client = _IPCClient(socket_path)
@@ -276,18 +286,24 @@ async def stream_depth_ws(
     url = f"ws://{DEPTH_WS_ADDR}:{DEPTH_WS_PORT}"
     count = 0
     was_connected = False
+    # jittered backoff so we don't thundering-herd on restarts
+    backoff = 0.5
+    max_backoff = float(os.getenv("DEPTH_WS_MAX_BACKOFF", "5") or 5.0)
     while True:
         try:
             session = await get_session()
-            async with session.ws_connect(url) as ws:
+            async with session.ws_connect(
+                url, heartbeat=20, max_msg_size=16 * 1024 * 1024
+            ) as ws:
                 publish(
                     "depth_service_status",
                     {"status": "reconnected" if was_connected else "connected"},
                 )
                 was_connected = True
+                backoff = 0.5
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.BINARY and msg.data.startswith(
-                        b"IDX1"
+                        _IDX1_MAGIC
                     ):
                         buf = msg.data
                         count = int.from_bytes(buf[4:8], "little")
@@ -358,6 +374,7 @@ async def stream_depth_ws(
                             asks += float(v.get("asks", 0.0))
                     depth = bids + asks
                     imb = (bids - asks) / depth if depth else 0.0
+                    _WS_UPDATED_AT[token] = time.monotonic()
                     yield {
                         "token": token,
                         "depth": depth,
@@ -388,9 +405,12 @@ async def stream_depth_ws(
             count += 1
             if max_updates is not None and count >= max_updates:
                 return
-            sleep_time = max(rate_limit, DEPTH_CACHE_TTL)
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
+            # exponential backoff with cap + jitter
+            sleep_time = max(rate_limit, DEPTH_CACHE_TTL, backoff)
+            await asyncio.sleep(
+                sleep_time + (0.25 * sleep_time * (os.getpid() % 7) / 7)
+            )
+            backoff = min(max_backoff, backoff * 2)
         else:
             if was_connected:
                 publish("depth_service_status", {"status": "disconnected"})
@@ -448,6 +468,7 @@ async def listen_depth_ws(*, max_updates: Optional[int] = None) -> None:
                         WS_SNAPSHOT.clear()
                     for k, v in data.items():
                         WS_SNAPSHOT[k] = v
+                        _WS_UPDATED_AT[k] = time.monotonic()
                     publish(topic, data)
                     count += 1
                     if max_updates is not None and count >= max_updates:
@@ -470,6 +491,17 @@ def snapshot(token: str) -> Tuple[Dict[str, Dict[str, float]], float]:
     cached = SNAPSHOT_CACHE.get(token)
     if cached and now - cached[0] < DEPTH_CACHE_TTL:
         return cached[2], cached[1]
+    # Prefer a fresh WS snapshot if present
+    ws_ts = _WS_UPDATED_AT.get(token)
+    if ws_ts is not None and (now - ws_ts) < _WS_CACHE_TTL:
+        entry = WS_SNAPSHOT.get(token) or {}
+        rate = float(entry.get("tx_rate", 0.0))
+        venues = {
+            d: {"bids": float(i.get("bids", 0.0)), "asks": float(i.get("asks", 0.0))}
+            for d, i in (entry.get("dex") or {}).items()
+        }
+        SNAPSHOT_CACHE[token] = (now, rate, venues)
+        return venues, rate
     try:
         m = open_mmap()
         if m is None:
@@ -496,7 +528,7 @@ def snapshot(token: str) -> Tuple[Dict[str, Dict[str, float]], float]:
                 SNAPSHOT_CACHE[token] = (now, rate, venues)
                 return venues, rate
             return {}, 0.0
-        if len(buf) >= 8 and bytes(buf[:4]) == b"IDX1":
+        if len(buf) >= 8 and bytes(buf[:4]) == _IDX1_MAGIC:
             return {}, 0.0
         # Fallback to legacy JSON structure
         raw = bytes(buf).rstrip(b"\x00")
@@ -685,6 +717,21 @@ async def best_route(
         payload["max_hops"] = int(max_hops)
     data = await client.request(payload, timeout)
     if not data:
+        return None
+    # Accept protobuf or JSON, whichever the service replies with.
+    try:
+        resp = pb.RouteResponse()
+        resp.ParseFromString(data)
+        return list(resp.path), float(resp.profit), float(resp.slippage)
+    except Exception:
+        pass
+    try:
+        resp = loads(data)
+        path = [str(p) for p in resp.get("path", [])]
+        profit = float(resp.get("profit", 0.0))
+        slippage = float(resp.get("slippage", 0.0))
+        return path, profit, slippage
+    except Exception:
         return None
 
 

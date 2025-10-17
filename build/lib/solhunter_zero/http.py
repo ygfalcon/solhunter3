@@ -17,6 +17,10 @@ USE_ORJSON = _json is not _json_std
 logger = logging.getLogger(__name__)
 
 
+class HTTPError(Exception):
+    """Raised when an HTTP request returns a non-success status code."""
+
+
 def dumps(obj: object) -> bytes:
     """Serialize *obj* to JSON bytes using ``orjson`` when available."""
     if USE_ORJSON:
@@ -82,6 +86,11 @@ def check_endpoint(url: str, retries: int = 3) -> None:
 
         if attempt == retries - 1:
             if last_exc is not None:
+                # Normalize HTTPError to URLError to match the docstring
+                if isinstance(last_exc, urllib.error.HTTPError):
+                    raise urllib.error.URLError(
+                        f"HTTP {last_exc.code}: {last_exc.reason}"
+                    ) from last_exc
                 raise last_exc
             raise urllib.error.URLError("endpoint check failed")
 
@@ -122,28 +131,40 @@ STATIC_DNS_DEFAULT = ""
 STATIC_DNS_MAP = _parse_static_dns(os.getenv("HTTP_STATIC_DNS", STATIC_DNS_DEFAULT))
 
 
+def reload_static_dns(value: str | None = None) -> None:
+    """Reload the static DNS mapping, optionally using ``value`` instead of env vars."""
+
+    global STATIC_DNS_MAP
+    source = value if value is not None else os.getenv("HTTP_STATIC_DNS", STATIC_DNS_DEFAULT)
+    STATIC_DNS_MAP = _parse_static_dns(source)
+
+
 class StaticResolver(AbstractResolver):
     def __init__(self, mapping: dict[str, list[str]], fallback: AbstractResolver | None = None) -> None:
         self._mapping = {host: list(ips) for host, ips in mapping.items() if ips}
         self._fallback = fallback or DefaultResolver()
 
-    async def resolve(self, host: str, port: int = 0, family: int = 0) -> list[dict[str, Any]]:  # type: ignore[name-defined]
+    async def resolve(self, host: str, port: int = 0, family: int = 0) -> list[dict[str, Any]]:
         host_lower = host.lower()
         ips = self._mapping.get(host_lower)
         if ips:
             resolved = []
             for ip in ips:
-                resolved.append(
-                    {
-                        "hostname": host,
-                        "host": ip,
-                        "port": port,
-                        "family": socket.AF_INET,
-                        "proto": 0,
-                        "flags": 0,
-                    }
-                )
-            return resolved
+                fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
+                requested_any = family in {getattr(socket, "AF_UNSPEC", 0), 0}
+                if requested_any or fam == family:
+                    resolved.append(
+                        {
+                            "hostname": host,
+                            "host": ip,
+                            "port": port,
+                            "family": fam,
+                            "proto": 0,
+                            "flags": 0,
+                        }
+                    )
+            if resolved:
+                return resolved
         return await self._fallback.resolve(host, port, family)
 
     async def close(self) -> None:
@@ -159,8 +180,8 @@ async def get_session() -> aiohttp.ClientSession:
         if conn_cls is not object and conn_cls is not None:
             force_ipv4 = str(os.getenv("HTTP_FORCE_IPV4", "")).lower() in {"1", "true", "yes"}
             family = socket.AF_INET if force_ipv4 else getattr(socket, "AF_UNSPEC", 0)
+            resolver: AbstractResolver | None = StaticResolver(STATIC_DNS_MAP) if STATIC_DNS_MAP else None
             try:
-                resolver: AbstractResolver | None = StaticResolver(STATIC_DNS_MAP) if STATIC_DNS_MAP else None
                 connector = conn_cls(
                     limit=CONNECTOR_LIMIT,
                     limit_per_host=CONNECTOR_LIMIT_PER_HOST,
@@ -168,10 +189,26 @@ async def get_session() -> aiohttp.ClientSession:
                     resolver=resolver,
                 )
             except TypeError:
+                if resolver is not None:
+                    try:
+                        await resolver.close()
+                    except Exception:
+                        pass
                 connector = None
         # Default headers with a friendly User-Agent to avoid 403s on some APIs
         ua = os.getenv("HTTP_USER_AGENT", "SolhunterZero/1.0 (+https://local)")
-        client_kwargs = {"headers": {"User-Agent": ua}}
+        try:
+            timeout_total = float(os.getenv("HTTP_TIMEOUT_SEC", "15") or 15)
+        except ValueError:
+            timeout_total = 15.0
+        trust_env = str(os.getenv("HTTP_TRUST_ENV", "")).lower() in {"1", "true", "yes"}
+        if trust_env:
+            logger.info("HTTP session will honor proxy settings from the environment")
+        client_kwargs = {
+            "headers": {"User-Agent": ua},
+            "timeout": aiohttp.ClientTimeout(total=timeout_total),
+            "trust_env": trust_env,
+        }
         if connector is not None:
             client_kwargs["connector"] = connector
         try:
@@ -214,3 +251,15 @@ async def close_session() -> None:
         await close_ipc_clients()
     except Exception:
         pass
+
+
+async def fetch_json(url: str, method: str = "GET", **kwargs: Any) -> Any:
+    """Fetch *url* using *method* and return the parsed JSON body."""
+
+    sess = await get_session()
+    async with sess.request(method, url, **kwargs) as response:
+        if response.status >= 400:
+            text = await response.text()
+            raise HTTPError(f"{method} {url} -> {response.status}: {text[:300]}")
+        raw = await response.read()
+        return loads(raw)

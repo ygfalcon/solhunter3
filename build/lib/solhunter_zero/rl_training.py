@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Iterable, List, Optional, Tuple
@@ -31,6 +32,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from .device import get_default_device
 from .event_bus import publish
+from .schemas import TOPIC_RL_CHECKPOINT, TOPIC_RL_WEIGHTS
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,10 @@ def _normalize_angle(value: float) -> float:
 
 
 def _default_timestamp(obj: Any) -> float:
-    ts = getattr(obj, "timestamp", None)
+    # Prefer DB canonical time, then fall back to the legacy timestamp field.
+    ts = getattr(obj, "created_at", None)
+    if ts is None:
+        ts = getattr(obj, "timestamp", None)
     if ts is None:
         return 0.0
     if hasattr(ts, "timestamp"):
@@ -371,7 +376,7 @@ def train_model(
     model = _model_for_algo(algo).to(device)
     if initial_state:
         try:
-            model.load_state_dict(initial_state)
+            model.load_state_dict(initial_state, strict=False)
         except Exception:  # pragma: no cover - corrupt checkpoint
             logger.warning("Failed to load previous state for %s", algo, exc_info=True)
 
@@ -422,21 +427,47 @@ def fit(
         with contextlib.suppress(Exception):
             existing = torch.load(path, map_location="cpu")
 
+    publish(
+        "runtime.log",
+        {
+            "stage": "rl",
+            "detail": f"dataset_ready algo={algo} samples={len(dataset)}",
+            "ts": time.time(),
+            "level": "INFO",
+        },
+    )
+
     state_dict, summary = train_model(dataset, algo=algo, config=config, initial_state=existing)
     if not state_dict:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
+        publish(
+            "runtime.log",
+            {
+                "stage": "rl",
+                "detail": f"skipped_training algo={algo} samples={len(dataset)} (< min_batch)",
+                "ts": time.time(),
+                "level": "INFO",
+            },
+        )
         return summary
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(state_dict, path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state_dict, tmp)
+    tmp.replace(path)
+
+    publish(TOPIC_RL_CHECKPOINT, {"time": time.time(), "path": str(path)})
     publish(
-        "rl_checkpoint",
+        "runtime.log",
         {
-            "algo": summary.algo,
-            "model_path": str(path),
-            "samples": summary.samples,
-            "loss": summary.loss,
-            "mean_reward": summary.mean_reward,
+            "stage": "rl",
+            "detail": (
+                f"checkpoint_saved algo={summary.algo} samples={summary.samples} "
+                f"loss={summary.loss:.6f} mean_reward={summary.mean_reward:.6f}"
+            ),
+            "ts": time.time(),
+            "level": "INFO",
         },
     )
     return summary
@@ -506,6 +537,18 @@ class MultiAgentRL:
         loop = asyncio.get_running_loop()
 
         summaries: Dict[str, TrainingSummary] = {}
+        publish(
+            "runtime.log",
+            {
+                "stage": "rl",
+                "detail": (
+                    f"population_start algos={self.algos} "
+                    f"samples_trades={len(trades)} samples_snaps={len(snaps)}"
+                ),
+                "ts": time.time(),
+                "level": "INFO",
+            },
+        )
         for algo, path in zip(self.algos, self.model_paths):
             summary = await loop.run_in_executor(
                 None,
@@ -518,6 +561,15 @@ class MultiAgentRL:
                 ),
             )
             summaries[algo] = summary
+        publish(
+            "runtime.log",
+            {
+                "stage": "rl",
+                "detail": f"population_done algos={self.algos}",
+                "ts": time.time(),
+                "level": "INFO",
+            },
+        )
         self._last_summaries = summaries
         return summaries
 
@@ -549,7 +601,7 @@ class MultiAgentRL:
                 json.dump(mapping, fh, indent=2)
         except Exception:  # pragma: no cover - disk failures
             logger.warning("Failed to persist RL controller", exc_info=True)
-        publish("rl_weights", {"weights": mapping})
+        publish(TOPIC_RL_WEIGHTS, {"weights": mapping})
         return mapping
 
 

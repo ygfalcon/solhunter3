@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import time
@@ -25,11 +26,12 @@ import hashlib
 import random
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Awaitable, Dict, Iterable, List, Optional
+from typing import Any, Dict, List
 
 from .event_bus import publish, subscribe
 from .memory import Memory
 from .offline_data import OfflineData
+from .paths import ROOT
 from .rl_training import TrainingConfig, TrainingSummary, fit
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,9 @@ class RLDaemon:
     health_state: Any | None = None
     training_config: TrainingConfig = field(default_factory=TrainingConfig)
 
+    _hb_task: asyncio.Task | None = field(init=False, default=None)
+    _vote_window_ms: float | None = field(init=False, default=None)
+
     def __post_init__(self) -> None:
         self.memory = Memory(self.memory_path)
         self.offline = OfflineData(f"sqlite:///{self.data_path}")
@@ -60,7 +65,157 @@ class RLDaemon:
         self.current_risk: float = 1.0
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._hb_task = None
         self._risk_unsub = subscribe("risk_updated", self._on_risk_update)
+
+        raw_window = os.getenv("VOTE_WINDOW_MS", "400") or 400
+        try:
+            self._vote_window_ms = max(1.0, float(raw_window))
+        except Exception:
+            logger.debug("Invalid VOTE_WINDOW_MS=%r; defaulting to 400", raw_window)
+            self._vote_window_ms = 400.0
+
+        raw_interval = os.getenv("RL_INTERVAL")
+        if raw_interval:
+            try:
+                self.interval = float(raw_interval)
+            except Exception:
+                logger.debug("Invalid RL_INTERVAL=%r; keeping default %s", raw_interval, self.interval)
+
+        self._vote_window_ms = float(self._vote_window_ms or 400.0)
+        self._window_span = max(self._vote_window_ms / 1000.0, 0.1)
+
+        self._health_path = ROOT / "rl_daemon.health.json"
+        self._health_url: str | None = None
+        self._status = "starting"
+        self._last_heartbeat: float | None = None
+        self._last_training: float | None = None
+        self._last_error: str | None = None
+        self._last_updated: float | None = None
+
+        self._last_weights: Dict[str, float] | None = None
+        self._bootstrap_window_hash = hashlib.sha256(b"bootstrap").hexdigest()
+        self._last_window_hash: str | None = self._bootstrap_window_hash
+
+        self._write_health_json()
+
+    def _write_health_json(self) -> None:
+        updated = self._last_updated if self._last_updated is not None else time.time()
+        payload = {
+            "url": self._health_url,
+            "status": self._status,
+            "last_heartbeat": self._last_heartbeat,
+            "last_training": self._last_training,
+            "last_error": self._last_error,
+            "updated": updated,
+        }
+        try:
+            self._health_path.parent.mkdir(parents=True, exist_ok=True)
+            self._health_path.write_text(json.dumps(payload), encoding="utf-8")
+        except Exception:  # pragma: no cover - filesystem best effort
+            logger.debug("Failed to write RL health file", exc_info=True)
+
+    def _record_health(
+        self,
+        *,
+        status: str | None = None,
+        last_error: str | None = None,
+        training: bool = False,
+    ) -> None:
+        if status is not None:
+            self._status = status
+        if last_error is not None:
+            self._last_error = last_error
+        elif status == "running":
+            self._last_error = None
+
+        now = time.time()
+        self._last_heartbeat = now
+        if training:
+            self._last_training = now
+        self._last_updated = now
+        self._write_health_json()
+
+    async def _publish_status_frame(
+        self,
+        *,
+        status: str,
+        weights: Dict[str, float] | None = None,
+        window_hash: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        asof = float(time.time())
+        window_id = int(loop.time() / self._window_span)
+        frame_window_hash = window_hash or self._last_window_hash or self._bootstrap_window_hash
+        if window_hash:
+            self._last_window_hash = window_hash
+        elif self._last_window_hash is None:
+            self._last_window_hash = frame_window_hash
+
+        weights_payload = weights if weights is not None else (self._last_weights or {})
+        payload = {
+            "schema": _RL_SCHEMA,
+            "version": _RL_VERSION,
+            "risk": {"multiplier": float(self.current_risk)},
+            "asof": asof,
+            "window_id": window_id,
+            "window_hash": frame_window_hash,
+            "source": self.algo,
+            "vote_window_ms": float(self._vote_window_ms),
+            "status": status,
+            "weights": dict(weights_payload),
+        }
+        if last_error:
+            payload["last_error"] = last_error
+
+        await self._publish_with_backoff("rl:weights.applied", payload)
+
+        heartbeat_payload = {
+            "status": status,
+            "algo": self.algo,
+            "asof": asof,
+            "risk": {"multiplier": float(self.current_risk)},
+        }
+        if last_error:
+            heartbeat_payload["last_error"] = last_error
+
+        await self._publish_with_backoff("rl:heartbeat", heartbeat_payload)
+
+    async def _handle_training_error(self, exc: BaseException) -> None:
+        message = str(exc).strip() or exc.__class__.__name__
+        short_message = message.splitlines()[0][:256]
+        if self.health_state is not None and hasattr(self.health_state, "record_error"):
+            try:
+                self.health_state.record_error(short_message)
+            except Exception:  # pragma: no cover - health errors shouldn't crash
+                logger.debug("Health state error update failed", exc_info=True)
+        self._record_health(status="error", last_error=short_message)
+        await self._publish_status_frame(status="error", last_error=short_message)
+
+    async def _heartbeat_loop(self) -> None:
+        window_seconds = max(self._vote_window_ms / 1000.0, 0.2)
+        delay = min(self.interval, window_seconds)
+        if delay <= 0:
+            delay = window_seconds
+        if delay <= 0:
+            delay = 0.2
+        while not self._stop.is_set():
+            status = self._resolve_status()
+            if self.health_state is not None:
+                try:
+                    self.health_state.touch()
+                except Exception:  # pragma: no cover - best effort
+                    logger.debug("Health state touch failed", exc_info=True)
+            self._record_health(status=status)
+            try:
+                await self._publish_status_frame(status=status)
+            except Exception:  # pragma: no cover - logging only
+                logger.exception("RL heartbeat publish failed")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                continue
 
     # ------------------------------------------------------------------
     # Agent management
@@ -136,6 +291,12 @@ class RLDaemon:
         snapshots = list(await self.offline.list_snapshots())
         return trades, snapshots
 
+    def _resolve_status(self) -> str:
+        status = (self._status or "").strip().lower()
+        if status in {"", "starting"}:
+            return "running"
+        return self._status
+
     # ------------------------------------------------------------------
     # Training lifecycle
     # ------------------------------------------------------------------
@@ -143,19 +304,32 @@ class RLDaemon:
     async def train(self) -> TrainingSummary | None:
         trades, snaps = await self._collect_samples()
         if not trades:
+            status = self._resolve_status()
+            if self.health_state is not None:
+                try:
+                    self.health_state.touch()
+                except Exception:  # pragma: no cover - best effort
+                    logger.debug("Health state touch failed", exc_info=True)
+            self._record_health(status=status)
+            await self._publish_status_frame(status=status)
             return None
 
         loop = asyncio.get_running_loop()
-        summary = await loop.run_in_executor(
-            None,
-            lambda: fit(
-                trades,
-                snaps,
-                model_path=self.model_path,
-                algo=self.algo,
-                config=self.training_config,
-            ),
-        )
+        try:
+            summary = await loop.run_in_executor(
+                None,
+                lambda: fit(
+                    trades,
+                    snaps,
+                    model_path=self.model_path,
+                    algo=self.algo,
+                    config=self.training_config,
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - logged and signalled
+            logger.exception("RL training failed")
+            await self._handle_training_error(exc)
+            return None
 
         if self.health_state is not None:
             try:
@@ -166,28 +340,20 @@ class RLDaemon:
 
         await self._notify_agents()
         weights = {f"{self.algo}_mean_reward": float(summary.mean_reward)}
+        self._last_weights = dict(weights)
+        weight_items = tuple(sorted((str(k), float(v)) for k, v in weights.items()))
+        window_hash = hashlib.sha256(repr(weight_items).encode("utf-8")).hexdigest()
+
         await self._publish_with_backoff(
             "rl_weights",
             {"weights": weights, "risk": {"multiplier": float(self.current_risk)}},
         )
-        now = asyncio.get_running_loop().time()
-        window_span = max(float(os.getenv("VOTE_WINDOW_MS", "400") or 400.0) / 1000.0, 0.1)
-        window_id = int(now / window_span)
-        weight_items = tuple(sorted((str(k), float(v)) for k, v in weights.items()))
-        window_hash = hashlib.sha256(repr(weight_items).encode("utf-8")).hexdigest()
-        await self._publish_with_backoff(
-            "rl:weights.applied",
-            {
-                "schema": _RL_SCHEMA,
-                "version": _RL_VERSION,
-                "weights": weights,
-                "risk": {"multiplier": float(self.current_risk)},
-                "asof": float(time.time()),
-                "window_id": window_id,
-                "window_hash": window_hash,
-                "source": self.algo,
-                "vote_window_ms": float(window_span * 1000.0),
-            },
+
+        self._record_health(status="running", training=True)
+        await self._publish_status_frame(
+            status="running",
+            weights=weights,
+            window_hash=window_hash,
         )
         return summary
 
@@ -216,7 +382,10 @@ class RLDaemon:
 
     def start(self) -> asyncio.Task:
         if self._task is None:
+            self._stop.clear()
             self._task = asyncio.create_task(self.run_forever())
+        if self._hb_task is None:
+            self._hb_task = asyncio.create_task(self._heartbeat_loop())
         return self._task
 
     def stop(self) -> None:
@@ -224,6 +393,11 @@ class RLDaemon:
 
     async def close(self) -> None:
         self.stop()
+        if self._hb_task is not None:
+            self._hb_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):  # type: ignore[name-defined]
+                await self._hb_task
+            self._hb_task = None
         if self._task is not None:
             with contextlib.suppress(asyncio.CancelledError):  # type: ignore[name-defined]
                 await self._task

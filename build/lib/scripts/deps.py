@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import pkgutil
+import platform
 import re
 import subprocess
 import sys
@@ -79,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Install optional dependencies",
     )
     parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Only report missing dependencies; do not install",
+    )
+    parser.add_argument(
         "--extras",
         nargs="*",
         help="Extras to install from the local package",
@@ -87,29 +93,56 @@ def main(argv: list[str] | None = None) -> int:
 
     from solhunter_zero.bootstrap_utils import DepsConfig, ensure_deps
 
+    pyproject = ROOT / "pyproject.toml"
+    if not pyproject.exists():
+        print(f"[deps] pyproject.toml not found at {pyproject}", file=sys.stderr)
+        return 2
+
+    try:
+        missing_required, missing_optional = check_deps()
+    except tomllib.TOMLDecodeError as exc:  # pragma: no cover - configuration error
+        print(f"[deps] failed to parse {pyproject}: {exc}", file=sys.stderr)
+        return 2
+
+    if args.check_only:
+        if missing_required:
+            print("[deps] missing required:", ", ".join(sorted(missing_required)))
+        if args.install_optional and missing_optional:
+            print("[deps] missing optional:", ", ".join(sorted(missing_optional)))
+        return 1 if missing_required else 0
+
     cfg = DepsConfig(
         install_optional=args.install_optional,
-        extras=args.extras if args.extras else ("uvloop",),
+        extras=
+        tuple(args.extras)
+        if args.extras
+        else (() if platform.system().lower().startswith("win") else ("uvloop",)),
     )
     ensure_deps(cfg)
 
     if "PYTEST_CURRENT_TEST" not in os.environ:
-        METAL_INDEX = (
-            device.METAL_EXTRA_INDEX[1]
-            if len(getattr(device, "METAL_EXTRA_INDEX", [])) > 1
-            else "https://download.pytorch.org/whl/metal"
-        )
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                ".[fastjson,fastcompress,msgpack]",
-                "--extra-index-url",
-                METAL_INDEX,
-            ]
-        )
+        pip_args = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            ".[fastjson,fastcompress,msgpack]",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--root-user-action=ignore",
+        ]
+        if platform.system() == "Darwin" and platform.machine() in {"arm64", "aarch64"}:
+            metal_list = getattr(device, "METAL_EXTRA_INDEX", [])
+            METAL_INDEX = (
+                metal_list[1]
+                if isinstance(metal_list, (list, tuple)) and len(metal_list) > 1
+                else "https://download.pytorch.org/whl/metal"
+            )
+            pip_args += ["--extra-index-url", METAL_INDEX]
+        result = subprocess.run(pip_args, cwd=str(ROOT))
+        if result.returncode != 0:
+            print("[deps] pip extras install failed", file=sys.stderr)
+            return result.returncode
 
     return 0
 

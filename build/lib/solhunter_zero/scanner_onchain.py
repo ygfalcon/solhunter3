@@ -41,11 +41,6 @@ except Exception:  # pragma: no cover - prometheus optional
     Histogram = None  # type: ignore
     REGISTRY = None  # type: ignore
 
-try:  # optional dependency shared with the event bus
-    import redis.asyncio as aioredis  # type: ignore
-except Exception:  # pragma: no cover - redis optional
-    aioredis = None  # type: ignore
-
 from .rpc_helpers import (
     extract_signature_entries,
     extract_token_accounts,
@@ -108,23 +103,64 @@ _TOKEN_ACCOUNT_FILTERS: list[dict[str, int]] = [
 
 # Helius-specific pagination settings. Requests default to 1k accounts per page which keeps
 # memory bounded while avoiding the "Too many accounts requested" RPC errors.
-_HELIUS_GPA_PAGE_LIMIT = int(os.getenv("HELIUS_GPA_PAGE_LIMIT", "1000") or 1000)
-_HELIUS_GPA_TIMEOUT = float(os.getenv("HELIUS_GPA_TIMEOUT", "20") or 20.0)
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+) -> float:
+    raw = os.getenv(name)
+    if raw in {None, ""}:
+        value = default
+    else:
+        try:
+            value = float(raw)
+        except Exception:
+            value = default
+    if not math.isfinite(value):
+        value = default
+    if minimum is not None and value < minimum:
+        value = minimum
+    return value
+
+
+def _env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    raw = os.getenv(name)
+    if raw in {None, ""}:
+        value = default
+    else:
+        try:
+            value = int(float(raw))
+        except Exception:
+            value = default
+    if minimum is not None and value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
+_HELIUS_GPA_PAGE_LIMIT = _env_int("HELIUS_GPA_PAGE_LIMIT", 1000, minimum=50, maximum=1000)
+_HELIUS_GPA_TIMEOUT = _env_float("HELIUS_GPA_TIMEOUT", 20.0, minimum=5.0)
 
 _FAST_PIPELINE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
-_ONCHAIN_SCAN_OVERFETCH = float(
-    os.getenv(
-        "ONCHAIN_SCAN_OVERFETCH",
-        "3.0" if _FAST_PIPELINE else "5.0",
-    )
-    or ("3.0" if _FAST_PIPELINE else "5.0")
+_DEFAULT_OVERFETCH = 3.0 if _FAST_PIPELINE else 5.0
+_DEFAULT_MIN_ACCOUNTS = 80 if _FAST_PIPELINE else 160
+_ONCHAIN_SCAN_OVERFETCH = _env_float(
+    "ONCHAIN_SCAN_OVERFETCH",
+    _DEFAULT_OVERFETCH,
+    minimum=1.0,
 )
-_ONCHAIN_SCAN_MIN_ACCOUNTS = int(
-    os.getenv(
-        "ONCHAIN_SCAN_MIN_ACCOUNTS",
-        "80" if _FAST_PIPELINE else "160",
-    )
-    or ("80" if _FAST_PIPELINE else "160")
+_ONCHAIN_SCAN_MIN_ACCOUNTS = _env_int(
+    "ONCHAIN_SCAN_MIN_ACCOUNTS",
+    _DEFAULT_MIN_ACCOUNTS,
+    minimum=1,
 )
 
 # DAS discovery knobs (with defensive defaults)
@@ -254,7 +290,7 @@ async def _get_redis_client() -> Any | None:
     try:
         _DISCOVERY_REDIS = aioredis.from_url(_DISCOVERY_REDIS_URL)
     except Exception as exc:  # pragma: no cover - connection failure
-        logger.warning("Discovery Redis connection failed: %s", exc)
+        logger.debug("Discovery Redis connection failed: %s", exc)
         _DISCOVERY_REDIS = None
     return _DISCOVERY_REDIS
 
@@ -714,7 +750,7 @@ def _get_signatures_for_address(
             raise
     if last_exc is not None:
         raise last_exc
-def _to_pubkey(token: str | Pubkey) -> Pubkey:
+def _to_pubkey(token: str | bytes | Pubkey) -> Pubkey:
     if isinstance(token, Pubkey):
         return token
     if isinstance(token, bytes):
@@ -917,24 +953,31 @@ def _das_enabled() -> bool:
 
 def _das_page_limit(target: int) -> int:
     raw = os.getenv("ONCHAIN_DAS_PAGE_LIMIT") or os.getenv("DAS_DISCOVERY_LIMIT")
-    try:
-        limit = int(raw) if raw not in {None, ""} else target
-    except Exception:
-        limit = target
-    limit = max(1, limit)
+    fallback = target if target > 0 else 0
+    limit = fallback
+    if raw not in {None, ""}:
+        try:
+            limit = int(float(raw))
+        except Exception:
+            limit = fallback
+    if limit < 0:
+        limit = 0
     if target > 0:
-        limit = min(limit, target)
+        if limit == 0:
+            return target
+        return min(limit, target)
     return limit
 
 
 def _das_metadata_limit() -> int:
     raw = os.getenv("ONCHAIN_DAS_METADATA_LIMIT") or os.getenv("DAS_METADATA_LIMIT")
+    default = 128
     if not raw:
-        return 128
+        return default
     try:
-        limit = int(raw)
+        limit = int(float(raw))
     except Exception:
-        return 128
+        return default
     return max(0, limit)
 
 

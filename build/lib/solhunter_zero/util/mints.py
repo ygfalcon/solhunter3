@@ -1,63 +1,126 @@
 """Utilities for validating and cleaning Solana mint addresses."""
-
 from __future__ import annotations
 
+from dataclasses import dataclass
+import re
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
+
 import base58
-from typing import List, Sequence, Tuple
+
+# Base58 (Bitcoin) alphabet used by Solana
+_BASE58_ALPHABET = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+
+# Heuristic patterns to pull mints out of free text/URLs quickly
+_MINT_RE = re.compile(r"([1-9A-HJ-NP-Za-km-z]{32,44})")
+_SOLSCAN_TOKEN_RE = re.compile(r"solscan\\.io/(?:token|account)/([1-9A-HJ-NP-Za-km-z]{32,44})", re.I)
+_QUERY_PARAM_RE = re.compile(r"[?&](?:mint|address|token)=([1-9A-HJ-NP-Za-km-z]{32,44})", re.I)
+
+
+@dataclass(frozen=True)
+class MintCleanResult:
+    valid: List[str]
+    dropped: List[Any]
+    reasons: Dict[Any, str]
 
 
 def is_valid_solana_mint(mint: str) -> bool:
-    """Return ``True`` when ``mint`` decodes to a 32-byte base58 string."""
-
+    """Return True when `mint` decodes to a 32-byte base58 string."""
     if not isinstance(mint, str):
         return False
-    candidate = mint.strip()
-    if not (32 <= len(candidate) <= 44):
+    s = mint.strip()
+    # quick length & alphabet gate
+    if not (32 <= len(s) <= 44) or any(ch not in _BASE58_ALPHABET for ch in s):
         return False
     try:
-        raw = base58.b58decode(candidate)
+        raw = base58.b58decode(s)
     except Exception:
         return False
     return len(raw) == 32
 
 
-def _coerce_candidate(value: object) -> str | None:
-    if isinstance(value, str):
-        return value
-    try:
-        return str(value)
-    except Exception:
-        return None
+def _coerce_iter(mints: Iterable[Any] | Any) -> Iterable[Any]:
+    # Accept a single string of comma/space/newline separated tokens as well
+    if isinstance(mints, str):
+        # split on commas/semicolons/whitespace
+        parts = re.split(r"[,\s;]+", mints.strip())
+        return (p for p in parts if p)
+    return mints
 
 
-def _strip_artifacts(text: str) -> str:
-    stripped = text.strip()
-    for sep in (" ", ",", ";", "\t", "\n"):
-        stripped = stripped.split(sep, 1)[0]
-    return stripped.strip()
+def _extract_candidate(text: str) -> str:
+    """Strip obvious artifacts: URLs, query params, trailing punctuation."""
+    t = text.strip()
+    # Try explicit URL/query param captures
+    for rex in (_QUERY_PARAM_RE, _SOLSCAN_TOKEN_RE):
+        m = rex.search(t)
+        if m:
+            return m.group(1)
+    # Fallback: take the first plausible base58 chunk
+    m = _MINT_RE.search(t)
+    return m.group(1) if m else t
 
 
-def clean_candidate_mints(mints: Sequence[object]) -> Tuple[List[str], List[object]]:
-    """Split and validate potential mint addresses.
+def clean_candidate_mints(mints: Sequence[object] | str) -> Tuple[List[str], List[object]]:
+    """Backwards-compatible API: returns (valid, dropped)."""
+    res = clean_mints(mints)
+    return res.valid, res.dropped
 
-    Returns ``(valid, dropped)`` where ``valid`` contains cleaned base58 mints
-    suitable for downstream processing and ``dropped`` lists the rejected
-    entries for diagnostics.
-    """
 
-    cleaned: List[str] = []
-    dropped: List[object] = []
-    for raw in mints:
-        candidate = _coerce_candidate(raw)
-        if not candidate:
-            dropped.append(raw)
+def clean_mints(mints: Sequence[object] | str) -> MintCleanResult:
+    """Split, extract, validate, and dedupe potential mint addresses."""
+    seen: set[str] = set()
+    valid: List[str] = []
+    dropped: List[Any] = []
+    reasons: Dict[Any, str] = {}
+
+    for raw in _coerce_iter(mints):
+        # Keep original object for diagnostics
+        orig = raw
+        try:
+            s = str(raw)
+        except Exception:
+            dropped.append(orig)
+            reasons[orig] = "unstringifiable"
             continue
-        stripped = _strip_artifacts(candidate)
-        if is_valid_solana_mint(stripped):
-            cleaned.append(stripped)
-        else:
-            dropped.append(raw)
-    return cleaned, dropped
+
+        cand = _extract_candidate(s)
+        # common trailing punctuation in chats/CSV
+        cand = cand.strip().strip(")]},.;:'\"")
+
+        if not cand:
+            dropped.append(orig)
+            reasons[orig] = "empty"
+            continue
+        if not (32 <= len(cand) <= 44):
+            dropped.append(orig)
+            reasons[orig] = "bad_length"
+            continue
+        if any(ch not in _BASE58_ALPHABET for ch in cand):
+            dropped.append(orig)
+            reasons[orig] = "invalid_chars"
+            continue
+        try:
+            raw_bytes = base58.b58decode(cand)
+        except Exception:
+            dropped.append(orig)
+            reasons[orig] = "b58decode_error"
+            continue
+        if len(raw_bytes) != 32:
+            dropped.append(orig)
+            reasons[orig] = "decoded_len!=32"
+            continue
+        if cand in seen:
+            # silently dedupe
+            continue
+        seen.add(cand)
+        valid.append(cand)
+
+    return MintCleanResult(valid=valid, dropped=dropped, reasons=reasons)
 
 
-__all__ = ["clean_candidate_mints", "is_valid_solana_mint"]
+__all__ = [
+    "is_valid_solana_mint",
+    "clean_candidate_mints",
+    "clean_mints",
+    "MintCleanResult",
+]

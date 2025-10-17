@@ -7,10 +7,13 @@ import contextlib
 import logging
 import os
 from typing import Iterable
+from urllib.parse import urlparse
 
 from .util import parse_bool_env
 
 _ADDITIONAL_WS_TARGETS: tuple[tuple[str, str], ...] = (
+    ("SOLANA_WS_URL", "Solana RPC WS"),
+    ("HELIUS_WS_URL", "Helius RPC WS"),
     ("PHOENIX_DEPTH_WS_URL", "Phoenix depth"),
     ("METEORA_DEPTH_WS_URL", "Meteora depth"),
     ("JUPITER_WS_URL", "Jupiter quotes"),
@@ -26,10 +29,14 @@ async def _check_websocket_handshake(
         return
 
     try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+            raise ValueError(f"invalid ws url: {url}")
+
         from .http import get_session
 
         session = await get_session()
-        async with session.ws_connect(url, timeout=3):  # type: ignore[arg-type]
+        async with session.ws_connect(url, timeout=8):  # type: ignore[arg-type]
             pass
     except Exception as exc:  # pragma: no cover - network failure
         logger = logging.getLogger(__name__)
@@ -85,17 +92,19 @@ async def ensure_connectivity_async(*, offline: bool = False) -> None:
     tasks = []
     if listing_url:
         async def _check_listing() -> None:
-            gen = stream_listed_tokens(listing_url)
+            gen = None
             try:
-                await asyncio.wait_for(gen.__anext__(), timeout=1)
+                gen = stream_listed_tokens(listing_url)
+                await asyncio.wait_for(gen.__anext__(), timeout=5)
             except asyncio.TimeoutError:
                 msg = "No data received from DEX listing websocket"
                 logging.getLogger(__name__).warning(msg)
                 if raise_on_ws_fail:
                     raise RuntimeError(msg)
             finally:
-                with contextlib.suppress(Exception):
-                    await gen.aclose()
+                if gen is not None:
+                    with contextlib.suppress(Exception):
+                        await gen.aclose()
 
         tasks.append(_check_listing())
 
@@ -112,7 +121,15 @@ async def ensure_connectivity_async(*, offline: bool = False) -> None:
 
 def ensure_connectivity(*, offline: bool = False) -> None:
     """Synchronous wrapper for :func:`ensure_connectivity_async`."""
-    asyncio.run(ensure_connectivity_async(offline=offline))
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(ensure_connectivity_async(offline=offline))
+    else:
+        future = asyncio.run_coroutine_threadsafe(
+            ensure_connectivity_async(offline=offline), loop
+        )
+        future.result()
 
 
 __all__ = ["ensure_connectivity_async", "ensure_connectivity"]

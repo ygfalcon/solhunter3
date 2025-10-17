@@ -55,6 +55,9 @@ class Portfolio:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = loads(f.read())
         except Exception:  # pragma: no cover - invalid file
+            logger.debug(
+                "Portfolio.load: failed to parse %s; leaving empty state", self.path
+            )
             return
         self.balances = {}
         for token, info in data.items():
@@ -89,6 +92,10 @@ class Portfolio:
     def save(self) -> None:
         if not self.path:
             return
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        except Exception:
+            pass
         data = {
             token: {
                 "amount": pos.amount,
@@ -104,8 +111,10 @@ class Portfolio:
             }
             for token, pos in self.balances.items()
         }
-        with open(self.path, "w", encoding="utf-8") as f:
+        tmp = f"{self.path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             f.write(dumps(data))
+        os.replace(tmp, self.path)
         publish(
             "portfolio_updated",
             PortfolioUpdated(
@@ -136,8 +145,14 @@ class Portfolio:
             }
             for token, pos in self.balances.items()
         }
-        async with aiofiles.open(self.path, "w", encoding="utf-8") as f:  # type: ignore
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        except Exception:
+            pass
+        tmp = f"{self.path}.tmp"
+        async with aiofiles.open(tmp, "w", encoding="utf-8") as f:  # type: ignore
             await f.write(dumps(data))
+        os.replace(tmp, self.path)
         publish(
             "portfolio_updated",
             PortfolioUpdated(
@@ -203,9 +218,12 @@ class Portfolio:
             pos.breakeven_price = price if price else pos.entry_price
             return
         pos.unrealized_pnl = (price - pos.entry_price) * pos.amount
-        pos.breakeven_price = pos.entry_price
+        effective = pos.entry_price
         if pos.amount != 0:
-            pos.breakeven_price = pos.entry_price - (pos.realized_pnl / pos.amount)
+            effective = pos.entry_price - (pos.realized_pnl / pos.amount)
+        if pos.breakeven_bps > 0:
+            effective *= 1.0 + pos.breakeven_bps / 10_000.0
+        pos.breakeven_price = max(0.0, effective)
 
     def _apply_update(
         self,
@@ -318,12 +336,6 @@ class Portfolio:
     ) -> None:
         self._apply_update(token, amount, price, ts=ts or time.time(), reason=reason, meta=meta)
         self.save()
-        publish(
-            "portfolio_updated",
-            PortfolioUpdated(
-                balances={t: p.amount for t, p in self.balances.items()}
-            ),
-        )
 
     async def update_async(
         self,
@@ -337,12 +349,6 @@ class Portfolio:
     ) -> None:
         self._apply_update(token, amount, price, ts=ts or time.time(), reason=reason, meta=meta)
         await self.save_async()
-        publish(
-            "portfolio_updated",
-            PortfolioUpdated(
-                balances={t: p.amount for t, p in self.balances.items()}
-            ),
-        )
 
     def remove(self, token: str) -> None:
         pos = self.balances.pop(token, None)
@@ -352,12 +358,6 @@ class Portfolio:
             self._mark_position(pos, pos.last_mark or pos.entry_price)
             self.closed_positions[token] = pos
             self.save()
-            publish(
-                "portfolio_updated",
-                PortfolioUpdated(
-                    balances={t: p.amount for t, p in self.balances.items()}
-                ),
-            )
 
     def get_position(self, token: str) -> Optional[Position]:
         pos = self.balances.get(token)
@@ -453,20 +453,22 @@ class Portfolio:
             return 0.0
         return (self.max_value - value) / self.max_value
 
-    def update_highs(self, prices: Dict[str, float]) -> None:
-        """Update high water marks for held tokens."""
+    def update_highs(self, prices: Dict[str, float], *, persist: bool = False) -> None:
+        """Update high water marks for held tokens. Optionally persist."""
         for token, pos in self.balances.items():
             price = prices.get(token)
             if price is not None and price > pos.high_price:
                 pos.high_price = price
-        self.save()
+        if persist:
+            self.save()
 
-    async def update_highs_async(self, prices: Dict[str, float]) -> None:
+    async def update_highs_async(self, prices: Dict[str, float], *, persist: bool = False) -> None:
         for token, pos in self.balances.items():
             price = prices.get(token)
             if price is not None and price > pos.high_price:
                 pos.high_price = price
-        await self.save_async()
+        if persist:
+            await self.save_async()
 
     # ------------------------------------------------------------------
     def record_prices(
@@ -483,7 +485,7 @@ class Portfolio:
 
         if prices:
             self.mark_to_market(prices)
-            self.update_highs(prices)
+            self.update_highs(prices, persist=False)
             self.update_drawdown(prices)
 
     def correlations(self) -> Dict[tuple[str, str], float]:

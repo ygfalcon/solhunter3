@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import List, Dict, Any, Iterable
+from typing import Any, Dict, Iterable, List
 
-from sklearn.ensemble import GradientBoostingRegressor
+try:  # optional dependency
+    from sklearn.ensemble import GradientBoostingRegressor
+
+    HAS_SK = True
+except Exception:  # pragma: no cover - sklearn may be unavailable
+    HAS_SK = False
 
 from . import BaseAgent
 from .price_utils import resolve_price
@@ -30,6 +36,8 @@ class SmartDiscoveryAgent(BaseAgent):
         discord_feeds: Iterable[str] | None = None,
         trade_volume_threshold: float = 0.0,
         trade_liquidity_threshold: float = 0.0,
+        max_tokens_from_stream: int = 10,
+        train_offloop: bool = True,
     ) -> None:
         self.mempool_score_threshold = float(mempool_score_threshold)
         self.trend_volume_threshold = float(trend_volume_threshold)
@@ -40,6 +48,9 @@ class SmartDiscoveryAgent(BaseAgent):
         self.trade_liquidity_threshold = float(trade_liquidity_threshold)
         self.metrics: Dict[str, Dict[str, Any]] = {}
         self._executor: ThreadPoolExecutor | None = None
+        self.max_tokens_from_stream = int(max_tokens_from_stream)
+        self.train_offloop = bool(train_offloop)
+        self._lock = asyncio.Lock()
 
     def _get_executor(self) -> ThreadPoolExecutor:
         if self._executor is None:
@@ -56,40 +67,48 @@ class SmartDiscoveryAgent(BaseAgent):
         )
         events: List[Dict[str, Any]] = []
         try:
-            while len(events) < limit:
-                evt = await asyncio.wait_for(anext(gen), timeout=0.5)
+            async for evt in gen:
                 events.append(evt)
-        except (StopAsyncIteration, asyncio.TimeoutError):
-            pass
+                if len(events) >= min(limit, self.max_tokens_from_stream):
+                    break
         finally:
-            await gen.aclose()
+            with contextlib.suppress(Exception):
+                await gen.aclose()
 
-        tokens = [e["address"] for e in events]
+        tokens = [e.get("address") for e in events if e.get("address")]
+        if not tokens:
+            async with self._lock:
+                self.metrics = {}
+            return []
+
         loop = asyncio.get_running_loop()
         executor = self._get_executor()
-        volumes = await asyncio.gather(
-            *[
-                loop.run_in_executor(
-                    executor,
-                    partial(onchain_metrics.fetch_volume_onchain, t, rpc_url),
-                )
-                for t in tokens
-            ]
-        )
-        liquidities = await asyncio.gather(
-            *[
-                loop.run_in_executor(
-                    executor,
-                    partial(onchain_metrics.fetch_liquidity_onchain, t, rpc_url),
-                )
-                for t in tokens
-            ]
+        volumes, liquidities = await asyncio.gather(
+            asyncio.gather(
+                *[
+                    loop.run_in_executor(
+                        executor,
+                        partial(onchain_metrics.fetch_volume_onchain, t, rpc_url),
+                    )
+                    for t in tokens
+                ]
+            ),
+            asyncio.gather(
+                *[
+                    loop.run_in_executor(
+                        executor,
+                        partial(onchain_metrics.fetch_liquidity_onchain, t, rpc_url),
+                    )
+                    for t in tokens
+                ]
+            ),
         )
         sentiment = 0.0
         if self.feeds or self.twitter_feeds or self.discord_feeds:
             try:
                 sentiment = await news.fetch_sentiment_async(
                     self.feeds,
+                    allowed=self.feeds,
                     twitter_urls=self.twitter_feeds,
                     discord_urls=self.discord_feeds,
                 )
@@ -100,14 +119,18 @@ class SmartDiscoveryAgent(BaseAgent):
         kept_tokens: List[str] = []
         details: Dict[str, Dict[str, float]] = {}
         for tok, evt, vol, liq in zip(tokens, events, volumes, liquidities):
-            volume_val = float(vol or 0.0)
-            liquidity_val = float(liq or 0.0)
-            if volume_val < self.trend_volume_threshold:
+            try:
+                volume_val = float(vol or 0.0)
+                liquidity_val = float(liq or 0.0)
+                if volume_val < self.trend_volume_threshold:
+                    continue
+                if liquidity_val < self.trade_liquidity_threshold:
+                    continue
+                score = float(evt.get("combined_score", evt.get("score", 0.0)) or 0.0)
+            except Exception:
                 continue
-            if liquidity_val < self.trade_liquidity_threshold:
-                continue
-            score = float(evt.get("combined_score", evt.get("score", 0.0)))
-            feats.append([score, volume_val, liquidity_val, sentiment])
+
+            feats.append([score, volume_val, liquidity_val, float(sentiment)])
             kept_tokens.append(tok)
             details[tok] = {
                 "mempool_score": score,
@@ -116,15 +139,40 @@ class SmartDiscoveryAgent(BaseAgent):
             }
 
         if not feats:
-            self.metrics = {}
+            async with self._lock:
+                self.metrics = {}
             return []
 
-        y = [sum(f) for f in feats]
-        model = GradientBoostingRegressor()
-        model.fit(feats, y)
-        preds = model.predict(feats)
+        async def _rank_with_model() -> List[float]:
+            if not HAS_SK:
+                cols = list(zip(*feats))
+                mins = [min(col) for col in cols]
+                maxs = [max(col) for col in cols]
 
-        ranked = sorted(zip(kept_tokens, preds), key=lambda x: x[1], reverse=True)
+                def norm_row(row: List[float]) -> float:
+                    total = 0.0
+                    for value, lo, hi in zip(row, mins, maxs):
+                        rng = (hi - lo) or 1.0
+                        total += (value - lo) / rng
+                    return total
+
+                return [norm_row(row) for row in feats]
+
+            model = GradientBoostingRegressor(random_state=42)
+            y = [sum(f) for f in feats]
+            if self.train_offloop:
+                await loop.run_in_executor(executor, model.fit, feats, y)
+                return await loop.run_in_executor(executor, model.predict, feats)
+            model.fit(feats, y)
+            return list(model.predict(feats))
+
+        preds = await _rank_with_model()
+
+        ranked = sorted(
+            zip(kept_tokens, preds),
+            key=lambda item: (item[1], item[0]),
+            reverse=True,
+        )
         ranked_metrics: Dict[str, Dict[str, Any]] = {}
         for idx, (tok, pred_score) in enumerate(ranked, start=1):
             tok_details = details.get(tok, {})
@@ -136,7 +184,10 @@ class SmartDiscoveryAgent(BaseAgent):
                 "liquidity": float(tok_details.get("liquidity", 0.0)),
                 "mempool_score": float(tok_details.get("mempool_score", 0.0)),
             }
-        self.metrics = ranked_metrics
+
+        async with self._lock:
+            self.metrics = ranked_metrics
+
         return [tok for tok, _ in ranked]
 
     async def propose_trade(
@@ -147,7 +198,8 @@ class SmartDiscoveryAgent(BaseAgent):
         depth: float | None = None,
         imbalance: float | None = None,
     ) -> List[Dict[str, Any]]:
-        stats = self.metrics.get(token)
+        async with self._lock:
+            stats = dict(self.metrics.get(token, {}) or {})
         if not stats:
             return []
 
@@ -166,22 +218,25 @@ class SmartDiscoveryAgent(BaseAgent):
         if price <= 0:
             return []
 
-        metadata = {
-            "predicted_score": predicted_score,
-            "sentiment": float(stats.get("sentiment", 0.0)),
-            "rank": int(stats.get("rank", 0)),
-            "volume": volume,
-            "liquidity": liquidity,
-            "mempool_score": float(stats.get("mempool_score", 0.0)),
-            "price_context": price_context,
-        }
+        free_cash = float(getattr(portfolio, "free_cash", 0.0) or 0.0)
+        target_notional = max(10.0, min(free_cash * 0.01, liquidity * 0.005))
+        qty = target_notional / price if price > 0 else 0.0
+        if qty <= 0:
+            return []
+
+        metadata = {**stats, "price_context": price_context}
 
         return [
             {
                 "token": token,
                 "side": "buy",
-                "amount": 1.0,
+                "amount": qty,
                 "price": float(price),
                 "metadata": metadata,
             }
         ]
+
+    def close(self) -> None:
+        if self._executor:
+            self._executor.shutdown(wait=False)
+            self._executor = None

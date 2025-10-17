@@ -106,6 +106,23 @@ pub struct TradeLogged {
     pub uuid: ::prost::alloc::string::String,
     #[prost(int64, tag = "10")]
     pub trade_id: i64,
+    /// unix seconds (float64). Optional, omitted by older producers.
+    #[prost(double, tag = "11")]
+    pub created_at: f64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RuntimeLog {
+    #[prost(string, tag = "1")]
+    pub stage: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub detail: ::prost::alloc::string::String,
+    #[prost(double, tag = "3")]
+    pub ts: f64,
+    #[prost(string, tag = "4")]
+    pub level: ::prost::alloc::string::String,
+    #[prost(int32, tag = "5")]
+    pub actions: i32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -214,6 +231,8 @@ pub struct SystemMetricsCombined {
     pub cpu: f64,
     #[prost(double, tag = "2")]
     pub memory: f64,
+    #[prost(double, tag = "3")]
+    pub iter_ms: f64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -242,7 +261,7 @@ pub struct Event {
     pub topic: ::prost::alloc::string::String,
     #[prost(
         oneof = "event::Kind",
-        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
     )]
     pub kind: ::core::option::Option<event::Kind>,
 }
@@ -295,5 +314,7 @@ pub mod event {
         MemorySyncResponse(super::MemorySyncResponse),
         #[prost(message, tag = "23")]
         DepthDiff(super::DepthDiff),
+        #[prost(message, tag = "24")]
+        RuntimeLog(super::RuntimeLog),
     }
 }

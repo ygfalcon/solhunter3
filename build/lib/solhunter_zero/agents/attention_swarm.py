@@ -1,29 +1,41 @@
 from __future__ import annotations
 
-from typing import Sequence, Iterable, Dict, Any
+from typing import Sequence, Dict, Any
 
 from ..optional_imports import try_import
 import numpy as np
 
-
 class _TorchStub:
-    def __getattr__(self, name):
-        raise ImportError(
-            "torch is required for AttentionSwarm",
-        )
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple
+        raise ImportError("torch is required for AttentionSwarm")
 
 
 _torch = try_import("torch", stub=_TorchStub())
 if isinstance(_torch, _TorchStub):  # pragma: no cover - optional dependency
-    torch = nn = _torch  # type: ignore
-else:
-    torch = _torch  # type: ignore
+    torch = None
+
+    class _NNStub:
+        def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple
+            raise ImportError("torch is required for AttentionSwarm")
+
+    nn = _NNStub()  # type: ignore
+    ModuleBase = object
+else:  # pragma: no cover - optional dependency
+    torch = _torch  # type: ignore[assignment]
     import torch.nn as nn  # type: ignore
+    ModuleBase = nn.Module  # type: ignore[attr-defined]
 
 from ..regime import detect_regime
 from ..advanced_memory import AdvancedMemory
 from ..device import get_default_device
-class AttentionSwarm(nn.Module):
+
+
+def _require_torch() -> None:
+    if torch is None:  # pragma: no cover - optional dependency
+        raise ImportError("torch is required for AttentionSwarm")
+
+
+class AttentionSwarm(ModuleBase):
     """Tiny transformer predicting agent weights from ROI history."""
 
     def __init__(
@@ -33,8 +45,9 @@ class AttentionSwarm(nn.Module):
         hidden_dim: int = 32,
         num_layers: int = 2,
         *,
-        device: str = "cpu",
+        device: str | torch.device | None = None,
     ) -> None:
+        _require_torch()
         super().__init__()
         self.num_agents = int(num_agents)
         self.seq_len = int(seq_len)
@@ -43,11 +56,15 @@ class AttentionSwarm(nn.Module):
 
         self.device = get_default_device(device)
 
-        input_dim = num_agents + 2
-        nhead = max(1, min(4, input_dim))
-        if input_dim % nhead != 0:
-            nhead = 1
-        layer = nn.TransformerEncoderLayer(input_dim, nhead=nhead, dim_feedforward=hidden_dim)
+        input_dim = self.num_agents + 2
+        candidates = [h for h in (4, 3, 2, 1) if input_dim % h == 0]
+        nhead = candidates[0] if candidates else 1
+        layer = nn.TransformerEncoderLayer(
+            d_model=input_dim,
+            nhead=nhead,
+            dim_feedforward=self.hidden_dim,
+            batch_first=True,
+        )
         self.encoder = nn.TransformerEncoder(layer, num_layers)
         self.fc = nn.Linear(input_dim, num_agents)
         self.softmax = nn.Softmax(dim=-1)
@@ -57,14 +74,14 @@ class AttentionSwarm(nn.Module):
         if x.device != self.device:
             x = x.to(self.device)
         enc = self.encoder(x)
-        out = enc[:, -1]
+        out = enc[:, -1, :]
         return self.softmax(self.fc(out))
 
     def predict(self, seq: Sequence[Sequence[float]]) -> Sequence[float]:
         self.eval()
         with torch.no_grad():
-            t = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(self.device)
-            w = self(t)[0].detach().cpu()
+            t = torch.tensor(seq, dtype=torch.float32, device=self.device).unsqueeze(0)
+            w = self.forward(t)[0].detach().cpu()
             return [float(v) for v in w]
 
 
@@ -97,10 +114,15 @@ def make_training_data(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Construct dataset tensors from ``memory`` trades."""
 
+    _require_torch()
     trades = memory.list_trades()
     trades.sort(key=lambda t: t.timestamp)
     if not trades:
         raise ValueError("no trades in memory")
+    if len(trades) < window + seq_len:
+        raise ValueError(
+            f"not enough trades for window={window} and seq_len={seq_len}"
+        )
 
     windows = [trades[i:i + window] for i in range(0, len(trades) - window, window)]
     feats: list[list[float]] = []
@@ -119,8 +141,15 @@ def make_training_data(
         X_seq.append(feats[i:i + seq_len])
         target = feats[i + seq_len][: len(agents)]
         t = np.array(target, dtype=np.float32)
-        t = np.exp(t) / np.sum(np.exp(t))
-        y.append(t.tolist())
+        max_t = float(np.max(t))
+        exp_t = np.exp(t - max_t)
+        soft = exp_t / np.sum(exp_t)
+        y.append(soft.tolist())
+
+    if not X_seq or not y:
+        raise ValueError(
+            "not enough sequences after windowing; collect more trades or adjust parameters"
+        )
 
     X = torch.tensor(X_seq, dtype=torch.float32)
     y_t = torch.tensor(y, dtype=torch.float32)
@@ -140,13 +169,14 @@ def train_attention_swarm(
     device: str | None = None,
 ) -> AttentionSwarm:
     """Fit an :class:`AttentionSwarm` from ``memory`` trades."""
-    device = str(get_default_device(device))
+    _require_torch()
+    dev = get_default_device(device)
 
     X, y = make_training_data(memory, agents, window=window, seq_len=seq_len)
-    X = X.to(device)
-    y = y.to(device)
+    X = X.to(dev)
+    y = y.to(dev)
     model = AttentionSwarm(
-        len(agents), seq_len=seq_len, hidden_dim=hidden_dim, num_layers=num_layers, device=device
+        len(agents), seq_len=seq_len, hidden_dim=hidden_dim, num_layers=num_layers, device=dev
     )
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
@@ -167,14 +197,16 @@ def save_model(model: AttentionSwarm, path: str) -> None:
         "hidden_dim": model.hidden_dim,
         "num_layers": model.num_layers,
     }
+    _require_torch()
     torch.save({"cfg": cfg, "state": model.state_dict()}, path)
 
 
 def load_model(path: str, *, device: str | None = None) -> AttentionSwarm:
-    device = str(get_default_device(device))
-    obj = torch.load(path, map_location=device)
+    _require_torch()
+    dev = get_default_device(device)
+    obj = torch.load(path, map_location=dev)
     cfg = obj.get("cfg", {})
-    model = AttentionSwarm(**cfg, device=device)
+    model = AttentionSwarm(**cfg, device=dev)
     model.load_state_dict(obj["state"])
     model.eval()
     return model

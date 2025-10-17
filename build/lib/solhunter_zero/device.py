@@ -7,8 +7,15 @@ import os
 import platform
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
+from time import sleep
 from typing import Sequence
+
+try:  # pragma: no cover - fcntl unavailable on Windows
+    import fcntl
+except ImportError:  # pragma: no cover - platform specific
+    fcntl = None  # type: ignore[assignment]
 
 from .cache_paths import MPS_SENTINEL
 from .logging_utils import warn_once_per
@@ -21,6 +28,9 @@ METAL_EXTRA_INDEX = [
 ]
 
 INSTALL_TIMEOUT = 600
+WARN_THROTTLE_MINUTES = 5.0
+PIP_RETRIES = int(os.getenv("PIP_RETRIES", "3") or 3)
+PIP_BACKOFF_SECS = float(os.getenv("PIP_BACKOFF_SECS", "2.0") or 2.0)
 
 DEFAULT_TORCH_METAL_VERSION = "2.8.0"
 DEFAULT_TORCHVISION_METAL_VERSION = "0.23.0"
@@ -79,7 +89,7 @@ def load_torch_metal_versions() -> tuple[str, str]:
 TORCH_METAL_VERSION, TORCHVISION_METAL_VERSION = load_torch_metal_versions()
 
 
-def _read_sentinel_versions() -> tuple[str, str] | None:
+def _read_sentinel_versions() -> tuple[str, str, str] | None:
     """Return the torch and torchvision versions stored in the sentinel file.
 
     The helper returns ``None`` when the sentinel does not exist or is malformed
@@ -89,20 +99,46 @@ def _read_sentinel_versions() -> tuple[str, str] | None:
     if not MPS_SENTINEL.exists():
         return None
     try:
-        torch_ver, vision_ver = MPS_SENTINEL.read_text().splitlines()[:2]
+        torch_ver, vision_ver, py_tag = MPS_SENTINEL.read_text().splitlines()[:3]
     except Exception:
         return None
-    return torch_ver, vision_ver
+    return torch_ver, vision_ver, py_tag
 
 
 def _sentinel_matches() -> bool:
     versions = _read_sentinel_versions()
-    return versions == (TORCH_METAL_VERSION, TORCHVISION_METAL_VERSION)
+    py_tag = f"{sys.version_info.major}.{sys.version_info.minor}"
+    return versions == (TORCH_METAL_VERSION, TORCHVISION_METAL_VERSION, py_tag)
 
 
 def _write_sentinel() -> None:
     MPS_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
-    MPS_SENTINEL.write_text(f"{TORCH_METAL_VERSION}\n{TORCHVISION_METAL_VERSION}\n")
+    py_tag = f"{sys.version_info.major}.{sys.version_info.minor}"
+    MPS_SENTINEL.write_text(
+        f"{TORCH_METAL_VERSION}\n{TORCHVISION_METAL_VERSION}\n{py_tag}\n"
+    )
+
+
+_INSTALL_LOCK_PATH = MPS_SENTINEL.parent / ".torch_metal.install.lock"
+
+
+@contextmanager
+def _install_lock():
+    """Serialize installation attempts across concurrent processes."""
+
+    if fcntl is None:  # pragma: no cover - non-POSIX fallback
+        yield
+        return
+    _INSTALL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(_INSTALL_LOCK_PATH, os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 try:  # pragma: no cover - optional dependency
@@ -117,6 +153,8 @@ class InstallStatus:
 
     success: bool
     message: str
+    stdout: str | None = None
+    stderr: str | None = None
 
 
 def _run_with_timeout(cmd: Sequence[str], timeout: int = 600) -> InstallStatus:
@@ -130,15 +168,67 @@ def _run_with_timeout(cmd: Sequence[str], timeout: int = 600) -> InstallStatus:
         Maximum seconds to wait before aborting.
     """
 
+    cmd_str = " ".join(cmd)
     try:
-        subprocess.run(cmd, check=True, timeout=timeout)
-        return InstallStatus(True, "")
-    except subprocess.TimeoutExpired:
-        return InstallStatus(False, f"Command timed out after {timeout} seconds")
+        proc = subprocess.run(
+            cmd,
+            check=True,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+        return InstallStatus(
+            True,
+            cmd_str,
+            stdout=getattr(proc, "stdout", None),
+            stderr=getattr(proc, "stderr", None),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return InstallStatus(
+            False,
+            f"{cmd_str} | timed out after {timeout}s",
+            stdout=getattr(exc, "stdout", None),
+            stderr=getattr(exc, "stderr", None),
+        )
     except subprocess.CalledProcessError as exc:
-        return InstallStatus(False, f"Command failed with exit code {exc.returncode}")
+        return InstallStatus(
+            False,
+            f"{cmd_str} | exit={exc.returncode}",
+            stdout=exc.stdout,
+            stderr=exc.stderr,
+        )
     except Exception as exc:  # pragma: no cover - unexpected failure
-        return InstallStatus(False, str(exc))
+        return InstallStatus(False, f"{cmd_str} | {exc}", None, None)
+
+
+def _pip_with_retries(cmd: Sequence[str], *, timeout: int) -> InstallStatus:
+    """Run pip with limited retries/backoff for transient failures."""
+
+    last: InstallStatus | None = None
+    for attempt in range(1, max(1, PIP_RETRIES) + 1):
+        status = _run_with_timeout(cmd, timeout=timeout)
+        if status.success:
+            return status
+        last = status
+        if attempt < PIP_RETRIES:
+            sleep(PIP_BACKOFF_SECS * attempt)
+    return last or InstallStatus(False, "pip failed", None, None)
+
+
+def _metal_index_args() -> list[str]:
+    """Respect env overrides for pip indexes while keeping Metal wheel source."""
+
+    args: list[str] = []
+    idx = os.getenv("PIP_INDEX_URL")
+    if idx:
+        args += ["--index-url", idx]
+    extra = os.getenv("PIP_EXTRA_INDEX_URL")
+    if extra:
+        for url in extra.split():
+            args += ["--extra-index-url", url]
+    if os.getenv("DISABLE_TORCH_METAL_INDEX", "").lower() not in {"1", "true", "yes"}:
+        args += METAL_EXTRA_INDEX
+    return args
 
 
 def ensure_torch_with_metal() -> None:
@@ -152,12 +242,30 @@ def ensure_torch_with_metal() -> None:
     reinstallation attempts.
     """
 
-    if platform.system() != "Darwin" or platform.machine() != "arm64":
+    system = platform.system()
+    machine = platform.machine()
+    if system == "Darwin" and machine == "x86_64":
+        raise RuntimeError(
+            "Running under Rosetta (x86_64); Metal is unavailable. Launch with: arch -arm64"
+        )
+    if system != "Darwin" or machine != "arm64":
         return
 
-    logger = logging.getLogger(__name__)
+    log = logger
 
     global torch
+
+    if _sentinel_matches():
+        try:
+            mod = sys.modules.get("torch")
+            if mod is None:
+                importlib.invalidate_caches()
+                mod = importlib.import_module("torch")
+            torch = mod
+            if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                return
+        except Exception:
+            pass
     try:
         needs_install = not (
             torch is not None
@@ -168,55 +276,115 @@ def ensure_torch_with_metal() -> None:
         needs_install = True
 
     if needs_install:
+        minimal_cmd = (
+            f"{sys.executable} -m pip install "
+            f"torch=={TORCH_METAL_VERSION} torchvision=={TORCHVISION_METAL_VERSION} "
+            + " ".join(_metal_index_args())
+        )
         cmd = [
             sys.executable,
             "-m",
             "pip",
             "install",
+            "--upgrade",
+            "--disable-pip-version-check",
+            "--no-input",
+            "-q",
             f"torch=={TORCH_METAL_VERSION}",
             f"torchvision=={TORCHVISION_METAL_VERSION}",
-            *METAL_EXTRA_INDEX,
+            *_metal_index_args(),
+            "--upgrade-strategy",
+            "only-if-needed",
         ]
         install_cmd = " ".join(cmd)
-        status = _run_with_timeout(cmd, timeout=INSTALL_TIMEOUT)
+        with _install_lock():
+            status = _pip_with_retries(cmd, timeout=INSTALL_TIMEOUT)
         if not status.success:
-            logger.error("PyTorch installation failed: %s", status.message)
-            logger.error("Install manually with: %s", install_cmd)
+            log.error("PyTorch installation failed: %s", status.message)
+            if status.stderr:
+                log.error("Installer stderr:\n%s", status.stderr.strip())
+            if status.stdout:
+                log.debug("Installer stdout:\n%s", status.stdout.strip())
+            log.error("Install manually with: %s", install_cmd)
+            log.error("Minimal command (no extra flags): %s", minimal_cmd)
+            log.error(
+                "If Python was recently upgraded, delete %s or pin the Python minor version before retrying.",
+                MPS_SENTINEL,
+            )
             raise RuntimeError("Failed to install MPS-enabled PyTorch")
 
         importlib.invalidate_caches()
+        for mod in ("torch", "torchvision"):
+            if mod in sys.modules:
+                del sys.modules[mod]
         torch = importlib.import_module("torch")
 
         if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
-            logger.warning("MPS backend not available; attempting to reinstall Metal wheel")
+            log.warning("MPS backend not available; attempting to reinstall Metal wheel")
             reinstall_cmd = [
                 sys.executable,
                 "-m",
                 "pip",
                 "install",
+                "--upgrade",
+                "--disable-pip-version-check",
+                "--no-input",
+                "-q",
                 "--force-reinstall",
                 f"torch=={TORCH_METAL_VERSION}",
                 f"torchvision=={TORCHVISION_METAL_VERSION}",
-                *METAL_EXTRA_INDEX,
+                *_metal_index_args(),
+                "--upgrade-strategy",
+                "only-if-needed",
             ]
             reinstall_cmd_str = " ".join(reinstall_cmd)
-            status = _run_with_timeout(reinstall_cmd, timeout=INSTALL_TIMEOUT)
+            with _install_lock():
+                status = _pip_with_retries(reinstall_cmd, timeout=INSTALL_TIMEOUT)
             if not status.success:
-                logger.error("PyTorch reinstallation failed: %s", status.message)
-                logger.error("Install manually with: %s", reinstall_cmd_str)
+                log.error("PyTorch reinstallation failed: %s", status.message)
+                if status.stderr:
+                    log.error("Installer stderr:\n%s", status.stderr.strip())
+                if status.stdout:
+                    log.debug("Installer stdout:\n%s", status.stdout.strip())
+                log.error("Install manually with: %s", reinstall_cmd_str)
+                log.error("Minimal command (no extra flags): %s", minimal_cmd)
+                log.error(
+                    "If Python was recently upgraded, delete %s or pin the Python minor version before retrying.",
+                    MPS_SENTINEL,
+                )
                 raise RuntimeError("Failed to reinstall MPS-enabled PyTorch")
             importlib.invalidate_caches()
-            torch = importlib.reload(torch)
+            for mod in ("torch", "torchvision"):
+                if mod in sys.modules:
+                    del sys.modules[mod]
+            torch = importlib.import_module("torch")
             if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
-                logger.error(
+                log.error(
                     "MPS backend still not available after installation. Install manually with: %s",
                     reinstall_cmd_str,
                 )
                 raise RuntimeError(
                     "MPS backend still not available. Install manually with: pip install "
                     f"torch=={TORCH_METAL_VERSION} torchvision=={TORCHVISION_METAL_VERSION} "
-                    + " ".join(METAL_EXTRA_INDEX),
+                    + " ".join(_metal_index_args()),
                 )
+
+    if os.getenv("STRICT_TORCH_METAL_VERSIONS", "").lower() in {"1", "true", "yes"}:
+        try:
+            tv = getattr(torch, "__version__", "")
+            import torchvision as _vision  # noqa: F401
+
+            vv = getattr(_vision, "__version__", "")
+            if not (tv.startswith(TORCH_METAL_VERSION) and vv.startswith(TORCHVISION_METAL_VERSION)):
+                logger.warning(
+                    "Installed torch/torchvision versions (%s/%s) differ from requested (%s/%s)",
+                    tv,
+                    vv,
+                    TORCH_METAL_VERSION,
+                    TORCHVISION_METAL_VERSION,
+                )
+        except Exception:
+            logger.debug("Version sanity check failed", exc_info=True)
 
     if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
         raise RuntimeError("MPS backend still not available after installation attempts")
@@ -229,8 +397,11 @@ def detect_gpu(_attempt_install: bool = True) -> bool:
     """Return ``True`` when a supported GPU backend is available."""
 
     if torch is None:
-        logging.getLogger(__name__).warning(
+        warn_once_per(
+            WARN_THROTTLE_MINUTES,
+            "torch-missing",
             "PyTorch is not installed; GPU unavailable",
+            logger=logging.getLogger(__name__),
         )
         return False
     try:
@@ -238,53 +409,84 @@ def detect_gpu(_attempt_install: bool = True) -> bool:
         if system == "Darwin":
             machine = platform.machine()
             if machine == "x86_64":
-                logging.getLogger(__name__).warning(
+                warn_once_per(
+                    WARN_THROTTLE_MINUTES,
+                    "rosetta",
                     "Running under Rosetta (x86_64); GPU unavailable",
+                    logger=logging.getLogger(__name__),
                 )
                 return False
             install_hint = (
                 "Install with: pip install "
                 f"torch=={TORCH_METAL_VERSION} torchvision=={TORCHVISION_METAL_VERSION} "
-                "--extra-index-url https://download.pytorch.org/whl/metal"
+                + " ".join(_metal_index_args())
             )
             if not getattr(torch.backends, "mps", None):
-                logging.getLogger(__name__).warning(
-                    "MPS backend not present; GPU unavailable. %s", install_hint
+                warn_once_per(
+                    WARN_THROTTLE_MINUTES,
+                    "mps-missing",
+                    "MPS backend not present; GPU unavailable. %s",
+                    install_hint,
+                    logger=logging.getLogger(__name__),
                 )
                 return False
             if not torch.backends.mps.is_built():
-                logging.getLogger(__name__).warning(
-                    "MPS backend not built; GPU unavailable. %s", install_hint
+                warn_once_per(
+                    WARN_THROTTLE_MINUTES,
+                    "mps-not-built",
+                    "MPS backend not built; GPU unavailable. %s",
+                    install_hint,
+                    logger=logging.getLogger(__name__),
                 )
                 return False
             if "PYTORCH_ENABLE_MPS_FALLBACK" not in os.environ:
                 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
             elif os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
-                logging.getLogger(__name__).warning(
+                warn_once_per(
+                    WARN_THROTTLE_MINUTES,
+                    "mps-fallback",
                     "PYTORCH_ENABLE_MPS_FALLBACK is not set to '1'; GPU unavailable",
+                    logger=logging.getLogger(__name__),
                 )
                 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
             if not torch.backends.mps.is_available():
-                logging.getLogger(__name__).warning(
-                    "MPS backend not available; GPU unavailable. %s", install_hint
+                warn_once_per(
+                    WARN_THROTTLE_MINUTES,
+                    "mps-not-available",
+                    "MPS backend not available; GPU unavailable. %s",
+                    install_hint,
+                    logger=logging.getLogger(__name__),
                 )
                 return False
             try:
                 torch.ones(1, device="mps").cpu()
             except Exception:
-                logging.getLogger(__name__).exception(
+                warn_once_per(
+                    WARN_THROTTLE_MINUTES,
+                    "mps-op-failed",
                     "Tensor operation failed on mps backend",
+                    logger=logging.getLogger(__name__),
+                    exc_info=True,
                 )
                 return False
             return True
         if not torch.cuda.is_available():
-            logging.getLogger(__name__).warning("CUDA backend not available")
+            warn_once_per(
+                WARN_THROTTLE_MINUTES,
+                "cuda-not-available",
+                "CUDA backend not available",
+                logger=logging.getLogger(__name__),
+            )
             return False
         try:
             torch.ones(1, device="cuda").cpu()
         except Exception:
-            logging.getLogger(__name__).exception(
+            warn_once_per(
+                WARN_THROTTLE_MINUTES,
+                "cuda-op-failed",
                 "Tensor operation failed on cuda backend",
+                logger=logging.getLogger(__name__),
+                exc_info=True,
             )
             return False
         return True
@@ -346,12 +548,14 @@ def get_default_device(device: str | "torch.device" | None = "auto") -> "torch.d
     if torch is None:
         raise RuntimeError("PyTorch is required for device selection")
     if device is None or (isinstance(device, str) and device == "auto"):
-        if platform.system() == "Darwin" and torch.backends.mps.is_available():
+        if (
+            platform.system() == "Darwin"
+            and getattr(torch.backends, "mps", None)
+            and torch.backends.mps.is_available()
+        ):
             return torch.device("mps")
         if torch.cuda.is_available():
             return torch.device("cuda")
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
         return torch.device("cpu")
     if isinstance(device, str) and device not in ("cpu", "mps") and not torch.cuda.is_available():
         return torch.device("cpu")
@@ -404,14 +608,19 @@ def verify_gpu() -> tuple[bool, str]:
     """
 
     hint = (
-        "No GPU backend detected. Install a Metal-enabled PyTorch build or run "
-        "python -c 'from solhunter_zero.macos_setup import prepare_macos_env; prepare_macos_env()' to enable GPU support"
+        "No GPU backend detected. On Apple Silicon, install Metal-enabled PyTorch "
+        f"(torch=={TORCH_METAL_VERSION} torchvision=={TORCHVISION_METAL_VERSION} "
+        + " ".join(_metal_index_args())
+        + "). On NVIDIA, install CUDA-enabled PyTorch."
     )
 
     env_available = os.environ.get("SOLHUNTER_GPU_AVAILABLE")
     env_device = os.environ.get("SOLHUNTER_GPU_DEVICE")
     if env_available is not None:
-        if env_available == "1":
+        env = ensure_gpu_env()
+        env_status = env.get("SOLHUNTER_GPU_AVAILABLE", env_available)
+        env_device = env.get("SOLHUNTER_GPU_DEVICE", env_device)
+        if env_status == "1":
             return True, f"Using GPU device: {env_device or 'unknown'}"
         return False, hint
 
@@ -425,7 +634,7 @@ def verify_gpu() -> tuple[bool, str]:
             ensure_gpu_env()
             return False, f"GPU detected but unusable: {exc}"
         env = ensure_gpu_env()
-        return True, f"Using GPU device: {env.get('TORCH_DEVICE', dev)}"
+        return True, f"Using GPU device: {env.get('TORCH_DEVICE', str(dev))}"
     except Exception as exc:  # pragma: no cover - defensive
         ensure_gpu_env()
         return False, str(exc)
