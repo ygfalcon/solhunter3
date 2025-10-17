@@ -332,7 +332,7 @@ class AgentManager:
 
         self.use_attention_swarm = bool(cfg.use_attention_swarm)
         self.attention_swarm: AttentionSwarm | None = None
-        self._attn_history: list[list[float]] = []
+        self._attn_history: dict[str, list[list[float]]] = {}
         if self.use_attention_swarm and cfg.attention_model_path:
             try:
                 attn_device = os.getenv(
@@ -353,7 +353,7 @@ class AgentManager:
         self._rl_window_sec = max(vote_window_ms / 1000.0, 0.1)
         self._rl_last_meta: Dict[str, Any] = {}
         self._rl_last_hash: str | None = None
-        self._rl_disabled = _parse_bool_env("RL_WEIGHTS_DISABLED", True)
+        self._rl_disabled = _parse_bool_env("RL_WEIGHTS_DISABLED", False)
 
         self.use_rl_weights = bool(cfg.use_rl_weights) and not self._rl_disabled
         self.rl_weight_agent: RLWeightAgent | None = None
@@ -822,7 +822,8 @@ class AgentManager:
                 else 0.0
             )
             reg_val = 1.0 if regime == "bull" else -1.0 if regime == "bear" else 0.0
-            self._attn_history.append(
+            history = self._attn_history.setdefault(token, [])
+            history.append(
                 [rois.get(a.name, 0.0) for a in agents] + [reg_val, vol]
             )
             limit = getattr(self.attention_swarm, "seq_len", 64)
@@ -831,10 +832,15 @@ class AgentManager:
             except (TypeError, ValueError):
                 limit = 64
             limit = max(limit, 1) * 4
-            if len(self._attn_history) > limit:
-                self._attn_history = self._attn_history[-limit:]
-            if len(self._attn_history) >= self.attention_swarm.seq_len:
-                seq = self._attn_history[-self.attention_swarm.seq_len :]
+            if len(history) > limit:
+                del history[:-limit]
+            seq_len = getattr(self.attention_swarm, "seq_len", 0) or 0
+            try:
+                seq_len = int(seq_len)
+            except (TypeError, ValueError):
+                seq_len = 0
+            if seq_len > 0 and len(history) >= seq_len:
+                seq = history[-seq_len:]
                 pred = self.attention_swarm.predict(seq)
                 weights = {a.name: float(pred[i]) for i, a in enumerate(agents)}
                 publish("weights_updated", WeightsUpdated(weights=dict(weights)))
@@ -1344,6 +1350,38 @@ class AgentManager:
             )
         results = []
         if self.depth_service and token not in self._event_executors:
+            try:
+                max_executors = int(os.getenv("EVENT_EXECUTOR_LIMIT", "64") or 64)
+            except (TypeError, ValueError):
+                max_executors = 64
+            if max_executors > 0 and len(self._event_executors) >= max_executors:
+                try:
+                    old_token, old_task = next(iter(self._event_tasks.items()))
+                except StopIteration:
+                    old_token = None
+                    old_task = None
+                if old_token:
+                    if old_task and not old_task.done():
+                        old_task.cancel()
+                    self._event_tasks.pop(old_token, None)
+                    old_exec = self._event_executors.pop(old_token, None)
+                    try:
+                        getattr(self.executor, "_executors", {}).pop(old_token, None)
+                    except Exception:
+                        logger.debug(
+                            "AgentManager: failed to remove executor mapping for %s",
+                            old_token,
+                            exc_info=True,
+                        )
+                    if old_exec and hasattr(old_exec, "stop"):
+                        try:
+                            stop_result = old_exec.stop()
+                            if inspect.isawaitable(stop_result):
+                                run_coro(stop_result)
+                        except Exception:
+                            logger.debug(
+                                "AgentManager: failed to stop executor for %s", old_token, exc_info=True
+                            )
             execer = EventExecutor(
                 token,
                 priority_rpc=getattr(self.executor, "priority_rpc", None),
@@ -1848,23 +1886,40 @@ class AgentManager:
             return {}
         if not isinstance(data, dict):
             return {}
-        return {str(k): float(v) for k, v in data.items()}
+        weights: Dict[str, float] = {}
+        for k, v in data.items():
+            fv = _as_float(v)
+            if fv is None:
+                continue
+            weights[str(k)] = fv
+        return weights
 
     def _load_weight_configs(self, paths: Iterable[str]) -> Dict[str, Dict[str, float]]:
         configs: Dict[str, Dict[str, float]] = {}
         for p in paths:
             w = self._load_weights(p)
             if w:
-                configs[os.path.basename(p)] = w
+                abs_path = os.path.abspath(os.fspath(p))
+                try:
+                    key = os.path.relpath(abs_path, os.fspath(ROOT))
+                except Exception:
+                    key = os.path.basename(abs_path)
+                configs[key] = w
         return configs
 
     def save_weights(self, path: str | os.PathLike | None = None) -> None:
         path = path or self.weights_path
         if not path:
+            logger.info("No weights_path configured; skipping weight save")
             return
         if str(path).endswith(".toml"):
-            lines = [f"{k} = {v}" for k, v in self.weights.items()]
-            content = "\n".join(lines) + "\n"
+            lines = []
+            for k, v in self.weights.items():
+                fv = _as_float(v)
+                if fv is None:
+                    continue
+                lines.append(f"{k} = {fv}")
+            content = ("\n".join(lines) + "\n") if lines else ""
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(content)
         else:
