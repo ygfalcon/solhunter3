@@ -10,6 +10,9 @@ from solhunter_zero import token_discovery as td
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
+    bird1 = "So11111111111111111111111111111111111111112"
+    bird2 = "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU"
+
     class FakeResp:
         status = 200
 
@@ -44,7 +47,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
                 "data": {
                     "tokens": [
                         {
-                            "address": "bird1",
+                            "address": bird1,
                             "name": "Bird One",
                             "symbol": "B1",
                             "v24hUSD": 200000,
@@ -53,7 +56,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
                             "v24hChangePercent": 5.0,
                         },
                         {
-                            "address": "bird2",
+                            "address": bird2,
                             "name": "Bird Two",
                             "symbol": "B2",
                             "v24hUSD": 80000,
@@ -73,7 +76,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
         return fake_session
 
     monkeypatch.setattr(td, "get_session", get_session)
-    monkeypatch.setattr(td, "fetch_trending_tokens_async", lambda: ["bird2", "trend_only"])
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", lambda: [bird2, "trend_only"])
 
     async def fake_mempool(_rpc_url, threshold):
         _ = threshold
@@ -97,7 +100,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
     assert len(results) <= 3
     assert addresses[0] == "memToken"
-    assert set(addresses) >= {"bird1", "bird2", "memToken"}
+    assert set(addresses) >= {bird1, bird2, "memToken"}
     assert results[0]["sources"] == ["mempool"]
     assert any("birdeye" in r["sources"] for r in results)
     assert len(fake_session.calls) == 1
