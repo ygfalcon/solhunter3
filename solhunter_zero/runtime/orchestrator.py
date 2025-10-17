@@ -10,6 +10,7 @@ import socket
 import sys
 from contextlib import closing, suppress
 from dataclasses import dataclass
+from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Optional
 
@@ -63,6 +64,45 @@ install_uvloop()
 log = logging.getLogger(__name__)
 
 
+def _runtime_artifact_dir() -> Path:
+    """Return the directory where runtime artifacts should be written."""
+
+    root = Path(os.getenv("RUNTIME_ARTIFACT_ROOT", "artifacts"))
+    run_id_raw = (
+        os.getenv("RUNTIME_RUN_ID")
+        or os.getenv("RUN_ID")
+        or os.getenv("MODE")
+        or "prelaunch"
+    )
+    run_id_norm = run_id_raw.replace("\\", "/").strip()
+    parts = [part for part in run_id_norm.split("/") if part and part not in {".", ".."}]
+    if not parts:
+        parts = ["prelaunch"]
+    artifact_dir = root.joinpath(*parts)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir
+
+
+def _publish_ui_url_to_redis(ui_url: str) -> None:
+    """Publish the UI URL to Redis using durable and TTL keys."""
+
+    redis_url = os.getenv("REDIS_URL") or "redis://127.0.0.1:6379/0"
+    if not redis_url:
+        return
+    try:
+        import redis  # type: ignore[import-not-found]
+    except Exception:  # pragma: no cover - redis optional in some builds
+        log.debug("Redis client unavailable; skipping UI URL publish")
+        return
+
+    try:
+        client = redis.Redis.from_url(redis_url, socket_timeout=1.0)  # type: ignore[attr-defined]
+        client.set("solhunter:ui:url", ui_url)
+        client.setex("solhunter:ui:url:latest", 600, ui_url)
+    except Exception as exc:  # pragma: no cover - redis connectivity issues
+        log.warning("Failed to publish UI URL to redis at %s: %s", redis_url, exc)
+
+
 @dataclass
 class RuntimeHandles:
     ui_app: Any | None = None
@@ -85,6 +125,44 @@ class RuntimeOrchestrator:
         self.run_http = run_http
         self.handles = RuntimeHandles(tasks=[])
         self._closed = False
+
+    def _emit_ui_ready(self, host: str, port: int) -> None:
+        """Log and persist UI readiness details for downstream consumers."""
+
+        url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+        scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
+        ui_url = f"{scheme}://{url_host}:{port}"
+        ws_urls: dict[str, str] = {}
+        if hasattr(_ui_module, "get_ws_urls"):
+            try:
+                ws_urls = _ui_module.get_ws_urls()  # type: ignore[attr-defined]
+            except Exception:
+                ws_urls = {}
+        rl_url = ws_urls.get("rl") or "-"
+        events_url = ws_urls.get("events") or "-"
+        logs_url = ws_urls.get("logs") or "-"
+        readiness_line = (
+            "UI_READY "
+            f"url={ui_url} "
+            f"rl_ws={rl_url} "
+            f"events_ws={events_url} "
+            f"logs_ws={logs_url}"
+        )
+        log.info(readiness_line)
+        artifact_dir: Path | None = None
+        try:
+            artifact_dir = _runtime_artifact_dir()
+        except Exception as exc:  # pragma: no cover - filesystem issues
+            log.warning("Failed to prepare UI artifact directory: %s", exc)
+        if artifact_dir is not None:
+            try:
+                (artifact_dir / "ui_url.txt").write_text(ui_url, encoding="utf-8")
+            except Exception as exc:  # pragma: no cover - filesystem issues
+                log.warning("Failed to write UI URL artifact: %s", exc)
+        try:
+            _publish_ui_url_to_redis(ui_url)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("Error publishing UI URL to redis: %s", exc)
 
     async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
         try:
@@ -218,6 +296,10 @@ class RuntimeOrchestrator:
                     server.daemon_threads = True
                     self.handles.ui_server = server
                     port_queue.put(port)
+                    try:
+                        self._emit_ui_ready(host, port)
+                    except Exception:
+                        log.exception("Failed to emit UI readiness signal")
                     server.serve_forever()
                 except Exception:
                     with suppress(Exception):
