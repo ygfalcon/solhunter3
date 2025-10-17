@@ -192,6 +192,7 @@ class ExecutionAgent(BaseAgent):
 
     async def execute(self, action: Dict[str, Any]) -> Any:
         token = str(action.get("token", ""))
+        amount = float(action.get("amount", 0.0))
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "ExecutionAgent: received action -> %s",
@@ -311,7 +312,7 @@ class ExecutionAgent(BaseAgent):
                 tx = await self._create_signed_tx(
                     action["token"],
                     action["side"],
-                    action.get("amount", 0.0),
+                    amount,
                     action.get("price", 0.0),
                     endpoint,
                     priority_fee=priority_fee,
@@ -397,7 +398,7 @@ class ExecutionAgent(BaseAgent):
                     len(endpoints),
                 )
 
-            amount = action.get("amount", 0.0)
+            amount = float(action.get("amount", 0.0))
             pri_idx = int(action.get("priority", 0))
             if (
                 self.priority_fees
