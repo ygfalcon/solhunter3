@@ -158,6 +158,76 @@ message MemorySyncResponse {
   bytes index = 2;
 }
 
+message ActionProposal {
+  string token = 1;
+  string side = 2;
+  double size = 3;
+  double score = 4;
+  string agent = 5;
+  double price = 6;
+}
+
+message DecisionRationale {
+  string agent = 1;
+  repeated string agents = 2;
+  double score = 3;
+  double confidence = 4;
+  double conviction_delta = 5;
+  string snapshot_hash = 6;
+}
+
+message ActionDecision {
+  string token = 1;
+  string side = 2;
+  double size = 3;
+  double price = 4;
+  DecisionRationale rationale = 5;
+}
+
+message DecisionSummary {
+  string token = 1;
+  uint32 count = 2;
+  uint32 buys = 3;
+  uint32 sells = 4;
+}
+
+message DecisionMetrics {
+  double window_sec = 1;
+  uint32 count = 2;
+  double decision_rate = 3;
+  uint32 buys = 4;
+  uint32 sells = 5;
+  double avg_size = 6;
+  double ttf_decision = 7;
+}
+
+message DexLatencyUpdate {
+  map<string, double> latencies = 1;
+}
+
+message RuntimeStageChanged {
+  string stage = 1;
+  bool ok = 2;
+  string detail = 3;
+}
+
+message ScalarMetric {
+  double value = 1;
+}
+
+message StartupComplete {
+  double startup_duration_ms = 1;
+}
+
+message VirtualPnL {
+  string order_id = 1;
+  string mint = 2;
+  string snapshot_hash = 3;
+  double realized_usd = 4;
+  double unrealized_usd = 5;
+  double ts = 6;
+}
+
 message Event {
   string topic = 1;
   oneof kind {
@@ -185,5 +255,14 @@ message Event {
     DepthDiff depth_diff = 23;
 
     RuntimeLog runtime_log = 24;
+    ActionProposal action_proposal = 25;
+    ActionDecision action_decision = 26;
+    DecisionSummary decision_summary = 27;
+    DecisionMetrics decision_metrics = 28;
+    DexLatencyUpdate dex_latency_update = 29;
+    RuntimeStageChanged runtime_stage_changed = 30;
+    ScalarMetric scalar_metric = 31;
+    StartupComplete startup_complete = 32;
+    VirtualPnL virtual_pnl = 33;
   }
 }
