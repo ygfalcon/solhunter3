@@ -1,67 +1,102 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, TypedDict, Literal
+import inspect
 import math
 import re
 
 
-_THRESHOLD_KEYS = ("threshold", "limit", "target")
-_MIN_KEYS = ("min_", "minimum", "lower", "floor")
-_MAX_KEYS = ("max_", "maximum", "upper", "ceiling")
+_THRESHOLD_KEYS = ("threshold", "limit")
+_BOUND_NOISE = {"min", "max", "minimum", "maximum", "lower", "upper", "floor", "ceiling"}
+_MIN_KEYS = ("min_", "minimum_", "lower_", "floor_")
+_MAX_KEYS = ("max_", "maximum_", "upper_", "ceiling_")
+
+_WORD = re.compile(r"[A-Za-z0-9]+")
+
+
+class RequirementEntry(TypedDict, total=False):
+    parameter: str
+    kind: Literal["min", "max", "threshold"]
+    target: float
+    metric: Optional[str]
+    current: Optional[float]
+    delta: float
+    met: bool
 
 
 def _is_threshold_attr(name: str) -> bool:
     lower = name.lower()
-    if any(key in lower for key in _THRESHOLD_KEYS):
+    words = set(_WORD.findall(lower))
+    if words & set(_THRESHOLD_KEYS):
         return True
-    if lower.startswith(_MIN_KEYS) or lower.startswith(_MAX_KEYS):
+    if lower.startswith(_MIN_KEYS) or lower.endswith("_min"):
         return True
-    if lower.endswith("_threshold") or lower.endswith("_limit"):
+    if lower.startswith(_MAX_KEYS) or lower.endswith("_max"):
         return True
     return False
 
 
+def _safe_numeric_members(obj: Any) -> Dict[str, Any]:
+    fields: Dict[str, Any] = {}
+    try:
+        for name, val in inspect.getmembers_static(obj):
+            if not name.startswith("_"):
+                fields[name] = val
+    except Exception:
+        try:
+            fields.update({k: v for k, v in vars(obj).items() if not k.startswith("_")})
+        except Exception:
+            pass
+    return fields
+
+
 def _extract_numeric_fields(agent: Any) -> Dict[str, float]:
     fields: Dict[str, float] = {}
-    for attr in dir(agent):
-        if attr.startswith("_"):
-            continue
+    for attr, value in _safe_numeric_members(agent).items():
         if not _is_threshold_attr(attr):
             continue
-        try:
-            value = getattr(agent, attr)
-        except Exception:
+        if callable(value):
             continue
-        if isinstance(value, (int, float)) and math.isfinite(value):
-            fields[attr] = float(value)
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric_value):
+            fields[attr] = numeric_value
     return fields
 
 
 def _normalise_name(name: str) -> str:
     tokens = re.split(r"[_\-\s]+", name.lower())
-    filtered = [tok for tok in tokens if tok and tok not in {"threshold", "limit", "min", "max", "minimum", "maximum"}]
+    filtered = [tok for tok in tokens if tok and tok not in _BOUND_NOISE and tok not in _THRESHOLD_KEYS]
     return "_".join(filtered) or name.lower()
 
 
-def _match_metric(field: str, metrics: Mapping[str, Any]) -> Optional[str]:
+def _normalize_metric_keys(metrics: Mapping[str, Any]) -> Dict[str, str]:
+    return {_normalise_name(name): name for name in metrics.keys()}
+
+
+def _match_metric(field: str, metrics: Mapping[str, Any], norm_map: Mapping[str, str]) -> Optional[str]:
     if not metrics:
         return None
-    field_key = _normalise_name(field)
-    if not field_key or field_key == field.lower():
-        field_key = field_key.replace("threshold", "").strip("_")
-    if not field_key:
-        field_key = "roi"
-    for metric_name in metrics.keys():
-        metric_key = metric_name.lower()
-        if field_key and field_key in metric_key:
-            return metric_name
+    field_key = _normalise_name(field) or "roi"
+
+    if field_key in norm_map:
+        return norm_map[field_key]
+
+    for norm_name, original in norm_map.items():
+        haystack = f"_{norm_name}_"
+        needle = f"_{field_key}_"
+        if needle in haystack or norm_name.startswith(field_key + "_") or norm_name.endswith("_" + field_key):
+            return original
+
     # fallbacks for common metric types
     if "roi" in field.lower():
-        for key in ("avg_roi", "max_roi", "min_roi"):
+        for key in ("avg_roi", "max_roi", "min_roi", "roi"):
             if key in metrics:
                 return key
-    if "success" in field.lower() or "confidence" in field.lower():
-        for key in ("avg_success", "success", "success_prob"):
+    if any(token in field.lower() for token in ("success", "confidence", "prob")):
+        for key in ("avg_success", "success", "success_prob", "confidence"):
             if key in metrics:
                 return key
     if "volume" in field.lower():
@@ -70,6 +105,10 @@ def _match_metric(field: str, metrics: Mapping[str, Any]) -> Optional[str]:
                 return key
     if "liquidity" in field.lower():
         for key in ("liquidity", "avg_liquidity"):
+            if key in metrics:
+                return key
+    if "price" in field.lower():
+        for key in ("avg_price", "price"):
             if key in metrics:
                 return key
     return None
@@ -84,23 +123,29 @@ def _classify(field: str) -> str:
     return "threshold"
 
 
-def collect_agent_requirements(agent: Any, metrics: Mapping[str, Any] | None = None) -> List[Dict[str, Any]]:
+def collect_agent_requirements(agent: Any, metrics: Mapping[str, Any] | None = None) -> List[RequirementEntry]:
     """Return a structured list of numeric requirements for ``agent``."""
 
     metrics = metrics or {}
     fields = _extract_numeric_fields(agent)
-    requirements: List[Dict[str, Any]] = []
+    norm_map = _normalize_metric_keys(metrics) if metrics else {}
+    requirements: List[RequirementEntry] = []
     for field, value in fields.items():
         kind = _classify(field)
-        metric_key = _match_metric(field, metrics)
+        metric_key = _match_metric(field, metrics, norm_map)
         current = None
         if metric_key is not None:
             metric_value = metrics.get(metric_key)
             try:
-                current = float(metric_value)
+                metric_float = float(metric_value)
             except (TypeError, ValueError):
-                current = None
-        entry: Dict[str, Any] = {
+                metric_float = None
+            else:
+                if not math.isfinite(metric_float):
+                    metric_float = None
+            if metric_float is not None:
+                current = metric_float
+        entry: RequirementEntry = {
             "parameter": field,
             "kind": kind,
             "target": value,
