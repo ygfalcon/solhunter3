@@ -43,6 +43,15 @@ Usage: bash scripts/launch_live.sh --env <env-file> --micro <0|1> [--canary] --b
 EOF
 }
 
+need_val() {
+  # ensure a flag expecting a value actually has one
+  if [[ -z ${2:-} || ${2:-} == --* ]]; then
+    echo "Flag $1 requires a value" >&2
+    usage
+    exit 1
+  fi
+}
+
 ENV_FILE=""
 MICRO_FLAG=""
 CANARY_MODE=0
@@ -56,11 +65,11 @@ declare -a POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case $1 in
     --env)
-      ENV_FILE=$2
+      need_val "$1" "${2:-}"; ENV_FILE=$2
       shift 2
       ;;
     --micro)
-      MICRO_FLAG=$2
+      need_val "$1" "${2:-}"; MICRO_FLAG=$2
       shift 2
       ;;
     --canary)
@@ -68,23 +77,23 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --budget)
-      CANARY_BUDGET=$2
+      need_val "$1" "${2:-}"; CANARY_BUDGET=$2
       shift 2
       ;;
     --risk)
-      CANARY_RISK=$2
+      need_val "$1" "${2:-}"; CANARY_RISK=$2
       shift 2
       ;;
     --preflight)
-      PREFLIGHT_RUNS=$2
+      need_val "$1" "${2:-}"; PREFLIGHT_RUNS=$2
       shift 2
       ;;
     --soak)
-      SOAK_DURATION=$2
+      need_val "$1" "${2:-}"; SOAK_DURATION=$2
       shift 2
       ;;
     --config)
-      CONFIG_PATH=$2
+      need_val "$1" "${2:-}"; CONFIG_PATH=$2
       shift 2
       ;;
     -h|--help)
@@ -155,8 +164,9 @@ fi
 log_info "Starting launch_live with env=$ENV_FILE micro=$MICRO_FLAG canary=$CANARY_MODE preflight_runs=$PREFLIGHT_RUNS soak=${SOAK_DURATION}s"
 
 log_info "Ensuring Python dependencies are installed"
-if ! python3 -m scripts.deps >/dev/null; then
-  log_warn "Failed to install Python dependencies"
+DEPS_LOG="$LOG_DIR/deps_install.log"
+if ! python3 -m scripts.deps 2>&1 | tee "$DEPS_LOG" >/dev/null; then
+  log_warn "Failed to install Python dependencies (see $DEPS_LOG)"
   exit $EXIT_DEPS
 fi
 
@@ -287,11 +297,16 @@ import asyncio
 from solhunter_zero.production import ConnectivityChecker
 async def _check():
     checker = ConnectivityChecker()
-    for target in checker.targets:
-        if target.get("name") == "redis":
-            result = await checker._probe_redis(target["name"], target["url"])
-            if not result.ok:
-                raise SystemExit(1)
+    try:
+        ok = await checker.check("redis")
+        if not ok:
+            raise SystemExit(1)
+    except AttributeError:
+        for target in checker.targets:
+            if target.get("name") == "redis":
+                result = await checker._probe_redis(target["name"], target["url"])
+                if not result.ok:
+                    raise SystemExit(1)
 asyncio.run(_check())
 PY
   fi
@@ -375,12 +390,13 @@ print_log_excerpt() {
   fi
 }
 
+READY_TIMEOUT="${READY_TIMEOUT:-120}"
 wait_for_ready() {
   local log=$1
   local notify=$2
   local pid=${3:-}
   local waited=0
-  while [[ $waited -lt 120 ]]; do
+  while [[ $waited -lt $READY_TIMEOUT ]]; do
     if [[ -n $notify && -f $notify ]]; then
       return 0
     fi
@@ -464,7 +480,8 @@ fi
 log_info "Connectivity soak complete: $SOAK_RESULT"
 
 export MODE=live
-export MICRO_MODE=1
+# keep env aligned with the flag we passed to the controller
+export MICRO_MODE="$MICRO_FLAG"
 if [[ $CANARY_MODE -eq 1 ]]; then
   export CANARY_MODE=1
   export CANARY_BUDGET_USD=$CANARY_BUDGET
@@ -484,7 +501,9 @@ if ! wait_for_ready "$LIVE_LOG" "$LIVE_NOTIFY" "$LIVE_PID"; then
 fi
 
 log_info "Live runtime ready (PID=$LIVE_PID)"
-GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (2/2) | Soak PASSED | MODE=live | MICRO=on | Canary limits applied"
+micro_label=$([[ "$MICRO_FLAG" == "1" ]] && echo "on" || echo "off")
+canary_label=$([[ $CANARY_MODE -eq 1 ]] && echo " | Canary limits applied" || echo "")
+GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (2/2) | Soak PASSED | MODE=live | MICRO=${micro_label}${canary_label}"
 log_info "$GO_NO_GO"
 
 wait "$LIVE_PID"
