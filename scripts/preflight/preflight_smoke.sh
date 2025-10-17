@@ -17,9 +17,15 @@ simulation_enabled() {
 }
 
 simulate_hash() {
+  # Use unique_suffix from common.sh (portable even on macOS where %N is missing)
   local seed
-  seed="${PREFLIGHT_MINT}-$(date +%s%N)-$RANDOM-$RANDOM"
-  printf '%s' "$seed" | sha256sum | awk '{print $1}'
+  seed="${PREFLIGHT_MINT}-$(unique_suffix)-$RANDOM-$RANDOM"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$seed" | sha256sum | awk '{print $1}'
+  else
+    # macOS: shasum is available; -a 256 == sha256
+    printf '%s' "$seed" | shasum -a 256 | awk '{print $1}'
+  fi
 }
 
 simulate_golden_payload() {
@@ -171,6 +177,10 @@ main() {
   if ! require_command redis-cli; then
     record_audit fail "require:redis-cli"
     abort "missing redis-cli"
+  fi
+  if ! require_command curl; then
+    record_audit fail "require:curl"
+    abort "missing curl"
   fi
   if ! require_env REDIS_URL; then
     record_audit fail "env:REDIS_URL"
@@ -393,7 +403,17 @@ main() {
     fi
 
     local dupe_count
-    dupe_count=$(redis --raw XRANGE x:vote.decisions - + COUNT 500 | grep clientOrderId | sed 's/\\//g' | awk -F'"clientOrderId":"' '{print $2}' | awk -F'"' '{print $1}' | sort | uniq -d | wc -l | tr -d ' ')
+    if [[ ${PREFLIGHT_STRICT_JQ_DEDUP:-0} == 1 ]]; then
+      # Robust path: parse JSON fields safely with jq
+      dupe_count=$(
+        redis --raw XRANGE x:vote.decisions - + COUNT 500 \
+        | jq -r 'try fromjson | .clientOrderId? // empty' \
+        | sort | uniq -d | wc -l | tr -d ' '
+      )
+    else
+      # Legacy fast path
+      dupe_count=$(redis --raw XRANGE x:vote.decisions - + COUNT 500 | grep clientOrderId | sed 's/\\//g' | awk -F'"clientOrderId":"' '{print $2}' | awk -F'"' '{print $1}' | sort | uniq -d | wc -l | tr -d ' ')
+    fi
     if [[ $dupe_count == 0 ]]; then
       pass "Recent decision window free of duplicates"
       detail_events+=("$(jq -n --argjson window "$PREFLIGHT_DUPLICATE_WINDOW_SEC" '{check:"decision_window_dupes",status:"pass",window_sec:$window}')")
