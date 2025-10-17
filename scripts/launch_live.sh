@@ -22,9 +22,14 @@ EXIT_HEALTH=4
 EXIT_DEPS=5
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-ARTIFACT_DIR="$ROOT_DIR/artifacts/prelaunch"
+DEFAULT_ARTIFACT_ROOT="$ROOT_DIR/artifacts"
+DEFAULT_RUN_ID="prelaunch"
+export RUNTIME_ARTIFACT_ROOT="${RUNTIME_ARTIFACT_ROOT:-$DEFAULT_ARTIFACT_ROOT}"
+export RUNTIME_RUN_ID="${RUNTIME_RUN_ID:-$DEFAULT_RUN_ID}"
+ART_DIR="$RUNTIME_ARTIFACT_ROOT/$RUNTIME_RUN_ID"
+ARTIFACT_DIR="$ART_DIR"
 LOG_DIR="$ARTIFACT_DIR/logs"
-mkdir -p "$LOG_DIR"
+mkdir -p "$ARTIFACT_DIR" "$LOG_DIR"
 log_info "Runtime artifacts will be written to $ARTIFACT_DIR (logs in $LOG_DIR)"
 
 # Ensure the repository root is always importable when invoking helper scripts.
@@ -390,6 +395,32 @@ print_log_excerpt() {
   fi
 }
 
+print_ui_location() {
+  local runtime_log=$1
+  local art_dir=$2
+  local ui_line=""
+  if [[ -f $runtime_log ]]; then
+    ui_line="$(grep -m1 -E 'UI_READY url=' "$runtime_log" || true)"
+  fi
+  if [[ -z $ui_line && -n $art_dir && -f "$art_dir/ui_url.txt" ]]; then
+    ui_line="UI_READY url=$(cat "$art_dir/ui_url.txt")"
+  fi
+  if [[ -n $ui_line ]]; then
+    local ui_url
+    ui_url="$(echo "$ui_line" | sed -E 's/.*url=([^ ]+).*/\1/')"
+    if [[ -n $ui_url ]]; then
+      echo ""
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "  UI available at: $ui_url"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    else
+      echo "UI readiness line detected but URL parsing failed: $ui_line"
+    fi
+  else
+    echo "UI URL not detected yet; check $runtime_log for binding lines."
+  fi
+}
+
 READY_TIMEOUT="${READY_TIMEOUT:-120}"
 wait_for_ready() {
   local log=$1
@@ -427,6 +458,7 @@ if ! wait_for_ready "$PAPER_LOG" "$PAPER_NOTIFY" "$PAPER_PID"; then
 fi
 
 log_info "Paper runtime ready (PID=$PAPER_PID)"
+print_ui_location "$PAPER_LOG" "$ART_DIR"
 
 run_preflight() {
   MODE=paper MICRO_MODE=1 bash "$ROOT_DIR/scripts/preflight/run_all.sh"
@@ -501,6 +533,7 @@ if ! wait_for_ready "$LIVE_LOG" "$LIVE_NOTIFY" "$LIVE_PID"; then
 fi
 
 log_info "Live runtime ready (PID=$LIVE_PID)"
+print_ui_location "$LIVE_LOG" "$ART_DIR"
 micro_label=$([[ "$MICRO_FLAG" == "1" ]] && echo "on" || echo "off")
 canary_label=$([[ $CANARY_MODE -eq 1 ]] && echo " | Canary limits applied" || echo "")
 GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (2/2) | Soak PASSED | MODE=live | MICRO=${micro_label}${canary_label}"
