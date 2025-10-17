@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 import logging
 import mmap
 import os
 import time
 import threading
-from typing import AsyncGenerator, Dict, Any, Optional, Tuple
+from typing import AsyncGenerator, Dict, Any, Optional, Tuple, Union
 
 try:
     from watchfiles import awatch
@@ -30,7 +31,7 @@ _MMAP_PATH = os.getenv("DEPTH_MMAP_PATH", "/tmp/depth_service.mmap")
 # Interval in seconds for polling the mmap file modification time
 DEPTH_MMAP_POLL_INTERVAL = float(os.getenv("DEPTH_MMAP_POLL_INTERVAL", "1") or 1)
 
-_watch_task: asyncio.Task | None = None
+_watch_task: Union[asyncio.Task, Future, None] = None
 _watch_loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -99,8 +100,8 @@ def _snapshot_from_mmap(token: str) -> tuple[float, float, float]:
                 depth = bids + asks
                 imb = (bids - asks) / depth if depth else 0.0
                 return depth, imb, rate
-    except Exception as exc:
-        logger.exception("Failed to read depth snapshot", exc_info=exc)
+    except Exception:
+        logger.exception("Failed to read depth snapshot")
         return 0.0, 0.0, 0.0
 
 
@@ -193,6 +194,8 @@ async def stream_order_book(
                 async with session.ws_connect(url) as ws:
                     backoff = 1.0
                     async for msg in ws:
+                        updates: Optional[Dict[str, Dict[str, float]]] = None
+
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
                                 data = loads(msg.data)
@@ -202,6 +205,7 @@ async def stream_order_book(
                             token = data.get("token")
                             if not token:
                                 continue
+
                             if "bids" in data and "asks" in data:
                                 bids = float(data.get("bids", 0.0))
                                 asks = float(data.get("asks", 0.0))
@@ -214,19 +218,22 @@ async def stream_order_book(
                                     if isinstance(v, dict):
                                         bids += float(v.get("bids", 0.0))
                                         asks += float(v.get("asks", 0.0))
-                                updates = {token: {"bids": bids, "asks": asks, "tx_rate": rate}}
+                            updates = {token: {"bids": bids, "asks": asks, "tx_rate": rate}}
+
                         elif msg.type == aiohttp.WSMsgType.BINARY:
-                                try:
-                                    ev = pb.Event()
-                                    ev.ParseFromString(msg.data)
-                                    if ev.topic == "depth_update" and ev.HasField("depth_update"):
-                                        entries = ev.depth_update.entries
-                                    elif ev.topic == "depth_diff" and ev.HasField("depth_diff"):
-                                        entries = ev.depth_diff.entries
-                                    else:
-                                        continue
-                                except Exception:
-                                    continue
+                            try:
+                                ev = pb.Event()
+                                ev.ParseFromString(msg.data)
+                                if ev.topic == "depth_update" and ev.HasField("depth_update"):
+                                    entries = ev.depth_update.entries
+                                elif ev.topic == "depth_diff" and ev.HasField("depth_diff"):
+                                    entries = ev.depth_diff.entries
+                                else:
+                                    entries = None
+                            except Exception:
+                                entries = None
+
+                            if entries:
                                 updates = {
                                     tok: {
                                         "bids": e.bids,
@@ -235,30 +242,35 @@ async def stream_order_book(
                                     }
                                     for tok, e in entries.items()
                                 }
+
                         else:
+                            # Ignore other message types (PING/PONG/CLOSE, etc.)
                             continue
 
-                            now = time.time()
-                            for k, (ts, _) in list(_DEPTH_CACHE.items()):
-                                if now - ts > ORDERBOOK_CACHE_TTL:
-                                    _DEPTH_CACHE.pop(k, None)
-                            for token, info in updates.items():
-                                _DEPTH_CACHE[token] = (
-                                    now,
-                                    info,
-                                )
-                                depth, imb, txr = snapshot(token)
-                                yield {
-                                    "token": token,
-                                    "depth": depth,
-                                    "imbalance": imb,
-                                    "tx_rate": txr,
-                                }
-                            count += 1
-                            if max_updates is not None and count >= max_updates:
-                                return
-                            if rate_limit > 0:
-                                await asyncio.sleep(rate_limit)
+                        if not updates:
+                            continue
+
+                        now = time.time()
+
+                        for k, (ts, _) in list(_DEPTH_CACHE.items()):
+                            if now - ts > ORDERBOOK_CACHE_TTL:
+                                _DEPTH_CACHE.pop(k, None)
+
+                        for tok, info in updates.items():
+                            _DEPTH_CACHE[tok] = (now, info)
+                            depth, imb, txr = snapshot(tok)
+                            yield {
+                                "token": tok,
+                                "depth": depth,
+                                "imbalance": imb,
+                                "tx_rate": txr,
+                            }
+
+                        count += 1
+                        if max_updates is not None and count >= max_updates:
+                            return
+                        if rate_limit > 0:
+                            await asyncio.sleep(rate_limit)
             except Exception as exc:  # pragma: no cover - network errors
                 logger.error("Order book websocket error: %s", exc)
                 await asyncio.sleep(backoff)
