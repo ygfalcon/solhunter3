@@ -1,7 +1,11 @@
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 
-from solhunter_zero.logging_utils import setup_stdout_logging
+from solhunter_zero.logging_utils import (
+    configure_runtime_logging,
+    setup_stdout_logging,
+)
 
 
 def test_setup_stdout_logging_removes_duplicate_stream_handlers():
@@ -30,6 +34,44 @@ def test_setup_stdout_logging_removes_duplicate_stream_handlers():
                     handler.close()
                 except Exception:
                     pass
+        for handler in original_handlers:
+            root.addHandler(handler)
+        root.setLevel(original_level)
+
+
+def test_configure_runtime_logging_deduplicates_file_handlers(tmp_path):
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    try:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+
+        log_path = tmp_path / "runtime.log"
+        configure_runtime_logging(logfile=log_path, force=True)
+
+        duplicate = RotatingFileHandler(log_path, encoding="utf-8")
+        root.addHandler(duplicate)
+
+        configure_runtime_logging(logfile=log_path, force=False)
+
+        file_handlers = [
+            h
+            for h in root.handlers
+            if getattr(h, "baseFilename", None) == str(log_path)
+        ]
+        assert len(file_handlers) == 1
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
         for handler in original_handlers:
             root.addHandler(handler)
         root.setLevel(original_level)
