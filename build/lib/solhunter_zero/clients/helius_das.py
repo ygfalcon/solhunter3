@@ -14,6 +14,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
+from ..token_aliases import normalize_mint_or_none
+
 log = logging.getLogger(__name__)
 
 
@@ -80,6 +82,30 @@ class _APIKeyPool:
         return key
 
 
+_RPC_BASE_DEFAULT = "https://mainnet.helius-rpc.com"
+
+
+def _resolve_base_url() -> str:
+    base = (os.getenv("DAS_BASE_URL") or _RPC_BASE_DEFAULT).strip()
+    return base.rstrip("/") if base else _RPC_BASE_DEFAULT
+
+
+def _extract_api_key_from_url(url: str) -> Optional[str]:
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+        if not parts.query:
+            return None
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    except Exception:  # pragma: no cover - defensive parsing
+        return None
+    key = query.get("api-key")
+    if isinstance(key, str) and key.strip():
+        return key.strip()
+    return None
+
+
 def _load_keys() -> Tuple[str, ...]:
     multi = os.getenv("HELIUS_API_KEYS")
     if multi:
@@ -89,12 +115,14 @@ def _load_keys() -> Tuple[str, ...]:
     single = os.getenv("HELIUS_API_KEY") or os.getenv("HELIUS_API_TOKEN")
     if single:
         return (single.strip(),)
+    inline = _extract_api_key_from_url(_resolve_base_url())
+    if inline:
+        return (inline,)
     return tuple()
 
 
 _API_KEYS = _APIKeyPool(_load_keys())
-_RPC_BASE_DEFAULT = "https://mainnet.helius-rpc.com"
-DAS_BASE = (os.getenv("DAS_BASE_URL") or _RPC_BASE_DEFAULT).strip().rstrip("/")
+DAS_BASE = _resolve_base_url()
 _DEFAULT_LIMIT = _env_int("DAS_DISCOVERY_LIMIT", "100")
 _SESSION_TIMEOUT = _env_float("DAS_TIMEOUT_TOTAL", "5.0") or 5.0
 _CONNECT_TIMEOUT = _env_float("DAS_TIMEOUT_CONNECT", "1.5") or 1.5
@@ -139,6 +167,16 @@ def _rpc_url_for(key: str) -> str:
     return f"{base}{separator}api-key={key}"
 
 
+def _summarize_params(params: Dict[str, Any], *, limit: int = 256) -> str:
+    try:
+        rendered = json.dumps(params, default=str, separators=(",", ":"))
+    except Exception:
+        rendered = str(params)
+    if len(rendered) > limit:
+        return f"{rendered[: limit - 3]}..."
+    return rendered
+
+
 async def _post_rpc(
     session: aiohttp.ClientSession,
     method: str,
@@ -151,8 +189,13 @@ async def _post_rpc(
     """POST helper with retry/backoff semantics for DAS JSON-RPC endpoints."""
 
     await _rl.acquire()
-    key = _API_KEYS.next()
-    url = _rpc_url_for(key)
+    url: str
+    if _API_KEYS.keys:
+        url = _rpc_url_for(_API_KEYS.next())
+    else:
+        if "api-key=" not in DAS_BASE:
+            raise RuntimeError("HELIUS_API_KEY(S) not configured")
+        url = DAS_BASE
     total_timeout = timeout or _SESSION_TIMEOUT
     backoff = _BACKOFF_BASE
     last_exception: Exception | None = None
@@ -162,13 +205,15 @@ async def _post_rpc(
         "method": method,
         "params": params,
     }
+    prepared_headers = dict(headers or {})
+    prepared_headers.setdefault("Content-Type", "application/json")
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             async with session.post(
                 url,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=total_timeout, connect=_CONNECT_TIMEOUT),
-                headers=headers,
+                headers=prepared_headers,
             ) as resp:
                 if resp.status == 429:
                     retry_after = resp.headers.get("Retry-After")
@@ -202,7 +247,10 @@ async def _post_rpc(
                 if not isinstance(data, dict):
                     raise RuntimeError("Unexpected DAS response type")
                 if data.get("error"):
-                    raise RuntimeError(f"DAS RPC error: {data['error']}")
+                    summary = _summarize_params(params)
+                    raise RuntimeError(
+                        f"DAS RPC error for {method}: {data['error']} (params={summary})"
+                    )
                 return data
         except Exception as exc:  # pragma: no cover - network failures mocked in tests
             last_exception = exc
@@ -236,8 +284,37 @@ async def _post_rpc(
     raise RuntimeError("DAS request failed without exception")
 
 
+_MINT_PARAM_KEYS = {"ids", "mintIds", "mint_ids", "tokenAddresses", "mintAddresses"}
+
+
 def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {k: v for k, v in payload.items() if v is not None}
+    cleaned: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        if key in _MINT_PARAM_KEYS:
+            if isinstance(value, (list, tuple, set, frozenset)):
+                normalized = _filter_valid_mints(value)
+                if not normalized:
+                    continue
+                cleaned[key] = normalized
+                continue
+            normalized_single = normalize_mint_or_none(value)
+            if normalized_single:
+                cleaned[key] = normalized_single
+                continue
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def _filter_valid_mints(mints: Iterable[str]) -> List[str]:
+    filtered: List[str] = []
+    for mint in mints:
+        normalized = normalize_mint_or_none(mint)
+        if normalized:
+            filtered.append(normalized)
+    return filtered
 
 
 async def search_fungible_recent(
@@ -324,7 +401,7 @@ async def get_asset_batch(
 ) -> List[Dict[str, Any]]:
     """Validate mint addresses and return DAS asset objects."""
 
-    batch = [mint for mint in mints if isinstance(mint, str)]
+    batch = _filter_valid_mints(mints)
     if not batch:
         return []
     payload = {"ids": batch}

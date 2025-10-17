@@ -1521,7 +1521,7 @@ async def _helius_search_assets(
 
     while len(normalized) < limit:
         params: Dict[str, Any] = {
-            "tokenType": "fungible",
+            "query": {"tokenType": "fungible"},
             "page": page,
             "limit": per_page,
             "sortBy": {"field": "created", "direction": "desc"},

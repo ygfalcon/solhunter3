@@ -366,21 +366,25 @@ def configure_runtime_logging(
         formatter = logging.Formatter(resolved_format, datefmt=resolved_datefmt)
 
     file_handler: logging.Handler | None = None
-    for handler in root.handlers:
+    expected_handler = (
+        WatchedFileHandler if handler_choice == "watched" else RotatingFileHandler
+    )
+    for handler in list(root.handlers):
         base = getattr(handler, "baseFilename", None)
         if base is None:
             continue
         if Path(base) == log_path:
-            if handler_choice == "watched" and not isinstance(handler, WatchedFileHandler):
+            if not isinstance(handler, expected_handler):
                 root.removeHandler(handler)
-                handler.close()
+                with contextlib.suppress(Exception):
+                    handler.close()
                 continue
-            if handler_choice == "rotating" and not isinstance(handler, RotatingFileHandler):
-                root.removeHandler(handler)
-                handler.close()
+            if file_handler is None:
+                file_handler = handler
                 continue
-            file_handler = handler
-            break
+            root.removeHandler(handler)
+            with contextlib.suppress(Exception):
+                handler.close()
 
     if file_handler is None:
         if handler_choice == "watched":

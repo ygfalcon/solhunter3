@@ -4,14 +4,17 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Sequence, Tuple, Union
 
 import aiohttp
 
 from solhunter_zero.lru import TTLCache
+
 from .async_utils import run_async
 from .http import get_session
 from .logging_utils import warn_once_per
+from .token_aliases import canonical_mint, validate_mint
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +24,7 @@ PRICE_CACHE_TTL = float(os.getenv("PRICE_CACHE_TTL", "30") or 30)
 
 PRICE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
 QUOTE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
+BATCH_CACHE: TTLCache = TTLCache(maxsize=256, ttl=PRICE_CACHE_TTL)
 
 JUPITER_PRICE_URL = os.getenv("JUPITER_PRICE_URL", "https://price.jup.ag/v3/price")
 JUPITER_BATCH_SIZE = max(1, int(os.getenv("JUPITER_BATCH_SIZE", "100") or 100))
@@ -39,6 +43,7 @@ SYNTHETIC_HINTS_ENV = "SYNTHETIC_PRICE_HINTS"
 OFFLINE_PRICE_DEFAULT = os.getenv("OFFLINE_PRICE_DEFAULT")
 
 _LAST_BIRDEYE_KEY: str | None = None
+_LAST_BIRDEYE_FAILURE_KEY: str | None = None
 
 
 def _monotonic() -> float:
@@ -172,20 +177,32 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
 }
 
 
+def _is_valid_birdeye_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    candidate = value.strip()
+    if len(candidate) <= 20:
+        return None
+    return candidate
+
+
 def _get_birdeye_api_key() -> str | None:
-    global _LAST_BIRDEYE_KEY
-    key = os.getenv("BIRDEYE_API_KEY") or None
+    global _LAST_BIRDEYE_KEY, _LAST_BIRDEYE_FAILURE_KEY
+    key = _is_valid_birdeye_key(os.getenv("BIRDEYE_API_KEY"))
     if key != _LAST_BIRDEYE_KEY:
         _LAST_BIRDEYE_KEY = key
-        if key:
+        if key and key != _LAST_BIRDEYE_FAILURE_KEY:
             PROVIDER_HEALTH["birdeye"].clear()
+            _LAST_BIRDEYE_FAILURE_KEY = None
     return key
 
 
 def reset_provider_health() -> None:
-    global PROVIDER_HEALTH, PROVIDER_STATS
+    global PROVIDER_HEALTH, PROVIDER_STATS, _LAST_BIRDEYE_KEY, _LAST_BIRDEYE_FAILURE_KEY
     PROVIDER_HEALTH = _init_provider_health()
     PROVIDER_STATS = _init_provider_stats()
+    _LAST_BIRDEYE_KEY = None
+    _LAST_BIRDEYE_FAILURE_KEY = None
 
 
 def get_provider_health_snapshot() -> Dict[str, Dict[str, Any]]:
@@ -207,8 +224,56 @@ def get_provider_health_snapshot() -> Dict[str, Dict[str, Any]]:
     return snapshot
 
 
+def _canonical_mint_from_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    canonical = canonical_mint(candidate)
+    if not validate_mint(canonical):
+        return None
+    return canonical
+
+
+def _normalise_token(value: Any) -> str | None:
+    if isinstance(value, str):
+        candidate = value.strip()
+    elif value is None:
+        return None
+    else:
+        candidate = str(value).strip()
+    if not candidate:
+        return None
+    canonical = _canonical_mint_from_value(candidate)
+    if not canonical:
+        warn_once_per(
+            300.0,
+            f"prices-invalid:{candidate}",
+            "Prices: ignoring invalid mint '%s'",
+            candidate,
+            logger=logger,
+        )
+        return None
+    return canonical
+
+
 def _tokens_key(tokens: Iterable[str]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(tok for tok in tokens if isinstance(tok, str) and tok))
+    seen: Dict[str, None] = {}
+    ordered: List[str] = []
+    for token in tokens:
+        normalised = _normalise_token(token)
+        if not normalised or normalised in seen:
+            continue
+        seen[normalised] = None
+        ordered.append(normalised)
+    return tuple(ordered)
+
+
+def _tokens_cache_key(tokens: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(tokens, (list, tuple)):
+        return tuple(sorted(dict.fromkeys(tokens)))
+    return tuple(sorted(_tokens_key(tokens)))
 
 
 def get_cached_quote(token: str) -> PriceQuote | None:
@@ -308,6 +373,88 @@ def _extract_price(value: Any) -> float | None:
         if isinstance(data, dict):
             return _extract_price(data)
     return None
+
+
+def _pyth_decimal_price(raw_price: Any, expo: Any) -> float | None:
+    if raw_price is None or expo is None:
+        return None
+    try:
+        expo_int = int(expo)
+    except (TypeError, ValueError):
+        return None
+    try:
+        raw_decimal = Decimal(str(raw_price))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    try:
+        shifted = raw_decimal.scaleb(expo_int)
+    except InvalidOperation:
+        return None
+    return float(shifted)
+
+
+def _pyth_price_from_info(info: Any) -> float | None:
+    if isinstance(info, MutableMapping):
+        price = _pyth_decimal_price(info.get("price"), info.get("expo") or info.get("exponent"))
+        if price is not None:
+            return price
+        agg = info.get("aggregate_price")
+        if agg is not None:
+            price = _pyth_decimal_price(agg, info.get("expo") or info.get("exponent"))
+            if price is not None:
+                return price
+        nested = info.get("price")
+        if isinstance(nested, MutableMapping):
+            price = _pyth_price_from_info(nested)
+            if price is not None:
+                return price
+        nested = info.get("price_info")
+        if isinstance(nested, MutableMapping):
+            price = _pyth_price_from_info(nested)
+            if price is not None:
+                return price
+    return _extract_price(info)
+
+
+def _infer_pyth_mint(
+    entry: MutableMapping[str, Any], price_id: str, allowed: set[str]
+) -> str | None:
+    def search_value(value: Any) -> str | None:
+        if isinstance(value, str):
+            candidate = _canonical_mint_from_value(value)
+            if candidate and candidate != price_id and (not allowed or candidate in allowed):
+                return candidate
+        elif isinstance(value, MutableMapping):
+            return search_mapping(value)
+        elif isinstance(value, list):
+            for item in value:
+                candidate = search_value(item)
+                if candidate:
+                    return candidate
+        return None
+
+    def search_mapping(mapping: MutableMapping[str, Any]) -> str | None:
+        prioritised: List[Tuple[str, Any]] = []
+        fallback: List[Tuple[str, Any]] = []
+        for key, value in mapping.items():
+            lowered = key.lower()
+            target = "mint" in lowered or "token" in lowered or "address" in lowered or "base" in lowered
+            if target:
+                prioritised.append((key, value))
+            else:
+                fallback.append((key, value))
+        for _, value in prioritised + fallback:
+            candidate = search_value(value)
+            if candidate:
+                return candidate
+        return None
+
+    product = entry.get("product")
+    if isinstance(product, MutableMapping):
+        candidate = search_mapping(product)
+        if candidate:
+            return candidate
+    return search_mapping(entry)
 
 
 async def _fetch_quotes_jupiter(
@@ -427,14 +574,24 @@ async def _fetch_quotes_birdeye(
     return quotes
 
 
-def _parse_pyth_mapping() -> Dict[str, str]:
+def _parse_pyth_mapping() -> Tuple[Dict[str, str], List[str]]:
     env_value = os.getenv("PYTH_PRICE_IDS")
     mapping: Dict[str, str] = {}
+    extras: List[str] = []
     if env_value:
         try:
             loaded = json.loads(env_value)
             if isinstance(loaded, MutableMapping):
                 mapping.update({str(k): str(v) for k, v in loaded.items()})
+            elif isinstance(loaded, list):
+                for item in loaded:
+                    if isinstance(item, str):
+                        extras.append(item)
+                    elif isinstance(item, MutableMapping):
+                        mint = item.get("mint") or item.get("token") or item.get("address")
+                        price_id = item.get("price_id") or item.get("id")
+                        if isinstance(mint, str) and isinstance(price_id, str):
+                            mapping[canonical_mint(mint)] = price_id
         except json.JSONDecodeError:
             logger.warning("Failed to decode PYTH_PRICE_IDS env; ignoring")
     default_mapping = {
@@ -443,18 +600,20 @@ def _parse_pyth_mapping() -> Dict[str, str]:
         "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "7sxNXmAf6oMzFxLpyR4V6kRDeo63HgNbUsVTNff7kX2Z",
     }
     mapping.update({k: v for k, v in default_mapping.items() if k not in mapping})
-    return mapping
+    return mapping, extras
 
 
 async def _fetch_quotes_pyth(
     session: aiohttp.ClientSession, tokens: Sequence[str]
 ) -> Dict[str, PriceQuote]:
-    mapping = _parse_pyth_mapping()
+    mapping, extras = _parse_pyth_mapping()
     reverse = {v: k for k, v in mapping.items()}
-    ids = [mapping[token] for token in tokens if token in mapping]
+    requested_tokens = set(tokens)
+    ids = {str(mapping[token]) for token in tokens if token in mapping}
+    ids.update(str(value) for value in extras)
     if not ids:
         return {}
-    params = {"ids": ",".join(ids)}
+    params = {"ids": ",".join(sorted(ids))}
     payload = await _request_json(session, PYTH_PRICE_URL, "Pyth", params=params)
     if not isinstance(payload, MutableMapping):
         return {}
@@ -469,27 +628,23 @@ async def _fetch_quotes_pyth(
         records.extend([item for item in payload["result"] if isinstance(item, MutableMapping)])
     quotes: Dict[str, PriceQuote] = {}
     for entry in records:
-        price_info = entry.get("price")
-        token_id = entry.get("id") or entry.get("price_id")
-        if isinstance(price_info, MutableMapping):
-            raw_price = price_info.get("price") or price_info.get("aggregate_price")
-            expo = price_info.get("expo") or price_info.get("exponent")
-            if isinstance(raw_price, (int, float)) and isinstance(expo, (int, float)):
-                price = float(raw_price) * (10 ** float(expo))
-            else:
-                price = _extract_price(price_info)
-        else:
-            price = _extract_price(price_info)
+        price = _pyth_price_from_info(entry.get("price"))
         if price is None and isinstance(entry.get("ema_price"), MutableMapping):
-            ema = entry["ema_price"]
-            raw_price = ema.get("price")
-            expo = ema.get("expo")
-            if isinstance(raw_price, (int, float)) and isinstance(expo, (int, float)):
-                price = float(raw_price) * (10 ** float(expo))
+            price = _pyth_price_from_info(entry.get("ema_price"))
+        if price is None and isinstance(entry.get("aggregate_price"), MutableMapping):
+            price = _pyth_price_from_info(entry.get("aggregate_price"))
         if price is None:
+            continue
+        token_id = entry.get("id") or entry.get("price_id")
+        if not token_id:
             continue
         token = reverse.get(str(token_id))
         if not token:
+            inferred = _infer_pyth_mint(entry, str(token_id), requested_tokens)
+            if inferred:
+                reverse[str(token_id)] = inferred
+                token = inferred
+        if not token or token not in requested_tokens:
             continue
         publish_time = entry.get("publish_time") or entry.get("publishTime") or entry.get("timestamp")
         if isinstance(publish_time, (int, float)):
@@ -584,6 +739,11 @@ def _record_provider_failure(name: str, exc: BaseException, latency_ms: float) -
             cooldown = None
     elif isinstance(exc, asyncio.TimeoutError):
         cooldown = 2.0
+    elif isinstance(exc, aiohttp.ClientConnectorError):
+        cooldown = max(cooldown or 0.0, 15.0)
+    if name == "birdeye" and isinstance(exc, aiohttp.ClientResponseError) and exc.status in (401, 403):
+        global _LAST_BIRDEYE_FAILURE_KEY
+        _LAST_BIRDEYE_FAILURE_KEY = _LAST_BIRDEYE_KEY
     PROVIDER_HEALTH[name].record_failure(status, cooldown=cooldown)
     PROVIDER_STATS[name].record_failure(status, latency_ms, exc)
     if isinstance(exc, aiohttp.ClientResponseError):
@@ -663,9 +823,20 @@ async def fetch_price_quotes_async(tokens: Iterable[str]) -> Dict[str, PriceQuot
     token_list = _tokens_key(tokens)
     if not token_list:
         return {}
+    cache_key = _tokens_cache_key(token_list)
     result: Dict[str, PriceQuote] = {}
+    if cache_key:
+        cached_batch = BATCH_CACHE.get(cache_key)
+        if isinstance(cached_batch, dict):
+            for token in token_list:
+                quote = cached_batch.get(token)
+                if isinstance(quote, PriceQuote):
+                    result[token] = quote
+                    store_quote(token, quote)
     missing: List[str] = []
     for token in token_list:
+        if token in result:
+            continue
         cached = get_cached_quote(token)
         if cached is not None:
             result[token] = cached
@@ -681,6 +852,10 @@ async def fetch_price_quotes_async(tokens: Iterable[str]) -> Dict[str, PriceQuot
             store_quote(token, quote)
             result[token] = quote
         logger.info("Prices: fetched %d token(s) via providers", len(fetched))
+    if cache_key and result:
+        payload = {token: result[token] for token in token_list if token in result}
+        if payload:
+            BATCH_CACHE.set(cache_key, payload)
     return result
 
 
