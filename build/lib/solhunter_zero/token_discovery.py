@@ -13,10 +13,7 @@ from typing import Dict, List, Any, Union
 from aiohttp import ClientTimeout
 import aiohttp
 
-from .scanner_common import (
-    BIRDEYE_API,
-    BIRDEYE_API_KEY,
-)
+from .scanner_common import DEFAULT_BIRDEYE_API_KEY
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
 from .util.mints import is_valid_solana_mint
@@ -42,8 +39,8 @@ def _env_float(name: str, default: str, *, fast_default: float | None = None) ->
 _MIN_VOLUME = _env_float("DISCOVERY_MIN_VOLUME_USD", "50000", fast_default=0.0)
 _MIN_LIQUIDITY = _env_float("DISCOVERY_MIN_LIQUIDITY_USD", "75000", fast_default=0.0)
 _MAX_TOKENS = int(os.getenv("DISCOVERY_MAX_TOKENS", "50") or 50)
-_PAGE_LIMIT = max(1, min(int(os.getenv("DISCOVERY_PAGE_SIZE", "50") or 50), 50))
-_OVERFETCH_FACTOR = float(os.getenv("DISCOVERY_OVERFETCH_FACTOR", "1.0") or 1.0)
+_PAGE_LIMIT = max(1, min(int(os.getenv("DISCOVERY_PAGE_SIZE", "25") or 25), 50))
+_OVERFETCH_FACTOR = float(os.getenv("DISCOVERY_OVERFETCH_FACTOR", "0.8") or 0.8)
 _CACHE_TTL = float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45)
 _MAX_OFFSET = int(os.getenv("DISCOVERY_MAX_OFFSET", "4000") or 4000)
 _MEMPOOL_LIMIT = int(os.getenv("DISCOVERY_MEMPOOL_LIMIT", "12") or 12)
@@ -68,6 +65,13 @@ TokenEntry = Dict[str, Union[float, str, List[str]]]
 _BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
 _CACHE_LOCK = Lock()
 _BIRDEYE_DISABLED_INFO = False
+
+_BIRDEYE_TOKENLIST_URL = (
+    (os.getenv("BIRDEYE_TOKENLIST_URL") or "https://public-api.birdeye.so/defi/tokenlist")
+    .strip()
+)
+if not _BIRDEYE_TOKENLIST_URL:
+    _BIRDEYE_TOKENLIST_URL = "https://public-api.birdeye.so/defi/tokenlist"
 
 
 def _cache_get(key: str) -> List[TokenEntry] | None:
@@ -149,7 +153,9 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
     Pull BirdEye token list (paginated) for Solana with correct headers & params.
     Numeric filters only; no name/suffix heuristics.
     """
-    api_key = os.getenv("BIRDEYE_API_KEY") or BIRDEYE_API_KEY
+    api_key = (os.getenv("BIRDEYE_API_KEY") or "").strip()
+    if not api_key:
+        api_key = DEFAULT_BIRDEYE_API_KEY
     global _BIRDEYE_DISABLED_INFO
     if not api_key:
         if not _BIRDEYE_DISABLED_INFO and not _ENABLE_MEMPOOL:
@@ -204,7 +210,7 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
             for attempt in range(1, _BIRDEYE_RETRIES + 1):
                 try:
                     request_cm = session.get(
-                        BIRDEYE_API, params=params, headers=_headers()
+                        _BIRDEYE_TOKENLIST_URL, params=params, headers=_headers()
                     )
                     async with request_cm as resp:
                         if resp.status in (429, 503) or 500 <= resp.status < 600:

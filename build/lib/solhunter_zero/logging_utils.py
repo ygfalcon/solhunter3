@@ -86,6 +86,34 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _stream_fileno(stream: Any) -> int | None:
+    """Best-effort retrieval of ``stream.fileno()`` without raising."""
+
+    if stream is None:
+        return None
+    try:
+        fileno = stream.fileno()  # type: ignore[call-arg]
+    except Exception:
+        return None
+    try:
+        return int(fileno)
+    except (TypeError, ValueError):
+        return None
+
+
+def _stream_matches_alias(
+    stream: Any,
+    aliases: set[Any],
+    alias_fds: set[int],
+) -> bool:
+    """Return ``True`` when *stream* refers to an aliased stdout/stderr target."""
+
+    if stream in aliases:
+        return True
+    fileno = _stream_fileno(stream)
+    return fileno is not None and fileno in alias_fds
+
+
 def setup_stdout_logging(
     *,
     level: int = logging.INFO,
@@ -98,16 +126,35 @@ def setup_stdout_logging(
     root = logging.getLogger()
     root.setLevel(level)
 
-    stdout_aliases = {sys.stdout}
-    stderr_aliases = {sys.stderr}
+    stdout_aliases: set[Any] = {sys.stdout}
+    stderr_aliases: set[Any] = {sys.stderr}
+    stdout_alias_fds: set[int] = set()
+    stderr_alias_fds: set[int] = set()
+
+    def _register_alias(stream: Any, *, for_stdout: bool) -> None:
+        if stream is None:
+            return
+        fileno = _stream_fileno(stream)
+        if for_stdout:
+            stdout_aliases.add(stream)
+            if fileno is not None:
+                stdout_alias_fds.add(fileno)
+        else:
+            stderr_aliases.add(stream)
+            if fileno is not None:
+                stderr_alias_fds.add(fileno)
+
+    _register_alias(sys.stdout, for_stdout=True)
+    _register_alias(sys.stderr, for_stdout=False)
+
     for attr in ("__stdout__", "__stderr__"):
         extra = getattr(sys, attr, None)
         if extra is None:
             continue
         if attr == "__stdout__":
-            stdout_aliases.add(extra)
+            _register_alias(extra, for_stdout=True)
         else:
-            stderr_aliases.add(extra)
+            _register_alias(extra, for_stdout=False)
 
     stream_handler: logging.StreamHandler | None = None
     for handler in list(root.handlers):
@@ -117,7 +164,14 @@ def setup_stdout_logging(
         stream = getattr(handler, "stream", None)
         resolved_stream = stream if stream is not None else sys.stderr
 
-        if resolved_stream in stdout_aliases and stream_handler is None:
+        is_stdout_alias = _stream_matches_alias(
+            resolved_stream, stdout_aliases, stdout_alias_fds
+        )
+        is_stderr_alias = _stream_matches_alias(
+            resolved_stream, stderr_aliases, stderr_alias_fds
+        )
+
+        if is_stdout_alias and stream_handler is None:
             stream_handler = handler
             continue
 
@@ -125,7 +179,7 @@ def setup_stdout_logging(
         # stdout/stderr (or their ``sys.__stdout__/sys.__stderr__`` fallbacks).
         # These extra handlers cause duplicate log emission. Remove only the
         # duplicates while keeping custom user-provided streams intact.
-        if resolved_stream in stdout_aliases or resolved_stream in stderr_aliases:
+        if is_stdout_alias or is_stderr_alias:
             root.removeHandler(handler)
             with contextlib.suppress(Exception):  # pragma: no cover - best effort
                 handler.close()
