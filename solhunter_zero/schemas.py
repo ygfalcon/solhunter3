@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
-from dataclasses import asdict, dataclass, is_dataclass
-from typing import Any, Dict, List, Optional, Type, Union, cast
+from dataclasses import asdict, dataclass, is_dataclass, fields
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Type, Union, cast, Mapping
 
 
 # ─────────────────────────────
@@ -12,7 +13,7 @@ from typing import Any, Dict, List, Optional, Type, Union, cast
 # ─────────────────────────────
 
 
-@dataclass
+@dataclass(slots=True)
 class ActionExecuted:
     """Payload for an executed trading action."""
 
@@ -20,14 +21,14 @@ class ActionExecuted:
     result: Any
 
 
-@dataclass
+@dataclass(slots=True)
 class WeightsUpdated:
     """Payload for updated agent weights."""
 
     weights: Dict[str, float]
 
 
-@dataclass
+@dataclass(slots=True)
 class RLWeights:
     """Payload for RL-generated weights and risk parameters."""
 
@@ -35,7 +36,7 @@ class RLWeights:
     risk: Optional[Dict[str, float]] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RLCheckpoint:
     """Payload emitted when RL daemon saves a checkpoint."""
 
@@ -43,21 +44,21 @@ class RLCheckpoint:
     path: str
 
 
-@dataclass
+@dataclass(slots=True)
 class PortfolioUpdated:
     """Payload emitted whenever portfolio balances change."""
 
     balances: Dict[str, float]
 
 
-@dataclass
+@dataclass(slots=True)
 class Heartbeat:
     """Heartbeat message payload."""
 
     service: str
 
 
-@dataclass
+@dataclass(slots=True)
 class TradeLogged:
     """Payload emitted when a trade is written to memory."""
 
@@ -75,14 +76,14 @@ class TradeLogged:
     created_at: Optional[float] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class MemorySyncRequest:
     """Request snapshot of trades since ``last_id``."""
 
     last_id: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class MemorySyncResponse:
     """Response carrying new trades and optional index bytes (base64 or bytes)."""
 
@@ -90,7 +91,7 @@ class MemorySyncResponse:
     index: Optional[Union[bytes, str]] = None  # str is base64
 
 
-@dataclass
+@dataclass(slots=True)
 class SystemMetrics:
     """Payload with system CPU and memory usage."""
 
@@ -99,7 +100,7 @@ class SystemMetrics:
     proc_cpu: Optional[float] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RuntimeLog:
     """
     Lightweight diagnostic log for UI/event bus.
@@ -117,6 +118,8 @@ class RuntimeLog:
     ts: Optional[float] = None
     level: Optional[str] = None
     actions: Optional[int] = None
+    # Optional structured extras (ignored by strict fields but preserved on to_dict)
+    # NOTE: stays out of __init__ signature to keep BC; see to_dict passthrough.
 
 
 # ─────────────────────────────
@@ -151,6 +154,13 @@ _EVENT_SCHEMAS: Dict[str, Type[Any]] = {
     TOPIC_RUNTIME_LOG_LEGACY: RuntimeLog,
 }
 
+# Expose field names for quick filters / tooling
+SCHEMA_FIELDS: Dict[str, frozenset[str]] = {
+    topic: frozenset(f.name for f in fields(schema))
+    for topic, schema in _EVENT_SCHEMAS.items()
+}
+TOPICS: List[str] = list(_EVENT_SCHEMAS.keys())
+
 
 # ─────────────────────────────
 # Normalizers
@@ -162,9 +172,14 @@ def _to_unix_ts(value: Any) -> Optional[float]:
         return None
     if isinstance(value, (int, float)):
         return float(value)
+    if isinstance(value, Decimal):
+        return float(value)
     if isinstance(value, str):
         try:
-            return _dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            v = value.strip()
+            if v.replace(".", "", 1).isdigit():
+                return float(v)
+            return _dt.datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
         except Exception:
             return None
     if isinstance(value, _dt.datetime):
@@ -176,6 +191,10 @@ def _to_unix_ts(value: Any) -> Optional[float]:
 
 def _to_float(value: Any) -> float:
     try:
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, str):
+            return float(value.strip())
         return float(value)
     except Exception:
         return 0.0
@@ -185,9 +204,19 @@ def _b64_to_bytes(maybe_str: Union[str, bytes]) -> bytes:
     if isinstance(maybe_str, bytes):
         return maybe_str
     try:
-        return base64.b64decode(maybe_str)
+        s = "".join(str(maybe_str).split())
+        try:
+            return base64.b64decode(s, validate=True)
+        except Exception:
+            return base64.urlsafe_b64decode(s)
     except Exception:
         return maybe_str.encode("utf-8", errors="ignore")
+
+
+def _filter_payload(schema: Type[Any], payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Drop unknown keys so schema(**payload) won't explode on extras."""
+    allowed = {f.name for f in fields(schema)}
+    return {k: v for k, v in payload.items() if k in allowed}
 
 
 # ─────────────────────────────
@@ -237,9 +266,18 @@ def validate_message(topic: str, payload: Any) -> Any:
             if "index" in payload and payload["index"] is not None:
                 payload = dict(payload)
                 payload["index"] = _b64_to_bytes(cast(Union[str, bytes], payload["index"]))
-        elif schema is RuntimeLog and "ts" in payload:
+        elif schema is RuntimeLog:
             payload = dict(payload)
-            payload["ts"] = _to_unix_ts(payload.get("ts"))
+            if "ts" in payload:
+                payload["ts"] = _to_unix_ts(payload.get("ts"))
+            if payload.get("level"):
+                try:
+                    payload["level"] = str(payload["level"]).upper()
+                except Exception:
+                    payload["level"] = None
+            if not str(payload.get("stage", "")).strip():
+                payload["stage"] = "misc"
+        payload = _filter_payload(schema, payload)
         try:
             return schema(**payload)  # type: ignore[arg-type]
         except Exception as exc:
@@ -265,6 +303,9 @@ def to_dict(payload: Any) -> Any:
         idx = data["index"]
         if isinstance(idx, (bytes, bytearray)):
             data["index"] = base64.b64encode(bytes(idx)).decode("ascii")
+    for k, v in list(data.items()):
+        if isinstance(v, _dt.datetime):
+            data[k] = v.timestamp()
 
     return data
 
@@ -293,6 +334,8 @@ __all__ = [
     "MemorySyncResponse",
     "SystemMetrics",
     "RuntimeLog",
+    "SCHEMA_FIELDS",
+    "TOPICS",
     "validate_message",
     "to_dict",
 ]
