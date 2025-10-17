@@ -57,6 +57,27 @@ from .decision import should_buy, should_sell
 from . import event_bus
 from . import depth_client
 
+log = logging.getLogger(__name__)
+
+
+def _log_active_keypair_path() -> None:
+    keypair_env = os.getenv("KEYPAIR_PATH")
+    source = "KEYPAIR_PATH"
+    candidate = keypair_env
+    if not candidate:
+        alt = os.getenv("SOLANA_KEYPAIR")
+        if alt:
+            candidate = alt
+            source = "SOLANA_KEYPAIR"
+    if not candidate:
+        log.info("No KEYPAIR_PATH or SOLANA_KEYPAIR configured; running without signing key")
+        return
+    path = Path(candidate).expanduser()
+    if path.exists():
+        log.info("Using keypair from %s (%s)", source, path)
+    else:
+        log.warning("Configured %s points to missing path %s", source, path)
+
 _ORIGINAL_STRATEGY_MANAGER = StrategyManager
 
 try:  # optional dependency; tests patch attributes when available
@@ -187,6 +208,13 @@ async def perform_startup_async(
     start = time.perf_counter()
     cfg = apply_env_overrides(load_config(config_path))
     set_env_from_config(cfg)
+    _log_active_keypair_path()
+    try:
+        prices.validate_pyth_overrides_on_boot(network_required=not (offline or dry_run))
+    except RuntimeError:
+        raise
+    except Exception as exc:  # pragma: no cover - validation best effort
+        log.debug("Pyth override validation skipped: %s", exc)
     initialize_event_bus()
     runtime_cfg = Config.from_env(cfg)
     metrics_aggregator.publish(

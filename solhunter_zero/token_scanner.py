@@ -2304,7 +2304,7 @@ async def enrich_tokens_async(
     Verify token accounts exist and filter obviously bad ones.
     Keeps tokens if decimals parsing fails (agents can still decide).
     """
-    cleaned, dropped = clean_candidate_mints(list(mints))
+    cleaned, dropped = clean_candidate_mints(list(mints), source="enrich:input")
     if dropped:
         logger.warning("Dropped %d invalid mint(s) during enrichment", len(dropped))
     as_list = []

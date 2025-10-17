@@ -34,9 +34,9 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 _WS_HOST_ENV_KEYS = ("UI_WS_HOST", "UI_HOST")
-_RL_WS_PORT_DEFAULT = 8767
-_EVENT_WS_PORT_DEFAULT = 8770
-_LOG_WS_PORT_DEFAULT = 8768
+_RL_WS_PORT_DEFAULT = 0
+_EVENT_WS_PORT_DEFAULT = 0
+_LOG_WS_PORT_DEFAULT = 0
 _WS_QUEUE_DEFAULT = 512
 _backlog_env = os.getenv("UI_WS_BACKLOG_MAX", "64")
 try:
