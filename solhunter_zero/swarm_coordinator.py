@@ -114,10 +114,18 @@ class SwarmCoordinator:
         memory_agent: MemoryAgent | None = None,
         base_weights: Dict[str, float] | None = None,
         regime_weights: Dict[str, Dict[str, float]] | None = None,
+        *,
+        temperature: float = 1.0,
+        exposure_floor: float = 0.05,
     ):
         self.memory_agent = memory_agent
-        self.base_weights = base_weights or {}
-        self.regime_weights = regime_weights or {}
+        self.base_weights = {k: float(v) for k, v in (base_weights or {}).items()}
+        self.regime_weights = {
+            rk: {k: float(v) for k, v in rv.items()}
+            for rk, rv in (regime_weights or {}).items()
+        }
+        self.temperature = max(1e-6, float(temperature))
+        self.exposure_floor = max(0.0, float(exposure_floor))
 
     async def _agent_performance(
         self, agent_names: Iterable[str]
@@ -289,12 +297,39 @@ class SwarmCoordinator:
             hier_agent = None
             agents = [a for a in agents if not isinstance(a, RLWeightAgent)]
         names = [a.name for a in agents]
+        if not names:
+            return {}
         profiles = await self._agent_performance(names)
-        rois = {name: profiles.get(name, AgentPerformance()).roi for name in names}
-        exposures = {name: profiles.get(name, AgentPerformance()).exposure for name in names}
-        base = dict(self.base_weights)
+        rois: Dict[str, float] = {}
+        exposures: Dict[str, float] = {}
+        for name in names:
+            profile = profiles.get(name, AgentPerformance())
+            roi_val = profile.roi
+            try:
+                roi_f = float(roi_val)
+            except (TypeError, ValueError):
+                roi_f = 0.0
+            if not math.isfinite(roi_f):
+                roi_f = 0.0
+            rois[name] = roi_f
+            exposure_val = profile.exposure
+            try:
+                exp_f = float(exposure_val)
+            except (TypeError, ValueError):
+                exp_f = 0.0
+            if not math.isfinite(exp_f) or exp_f < 0:
+                exp_f = 0.0
+            exposures[name] = exp_f
+        base = {name: float(self.base_weights.get(name, 1.0)) for name in names}
         if regime and regime in self.regime_weights:
-            base.update(self.regime_weights[regime])
+            for n, v in self.regime_weights[regime].items():
+                if n in base:
+                    try:
+                        factor = float(v)
+                    except (TypeError, ValueError):
+                        factor = 1.0
+                    if math.isfinite(factor):
+                        base[n] *= factor
 
         async def _apply_learning(weights: Dict[str, float]) -> Dict[str, float]:
             if rl_agent:
@@ -318,16 +353,23 @@ class SwarmCoordinator:
         min_roi = min(rois.values()) if rois else 0.0
         max_roi = max(rois.values()) if rois else 0.0
 
-        total_exposure = sum(value for value in exposures.values() if value > 0)
+        exp_vals = []
+        for name in names:
+            exp_vals.append(max(0.0, exposures.get(name, 0.0)))
+        total_exposure = sum(exp_vals)
         if total_exposure <= 0:
             exposure_scale = {name: 1.0 for name in names}
         else:
-            exposure_scale = {
-                name: (exposures.get(name, 0.0) / total_exposure)
-                if exposures.get(name)
-                else 0.1
-                for name in names
-            }
+            exposure_scale: Dict[str, float] = {}
+            for idx, name in enumerate(names):
+                raw = exp_vals[idx] / total_exposure if total_exposure > 0 else 0.0
+                exposure_scale[name] = max(self.exposure_floor, raw)
+            scale_sum = sum(exposure_scale.values())
+            if scale_sum > 0:
+                for key in exposure_scale:
+                    exposure_scale[key] /= scale_sum
+            else:
+                exposure_scale = {name: 1.0 / len(names) for name in names}
 
         weights = {}
         for name in names:
@@ -338,9 +380,34 @@ class SwarmCoordinator:
             else:
                 norm = (roi - min_roi) / roi_range
             norm = max(0.0, min(1.0, norm))
+            if not math.isfinite(norm):
+                norm = 0.0
+            norm = norm ** (1.0 / self.temperature)
             exposure_factor = exposure_scale.get(name, 1.0)
             profile = profiles.get(name, AgentPerformance())
             tactical = profile.tactical_factor()
-            weights[name] = base.get(name, 1.0) * norm * exposure_factor * tactical
+            base_weight = base.get(name, 1.0)
+            try:
+                base_weight = float(base_weight)
+            except (TypeError, ValueError):
+                base_weight = 1.0
+            w = base_weight * norm * exposure_factor * tactical
+            if not math.isfinite(w) or w < 0:
+                w = 0.0
+            weights[name] = w
 
-        return await _apply_learning(weights)
+        weights = await _apply_learning(weights)
+        for key, value in list(weights.items()):
+            if not isinstance(value, (int, float)):
+                weights[key] = 0.0
+                continue
+            value_f = float(value)
+            if not math.isfinite(value_f) or value_f < 0:
+                weights[key] = 0.0
+            else:
+                weights[key] = value_f
+        weight_sum = sum(weights.get(name, 0.0) for name in names)
+        if weight_sum <= 0:
+            count = len(names)
+            return {name: 1.0 / count for name in names} if count else {}
+        return {name: weights.get(name, 0.0) / weight_sum for name in names}
