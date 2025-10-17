@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 from statistics import median
-from typing import Callable, Optional
+from typing import Callable
 
 from solana.rpc.api import Client
 from solana.rpc.async_api import AsyncClient
@@ -19,11 +19,11 @@ _FALLBACK_LAMPORTS = int(os.getenv("FALLBACK_LAMPORTS_PER_SIG", "5000") or 5000)
 _MIN_CU_PRICE = int(os.getenv("MIN_CU_PRICE_LAMPORTS", "0") or 0)
 _MAX_CU_PRICE = int(os.getenv("MAX_CU_PRICE_LAMPORTS", "10000") or 10000)
 _CU_PRICE_SLOPE = float(os.getenv("CU_PRICE_SLOPE", "1000") or 1000.0)
-_FEE_CACHE_TTL = float(os.getenv("FEE_CACHE_TTL_SECONDS", "5") or 5.0)
-_PRIORITY_CACHE_TTL = float(os.getenv("PRIORITY_FEE_CACHE_TTL_SECONDS", "3") or 3.0)
+_FEE_TTL_SEC = float(os.getenv("FEE_CACHE_TTL_SEC", "3") or 3.0)
+_PRIO_TTL_SEC = float(os.getenv("PRIORITY_FEE_CACHE_TTL_SEC", "3") or 3.0)
 
-_fee_cache = {}
-_priority_cache = {}
+_last_fee = {"lamports": None, "ts": 0.0}
+_last_prio = {"fee": None, "ts": 0.0}
 
 
 def _extract_lamports(resp: object) -> int:
@@ -78,43 +78,25 @@ def _best_effort_base_fee(client: Client) -> int:
     return _FALLBACK_LAMPORTS
 
 
-def _cache_get(cache: dict, key: tuple, ttl: float) -> Optional[float]:
-    entry = cache.get(key)
-    if not entry:
-        return None
-    value, timestamp = entry
-    if time.monotonic() - timestamp > ttl:
-        cache.pop(key, None)
-        return None
-    return value
-
-
-def _cache_set(cache: dict, key: tuple, value: float) -> None:
-    cache[key] = (value, time.monotonic())
-
-
 def get_current_fee(testnet: bool = False) -> float:
     """Return current fee per signature in SOL."""
 
-    cache_key = ("current_fee", testnet)
-    cached = _cache_get(_fee_cache, cache_key, _FEE_CACHE_TTL)
-    if cached is not None:
-        return cached
+    now = time.time()
+    if _last_fee["lamports"] and (now - float(_last_fee["ts"])) < _FEE_TTL_SEC:
+        return float(_last_fee["lamports"]) / LAMPORTS_PER_SOL
 
     client = Client(RPC_TESTNET_URL if testnet else RPC_URL)
     lamports = _best_effort_base_fee(client)
-    fee = lamports / LAMPORTS_PER_SOL
-    _cache_set(_fee_cache, cache_key, fee)
-    return fee
+    _last_fee.update({"lamports": lamports, "ts": now})
+    return lamports / LAMPORTS_PER_SOL
 
 
 async def get_current_fee_async(testnet: bool = False) -> float:
     """Asynchronously return current fee per signature in SOL."""
 
-    cache_key = ("current_fee", testnet)
-    cached = _cache_get(_fee_cache, cache_key, _FEE_CACHE_TTL)
-    if cached is not None:
-        return cached
+    now = time.time()
+    if _last_fee["lamports"] and (now - float(_last_fee["ts"])) < _FEE_TTL_SEC:
+        return float(_last_fee["lamports"]) / LAMPORTS_PER_SOL
 
     async with AsyncClient(RPC_TESTNET_URL if testnet else RPC_URL) as client:
         try:
@@ -140,9 +122,8 @@ async def get_current_fee_async(testnet: bool = False) -> float:
     if lamports <= 0:
         lamports = _FALLBACK_LAMPORTS
 
-    fee = lamports / LAMPORTS_PER_SOL
-    _cache_set(_fee_cache, cache_key, fee)
-    return fee
+    _last_fee.update({"lamports": lamports, "ts": now})
+    return lamports / LAMPORTS_PER_SOL
 
 
 async def get_priority_fee_async(rpc_url: str, *, percentile: float = 0.5) -> float:
@@ -172,19 +153,16 @@ async def get_priority_fee_estimate(
     rpc_urls: list[str],
     *,
     percentile: float = 0.5,
-    reduce: Optional[Callable[[list[float]], float]] = None,
+    reduce: Callable[[list[float]], float] | None = None,
 ) -> float:
     """Query all URLs concurrently and return an aggregate estimate."""
 
+    now = time.time()
+    if _last_prio["fee"] and (now - float(_last_prio["ts"])) < _PRIO_TTL_SEC:
+        return float(_last_prio["fee"])
+
     if not rpc_urls:
         return 0.0
-
-    use_cache = reduce is None
-    cache_key = (tuple(sorted(rpc_urls)), percentile)
-    if use_cache:
-        cached = _cache_get(_priority_cache, cache_key, _PRIORITY_CACHE_TTL)
-        if cached is not None:
-            return cached
 
     tasks = [get_priority_fee_async(u, percentile=percentile) for u in rpc_urls]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -193,8 +171,7 @@ async def get_priority_fee_estimate(
         return 0.0
 
     estimate = float(reduce(fees)) if reduce else float(median(fees))
-    if use_cache:
-        _cache_set(_priority_cache, cache_key, estimate)
+    _last_prio.update({"fee": estimate, "ts": now})
     return estimate
 
 
