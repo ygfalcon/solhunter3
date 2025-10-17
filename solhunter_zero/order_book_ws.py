@@ -194,7 +194,7 @@ async def stream_order_book(
                 async with session.ws_connect(url) as ws:
                     backoff = 1.0
                     async for msg in ws:
-                        updates: Optional[Dict[str, Dict[str, float]]] = None
+                        updates: Dict[str, Dict[str, float]]
 
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
@@ -210,6 +210,13 @@ async def stream_order_book(
                                 bids = float(data.get("bids", 0.0))
                                 asks = float(data.get("asks", 0.0))
                                 rate = float(data.get("tx_rate", 0.0))
+                                updates = {
+                                    token: {
+                                        "bids": bids,
+                                        "asks": asks,
+                                        "tx_rate": rate,
+                                    }
+                                }
                             else:
                                 bids = 0.0
                                 asks = 0.0
@@ -218,7 +225,13 @@ async def stream_order_book(
                                     if isinstance(v, dict):
                                         bids += float(v.get("bids", 0.0))
                                         asks += float(v.get("asks", 0.0))
-                            updates = {token: {"bids": bids, "asks": asks, "tx_rate": rate}}
+                                updates = {
+                                    token: {
+                                        "bids": bids,
+                                        "asks": asks,
+                                        "tx_rate": rate,
+                                    }
+                                }
 
                         elif msg.type == aiohttp.WSMsgType.BINARY:
                             try:
@@ -229,25 +242,20 @@ async def stream_order_book(
                                 elif ev.topic == "depth_diff" and ev.HasField("depth_diff"):
                                     entries = ev.depth_diff.entries
                                 else:
-                                    entries = None
+                                    continue
                             except Exception:
-                                entries = None
-
-                            if entries:
-                                updates = {
-                                    tok: {
-                                        "bids": e.bids,
-                                        "asks": e.asks,
-                                        "tx_rate": e.tx_rate,
-                                    }
-                                    for tok, e in entries.items()
+                                continue
+                            updates = {
+                                tok: {
+                                    "bids": e.bids,
+                                    "asks": e.asks,
+                                    "tx_rate": e.tx_rate,
                                 }
+                                for tok, e in entries.items()
+                            }
 
                         else:
                             # Ignore other message types (PING/PONG/CLOSE, etc.)
-                            continue
-
-                        if not updates:
                             continue
 
                         now = time.time()
