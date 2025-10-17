@@ -65,6 +65,17 @@ message TradeLogged {
   int64 simulation_id = 8;
   string uuid = 9;
   int64 trade_id = 10;
+
+  // unix seconds (float64). Optional, omitted by older producers.
+  double created_at = 11;
+}
+
+message RuntimeLog {
+  string stage = 1;
+  string detail = 2;
+  double ts = 3;
+  string level = 4;
+  int32 actions = 5;
 }
 
 message RLMetrics {
@@ -171,5 +182,7 @@ message Event {
     MemorySyncRequest memory_sync_request = 21;
     MemorySyncResponse memory_sync_response = 22;
     DepthDiff depth_diff = 23;
+
+    RuntimeLog runtime_log = 24;
   }
 }
