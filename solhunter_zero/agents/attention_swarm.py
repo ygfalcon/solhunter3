@@ -5,19 +5,37 @@ from typing import Sequence, Dict, Any
 from ..optional_imports import try_import
 import numpy as np
 
-_torch = try_import("torch", stub=None)
-if _torch is None:  # pragma: no cover - optional dependency
-    raise ImportError("torch is required for AttentionSwarm")
+class _TorchStub:
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple
+        raise ImportError("torch is required for AttentionSwarm")
 
-torch = _torch  # type: ignore[assignment]
-import torch.nn as nn  # type: ignore
+
+_torch = try_import("torch", stub=_TorchStub())
+if isinstance(_torch, _TorchStub):  # pragma: no cover - optional dependency
+    torch = None
+
+    class _NNStub:
+        def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple
+            raise ImportError("torch is required for AttentionSwarm")
+
+    nn = _NNStub()  # type: ignore
+    ModuleBase = object
+else:  # pragma: no cover - optional dependency
+    torch = _torch  # type: ignore[assignment]
+    import torch.nn as nn  # type: ignore
+    ModuleBase = nn.Module  # type: ignore[attr-defined]
 
 from ..regime import detect_regime
 from ..advanced_memory import AdvancedMemory
 from ..device import get_default_device
 
 
-class AttentionSwarm(nn.Module):
+def _require_torch() -> None:
+    if torch is None:  # pragma: no cover - optional dependency
+        raise ImportError("torch is required for AttentionSwarm")
+
+
+class AttentionSwarm(ModuleBase):
     """Tiny transformer predicting agent weights from ROI history."""
 
     def __init__(
@@ -29,6 +47,7 @@ class AttentionSwarm(nn.Module):
         *,
         device: str | torch.device | None = None,
     ) -> None:
+        _require_torch()
         super().__init__()
         self.num_agents = int(num_agents)
         self.seq_len = int(seq_len)
@@ -95,6 +114,7 @@ def make_training_data(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Construct dataset tensors from ``memory`` trades."""
 
+    _require_torch()
     trades = memory.list_trades()
     trades.sort(key=lambda t: t.timestamp)
     if not trades:
@@ -149,6 +169,7 @@ def train_attention_swarm(
     device: str | None = None,
 ) -> AttentionSwarm:
     """Fit an :class:`AttentionSwarm` from ``memory`` trades."""
+    _require_torch()
     dev = get_default_device(device)
 
     X, y = make_training_data(memory, agents, window=window, seq_len=seq_len)
@@ -176,10 +197,12 @@ def save_model(model: AttentionSwarm, path: str) -> None:
         "hidden_dim": model.hidden_dim,
         "num_layers": model.num_layers,
     }
+    _require_torch()
     torch.save({"cfg": cfg, "state": model.state_dict()}, path)
 
 
 def load_model(path: str, *, device: str | None = None) -> AttentionSwarm:
+    _require_torch()
     dev = get_default_device(device)
     obj = torch.load(path, map_location=dev)
     cfg = obj.get("cfg", {})
