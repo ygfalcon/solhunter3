@@ -102,6 +102,11 @@ from asyncio import Queue
 from .schemas import validate_message, to_dict
 from . import event_pb2 as _pb
 
+try:
+    from google.protobuf.message import DecodeError as _ProtoDecodeError
+except Exception:  # pragma: no cover - protobuf optional dependency guard
+    _ProtoDecodeError = Exception
+
 pb = cast(Any, _pb)
 
 _PB_MAP = {
@@ -1303,7 +1308,11 @@ async def _redis_listener(pubsub) -> None:
             if isinstance(data, memoryview):
                 data = bytes(data)
             ev = pb.Event()
-            ev.ParseFromString(_maybe_decompress(data))
+            try:
+                ev.ParseFromString(_maybe_decompress(data))
+            except _ProtoDecodeError:
+                logging.warning("Dropping redis event with incompatible protobuf schema")
+                continue
             publish(ev.topic, _decode_payload(ev), _broadcast=False)
     except asyncio.CancelledError:  # pragma: no cover - shutdown
         pass
