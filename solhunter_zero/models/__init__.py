@@ -83,7 +83,7 @@ class TransformerModel(nn.Module):
         if input_dim % nhead != 0:
             nhead = 1
         encoder_layer = nn.TransformerEncoderLayer(
-            input_dim, nhead=nhead, dim_feedforward=hidden_dim
+            input_dim, nhead=nhead, dim_feedforward=hidden_dim, batch_first=True
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.fc = nn.Linear(input_dim, 1)
@@ -124,7 +124,9 @@ class DeepTransformerModel(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        layer = nn.TransformerEncoderLayer(input_dim, nhead=8, dim_feedforward=hidden_dim)
+        layer = nn.TransformerEncoderLayer(
+            input_dim, nhead=8, dim_feedforward=hidden_dim, batch_first=True
+        )
         self.encoder = nn.TransformerEncoder(layer, num_layers)
         self.fc = nn.Linear(input_dim, 1)
 
@@ -149,7 +151,9 @@ class XLTransformerModel(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        layer = nn.TransformerEncoderLayer(input_dim, nhead=8, dim_feedforward=hidden_dim)
+        layer = nn.TransformerEncoderLayer(
+            input_dim, nhead=8, dim_feedforward=hidden_dim, batch_first=True
+        )
         self.encoder = nn.TransformerEncoder(layer, num_layers)
         self.fc = nn.Linear(input_dim, 1)
 
@@ -168,6 +172,7 @@ class XLTransformerModel(nn.Module):
 
 def save_model(model: nn.Module, path: str) -> None:
     """Save ``model`` to ``path`` using a portable format."""
+    model.eval()
     if isinstance(model, PriceModel):
         cfg = {
             "cls": "PriceModel",
@@ -277,10 +282,23 @@ def get_model(path: str | None, *, reload: bool = False) -> nn.Module | None:
         return None
 
 
+def _select_device() -> torch.device:
+    """Return the best available training device."""
+
+    if getattr(torch, "cuda", None) and torch.cuda.is_available():
+        return torch.device("cuda")
+    backends = getattr(torch, "backends", None)
+    mps = getattr(backends, "mps", None) if backends is not None else None
+    if mps is not None and hasattr(mps, "is_available") and mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def export_torchscript(model: nn.Module, path: str) -> str:
     """Compile ``model`` to TorchScript and save to ``path``."""
     out = os.fspath(path)
     try:
+        model.eval()
         scripted = torch.jit.script(model)
         scripted.save(out)
     except Exception as exc:  # pragma: no cover - optional feature
@@ -306,7 +324,16 @@ def export_onnx(model: nn.Module, path: str, example_input: torch.Tensor) -> str
     """Export ``model`` to ONNX format using ``example_input``."""
     out = os.fspath(path)
     try:
-        torch.onnx.export(model, example_input, out, opset_version=12)
+        model.eval()
+        torch.onnx.export(
+            model,
+            example_input,
+            out,
+            opset_version=12,
+            do_constant_folding=True,
+            input_names=["input"],
+            output_names=["output"],
+        )
     except Exception as exc:  # pragma: no cover - optional feature
         raise RuntimeError(f"failed to export ONNX: {exc}") from exc
     return out
@@ -433,15 +460,20 @@ def train_price_model(
         seq_len,
     )
     model = PriceModel(X.size(-1), hidden_dim=hidden_dim, num_layers=num_layers)
+    device = _select_device()
+    model = model.to(device)
+    X, y = X.to(device), y.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     for _ in range(epochs):
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         pred = model(X)
         loss = loss_fn(pred, y)
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     model.eval()
+    model = model.to("cpu")
     return model
 
 
@@ -479,15 +511,20 @@ def train_transformer_model(
         seq_len,
     )
     model = TransformerModel(X.size(-1), hidden_dim=hidden_dim, num_layers=num_layers)
+    device = _select_device()
+    model = model.to(device)
+    X, y = X.to(device), y.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     for _ in range(epochs):
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         pred = model(X)
         loss = loss_fn(pred, y)
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     model.eval()
+    model = model.to("cpu")
     return model
 
 
@@ -525,15 +562,20 @@ def train_deep_transformer_model(
         seq_len,
     )
     model = DeepTransformerModel(X.size(-1), hidden_dim=hidden_dim, num_layers=num_layers)
+    device = _select_device()
+    model = model.to(device)
+    X, y = X.to(device), y.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     for _ in range(epochs):
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         pred = model(X)
         loss = loss_fn(pred, y)
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     model.eval()
+    model = model.to("cpu")
     return model
 
 
@@ -571,15 +613,20 @@ def train_xl_transformer_model(
         seq_len,
     )
     model = XLTransformerModel(X.size(-1), hidden_dim=hidden_dim, num_layers=num_layers)
+    device = _select_device()
+    model = model.to(device)
+    X, y = X.to(device), y.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     for _ in range(epochs):
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         pred = model(X)
         loss = loss_fn(pred, y)
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     model.eval()
+    model = model.to("cpu")
     return model
 
 
@@ -635,15 +682,20 @@ def train_deep_lstm(
     """Train :class:`DeepLSTMModel` using stored snapshots."""
     X, y = make_snapshot_training_data(snaps, seq_len)
     model = DeepLSTMModel(X.size(-1))
+    device = _select_device()
+    model = model.to(device)
+    X, y = X.to(device), y.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     for _ in range(epochs):
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         pred = model(X)
         loss = loss_fn(pred, y)
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     model.eval()
+    model = model.to("cpu")
     return model
 
 
@@ -657,15 +709,20 @@ def train_deep_transformer(
     """Train :class:`DeepTransformerModel` using stored snapshots."""
     X, y = make_snapshot_training_data(snaps, seq_len)
     model = DeepTransformerModel(X.size(-1))
+    device = _select_device()
+    model = model.to(device)
+    X, y = X.to(device), y.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     for _ in range(epochs):
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         pred = model(X)
         loss = loss_fn(pred, y)
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     model.eval()
+    model = model.to("cpu")
     return model
 
 
@@ -681,13 +738,18 @@ def train_xl_transformer(
     """Train :class:`XLTransformerModel` using stored snapshots."""
     X, y = make_snapshot_training_data(snaps, seq_len)
     model = XLTransformerModel(X.size(-1), hidden_dim=hidden_dim, num_layers=num_layers)
+    device = _select_device()
+    model = model.to(device)
+    X, y = X.to(device), y.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
     for _ in range(epochs):
-        opt.zero_grad()
+        opt.zero_grad(set_to_none=True)
         pred = model(X)
         loss = loss_fn(pred, y)
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     model.eval()
+    model = model.to("cpu")
     return model
