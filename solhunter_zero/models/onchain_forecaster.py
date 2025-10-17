@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence, Iterable, Tuple, Any
+from typing import Sequence, Iterable, Tuple, Any, Optional
 
 import os
 try:
@@ -66,13 +66,33 @@ class TransformerForecaster(nn.Module):
         nhead = max(1, min(4, input_dim))
         if input_dim % nhead != 0:
             nhead = 1
-        layer = nn.TransformerEncoderLayer(input_dim, nhead=nhead, dim_feedforward=hidden_dim)
+        # Prefer batch_first=True (PyTorch ≥ 1.12/2.x); fall back if unavailable.
+        try:
+            layer = nn.TransformerEncoderLayer(
+                d_model=input_dim,
+                nhead=nhead,
+                dim_feedforward=hidden_dim,
+                batch_first=True,
+            )
+            self._batch_first = True
+        except TypeError:
+            layer = nn.TransformerEncoderLayer(
+                d_model=input_dim,
+                nhead=nhead,
+                dim_feedforward=hidden_dim,
+            )
+            self._batch_first = False
         self.encoder = nn.TransformerEncoder(layer, num_layers)
         self.fc = nn.Linear(input_dim, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        t = self.encoder(x)
-        out = t[:, -1]
+        # x expected (B, T, E). If encoder not batch_first, transpose to (T, B, E).
+        if getattr(self, "_batch_first", False):
+            t = self.encoder(x)
+            out = t[:, -1]
+        else:
+            t = self.encoder(x.transpose(0, 1))
+            out = t[-1]
         return self.fc(out).squeeze(-1)
 
     def predict(self, seq: Sequence[Sequence[float]]) -> float:
@@ -110,6 +130,14 @@ def make_dataset(snaps: Iterable[Any], seq_len: int = 30) -> Tuple[torch.Tensor,
     return X, y
 
 
+def _default_device() -> "torch.device":
+    if hasattr(torch, "cuda") and torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def train_lstm(
     snaps: Iterable[Any],
     *,
@@ -118,19 +146,47 @@ def train_lstm(
     lr: float = 1e-3,
     hidden_dim: int = 32,
     num_layers: int = 2,
+    batch_size: int = 64,
+    grad_clip: float = 1.0,
+    use_amp: bool = False,
+    seed: Optional[int] = 1337,
+    device: Optional["torch.device"] = None,
 ) -> LSTMForecaster:
     """Train :class:`LSTMForecaster` on snapshots."""
 
+    if seed is not None:
+        torch.manual_seed(seed)
     X, y = make_dataset(snaps, seq_len)
-    model = LSTMForecaster(X.size(-1), hidden_dim=hidden_dim, num_layers=num_layers, seq_len=seq_len)
+    device = device or _default_device()
+    model = LSTMForecaster(X.size(-1), hidden_dim=hidden_dim, num_layers=num_layers, seq_len=seq_len).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and device.type == "cuda")
+    X, y = X.to(device), y.to(device)
+    n = X.size(0)
     for _ in range(epochs):
-        opt.zero_grad()
-        pred = model(X)
-        loss = loss_fn(pred, y)
-        loss.backward()
-        opt.step()
+        model.train()
+        for start in range(0, n, max(1, batch_size)):
+            xb = X[start : start + batch_size]
+            yb = y[start : start + batch_size]
+            opt.zero_grad(set_to_none=True)
+            if scaler.is_enabled():
+                with torch.cuda.amp.autocast():
+                    pred = model(xb)
+                    loss = loss_fn(pred, yb)
+                scaler.scale(loss).backward()
+                if grad_clip and grad_clip > 0:
+                    scaler.unscale_(opt)
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                pred = model(xb)
+                loss = loss_fn(pred, yb)
+                loss.backward()
+                if grad_clip and grad_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                opt.step()
     model.eval()
     return model
 
@@ -143,19 +199,47 @@ def train_transformer(
     lr: float = 1e-3,
     hidden_dim: int = 32,
     num_layers: int = 2,
+    batch_size: int = 64,
+    grad_clip: float = 1.0,
+    use_amp: bool = False,
+    seed: Optional[int] = 1337,
+    device: Optional["torch.device"] = None,
 ) -> TransformerForecaster:
     """Train :class:`TransformerForecaster` on snapshots."""
 
+    if seed is not None:
+        torch.manual_seed(seed)
     X, y = make_dataset(snaps, seq_len)
-    model = TransformerForecaster(X.size(-1), hidden_dim=hidden_dim, num_layers=num_layers, seq_len=seq_len)
+    device = device or _default_device()
+    model = TransformerForecaster(X.size(-1), hidden_dim=hidden_dim, num_layers=num_layers, seq_len=seq_len).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and device.type == "cuda")
+    X, y = X.to(device), y.to(device)
+    n = X.size(0)
     for _ in range(epochs):
-        opt.zero_grad()
-        pred = model(X)
-        loss = loss_fn(pred, y)
-        loss.backward()
-        opt.step()
+        model.train()
+        for start in range(0, n, max(1, batch_size)):
+            xb = X[start : start + batch_size]
+            yb = y[start : start + batch_size]
+            opt.zero_grad(set_to_none=True)
+            if scaler.is_enabled():
+                with torch.cuda.amp.autocast():
+                    pred = model(xb)
+                    loss = loss_fn(pred, yb)
+                scaler.scale(loss).backward()
+                if grad_clip and grad_clip > 0:
+                    scaler.unscale_(opt)
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                pred = model(xb)
+                loss = loss_fn(pred, yb)
+                loss.backward()
+                if grad_clip and grad_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                opt.step()
     model.eval()
     return model
 
