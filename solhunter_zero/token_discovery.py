@@ -55,6 +55,13 @@ _WARM_TIMEOUT = float(os.getenv("DISCOVERY_WARM_TIMEOUT", "5") or 5)
 _BIRDEYE_RETRIES = int(os.getenv("DISCOVERY_BIRDEYE_RETRIES", "3") or 3)
 _BIRDEYE_BACKOFF = float(os.getenv("DISCOVERY_BIRDEYE_BACKOFF", "1.0") or 1.0)
 _BIRDEYE_BACKOFF_MAX = float(os.getenv("DISCOVERY_BIRDEYE_BACKOFF_MAX", "8.0") or 8.0)
+_BIRDEYE_THROTTLE_MARKERS = (
+    "compute units usage limit exceeded",
+    "request limit exceeded",
+    "rate limit exceeded",
+    "too many requests",
+    "throttle",
+)
 
 TokenEntry = Dict[str, Union[float, str, List[str]]]
 
@@ -108,6 +115,33 @@ def _clear_birdeye_cache_for_tests() -> None:
         _cache_clear()
     except Exception:
         pass
+
+
+def _coerce_numeric(value: Any) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, dict):
+        for key in ("usd", "USD", "value", "amount"):
+            if key in value:
+                return _coerce_numeric(value.get(key))
+        return 0.0
+    try:
+        numeric = float(value)
+    except Exception:
+        return 0.0
+    if math.isnan(numeric):
+        return 0.0
+    return numeric
+
+
+def _extract_numeric_from_item(item: Dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        if key not in item:
+            continue
+        numeric = _coerce_numeric(item.get(key))
+        if not math.isnan(numeric):
+            return numeric
+    return 0.0
 
 
 async def _fetch_birdeye_tokens() -> List[TokenEntry]:
@@ -169,12 +203,9 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
             payload: Dict[str, Any] | None = None
             for attempt in range(1, _BIRDEYE_RETRIES + 1):
                 try:
-                    try:
-                        request_cm = session.get(
-                            BIRDEYE_API, params=params, headers=_headers()
-                        )
-                    except TypeError:
-                        request_cm = session.get(BIRDEYE_API, headers=_headers())
+                    request_cm = session.get(
+                        BIRDEYE_API, params=params, headers=_headers()
+                    )
                     async with request_cm as resp:
                         if resp.status in (429, 503) or 500 <= resp.status < 600:
                             logger.warning(
@@ -209,6 +240,39 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
 
                         if resp.status == 400:
                             text = await resp.text()
+                            lower_text = text.lower()
+                            if any(marker in lower_text for marker in _BIRDEYE_THROTTLE_MARKERS):
+                                logger.warning(
+                                    "BirdEye throttle %s attempt=%s offset=%s backoff=%.2fs: %s",
+                                    resp.status,
+                                    attempt,
+                                    offset,
+                                    backoff,
+                                    text[:200],
+                                )
+                                delay = backoff
+                                retry_after = resp.headers.get("Retry-After")
+                                if retry_after:
+                                    try:
+                                        ra_val = min(float(retry_after), _BIRDEYE_BACKOFF_MAX)
+                                        delay = max(delay, ra_val)
+                                    except ValueError:
+                                        pass
+                                if attempt >= _BIRDEYE_RETRIES:
+                                    if tokens:
+                                        logger.warning(
+                                            "BirdEye throttle %s after %s tokens; returning partial results",
+                                            resp.status,
+                                            len(tokens),
+                                        )
+                                        payload = None
+                                        break
+                                    _cache_set(cache_key, [])
+                                    return []
+                                await asyncio.sleep(delay)
+                                backoff = min(max(backoff * 2, delay), _BIRDEYE_BACKOFF_MAX)
+                                continue
+
                             logger.warning(
                                 "BirdEye 400 at offset %s (params=%r): %s",
                                 offset,
@@ -272,14 +336,10 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                 address = str(raw_address)
                 if not is_valid_solana_mint(address):
                     continue
-                try:
-                    volume = float(item.get("v24hUSD") or item.get("volume24hUSD") or item.get("volume") or 0.0)
-                except Exception:
-                    volume = 0.0
-                try:
-                    liquidity = float(item.get("liquidity") or 0.0)
-                except Exception:
-                    liquidity = 0.0
+                volume = _extract_numeric_from_item(
+                    item, "v24hUSD", "volume24hUSD", "volume"
+                )
+                liquidity = _extract_numeric_from_item(item, "liquidity")
                 try:
                     price = float(item.get("price") or 0.0)
                 except Exception:
@@ -315,6 +375,8 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
 
             offset += _PAGE_LIMIT
             total = data.get("total")
+            if total is None:
+                total = data.get("totalCount")
             try:
                 total_int = int(total) if total is not None else None
             except (TypeError, ValueError):
