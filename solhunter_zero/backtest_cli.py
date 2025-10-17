@@ -31,11 +31,17 @@ def bayesian_optimize_weights(
     iterations: int = 20,
 ) -> Dict[str, float]:
     """Search for the best agent weights using Bayesian optimisation."""
-    from sklearn.gaussian_process import GaussianProcessRegressor
-    from sklearn.gaussian_process.kernels import Matern
+    try:
+        from sklearn.gaussian_process import GaussianProcessRegressor
+        from sklearn.gaussian_process.kernels import Matern
+    except Exception as exc:
+        raise RuntimeError("--optimize requires scikit-learn: pip install scikit-learn") from exc
     import numpy as np
 
     rng = np.random.default_rng(0)
+    if not keys:
+        return {}
+
     X: List[List[float]] = []
     y: List[float] = []
     gp = GaussianProcessRegressor(kernel=Matern(nu=2.5), alpha=1e-6, normalize_y=True)
@@ -46,13 +52,17 @@ def bayesian_optimize_weights(
         return res.roi
 
     for _ in range(iterations):
-        if len(X) >= 3:
-            gp.fit(np.array(X), np.array(y))
-            cand = rng.uniform(0.0, 2.0, size=(100, len(keys)))
-            preds = gp.predict(cand)
-            x = cand[int(np.argmax(preds))]
-        else:
+        explore = rng.random() < 0.2 or len(X) < 3
+        if explore:
             x = rng.uniform(0.0, 2.0, size=len(keys))
+        else:
+            try:
+                gp.fit(np.array(X), np.array(y))
+                cand = rng.uniform(0.0, 2.0, size=(256, len(keys)))
+                preds = gp.predict(cand)
+                x = cand[int(np.argmax(preds))]
+            except Exception:
+                x = rng.uniform(0.0, 2.0, size=len(keys))
         score = evaluate(x.tolist())
         X.append(x.tolist())
         y.append(score)
@@ -95,6 +105,8 @@ def _load_history(
             reader = csv.DictReader(f)
             if (start_dt or end_dt) and "date" not in (reader.fieldnames or []):
                 raise ValueError("Date range specified but history has no dates")
+            if "price" not in (reader.fieldnames or []):
+                raise ValueError("CSV must contain a 'price' column")
             for row in reader:
                 if "date" in row and row["date"]:
                     d = datetime.fromisoformat(row["date"])
@@ -113,7 +125,10 @@ def _load_history(
                 line = line.strip()
                 if not line:
                     continue
-                item = json.loads(line)
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 if "date" in item:
                     d = datetime.fromisoformat(item["date"])
                     if start_dt and d < start_dt:
@@ -122,6 +137,8 @@ def _load_history(
                         continue
                 elif start_dt or end_dt:
                     raise ValueError("Date range specified but history has no dates")
+                if "price" not in item:
+                    continue
                 prices.append(float(item["price"]))
                 add_liq(item.get("liquidity"))
         return prices, liquidity
@@ -165,6 +182,8 @@ def _load_history(
                         continue
                 elif start_dt or end_dt:
                     raise ValueError("Date range specified but history has no dates")
+                if "price" not in item:
+                    continue
                 prices.append(float(item["price"]))
                 add_liq(item.get("liquidity"))
             return prices, liquidity
@@ -237,13 +256,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("history is required unless --analyze-trades is used")
 
     prices, liquidity = _load_history(args.history, args.start, args.end)
+    if not prices:
+        parser.error("No price history loaded (empty or out of requested date range).")
+
+    print(f"Loaded {len(prices)} price points" + (f" and {len(liquidity)} liquidity points" if liquidity else ""))
 
     strategy_map = dict(DEFAULT_STRATEGIES)
     if args.strategies:
         strategies = []
         for name in args.strategies:
             if name not in strategy_map:
-                parser.error(f"Unknown strategy: {name}")
+                valid = ", ".join(strategy_map.keys())
+                parser.error(f"Unknown strategy: {name}. Valid: {valid}")
             strategies.append((name, strategy_map[name]))
     else:
         strategies = DEFAULT_STRATEGIES
