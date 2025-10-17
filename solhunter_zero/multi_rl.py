@@ -9,11 +9,40 @@ import random
 from typing import Any, Dict, Iterable, List
 
 from .http import dumps
+from .event_bus import publish
 
 from .agents.memory import MemoryAgent
 
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_weights(weights: Dict[str, Any], *, fallback_names: List[str]) -> Dict[str, float]:
+    """Clamp to >=0 and L1-normalize; uniform if degenerate or empty."""
+
+    clean: Dict[str, float] = {}
+    for key, value in (weights or {}).items():
+        try:
+            clean[key] = max(0.0, float(value))
+        except Exception:
+            continue
+
+    total = sum(clean.values())
+    if total > 0:
+        return {key: (weight / total) for key, weight in clean.items()}
+    if fallback_names:
+        unique_names = list(dict.fromkeys(fallback_names))
+        if unique_names:
+            uniform = 1.0 / len(unique_names)
+            return {name: uniform for name in unique_names}
+    return {}
+
+
+def _atomic_write_json(path: str, obj: Any) -> None:
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh)
+    os.replace(tmp_path, path)
 
 
 class PopulationRL:
@@ -27,10 +56,16 @@ class PopulationRL:
         weights_path: str = "weights.json",
     ) -> None:
         self.memory_agent = memory_agent
-        self.population_size = int(population_size)
+        self.population_size = max(1, int(population_size))
         self.weights_path = weights_path
         self.population: List[dict[str, Any]] = []
         self._load()
+        try:
+            seed = os.getenv("RL_SEED")
+            if seed is not None:
+                random.seed(int(seed))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     def _load(self) -> bool:
@@ -71,8 +106,10 @@ class PopulationRL:
     def _save(self) -> None:
         if not self.weights_path:
             return
-        with open(self.weights_path, "w", encoding="utf-8") as fh:
-            json.dump(self.population, fh)
+        try:
+            _atomic_write_json(self.weights_path, self.population)
+        except Exception:
+            logger.exception("Failed to save RL weights to %s", self.weights_path)
 
     # ------------------------------------------------------------------
     async def _list_trades(self) -> List[Any]:
@@ -157,31 +194,75 @@ class PopulationRL:
                 {"weights": {n: 0.5 for n in names}, "risk": {"risk_multiplier": 1.0}, "score": 0.0},
             ]
         for cfg in self.population:
+            cfg["weights"] = _normalize_weights(cfg.get("weights", {}), fallback_names=names)
+            try:
+                risk = dict(cfg.get("risk") or {})
+                risk_multiplier = float(risk.get("risk_multiplier", 1.0))
+                risk["risk_multiplier"] = max(0.0, risk_multiplier)
+                cfg["risk"] = risk
+            except Exception:
+                cfg["risk"] = {"risk_multiplier": 1.0}
             cfg["score"] = self._score_cfg(cfg, roi_map)
         self.population.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-        keep = self.population[: max(1, len(self.population) // 2)]
+        keep_count = max(1, len(self.population) // 2)
+        if self.population_size > 1 and len(self.population) >= 2:
+            keep_count = max(keep_count, 2)
+        keep_count = min(self.population_size, len(self.population), keep_count)
+        keep = self.population[: keep_count]
         while len(keep) < self.population_size:
             parent = random.choice(keep)
             child = {
                 "weights": {
                     k: max(0.0, float(v) * random.uniform(0.8, 1.2))
-                    for k, v in parent.get("weights", {}).items()
+                    for k, v in (parent.get("weights") or {}).items()
                 },
                 "risk": {
                     k: max(0.0, float(v) * random.uniform(0.8, 1.2))
-                    for k, v in parent.get("risk", {}).items()
+                    for k, v in (parent.get("risk") or {}).items()
                 },
                 "score": 0.0,
             }
+            child["weights"] = _normalize_weights(child["weights"], fallback_names=names)
+            try:
+                risk_multiplier = float(child["risk"].get("risk_multiplier", 1.0))
+                child["risk"]["risk_multiplier"] = max(0.0, risk_multiplier)
+            except Exception:
+                child["risk"] = {"risk_multiplier": 1.0}
             keep.append(child)
         self.population = keep
+        for cfg in self.population:
+            cfg["score"] = self._score_cfg(cfg, roi_map)
         self._save()
-        return self.population[0]
+        best = self.population[0]
+        try:
+            publish(
+                "rl_weights",
+                {
+                    "weights": best.get("weights") or {},
+                    "risk": best.get("risk") or {},
+                },
+            )
+            publish(
+                "runtime.log",
+                {
+                    "stage": "rl",
+                    "detail": f"population_evolved size={self.population_size} best_score={best.get('score', 0.0):.6f}",
+                    "level": "INFO",
+                },
+            )
+        except Exception:
+            logger.warning("Failed to publish rl_weights/runtime.log", exc_info=True)
+        return best
 
     # ------------------------------------------------------------------
     def best_config(self) -> dict[str, Any]:
         self.population.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-        return self.population[0]
+        best = dict(self.population[0])
+        if "weights" in best:
+            best["weights"] = dict(best.get("weights") or {})
+        if "risk" in best:
+            best["risk"] = dict(best.get("risk") or {})
+        return best
 
 
 if __name__ == "__main__":  # pragma: no cover - simple CLI
@@ -202,4 +283,5 @@ if __name__ == "__main__":  # pragma: no cover - simple CLI
     mgr = MemoryAgent(Memory(args.memory))
     rl = PopulationRL(mgr, population_size=args.population_size, weights_path=args.weights_path)
     best = asyncio.run(rl.evolve())
-    print(dumps(best).decode())
+    out = dumps(best)
+    print(out.decode() if isinstance(out, (bytes, bytearray)) else out)
