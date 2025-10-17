@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import datetime
 import threading
@@ -69,6 +70,7 @@ from sqlalchemy import (
     Text,
     ForeignKey,
     Index,
+    event,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -144,7 +146,28 @@ class AdvancedMemory(BaseMemory):
         *,
         sync_interval: float | None = None,
     ) -> None:
-        self.engine = create_engine(url, echo=False, future=True)
+        # SQLite tuned for long-running/background use
+        is_sqlite = url.startswith("sqlite")
+        connect_args = {}
+        if is_sqlite:
+            connect_args = {"check_same_thread": False}
+        self.engine = create_engine(
+            url,
+            echo=False,
+            future=True,
+            pool_pre_ping=True,
+            connect_args=connect_args,
+        )
+        if is_sqlite:
+            def _set_sqlite_pragma(dbapi_conn, _connection_record):
+                cursor = dbapi_conn.cursor()
+                try:
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                    cursor.execute("PRAGMA synchronous=NORMAL")
+                finally:
+                    cursor.close()
+
+            event.listen(self.engine, "connect", _set_sqlite_pragma)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
 
@@ -164,6 +187,7 @@ class AdvancedMemory(BaseMemory):
         self._flush_batch = int(os.getenv("MEMORY_INDEX_MAX_BATCH_ADDS", "256") or 256)
         self._cluster_cap = int(os.getenv("MEMORY_CLUSTER_MAX_VECTORS", "50000") or 50000)
         self._embed_model_name = os.getenv("MEMORY_EMBED_MODEL", "all-MiniLM-L6-v2")
+        self._max_context_chars = int(os.getenv("MEMORY_MAX_CONTEXT_CHARS", "2048") or 2048)
 
         self.cluster_index = None
         self.cluster_centroids: np.ndarray | None = None
@@ -199,6 +223,13 @@ class AdvancedMemory(BaseMemory):
             return
         model = SentenceTransformer(self._embed_model_name)
         dim = model.get_sentence_embedding_dimension()
+        # Ensure index directory exists before any writes
+        try:
+            d = os.path.dirname(self.index_path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
         if os.path.exists(self.index_path):
             try:
                 cpu_index = faiss.read_index(self.index_path)
@@ -209,8 +240,13 @@ class AdvancedMemory(BaseMemory):
         else:
             cpu_index = faiss.IndexIDMap2(faiss.IndexFlatL2(dim))
         if self._use_gpu and _HAS_FAISS_GPU:
-            self.cpu_index = cpu_index
-            self.index = faiss.index_cpu_to_all_gpus(cpu_index)
+            try:
+                self.cpu_index = cpu_index
+                self.index = faiss.index_cpu_to_all_gpus(cpu_index)
+            except Exception:
+                # Fall back to CPU if GPU path fails for any reason
+                self.cpu_index = None
+                self.index = cpu_index
         else:
             self.cpu_index = None
             self.index = cpu_index
@@ -225,7 +261,10 @@ class AdvancedMemory(BaseMemory):
             return
         if not self._index_dirty:
             return
-        faiss.write_index(self.cpu_index or self.index, self.index_path)
+        # Atomic write to avoid truncated/corrupt index under crash
+        tmp = f"{self.index_path}.tmp"
+        faiss.write_index(self.cpu_index or self.index, tmp)
+        os.replace(tmp, self.index_path)
         self._index_dirty = False
         self._adds_since_flush = 0
         self._last_index_flush = time.time()
@@ -238,7 +277,9 @@ class AdvancedMemory(BaseMemory):
             self._ensure_model()
             if self.index is None or self.model is None:
                 return
-            vec = self.model.encode([text])[0].astype("float32")
+            # Truncate pathological contexts to keep encode latency bounded
+            t = text if not text or self._max_context_chars <= 0 else text[: self._max_context_chars]
+            vec = self.model.encode([t])[0].astype("float32")
             ids = np.array([trade_id], dtype="int64")
             self.index.add_with_ids(np.array([vec]), ids)
             if self.cpu_index is not None:
@@ -404,7 +445,11 @@ class AdvancedMemory(BaseMemory):
                     return []
         if ids is not None:
             with self.Session() as session:
-                return list(session.query(Trade).filter(Trade.id.in_(ids)))
+                rows = list(session.query(Trade).filter(Trade.id.in_(ids)))
+                # Preserve FAISS similarity order
+                order = {tid: i for i, tid in enumerate(ids)}
+                rows.sort(key=lambda r: order.get(r.id, 1e9))
+                return rows
         # simple fallback search
         with self.Session() as session:
             return (
@@ -468,16 +513,35 @@ class AdvancedMemory(BaseMemory):
             self._ensure_model()
             if self.index is None:
                 return
+            # Atomic import + dimension guard
             tmp = self.index_path + ".sync"
-            with open(tmp, "wb") as fh:
-                fh.write(data)
-            idx = faiss.read_index(tmp)
-            os.remove(tmp)
+            try:
+                with open(tmp, "wb") as fh:
+                    fh.write(data)
+                idx = faiss.read_index(tmp)
+            finally:
+                with contextlib.suppress(Exception):
+                    os.remove(tmp)
+            try:
+                dim_ok = (
+                    self.model.get_sentence_embedding_dimension()
+                    if self.model is not None
+                    else idx.d
+                )
+            except Exception:
+                dim_ok = idx.d
+            if getattr(idx, "d", dim_ok) != dim_ok:
+                # Ignore incompatible index
+                return
             if self.index.ntotal < idx.ntotal:
-                if self._use_gpu and _HAS_FAISS_GPU:
-                    self.cpu_index = idx
-                    self.index = faiss.index_cpu_to_all_gpus(idx)
-                else:
+                try:
+                    if self._use_gpu and _HAS_FAISS_GPU:
+                        self.cpu_index = idx
+                        self.index = faiss.index_cpu_to_all_gpus(idx)
+                    else:
+                        self.cpu_index = None
+                        self.index = idx
+                except Exception:
                     self.cpu_index = None
                     self.index = idx
                 self._index_dirty = True
@@ -504,8 +568,8 @@ class AdvancedMemory(BaseMemory):
                 return {}
 
             raw_index = self.cpu_index or self.index
-            base_index = raw_index.index if hasattr(raw_index, "index") else raw_index
-            ntotal = raw_index.ntotal
+            base_index = getattr(raw_index, "index", raw_index)
+            ntotal = getattr(raw_index, "ntotal", 0)
             if ntotal == 0:
                 self.cluster_index = None
                 self.cluster_centroids = None
@@ -514,8 +578,12 @@ class AdvancedMemory(BaseMemory):
             dim = self.model.get_sentence_embedding_dimension()
             start = max(0, ntotal - self._cluster_cap)
             positions = range(start, ntotal)
-            ids_arr = faiss.vector_to_array(raw_index.id_map)
-            ids_subset = ids_arr[start:ntotal]
+            try:
+                ids_arr = faiss.vector_to_array(raw_index.id_map)
+                ids_subset = ids_arr[start:ntotal]
+            except Exception:
+                # Fallback: reconstruct ids as sequential if id_map missing
+                ids_subset = np.arange(start, ntotal, dtype="int64")
             vecs = np.zeros((len(ids_subset), dim), dtype="float32")
             for idx_pos, store_pos in enumerate(positions):
                 vecs[idx_pos] = base_index.reconstruct(store_pos)
