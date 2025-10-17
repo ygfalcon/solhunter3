@@ -20,7 +20,7 @@ _PLACEHOLDER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"REDACTED", re.IGNORECASE),
     re.compile(r"YOUR[_-]", re.IGNORECASE),
     re.compile(r"example", re.IGNORECASE),
-    re.compile(r"test_", re.IGNORECASE),
+    re.compile(r"^test(_|\b)", re.IGNORECASE),
     re.compile(r"xxxx", re.IGNORECASE),
     re.compile(r"\bempty\b", re.IGNORECASE),
 )
@@ -59,11 +59,48 @@ def _parse_env_line(line: str) -> tuple[str, str] | None:
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
         return None
+    if stripped.lower().startswith("export "):
+        stripped = stripped[7:].lstrip()
     if "=" not in stripped:
         logger.debug("Skipping malformed env line: %s", stripped)
         return None
     key, value = stripped.split("=", 1)
-    return key.strip(), value.strip()
+    key = key.strip()
+    value = value.strip()
+    if not key:
+        logger.debug("Skipping env line with empty key: %s", line.rstrip())
+        return None
+
+    # Drop inline comments that are not inside quotes.
+    in_single = False
+    in_double = False
+    escaped = False
+    comment_index = None
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "#" and not in_single and not in_double:
+            comment_index = index
+            break
+    if comment_index is not None:
+        value = value[:comment_index].rstrip()
+
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        value = value[1:-1]
+
+    value = os.path.expandvars(value)
+
+    return key, value
 
 
 def _check_permissions(path: Path) -> None:
@@ -114,7 +151,11 @@ def load_production_env(
     overwrite: bool = False,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Load production environment files in priority order."""
+    """Load production environment files in priority order.
+
+    Returns a mapping of the variables that were newly loaded (and possibly
+    overwritten when ``overwrite=True``).
+    """
 
     env_map = dict(env or os.environ)
     search_paths: list[Path] = []
@@ -125,6 +166,7 @@ def load_production_env(
             [
                 ROOT / "configs" / ".env.production",
                 ROOT / ".env.production",
+                ROOT / "etc" / "solhunter" / "env.production",
             ]
         )
     loaded: dict[str, str] = {}
