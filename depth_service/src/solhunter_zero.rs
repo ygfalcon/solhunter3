@@ -256,12 +256,132 @@ pub struct MemorySyncResponse {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActionProposal {
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub side: ::prost::alloc::string::String,
+    #[prost(double, tag = "3")]
+    pub size: f64,
+    #[prost(double, tag = "4")]
+    pub score: f64,
+    #[prost(string, tag = "5")]
+    pub agent: ::prost::alloc::string::String,
+    #[prost(double, tag = "6")]
+    pub price: f64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DecisionRationale {
+    #[prost(string, tag = "1")]
+    pub agent: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub agents: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(double, tag = "3")]
+    pub score: f64,
+    #[prost(double, tag = "4")]
+    pub confidence: f64,
+    #[prost(double, tag = "5")]
+    pub conviction_delta: f64,
+    #[prost(string, tag = "6")]
+    pub snapshot_hash: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActionDecision {
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub side: ::prost::alloc::string::String,
+    #[prost(double, tag = "3")]
+    pub size: f64,
+    #[prost(double, tag = "4")]
+    pub price: f64,
+    #[prost(message, optional, tag = "5")]
+    pub rationale: ::core::option::Option<DecisionRationale>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DecisionSummary {
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub count: u32,
+    #[prost(uint32, tag = "3")]
+    pub buys: u32,
+    #[prost(uint32, tag = "4")]
+    pub sells: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DecisionMetrics {
+    #[prost(double, tag = "1")]
+    pub window_sec: f64,
+    #[prost(uint32, tag = "2")]
+    pub count: u32,
+    #[prost(double, tag = "3")]
+    pub decision_rate: f64,
+    #[prost(uint32, tag = "4")]
+    pub buys: u32,
+    #[prost(uint32, tag = "5")]
+    pub sells: u32,
+    #[prost(double, tag = "6")]
+    pub avg_size: f64,
+    #[prost(double, tag = "7")]
+    pub ttf_decision: f64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DexLatencyUpdate {
+    #[prost(map = "string, double", tag = "1")]
+    pub latencies: ::std::collections::HashMap<::prost::alloc::string::String, f64>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RuntimeStageChanged {
+    #[prost(string, tag = "1")]
+    pub stage: ::prost::alloc::string::String,
+    #[prost(bool, tag = "2")]
+    pub ok: bool,
+    #[prost(string, tag = "3")]
+    pub detail: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScalarMetric {
+    #[prost(double, tag = "1")]
+    pub value: f64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StartupComplete {
+    #[prost(double, tag = "1")]
+    pub startup_duration_ms: f64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VirtualPnL {
+    #[prost(string, tag = "1")]
+    pub order_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub mint: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub snapshot_hash: ::prost::alloc::string::String,
+    #[prost(double, tag = "4")]
+    pub realized_usd: f64,
+    #[prost(double, tag = "5")]
+    pub unrealized_usd: f64,
+    #[prost(double, tag = "6")]
+    pub ts: f64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Event {
     #[prost(string, tag = "1")]
     pub topic: ::prost::alloc::string::String,
     #[prost(
         oneof = "event::Kind",
-        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33"
     )]
     pub kind: ::core::option::Option<event::Kind>,
 }
@@ -316,5 +436,23 @@ pub mod event {
         DepthDiff(super::DepthDiff),
         #[prost(message, tag = "24")]
         RuntimeLog(super::RuntimeLog),
+        #[prost(message, tag = "25")]
+        ActionProposal(super::ActionProposal),
+        #[prost(message, tag = "26")]
+        ActionDecision(super::ActionDecision),
+        #[prost(message, tag = "27")]
+        DecisionSummary(super::DecisionSummary),
+        #[prost(message, tag = "28")]
+        DecisionMetrics(super::DecisionMetrics),
+        #[prost(message, tag = "29")]
+        DexLatencyUpdate(super::DexLatencyUpdate),
+        #[prost(message, tag = "30")]
+        RuntimeStageChanged(super::RuntimeStageChanged),
+        #[prost(message, tag = "31")]
+        ScalarMetric(super::ScalarMetric),
+        #[prost(message, tag = "32")]
+        StartupComplete(super::StartupComplete),
+        #[prost(message, tag = "33")]
+        VirtualPnl(super::VirtualPnL),
     }
 }

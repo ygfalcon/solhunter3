@@ -133,6 +133,17 @@ _PB_MAP = {
     "token_discovered": getattr(pb, "TokenDiscovered", None),
     "memory_sync_request": getattr(pb, "MemorySyncRequest", None),
     "memory_sync_response": getattr(pb, "MemorySyncResponse", None),
+    "action_proposal": getattr(pb, "ActionProposal", None),
+    "action_decision": getattr(pb, "ActionDecision", None),
+    "decision_summary": getattr(pb, "DecisionSummary", None),
+    "decision_metrics": getattr(pb, "DecisionMetrics", None),
+    "dex_latency_update": getattr(pb, "DexLatencyUpdate", None),
+    "runtime.stage_changed": getattr(pb, "RuntimeStageChanged", None),
+    "startup_config_load_duration": getattr(pb, "ScalarMetric", None),
+    "startup_connectivity_check_duration": getattr(pb, "ScalarMetric", None),
+    "startup_depth_service_start_duration": getattr(pb, "ScalarMetric", None),
+    "startup_complete": getattr(pb, "StartupComplete", None),
+    "virtual_pnl": getattr(pb, "VirtualPnL", None),
 }
 
 # compress protobuf messages when broadcasting if enabled
@@ -821,6 +832,139 @@ def _encode_event(topic: str, payload: Any) -> Any:
                 slippage=float(data.get("slippage", 0.0)),
             ),
         )
+    elif topic == "action_proposal":
+        data = to_dict(payload)
+        event = pb.Event(
+            topic=topic,
+            action_proposal=pb.ActionProposal(
+                token=str(data.get("token", "")),
+                side=str(data.get("side", "")),
+                size=float(data.get("size", 0.0)),
+                score=float(data.get("score", 0.0)),
+                agent=str(data.get("agent", "")),
+                price=float(data.get("price", 0.0)),
+            ),
+        )
+    elif topic == "action_decision":
+        data = to_dict(payload)
+        rationale = data.get("rationale") if isinstance(data, dict) else None
+        rationale_kwargs: dict[str, Any] = {}
+        if isinstance(rationale, dict):
+            agent = rationale.get("agent")
+            if agent:
+                rationale_kwargs["agent"] = str(agent)
+            agents = rationale.get("agents")
+            if isinstance(agents, (list, tuple, set)):
+                rationale_kwargs["agents"] = [
+                    str(a) for a in agents if str(a).strip()
+                ]
+            score = rationale.get("score")
+            if score is not None:
+                try:
+                    rationale_kwargs["score"] = float(score)
+                except (TypeError, ValueError):
+                    pass
+            confidence = rationale.get("confidence")
+            if confidence is not None:
+                try:
+                    rationale_kwargs["confidence"] = float(confidence)
+                except (TypeError, ValueError):
+                    pass
+            conviction = rationale.get("conviction_delta")
+            if conviction is not None:
+                try:
+                    rationale_kwargs["conviction_delta"] = float(conviction)
+                except (TypeError, ValueError):
+                    pass
+            snapshot_hash = rationale.get("snapshot_hash")
+            if snapshot_hash:
+                rationale_kwargs["snapshot_hash"] = str(snapshot_hash)
+        decision = pb.ActionDecision(
+            token=str(data.get("token", "")),
+            side=str(data.get("side", "")),
+            size=float(data.get("size", 0.0)),
+            price=float(data.get("price", 0.0)),
+        )
+        if rationale_kwargs:
+            decision.rationale.CopyFrom(pb.DecisionRationale(**rationale_kwargs))
+        event = pb.Event(topic=topic, action_decision=decision)
+    elif topic == "decision_summary":
+        data = to_dict(payload)
+        event = pb.Event(
+            topic=topic,
+            decision_summary=pb.DecisionSummary(
+                token=str(data.get("token", "")),
+                count=int(data.get("count", 0) or 0),
+                buys=int(data.get("buys", 0) or 0),
+                sells=int(data.get("sells", 0) or 0),
+            ),
+        )
+    elif topic == "decision_metrics":
+        data = to_dict(payload)
+        metrics = pb.DecisionMetrics()
+        if data.get("window_sec") is not None:
+            try:
+                metrics.window_sec = float(data.get("window_sec", 0.0))
+            except (TypeError, ValueError):
+                metrics.window_sec = 0.0
+        if data.get("count") is not None:
+            try:
+                metrics.count = int(data.get("count", 0) or 0)
+            except (TypeError, ValueError):
+                metrics.count = 0
+        if data.get("decision_rate") is not None:
+            try:
+                metrics.decision_rate = float(data.get("decision_rate", 0.0))
+            except (TypeError, ValueError):
+                metrics.decision_rate = 0.0
+        if data.get("buys") is not None:
+            try:
+                metrics.buys = int(data.get("buys", 0) or 0)
+            except (TypeError, ValueError):
+                metrics.buys = 0
+        if data.get("sells") is not None:
+            try:
+                metrics.sells = int(data.get("sells", 0) or 0)
+            except (TypeError, ValueError):
+                metrics.sells = 0
+        if data.get("avg_size") is not None:
+            try:
+                metrics.avg_size = float(data.get("avg_size", 0.0))
+            except (TypeError, ValueError):
+                metrics.avg_size = 0.0
+        if data.get("ttf_decision") is not None:
+            try:
+                metrics.ttf_decision = float(data.get("ttf_decision", 0.0))
+            except (TypeError, ValueError):
+                metrics.ttf_decision = 0.0
+        event = pb.Event(topic=topic, decision_metrics=metrics)
+    elif topic == "dex_latency_update":
+        data = to_dict(payload)
+        if isinstance(data, dict):
+            latencies = {str(k): float(v) for k, v in data.items() if v is not None}
+        else:
+            latencies = {}
+        event = pb.Event(
+            topic=topic,
+            dex_latency_update=pb.DexLatencyUpdate(latencies=latencies),
+        )
+    elif topic == "runtime.stage_changed":
+        data = to_dict(payload)
+        ok = data.get("ok")
+        if isinstance(ok, str):
+            ok = ok.lower() in {"1", "true", "yes", "ok"}
+        elif isinstance(ok, (int, float)):
+            ok = bool(ok)
+        elif not isinstance(ok, bool):
+            ok = False
+        event = pb.Event(
+            topic=topic,
+            runtime_stage_changed=pb.RuntimeStageChanged(
+                stage=str(data.get("stage", "")),
+                ok=bool(ok),
+                detail=str(data.get("detail", "")),
+            ),
+        )
     elif topic == "remote_system_metrics":
         data = to_dict(payload)
         event = pb.Event(
@@ -859,6 +1003,40 @@ def _encode_event(topic: str, payload: Any) -> Any:
                 cpu=float(data.get("cpu", 0.0)),
                 memory=float(data.get("memory", 0.0)),
                 iter_ms=float(data.get("iter_ms", 0.0)),
+            ),
+        )
+    elif topic in {
+        "startup_config_load_duration",
+        "startup_connectivity_check_duration",
+        "startup_depth_service_start_duration",
+    }:
+        value = payload
+        if isinstance(payload, dict):
+            value = payload.get("value", 0.0)
+        try:
+            metric_value = float(value)
+        except (TypeError, ValueError):
+            metric_value = 0.0
+        event = pb.Event(topic=topic, scalar_metric=pb.ScalarMetric(value=metric_value))
+    elif topic == "startup_complete":
+        data = to_dict(payload)
+        event = pb.Event(
+            topic=topic,
+            startup_complete=pb.StartupComplete(
+                startup_duration_ms=float(data.get("startup_duration_ms", 0.0))
+            ),
+        )
+    elif topic == "virtual_pnl":
+        data = to_dict(payload)
+        event = pb.Event(
+            topic=topic,
+            virtual_pnl=pb.VirtualPnL(
+                order_id=str(data.get("order_id", "")),
+                mint=str(data.get("mint", "")),
+                snapshot_hash=str(data.get("snapshot_hash", "")),
+                realized_usd=float(data.get("realized_usd", 0.0)),
+                unrealized_usd=float(data.get("unrealized_usd", 0.0)),
+                ts=float(data.get("ts", 0.0)),
             ),
         )
     elif topic == "token_discovered":
@@ -1015,6 +1193,84 @@ def _decode_payload(ev: Any) -> Any:
             for t in msg.trades
         ]
         return {"trades": trades, "index": bytes(msg.index)}
+    if field == "action_proposal":
+        return {
+            "token": msg.token,
+            "side": msg.side,
+            "size": msg.size,
+            "score": msg.score,
+            "agent": msg.agent,
+            "price": msg.price,
+        }
+    if field == "action_decision":
+        data = {
+            "token": msg.token,
+            "side": msg.side,
+            "size": msg.size,
+            "price": msg.price,
+        }
+        if msg.HasField("rationale"):
+            rationale = {}
+            if msg.rationale.agent:
+                rationale["agent"] = msg.rationale.agent
+            if msg.rationale.agents:
+                rationale["agents"] = list(msg.rationale.agents)
+            if msg.rationale.score:
+                rationale["score"] = msg.rationale.score
+            if msg.rationale.confidence:
+                rationale["confidence"] = msg.rationale.confidence
+            if msg.rationale.conviction_delta:
+                rationale["conviction_delta"] = msg.rationale.conviction_delta
+            if msg.rationale.snapshot_hash:
+                rationale["snapshot_hash"] = msg.rationale.snapshot_hash
+            if rationale:
+                data["rationale"] = rationale
+        return data
+    if field == "decision_summary":
+        return {
+            "token": msg.token,
+            "count": msg.count,
+            "buys": msg.buys,
+            "sells": msg.sells,
+        }
+    if field == "decision_metrics":
+        data: dict[str, Any] = {}
+        if msg.window_sec:
+            data["window_sec"] = msg.window_sec
+        if msg.count:
+            data["count"] = msg.count
+        if msg.decision_rate:
+            data["decision_rate"] = msg.decision_rate
+        if msg.buys:
+            data["buys"] = msg.buys
+        if msg.sells:
+            data["sells"] = msg.sells
+        if msg.avg_size:
+            data["avg_size"] = msg.avg_size
+        if msg.ttf_decision:
+            data["ttf_decision"] = msg.ttf_decision
+        return data
+    if field == "dex_latency_update":
+        return dict(msg.latencies)
+    if field == "runtime_stage_changed":
+        return {
+            "stage": msg.stage,
+            "ok": msg.ok,
+            "detail": msg.detail,
+        }
+    if field == "scalar_metric":
+        return msg.value
+    if field == "startup_complete":
+        return {"startup_duration_ms": msg.startup_duration_ms}
+    if field == "virtual_pnl":
+        return {
+            "order_id": msg.order_id,
+            "mint": msg.mint,
+            "snapshot_hash": msg.snapshot_hash,
+            "realized_usd": msg.realized_usd,
+            "unrealized_usd": msg.unrealized_usd,
+            "ts": msg.ts,
+        }
     return None
 
 def _subscribe_impl(topic: str, handler: Callable[[Any], Awaitable[None] | None]):
