@@ -398,10 +398,11 @@ except Exception:  # pragma: no cover - optional dependency
 
 # compression algorithm for websockets
 _WS_COMPRESSION: str | None = os.getenv("EVENT_BUS_COMPRESSION")
-if _WS_COMPRESSION:
+if not _WS_COMPRESSION:
+    _WS_COMPRESSION = None
+else:
     comp = _WS_COMPRESSION.lower()
-    if comp in {"", "none", "0"}:
-        _WS_COMPRESSION = None
+    _WS_COMPRESSION = None if comp in {"", "none", "0"} else comp
 
 # ping interval and timeout for websocket connections
 _WS_PING_INTERVAL = float(os.getenv("WS_PING_INTERVAL", "20") or 20)
@@ -464,7 +465,7 @@ def _pack_batch(msgs: List[Any]) -> Any:
     """Return a single frame containing all ``msgs``."""
     if not msgs:
         return b""
-    if _WS_COMPRESSION and msgpack is not None:
+    if msgpack is not None:
         return _MP_BATCH_MAGIC + msgpack.packb(msgs)
     first = msgs[0]
     if isinstance(first, bytes):
@@ -661,9 +662,10 @@ _BROKER_HEARTBEAT_TASK: asyncio.Task | None = None
 def _encode_event(topic: str, payload: Any) -> Any:
     cls = _PB_MAP.get(topic)
     if cls is None:
-        event = pb.Event(topic=topic)
-        data = event.SerializeToString()
-        return _compress_event(data)
+        # Preserve payloads for unknown topics using JSON serialization so
+        # downstream consumers receive the original data instead of an empty
+        # protobuf envelope.
+        return _dumps({"topic": topic, "payload": to_dict(payload)})
 
     if topic == "action_executed":
         event = pb.Event(
@@ -1411,7 +1413,7 @@ async def disconnect_broker() -> None:
 
 
 async def verify_broker_connection(
-    urls: Sequence[str] | str | None = None, *, timeout: float = 1.0
+    urls: Sequence[str] | str | None = None, *, timeout: float = 3.0
 ) -> bool:
     """Return ``True`` if a publish/subscribe round-trip succeeds.
 
@@ -1511,18 +1513,15 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
             f"Event bus websocket already running on {_WS_LISTEN_HOST}:{_WS_LISTEN_PORT}"
         )
 
-    async def handler(ws):
+    async def handler(ws, path):
         allowed: Set[str] | None = None
         try:
             import urllib.parse as _urlparse
-            path = getattr(ws, "request", None)
-            if path is not None:
-                p = getattr(path, "path", "")
-                if "?" in p:
-                    qs = _urlparse.parse_qs(p.split("?", 1)[1])
-                    topics = qs.get("topics")
-                    if topics:
-                        allowed = {t for t in topics[0].split(",") if t}
+            parsed = _urlparse.urlparse(path or "")
+            qs = _urlparse.parse_qs(parsed.query)
+            topics = qs.get("topics")
+            if topics:
+                allowed = {t for t in topics[0].split(",") if t}
         except Exception:
             allowed = None
         _ws_clients.add(ws)
@@ -1714,6 +1713,10 @@ async def disconnect_ws() -> None:
     _watch_tasks.clear()
     if _flush_task is not None:
         _flush_task.cancel()
+        try:
+            await _flush_task
+        except Exception:
+            pass
         _flush_task = None
     _outgoing_queue = None
     try:
