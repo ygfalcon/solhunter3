@@ -98,7 +98,10 @@ async def load_keypair_async(path: str) -> Keypair:
     """Asynchronously load a Solana ``Keypair`` from ``path``."""
     async with aiofiles.open(path, "r") as f:
         content = await f.read()
-    data = loads(content)
+    try:
+        data = loads(content)
+    except Exception as exc:
+        raise ValueError(f"invalid keypair JSON in {path}") from exc
     secret = _validate_keypair_data(data)
     return Keypair.from_bytes(secret)
 
@@ -144,7 +147,8 @@ def select_keypair(name: str) -> None:
     path = os.path.join(KEYPAIR_DIR, name + ".json")
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    with open(ACTIVE_KEYPAIR_FILE, "w", encoding="utf-8") as f:
+    fd = os.open(ACTIVE_KEYPAIR_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(name)
 
 
@@ -274,13 +278,16 @@ def generate_default_keypair(*, encrypt: bool | None = None) -> tuple[str, Path]
 
     passphrase = os.environ.get("PASSPHRASE", "")
     kp = load_keypair_from_mnemonic(mnemonic, passphrase)
-    save_keypair("default", list(kp.to_bytes()))
-    select_keypair("default")
-    os.environ.setdefault("MNEMONIC", mnemonic)
 
     if encrypt is None:
         encrypt = os.getenv("ENCRYPT_MNEMONIC") == "1"
     enc_pass = os.getenv("MNEMONIC_ENCRYPTION_KEY", "")
+
+    save_keypair("default", list(kp.to_bytes()))
+    select_keypair("default")
+
+    if not encrypt:
+        os.environ.setdefault("MNEMONIC", mnemonic)
 
     mnemonic_path = Path(KEYPAIR_DIR) / "default.mnemonic"
     mnemonic_path.parent.mkdir(parents=True, exist_ok=True)
@@ -383,10 +390,15 @@ def setup_default_keypair() -> KeypairInfo:
     if keypair_json:
         try:
             data = json.loads(keypair_json)
-            if isinstance(data, list):
-                save_keypair("default", data)
-            else:
-                raise ValueError
+            if not (
+                isinstance(data, list)
+                and len(data) == 64
+                and all(isinstance(i, int) for i in data)
+            ):
+                raise ValueError(
+                    "KEYPAIR_JSON must be a JSON array of 64 integers"
+                )
+            save_keypair("default", data)
         except Exception:
             cmd = ["solhunter-wallet", "save", "default", keypair_json]
             if shutil.which("solhunter-wallet") is None:
