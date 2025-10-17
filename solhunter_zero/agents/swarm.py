@@ -435,9 +435,9 @@ class AgentSwarm:
                         entry[extra] = buy[extra]
                 if "metadata" in buy and buy["metadata"]:
                     meta = dict(buy["metadata"])
-                    agents = meta.get("needs_price_agents")
-                    if isinstance(agents, set):
-                        meta["needs_price_agents"] = sorted(agents)
+                    needs_price = meta.get("needs_price_agents")
+                    if isinstance(needs_price, set):
+                        meta["needs_price_agents"] = sorted(needs_price)
                     contributors_meta = meta.get("contributors")
                     if isinstance(contributors_meta, set):
                         meta["contributors"] = sorted(contributors_meta)
@@ -452,9 +452,9 @@ class AgentSwarm:
                         entry[extra] = sell[extra]
                 if "metadata" in sell and sell["metadata"]:
                     meta = dict(sell["metadata"])
-                    agents = meta.get("needs_price_agents")
-                    if isinstance(agents, set):
-                        meta["needs_price_agents"] = sorted(agents)
+                    needs_price = meta.get("needs_price_agents")
+                    if isinstance(needs_price, set):
+                        meta["needs_price_agents"] = sorted(needs_price)
                     contributors_meta = meta.get("contributors")
                     if isinstance(contributors_meta, set):
                         meta["contributors"] = sorted(contributors_meta)
