@@ -13,13 +13,19 @@ fi
 source "$SCRIPT_DIR/common.sh"
 
 unique_suffix() {
-  date +%s%N
+  # %N is not portable on macOS/BSD; fall back to $$ if unsupported
+  if suffix=$(date +%s%N 2>/dev/null) && [[ $suffix != *N ]]; then
+    printf '%s\n' "$suffix"
+  else
+    printf '%s\n' "$(date +%s)_$$"
+  fi
 }
 
 AUDIT_DIR=${PREFLIGHT_AUDIT_DIR:-$ROOT_DIR/artifacts/preflight}
 HISTORY_FILE=${PREFLIGHT_HISTORY_FILE:-$AUDIT_DIR/history.jsonl}
 READY_MARKER=${PREFLIGHT_READY_MARKER:-$AUDIT_DIR/READY}
-READY_SPACING_SEC=${PREFLIGHT_READYNESS_SPACING_SEC:-600}
+# Accept correctly spelled env var, keep backwards-compat with the old typo
+READY_SPACING_SEC=${PREFLIGHT_READINESS_SPACING_SEC:-${PREFLIGHT_READYNESS_SPACING_SEC:-600}}
 
 mkdir -p "$AUDIT_DIR"
 
@@ -86,7 +92,8 @@ main() {
 
   local overall_status
   overall_status=$(jq -n --arg env "$env_status" --arg bus "$bus_status" --argjson runs "$preflight_json" '
-    if ($env == "pass" and $bus == "pass" and ((runs | length) == 0 or ((runs | map(.status)) | all(. == "pass")))) then "pass" else "fail" end
+    def runs_all_pass: (runs | length) == 0 or (runs | all(.[]; .status == "pass"));
+    if ($env == "pass" and $bus == "pass" and runs_all_pass) then "pass" else "fail" end
   ')
 
   local timestamp
