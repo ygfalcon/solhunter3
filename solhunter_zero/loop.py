@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -24,7 +25,11 @@ log = logging.getLogger(__name__)
 
 
 class _LegacyExecutor:
-    """Minimal executor that reuses :func:`place_order_async` for legacy runs."""
+    """Minimal executor that reuses :func:`place_order_async` for legacy runs.
+
+    Depth service integration is intentionally disabled in legacy mode so newer
+    components are not accidentally wired into older entrypoints.
+    """
 
     priority_rpc: list[str] | None = None
 
@@ -58,7 +63,10 @@ class _LegacyExecutor:
 
 
 class _LegacyStrategyAdapter:
-    """Expose ``StrategyManager`` behind the AgentManager interface expected by the pipeline."""
+    """Expose ``StrategyManager`` via the AgentManager interface for the pipeline.
+
+    Legacy runs operate without the depth service to match historical behaviour.
+    """
 
     def __init__(self, strategy_manager: StrategyManager, *, dry_run: bool, testnet: bool) -> None:
         self.strategy_manager = strategy_manager
@@ -191,7 +199,7 @@ async def place_order_async(
             }
         }
         if rest:
-            extra = {**extra, **rest}
+            extra = {**rest, **extra}
     else:
         token = token_or_action
 
@@ -227,7 +235,19 @@ async def place_order_async(
     else:
         execer = ExecutionAgent(dry_run=dry_run, testnet=testnet, keypair=keypair)
 
-    result = await execer.execute(action)
+    try:
+        result = await execer.execute(action)
+    except Exception as exc:
+        log.exception("order execution failed: %s", exc)
+        publish(
+            "runtime.log",
+            RuntimeLog(
+                stage="order",
+                detail=f"error:{type(exc).__name__}",
+                level="ERROR",
+            ),
+        )
+        raise
     publish("runtime.log", RuntimeLog(stage="order", detail="submitted"))
     return result
 
@@ -357,6 +377,24 @@ async def run_iteration(
     return result
 
 
+def _result_has_trade(result: Any) -> bool:
+    """Return ``True`` when the pipeline ``result`` contains a trade/fill."""
+
+    if not isinstance(result, dict):
+        return False
+
+    for key in ("executions", "trades", "fills", "orders"):
+        entries = result.get(key)
+        if isinstance(entries, list) and len(entries) > 0:
+            return True
+
+    nested = result.get("data")
+    if isinstance(nested, dict):
+        return _result_has_trade(nested)
+
+    return False
+
+
 async def trading_loop(
     cfg: Dict[str, Any] | None,
     runtime_cfg: Any,
@@ -372,19 +410,77 @@ async def trading_loop(
 ) -> None:
     """Run repeated swarm iterations using the new pipeline."""
 
+    backoff = 1.0
     count = 0
+
+    deadline_env = os.getenv("FIRST_TRADE_DEADLINE_SEC", "0")
+    try:
+        first_trade_deadline = float(deadline_env) if deadline_env else 0.0
+    except ValueError:
+        first_trade_deadline = 0.0
+    if first_trade_deadline < 0:
+        first_trade_deadline = 0.0
+
+    loop_start = time.time() if first_trade_deadline else 0.0
+    first_trade_ts: float | None = None
+
     while iterations is None or count < iterations:
         start = time.perf_counter()
-        await run_iteration(
-            memory,
-            portfolio,
-            state,
-            cfg=runtime_cfg or cfg,
-            **kwargs,
+        try:
+            result = await run_iteration(
+                memory,
+                portfolio,
+                state,
+                cfg=runtime_cfg or cfg,
+                **kwargs,
+            )
+        except asyncio.CancelledError:
+            publish("heartbeat", Heartbeat(service="trading_loop"))
+            raise
+        except Exception as exc:
+            log.exception("iteration failed: %s", exc)
+            publish(
+                "runtime.log",
+                RuntimeLog(
+                    stage="loop",
+                    detail=f"iteration-error:{type(exc).__name__}",
+                    level="ERROR",
+                ),
+            )
+            publish("heartbeat", Heartbeat(service="trading_loop"))
+            jitter = random.uniform(0.5, 1.5)
+            sleep_for = min(30.0, backoff) * jitter
+            await asyncio.sleep(sleep_for)
+            backoff = min(30.0, backoff * 2.0)
+            continue
+
+        backoff = 1.0
+        elapsed = time.perf_counter() - start
+        publish("heartbeat", Heartbeat(service="trading_loop"))
+        publish(
+            "system_metrics_combined",
+            {"cpu": 0.0, "memory": 0.0, "iter_ms": elapsed * 1000.0},
         )
+
+        if first_trade_deadline and first_trade_ts is None:
+            if _result_has_trade(result):
+                first_trade_ts = time.time()
+            elif (time.time() - loop_start) >= first_trade_deadline:
+                log.error(
+                    "First trade not recorded within %.2f seconds", first_trade_deadline
+                )
+                publish(
+                    "runtime.log",
+                    RuntimeLog(
+                        stage="loop",
+                        detail="first-trade-timeout",
+                        level="ERROR",
+                    ),
+                )
+                raise FirstTradeTimeoutError("No trade within bootstrap deadline")
+
         count += 1
         if iterations is not None and count >= iterations:
             break
-        elapsed = time.perf_counter() - start
         delay = max(min_delay, min(max_delay, loop_delay - elapsed))
         await asyncio.sleep(max(0.0, delay))

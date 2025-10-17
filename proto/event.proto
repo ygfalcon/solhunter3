@@ -142,6 +142,7 @@ message RiskUpdated {
 message SystemMetricsCombined {
   double cpu = 1;
   double memory = 2;
+  double iter_ms = 3;
 }
 
 message TokenDiscovered {
