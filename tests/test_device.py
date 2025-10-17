@@ -17,17 +17,17 @@ TORCH_METAL_VERSION, TORCHVISION_METAL_VERSION = load_torch_metal_versions()
 
 
 def test_run_with_timeout_success(monkeypatch):
-    def fake_run(cmd, check, timeout):  # pragma: no cover - simplified
+    def fake_run(cmd, check, timeout, **kwargs):  # pragma: no cover - simplified
         return None
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = device_module._run_with_timeout(["echo"], timeout=1)
     assert result.success is True
-    assert result.message == ""
+    assert result.message == "echo"
 
 
 def test_run_with_timeout_timeout(monkeypatch):
-    def fake_run(cmd, check, timeout):  # pragma: no cover - simplified
+    def fake_run(cmd, check, timeout, **kwargs):  # pragma: no cover - simplified
         raise subprocess.TimeoutExpired(cmd, timeout)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -128,7 +128,7 @@ def test_detect_gpu_tensor_failure(monkeypatch, caplog):
         ones=failing_ones,
     )
     monkeypatch.setattr(device_module, "torch", torch_stub, raising=False)
-    with caplog.at_level("ERROR"):
+    with caplog.at_level("WARNING"):
         assert device_module.detect_gpu() is False
     assert "Tensor operation failed" in caplog.text
 
