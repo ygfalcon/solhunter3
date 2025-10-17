@@ -207,7 +207,7 @@ def check_helius_das(*, timeout: float = 5.0) -> CheckResult:
             "id": "env-doctor",
             "method": "searchAssets",
             "params": {
-                "tokenType": "fungible",
+                "query": {"tokenType": "fungible"},
                 "page": 1,
                 "limit": 1,
                 "sortBy": {"field": "created", "direction": "desc"},
