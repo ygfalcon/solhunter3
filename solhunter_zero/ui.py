@@ -38,6 +38,16 @@ _RL_WS_PORT_DEFAULT = 8767
 _EVENT_WS_PORT_DEFAULT = 8770
 _LOG_WS_PORT_DEFAULT = 8768
 _WS_QUEUE_DEFAULT = 512
+_backlog_env = os.getenv("UI_WS_BACKLOG_MAX", "64")
+try:
+    BACKLOG_MAX = int(_backlog_env or 64)
+except (TypeError, ValueError):
+    log.warning("Invalid backlog value %r; using default 64", _backlog_env)
+    BACKLOG_MAX = 64
+else:
+    if BACKLOG_MAX < 0:
+        log.warning("Negative backlog %s not allowed; using default 64", BACKLOG_MAX)
+        BACKLOG_MAX = 64
 _ADDR_IN_USE_ERRNOS = {errno.EADDRINUSE}
 
 
@@ -101,7 +111,7 @@ def _parse_port(value: str | None, default: int) -> int:
     if port < 0:
         log.warning("Negative port %s not allowed; using default %s", port, default)
         return default
-    return port or default
+    return port
 
 
 def _resolve_port(*keys: str, default: int) -> int:
@@ -207,15 +217,28 @@ def _split_netloc(netloc: str | None) -> tuple[str | None, int | None]:
 
 
 def _channel_path(channel: str) -> str:
-    template = os.getenv("UI_WS_PATH_TEMPLATE")
-    if template:
-        try:
-            candidate = template.format(channel=channel)
-        except Exception:
-            log.warning("Invalid UI_WS_PATH_TEMPLATE %r; falling back to default", template)
-            candidate = f"/ws/{channel}"
+    override_map = {
+        "rl": "UI_RL_WS_PATH",
+        "events": "UI_EVENTS_WS_PATH",
+        "logs": "UI_LOGS_WS_PATH",
+    }
+    override_key = override_map.get(channel)
+    override = os.getenv(override_key) if override_key else None
+    if override:
+        candidate = override
     else:
-        candidate = f"/ws/{channel}"
+        template = os.getenv("UI_WS_PATH_TEMPLATE")
+        if template:
+            try:
+                candidate = template.format(channel=channel)
+            except Exception:
+                log.warning(
+                    "Invalid UI_WS_PATH_TEMPLATE %r; falling back to default",
+                    template,
+                )
+                candidate = f"/ws/{channel}"
+        else:
+            candidate = f"/ws/{channel}"
     if not candidate:
         candidate = f"/ws/{channel}"
     if not candidate.startswith("/"):
@@ -376,11 +399,14 @@ def _start_channel(
                 for ws in stale_clients:
                     state.clients.discard(ws)
                 backlog.append(message)
-                if len(backlog) > 64:
+                if len(backlog) > BACKLOG_MAX:
                     backlog.popleft()
                 queue.task_done()
 
         async def _handler(websocket, path) -> None:  # type: ignore[override]
+            parsed = urlparse(path or "")
+            req_path = parsed.path or "/"
+            template_path = _channel_path(channel)
             allowed_paths = {
                 "",
                 "/",
@@ -389,8 +415,10 @@ def _start_channel(
                 f"/{channel}/",
                 f"/ws/{channel}",
                 f"/ws/{channel}/",
+                template_path,
+                template_path.rstrip("/") + "/",
             }
-            if path not in allowed_paths:
+            if req_path not in allowed_paths:
                 await websocket.close(code=1008, reason="invalid path")
                 return
             state.clients.add(websocket)
@@ -535,8 +563,17 @@ def _start_channel(
     thread.start()
     state.thread = thread
 
+    ready_timeout_raw = os.getenv("UI_WS_READY_TIMEOUT", "5")
     try:
-        result = ready.get(timeout=5)
+        ready_timeout = float(ready_timeout_raw or 5)
+    except (TypeError, ValueError):
+        log.warning(
+            "Invalid UI_WS_READY_TIMEOUT value %r; using default 5 seconds",
+            ready_timeout_raw,
+        )
+        ready_timeout = 5.0
+    try:
+        result = ready.get(timeout=ready_timeout)
     except Exception as exc:  # pragma: no cover - unexpected queue failure
         _shutdown_state(state)
         raise RuntimeError(f"Timeout starting {channel} websocket") from exc
@@ -2184,6 +2221,8 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.after_request
     def _no_store(response: Response) -> Response:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("X-Frame-Options", "DENY")
         content_type = response.content_type or ""
         if "application/json" in content_type.lower():
             response.headers["Cache-Control"] = "no-store"
