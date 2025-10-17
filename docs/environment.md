@@ -12,7 +12,7 @@ This document lists environment variables recognized by the project.
 | `ARBITRAGE_TOKENS` | `` | Configures arbitrage tokens |
 | `AUTO_SELECT_KEYPAIR` | `` | Configures auto select keypair |
 | `BIRDEYE_API_KEY` | `b1e60d72780940d1bd929b9b2e9225e6` | Configures birdeye api key |
-| `BROKER_CHANNEL` | `solhunter-events` | Configures broker channel |
+| `BROKER_CHANNEL` | `solhunter-events-v2` | Configures broker channel |
 | `BROKER_HEARTBEAT_INTERVAL` | `30` | Interval for broker heartbeat |
 | `BROKER_RETRY_LIMIT` | `3` | Configures broker retry limit |
 | `BROKER_URL` | `` | URL for broker |

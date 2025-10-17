@@ -5,7 +5,7 @@ import contextlib
 import logging
 import math
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 from .. import onchain_metrics
 from ..mempool_scanner import stream_ranked_mempool_tokens_with_depth
@@ -13,7 +13,7 @@ from ..scanner_onchain import (
     scan_tokens_onchain,
     fetch_liquidity_onchain_async as raw_liquidity_onchain_async,
 )
-from ..token_aliases import canonical_mint
+from ..token_aliases import canonical_mint, validate_mint
 from ..util.mints import clean_candidate_mints
 from .mint_resolver import normalize_candidate
 
@@ -117,6 +117,8 @@ async def _collect_mempool_candidates(
             if not candidate:
                 continue
             canonical = canonical_mint(candidate)
+            if not validate_mint(canonical):
+                continue
             item["address"] = canonical
             results.append(item)
             if len(results) >= limit:
@@ -195,9 +197,25 @@ async def merge_sources(
     if isinstance(trending_result, Exception):
         logger.debug("Trending discovery failed: %s", trending_result)
     else:
-        trending_tokens = [
-            tok for tok in trending_result if isinstance(tok, str)
-        ][:size]
+        filtered: List[str] = []
+        seen: Set[str] = set()
+        dropped = 0
+        for tok in trending_result:
+            if not isinstance(tok, str):
+                continue
+            canonical = canonical_mint(tok)
+            if not validate_mint(canonical):
+                dropped += 1
+                continue
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            filtered.append(canonical)
+            if len(filtered) >= size:
+                break
+        trending_tokens = filtered[:size]
+        if dropped:
+            logger.debug("Dropped %d invalid trending mint(s)", dropped)
 
     onchain_tokens: List[Dict[str, Any]] = []
     if isinstance(onchain_result, Exception):

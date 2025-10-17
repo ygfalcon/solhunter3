@@ -341,19 +341,45 @@ async def search_fungible_recent(
             page_number = max(1, int(page_hint))
         except (TypeError, ValueError):
             page_number = 1
-    params: Dict[str, Any] = {
+    base_params: Dict[str, Any] = {
         "tokenType": "fungible",
         "page": page_number,
         "limit": resolved_limit,
-        "sortBy": {"field": "created", "direction": sort_direction},
     }
-    payload = _clean_payload(params)
-    data = await _post_rpc(
-        session,
-        "searchAssets",
-        payload,
-        op="searchAssets",
+    sort_variants: Tuple[Any, ...] = (
+        {"field": "created", "direction": sort_direction},
+        "created",
+        None,
     )
+    data: Dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for variant in sort_variants:
+        params: Dict[str, Any] = dict(base_params)
+        if variant is not None:
+            params["sortBy"] = variant
+        payload = _clean_payload(params)
+        try:
+            data = await _post_rpc(
+                session,
+                "searchAssets",
+                payload,
+                op="searchAssets",
+            )
+            break
+        except RuntimeError as exc:
+            last_error = exc
+            message = str(exc).lower()
+            if (
+                "sortby" not in message
+                or "missing" not in message
+                or variant is None
+            ):
+                raise
+            continue
+    if data is None:
+        if last_error is not None:
+            raise last_error
+        return [], None
     result = data.get("result") if isinstance(data, dict) else None
     next_page: Optional[int] = None
     if isinstance(result, list):
