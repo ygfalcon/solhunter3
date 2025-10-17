@@ -597,7 +597,7 @@ def place_order(
                     except aiohttp.ClientError as exc:
                         last_error = exc
                         logger.warning(
-                            "Swap attempt %s/%s failed via %s (%s): %s",
+                            "Swap attempt %s/%s failed via %s endpoint=%s: %s",
                             attempt,
                             3,
                             venue_name,
@@ -738,7 +738,7 @@ async def place_order_async(
                 )
             except aiohttp.ClientError as exc:
                 logger.warning(
-                    "Swap attempt %s/%s failed via %s (%s): %s",
+                    "Swap attempt %s/%s failed via %s endpoint=%s: %s",
                     attempt,
                     max_retries,
                     venue_name,

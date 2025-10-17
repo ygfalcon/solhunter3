@@ -480,6 +480,11 @@ def main(
 
     if not offline and not dry_run:
         try:
+            _ct_timeout_env = os.getenv("CONNECTIVITY_TEST_TIMEOUT")
+            try:
+                _ct_timeout = float(_ct_timeout_env) if _ct_timeout_env is not None else 5.0
+            except ValueError:
+                _ct_timeout = 5.0
             asyncio.run(
                 place_order_async(
                     "So11111111111111111111111111111111111111112",
@@ -489,6 +494,8 @@ def main(
                     testnet=testnet,
                     dry_run=True,
                     connectivity_test=True,
+                    max_retries=1,
+                    timeout=_ct_timeout,
                 )
             )
         except Exception as exc:
@@ -498,8 +505,6 @@ def main(
     try:
         while True:
             try:
-                if live_discovery is None:
-                    live_discovery = parse_bool_env("LIVE_DISCOVERY", False)
                 if live_discovery is None:
                     live_discovery = parse_bool_env("LIVE_DISCOVERY", True)
                 trading_kwargs = dict(
