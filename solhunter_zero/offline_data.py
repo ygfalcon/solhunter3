@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import logging
 import mmap
 import os
 import time
@@ -15,8 +16,10 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
     async_sessionmaker,
 )
+from typing import List, Tuple
 
 Base = declarative_base()
+logger = logging.getLogger(__name__)
 
 
 def utcnow() -> datetime.datetime:
@@ -70,7 +73,14 @@ class OfflineData:
     def __init__(self, url: str = "sqlite:///offline_data.db") -> None:
         if url.startswith("sqlite:///") and "+" not in url:
             url = url.replace("sqlite:///", "sqlite+aiosqlite:///")
-        self.engine = create_async_engine(url, echo=False, future=True)
+        pool_recycle = int(os.getenv("OFFLINE_POOL_RECYCLE_SEC", "0") or 0) or None
+        self.engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            pool_pre_ping=True,
+            pool_recycle=pool_recycle,
+        )
         self.Session = async_sessionmaker(bind=self.engine, expire_on_commit=False)
         self._queue: asyncio.Queue[tuple[str, dict]] | None = None
         self._writer_task: asyncio.Task | None = None
@@ -82,6 +92,9 @@ class OfflineData:
         self._drop_oldest = drop_oldest in {"1", "true", "yes", "on"}
         self._coalesce_ms = float(os.getenv("OFFLINE_COALESCE_MS", "0") or 0.0)
         self._coalesce: dict[str, tuple[float, dict | None]] = {}
+        self._dropped_msgs = 0
+        self._flushed_rows = 0
+        self._flush_failures = 0
         self._memmap: mmap.mmap | None = None
         self._memmap_fd: int | None = None
         self._memmap_pos = 0
@@ -91,8 +104,16 @@ class OfflineData:
         self._memmap_flush_ms = float(os.getenv("OFFLINE_MEMMAP_FLUSH_MS", "0") or 0.0)
         self._last_memmap_flush = time.monotonic()
         import asyncio
+
         async def _init_models():
             async with self.engine.begin() as conn:
+                try:
+                    if str(self.engine.url).startswith("sqlite+aiosqlite"):
+                        await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+                        await conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
+                        await conn.exec_driver_sql("PRAGMA temp_store=MEMORY;")
+                except Exception:
+                    logger.debug("SQLite PRAGMA tuning failed", exc_info=True)
                 await conn.run_sync(Base.metadata.create_all)
         try:
             loop = asyncio.get_event_loop()
@@ -204,11 +225,15 @@ class OfflineData:
             return
         loop = asyncio.get_event_loop()
         for t, d in items:
-            line = json.dumps([t, d]).encode() + b"\n"
+            try:
+                line = json.dumps([t, d], separators=(",", ":")).encode() + b"\n"
+            except Exception as exc:
+                logger.warning("offline encode failed; skipping row (%s): %s", t, exc)
+                continue
             if self._memmap_size and len(line) > self._memmap_size:
                 if self._memmap_count:
                     await self._flush_memmap()
-                await self._flush([(t, d)])
+                await self._flush_with_retry([(t, d)])
                 continue
             if self._memmap_pos + len(line) > self._memmap_size:
                 await self._flush_memmap()
@@ -233,11 +258,19 @@ class OfflineData:
             return
         self._memmap.seek(0)
         data = self._memmap.read(self._memmap_pos).splitlines()
-        items = [tuple(json.loads(line)) for line in data]
+        items: List[Tuple[str, dict]] = []
+        for line in data:
+            try:
+                t, d = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(t, str) and isinstance(d, dict):
+                items.append((t, d))
         self._memmap_pos = 0
         self._memmap_count = 0
         self._memmap.seek(0)
-        await self._flush(items)
+        if items:
+            await self._flush_with_retry(items)
         try:
             self._memmap.flush()
             if self._memmap_fd is not None:
@@ -247,17 +280,34 @@ class OfflineData:
         self._last_memmap_flush = asyncio.get_event_loop().time()
 
     async def _flush(self, items: list[tuple[str, dict]]) -> None:
+        await self._flush_with_retry(items)
+
+    async def _flush_with_retry(self, items: list[tuple[str, dict]]) -> None:
+        if not items:
+            return
         max_batch = self._flush_max_batch or len(items)
-        async with self.Session() as session:
-            for i in range(0, len(items), max_batch):
-                batch = items[i : i + max_batch]
-                snaps = [d for t, d in batch if t == "snap"]
-                trades = [d for t, d in batch if t != "snap"]
-                if snaps:
-                    await session.execute(insert(MarketSnapshot), snaps)
-                if trades:
-                    await session.execute(insert(MarketTrade), trades)
-            await session.commit()
+        attempts = int(os.getenv("OFFLINE_FLUSH_RETRIES", "3") or 3)
+        backoff = float(os.getenv("OFFLINE_FLUSH_BACKOFF_SEC", "0.05") or 0.05)
+        for attempt in range(max(1, attempts)):
+            try:
+                async with self.Session() as session:
+                    for i in range(0, len(items), max_batch):
+                        batch = items[i : i + max_batch]
+                        snaps = [d for t, d in batch if t == "snap"]
+                        trades = [d for t, d in batch if t != "snap"]
+                        if snaps:
+                            await session.execute(insert(MarketSnapshot), snaps)
+                        if trades:
+                            await session.execute(insert(MarketTrade), trades)
+                    await session.commit()
+                self._flushed_rows += len(items)
+                return
+            except Exception:
+                self._flush_failures += 1
+                logger.exception("offline flush attempt %s failed", attempt + 1)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2.0, 0.8)
+        logger.error("offline flush failed permanently; dropping %d rows", len(items))
 
     async def log_snapshot(
         self,
@@ -428,7 +478,7 @@ class OfflineData:
             if latest is not None
         ]
         if coalesced:
-            await self._flush(coalesced)
+            await self._flush_with_retry(coalesced)
         self._coalesce.clear()
         if self._memmap is not None and self._memmap_pos:
             await self._flush_memmap()
@@ -457,6 +507,12 @@ class OfflineData:
             with suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()
                 self._queue.task_done()
+                self._dropped_msgs += 1
+                if (self._dropped_msgs % 1000) == 1:
+                    logger.warning(
+                        "offline queue full; dropped %d messages total",
+                        self._dropped_msgs,
+                    )
             with suppress(asyncio.QueueFull):
                 self._queue.put_nowait(item)
 
