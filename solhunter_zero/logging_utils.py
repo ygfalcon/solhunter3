@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -97,22 +98,93 @@ def setup_stdout_logging(
     root = logging.getLogger()
     root.setLevel(level)
 
+    stdout_aliases = [sys.stdout]
+    stderr_aliases = [sys.stderr]
+    for attr, aliases in (("__stdout__", stdout_aliases), ("__stderr__", stderr_aliases)):
+        extra = getattr(sys, attr, None)
+        if extra is not None:
+            aliases.append(extra)
+
+    stdout_fallback = next((alias for alias in stdout_aliases if alias is not None), sys.stdout)
+    stderr_fallback = next((alias for alias in stderr_aliases if alias is not None), sys.stderr)
+
+    def _matches_alias(
+        stream: Any, aliases: list[Any], fallback: Any | None
+    ) -> bool:
+        """Return ``True`` if *stream* targets the same destination as *aliases*."""
+
+        candidate = fallback if stream is None else stream
+        if candidate is None:
+            return False
+
+        for alias in aliases:
+            if alias is None:
+                continue
+            if candidate is alias:
+                return True
+
+        candidate_fd = None
+        candidate_stat = None
+        try:
+            candidate_fd = candidate.fileno()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        else:
+            with contextlib.suppress(Exception):
+                candidate_stat = os.fstat(candidate_fd)
+
+        for alias in aliases:
+            if alias is None:
+                continue
+
+            alias_fd = None
+            try:
+                alias_fd = alias.fileno()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            else:
+                if candidate_fd is not None and candidate_fd == alias_fd:
+                    return True
+                if candidate_stat is not None:
+                    alias_stat = None
+                    with contextlib.suppress(Exception):
+                        alias_stat = os.fstat(alias_fd)
+                    if (
+                        alias_stat is not None
+                        and candidate_stat.st_ino == alias_stat.st_ino
+                        and candidate_stat.st_dev == alias_stat.st_dev
+                    ):
+                        return True
+
+        candidate_name = getattr(candidate, "name", None)
+        if candidate_name and candidate_name in {"<stdout>", "<stderr>"}:
+            for alias in aliases:
+                if getattr(alias, "name", None) == candidate_name:
+                    return True
+
+        return False
+
     stream_handler: logging.StreamHandler | None = None
     for handler in list(root.handlers):
         if not isinstance(handler, logging.StreamHandler):
             continue
 
         stream = getattr(handler, "stream", None)
-        if stream is sys.stdout and stream_handler is None:
+
+        if _matches_alias(stream, stdout_aliases, stdout_fallback) and stream_handler is None:
             stream_handler = handler
             continue
 
-        # ``logging.basicConfig`` may have already attached stream handlers that
-        # duplicate stdout/stderr. These extra handlers cause every log record
-        # to be emitted multiple times. Remove only the duplicates while keeping
-        # custom user-provided streams intact.
-        if stream in {sys.stdout, sys.stderr}:
+        # ``logging.basicConfig`` may have attached stream handlers that point to
+        # stdout/stderr (or their ``sys.__stdout__/sys.__stderr__`` fallbacks).
+        # These extra handlers cause duplicate log emission. Remove only the
+        # duplicates while keeping custom user-provided streams intact.
+        if _matches_alias(stream, stdout_aliases, stdout_fallback) or _matches_alias(
+            stream, stderr_aliases, stderr_fallback
+        ):
             root.removeHandler(handler)
+            with contextlib.suppress(Exception):  # pragma: no cover - best effort
+                handler.close()
 
     if stream_handler is None:
         stream_handler = logging.StreamHandler(sys.stdout)
