@@ -596,7 +596,7 @@ def _parse_pyth_mapping() -> Tuple[Dict[str, str], List[str]]:
             logger.warning("Failed to decode PYTH_PRICE_IDS env; ignoring")
     default_mapping = {
         "So11111111111111111111111111111111111111112": "J83JdAq8FDeC8v2WFE2QyXkJhtCmvYzu3d6PvMfo4WwS",
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9": "GkzKf5qcF6edCbnMD4HzyBbs6k8ZZrVSu2Ce279b9EcT",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "GkzKf5qcF6edCbnMD4HzyBbs6k8ZZrVSu2Ce279b9EcT",
         "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "7sxNXmAf6oMzFxLpyR4V6kRDeo63HgNbUsVTNff7kX2Z",
     }
     mapping.update({k: v for k, v in default_mapping.items() if k not in mapping})
@@ -794,7 +794,8 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
             _record_provider_failure(provider_name, exc, latency_ms)
             continue
         latency_ms = (_monotonic() - start) * 1000.0
-        _record_provider_success(provider_name, latency_ms)
+        if quotes:
+            _record_provider_success(provider_name, latency_ms)
         if not quotes:
             continue
         if config.overrides:

@@ -659,7 +659,7 @@ _BROKER_URLS: list[str] = []
 _BROKER_TYPES: list[str] = []
 _BROKER_CONNS: list[Any] = []
 _BROKER_TASKS: list[Any] = []
-_BROKER_CHANNEL: str = os.getenv("BROKER_CHANNEL", "solhunter-events")
+_BROKER_CHANNEL: str = os.getenv("BROKER_CHANNEL", "solhunter-events-v2")
 _BROKER_HEARTBEAT_INTERVAL = float(os.getenv("BROKER_HEARTBEAT_INTERVAL", "30") or 30)
 _BROKER_RETRY_LIMIT = int(os.getenv("BROKER_RETRY_LIMIT", "3") or 3)
 _BROKER_HEARTBEAT_TASK: asyncio.Task | None = None
@@ -1839,6 +1839,10 @@ _ENV_PEERS: Set[str] = set()
 _reconnect_task: asyncio.Task | None = None
 
 
+def _local_ws_disabled() -> bool:
+    return os.getenv("EVENT_BUS_DISABLE_LOCAL", "").lower() in {"1", "true", "yes", "on"}
+
+
 def _validate_ws_urls(urls: Iterable[str]) -> Set[str]:
     """Ensure ``urls`` contains at least one valid websocket URI.
 
@@ -1846,6 +1850,8 @@ def _validate_ws_urls(urls: Iterable[str]) -> Set[str]:
     """
     urls_set = {u.strip() for u in urls if u and u.strip()}
     if not urls_set:
+        if _local_ws_disabled():
+            return set()
         logging.warning(
             "BROKER_WS_URLS is empty; falling back to %s", DEFAULT_WS_URL
         )
@@ -1916,14 +1922,19 @@ def _reload_bus(cfg) -> None:
 
     async def _reconnect() -> None:
         await disconnect_ws()
+        if not urls:
+            logging.getLogger(__name__).info(
+                "Event bus local websocket disabled; no peers configured"
+            )
+            return
         reachable = await _reachable_ws_urls(urls)
         if not reachable:
             if urls == {DEFAULT_WS_URL}:
                 # Allow disabling the local websocket server in restricted environments
-                disable_local = (os.getenv("EVENT_BUS_DISABLE_LOCAL", "").lower() in {"1", "true", "yes"})
+                disable_local = _local_ws_disabled()
                 if disable_local:
-                    logging.getLogger(__name__).warning(
-                        "Local websocket disabled via EVENT_BUS_DISABLE_LOCAL; proceeding without broker"
+                    logging.getLogger(__name__).info(
+                        "Local websocket disabled via EVENT_BUS_DISABLE_LOCAL"
                     )
                     reachable = set()
                 else:
