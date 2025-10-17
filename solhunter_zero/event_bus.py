@@ -124,6 +124,7 @@ _PB_MAP = {
     "risk_metrics": getattr(pb, "RiskMetrics", None),
     "risk_updated": getattr(pb, "RiskUpdated", None),
     "system_metrics_combined": getattr(pb, "SystemMetricsCombined", None),
+    "runtime.log": getattr(pb, "RuntimeLog", None),
     "token_discovered": getattr(pb, "TokenDiscovered", None),
     "memory_sync_request": getattr(pb, "MemorySyncRequest", None),
     "memory_sync_response": getattr(pb, "MemorySyncResponse", None),
@@ -763,6 +764,25 @@ def _encode_event(topic: str, payload: Any) -> Any:
                 memory=float(data.get("memory", 0.0)),
             ),
         )
+    elif topic == "runtime.log":
+        data = to_dict(payload)
+        runtime_log = pb.RuntimeLog(
+            stage=str(data.get("stage", "")),
+            detail=str(data.get("detail", "")),
+        )
+        if data.get("ts") is not None:
+            try:
+                runtime_log.ts = float(data.get("ts"))
+            except (TypeError, ValueError):
+                runtime_log.ts = 0.0
+        if data.get("level") is not None:
+            runtime_log.level = str(data.get("level"))
+        if data.get("actions") is not None:
+            try:
+                runtime_log.actions = int(data.get("actions") or 0)
+            except (TypeError, ValueError):
+                runtime_log.actions = 0
+        event = pb.Event(topic=topic, runtime_log=runtime_log)
     elif topic == "price_update":
         data = to_dict(payload)
         event = pb.Event(
@@ -833,6 +853,7 @@ def _encode_event(topic: str, payload: Any) -> Any:
             system_metrics_combined=pb.SystemMetricsCombined(
                 cpu=float(data.get("cpu", 0.0)),
                 memory=float(data.get("memory", 0.0)),
+                iter_ms=float(data.get("iter_ms", 0.0)),
             ),
         )
     elif topic == "token_discovered":
@@ -928,6 +949,14 @@ def _decode_payload(ev: Any) -> Any:
         return {"loss": msg.loss, "reward": msg.reward}
     if field == "system_metrics":
         return {"cpu": msg.cpu, "memory": msg.memory}
+    if field == "runtime_log":
+        return {
+            "stage": msg.stage,
+            "detail": msg.detail,
+            "ts": msg.ts,
+            "level": msg.level,
+            "actions": msg.actions,
+        }
     if field == "price_update":
         return {
             "venue": msg.venue,
@@ -959,7 +988,7 @@ def _decode_payload(ev: Any) -> Any:
     if field == "risk_updated":
         return {"multiplier": msg.multiplier}
     if field == "system_metrics_combined":
-        return {"cpu": msg.cpu, "memory": msg.memory}
+        return {"cpu": msg.cpu, "memory": msg.memory, "iter_ms": msg.iter_ms}
     if field == "token_discovered":
         return list(msg.tokens)
     if field == "memory_sync_request":
