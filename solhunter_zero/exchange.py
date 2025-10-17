@@ -2,6 +2,9 @@ import asyncio
 import base64
 import logging
 import os
+import random
+import threading
+import time
 from contextlib import asynccontextmanager, suppress
 from typing import Any, Dict, Optional, Sequence
 
@@ -38,8 +41,11 @@ logger = logging.getLogger(__name__)
 install_uvloop()
 
 # Event loop used for synchronous order placement when no running loop is
-# available.  Created lazily on first use and reused across calls.
+# available.  Created lazily on first use and reused across calls on a
+# dedicated background thread.
 _order_loop: asyncio.AbstractEventLoop | None = None
+_order_thread: threading.Thread | None = None
+_order_loop_lock = threading.Lock()
 
 # Persistent IPC connection pooling
 _IPC_CONNECTIONS: dict[str, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
@@ -121,6 +127,9 @@ USE_JUPITER_FALLBACK = parse_bool_env("ENABLE_JUPITER_SWAP_FALLBACK", True)
 DEFAULT_SOL_INPUT = _parse_float_env("JUPITER_DEFAULT_SOL_INPUT", 0.02)
 DEFAULT_TOKEN_INPUT = _parse_float_env("JUPITER_DEFAULT_TOKEN_INPUT", 1.0)
 
+_BACKOFF_BASE = _parse_float_env("SWAP_BACKOFF_BASE", 0.5)
+_BACKOFF_JITTER = _parse_float_env("SWAP_BACKOFF_JITTER", 0.25)
+
 ORCA_DEX_URL = _DEX_CFG.venue_urls.get("orca", DEX_BASE_URL)
 RAYDIUM_DEX_URL = _DEX_CFG.venue_urls.get("raydium", DEX_BASE_URL)
 PHOENIX_DEX_URL = _DEX_CFG.venue_urls.get("phoenix", DEX_BASE_URL)
@@ -155,6 +164,40 @@ VENUE_URLS = {
     "phoenix": PHOENIX_DEX_URL,
     "meteora": METEORA_DEX_URL,
 }
+
+
+_DECIMALS_CACHE: dict[str, tuple[int, float]] = {}
+_DECIMALS_CACHE_TTL = 60.0
+
+
+def _ensure_order_loop() -> asyncio.AbstractEventLoop:
+    global _order_loop, _order_thread
+    with _order_loop_lock:
+        if _order_loop and _order_thread and _order_thread.is_alive():
+            return _order_loop
+
+        loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def _runner() -> None:
+            asyncio.set_event_loop(loop)
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=_runner, name="order-loop", daemon=True)
+        thread.start()
+        ready.wait()
+
+        _order_loop = loop
+        _order_thread = thread
+        return loop
+
+
+def _backoff_delay(attempt: int) -> float:
+    attempt = max(1, int(attempt))
+    base = max(0.0, _BACKOFF_BASE)
+    jitter = max(0.0, _BACKOFF_JITTER)
+    return base * attempt + (random.random() * jitter if jitter else 0.0)
 
 
 def _build_swap_endpoint(name: str, base_url: str, default_path: str = DEFAULT_SWAP_PATH) -> str:
@@ -215,7 +258,11 @@ def _resolve_swap_candidates(
     def add(name: str, base: str, append_path: bool) -> None:
         if not base:
             return
-        endpoint = _build_swap_endpoint(name, base) if append_path else base
+        endpoint = base
+        if append_path:
+            base_path = base.split("?", 1)[0].rstrip("/")
+            if "/swap" not in base_path:
+                endpoint = _build_swap_endpoint(name, base)
         if endpoint in seen:
             return
         resolved.append((name, endpoint))
@@ -256,13 +303,20 @@ async def _post_swap_request(
     try:
         async with session.post(endpoint, json=payload, timeout=10) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            raw = await resp.read()
+            return loads(raw)
     except aiohttp.ClientResponseError as exc:
-        if exc.status == 403:
+        if exc.status in (403, 429) and attempt < max_attempts:
             headers = {"User-Agent": "Mozilla/5.0"}
-            async with session.post(endpoint, json=payload, timeout=10, headers=headers) as resp2:
+            await asyncio.sleep(_backoff_delay(attempt))
+            async with session.post(
+                endpoint,
+                json=payload,
+                timeout=10,
+                headers=headers,
+            ) as resp2:
                 resp2.raise_for_status()
-                return await resp2.json()
+                return loads(await resp2.read())
         raise
 
 
@@ -273,18 +327,26 @@ def _sign_transaction(tx_b64: str, keypair: Keypair) -> VersionedTransaction:
 
 
 async def _resolve_token_decimals(token: str, metadata: Dict[str, Any]) -> int:
+    now = time.monotonic()
+    cached = _DECIMALS_CACHE.get(token)
+    if cached and now - cached[1] <= _DECIMALS_CACHE_TTL:
+        return cached[0]
+
     hint = _coerce_int(metadata.get("decimals"))
     if hint is not None and hint >= 0:
+        _DECIMALS_CACHE[token] = (hint, now)
         return hint
     meta = metadata.get("metadata")
     if isinstance(meta, dict):
         nested = _coerce_int(meta.get("decimals"))
         if nested is not None and nested >= 0:
+            _DECIMALS_CACHE[token] = (nested, now)
             return nested
         for source in meta.values():
             if isinstance(source, dict):
                 nested = _coerce_int(source.get("decimals"))
                 if nested is not None and nested >= 0:
+                    _DECIMALS_CACHE[token] = (nested, now)
                     return nested
     try:
         metrics = await fetch_dex_metrics_async(token)
@@ -292,7 +354,8 @@ async def _resolve_token_decimals(token: str, metadata: Dict[str, Any]) -> int:
         metrics = {}
     decimals = _coerce_int(metrics.get("decimals"))
     if decimals is None or decimals < 0:
-        return 9
+        decimals = 9
+    _DECIMALS_CACHE[token] = (decimals, now)
     return decimals
 
 
@@ -449,25 +512,30 @@ async def _place_order_ipc(
         logger.info("Dry run IPC order")
         return {"dry_run": True}
 
-    for _ in range(max_retries):
+    for attempt in range(1, max_retries + 1):
         try:
             async with _ipc_connection(socket_path) as (reader, writer):
                 payload = {"cmd": "submit", "tx": tx_b64, "testnet": testnet}
                 data = dumps(payload)
-                writer.write(data if isinstance(data, (bytes, bytearray)) else data.encode())
+                if isinstance(data, str):
+                    data = data.encode()
+                writer.write(data + b"\n")
                 await writer.drain()
-                if timeout:
-                    data = await asyncio.wait_for(reader.read(), timeout)
-                else:
-                    data = await reader.read()
-                if data:
-                    return loads(data)
+                try:
+                    if timeout:
+                        raw = await asyncio.wait_for(reader.readuntil(b"\n"), timeout)
+                    else:
+                        raw = await reader.readuntil(b"\n")
+                except asyncio.IncompleteReadError as exc:
+                    raw = exc.partial
+                if raw:
+                    return loads(raw.rstrip(b"\n"))
                 return None
         except asyncio.TimeoutError:
             logger.warning("IPC order timed out, retrying")
         except Exception as exc:
             logger.error("IPC order submission failed: %s", exc)
-        await asyncio.sleep(retry_delay)
+        await asyncio.sleep(_backoff_delay(attempt))
     return None
 
 
@@ -483,6 +551,10 @@ def place_order(
     base_url: str | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Submit an order via the configured swap partners and broadcast it."""
+
+    side = side.lower()
+    if side not in {"buy", "sell"}:
+        raise ValueError(f"Unsupported side: {side}")
 
     payload = {
         "token": token,
@@ -525,14 +597,15 @@ def place_order(
                     except aiohttp.ClientError as exc:
                         last_error = exc
                         logger.warning(
-                            "Swap attempt %s/%s failed via %s: %s",
+                            "Swap attempt %s/%s failed via %s (%s): %s",
                             attempt,
                             3,
                             venue_name,
+                            endpoint,
                             exc,
                         )
                         if attempt < 3:
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(_backoff_delay(attempt))
                         continue
 
                     tx_b64 = data.get("swapTransaction")
@@ -546,21 +619,15 @@ def place_order(
                         data = None
                         break
 
+                    logger.info("Swap submitted via %s (%s)", venue_name, endpoint)
                     return data, str(tx_b64), None
 
                 logger.warning("Exhausted swap attempts via %s", venue_name)
             return None, None, last_error
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            global _order_loop
-            if _order_loop is None:
-                _order_loop = asyncio.new_event_loop()
-            data, tx_b64, last_error = _order_loop.run_until_complete(_place())
-        else:
-            future = asyncio.run_coroutine_threadsafe(_place(), loop)
-            data, tx_b64, last_error = future.result()
+        loop = _ensure_order_loop()
+        future = asyncio.run_coroutine_threadsafe(_place(), loop)
+        data, tx_b64, last_error = future.result()
 
         if not data:
             if last_error is not None:
@@ -571,9 +638,11 @@ def place_order(
             return data
 
         tx = _sign_transaction(tx_b64, keypair)
-        rpc = Client(RPC_TESTNET_URL if testnet else RPC_URL)
+        rpc_url = RPC_TESTNET_URL if testnet else RPC_URL
+        rpc = Client(rpc_url)
         result = rpc.send_raw_transaction(bytes(tx))
         data["signature"] = str(result.value)
+        logger.info("Swap submitted via %s (%s)", "rpc", rpc_url)
         return data
     except aiohttp.ClientError as exc:
         data = getattr(exc.response, "text", "") if getattr(exc, "response", None) else ""
@@ -609,6 +678,10 @@ async def place_order_async(
     verify connectivity without broadcasting a transaction.
     """
 
+    side = side.lower()
+    if side not in {"buy", "sell"}:
+        raise ValueError(f"Unsupported side: {side}")
+
     # For pure connectivity tests, skip fee retrieval to avoid RPC dependency
     if connectivity_test:
         trade_amount = float(amount)
@@ -628,6 +701,11 @@ async def place_order_async(
         "price": price,
         "cluster": "devnet" if testnet else "mainnet-beta",
     }
+
+    ctx = context or {}
+    client_order_id = ctx.get("client_order_id")
+    if client_order_id:
+        payload_base["clientOrderId"] = str(client_order_id)
 
     if dry_run and not connectivity_test:
         logger.info(
@@ -668,7 +746,7 @@ async def place_order_async(
                     exc,
                 )
                 if attempt < max_retries:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(_backoff_delay(attempt))
                 continue
 
             tx_b64 = data.get("swapTransaction")
@@ -692,24 +770,26 @@ async def place_order_async(
                 )
                 if res:
                     data.update(res)
+                    logger.info("Swap submitted via %s (%s)", venue_name, endpoint)
                     return data
                 logger.warning("IPC execution failed via %s; retrying", venue_name)
                 if attempt < max_retries:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(_backoff_delay(attempt))
                 continue
             else:
                 try:
                     async with AsyncClient(RPC_TESTNET_URL if testnet else RPC_URL) as client:
                         result = await client.send_raw_transaction(bytes(tx))
                     data["signature"] = str(result.value)
+                    logger.info("Swap submitted via %s (%s)", venue_name, endpoint)
                 except Exception as exc:
                     logger.warning("RPC send failed via %s: %s", venue_name, exc)
                     if attempt < max_retries:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(_backoff_delay(attempt))
                     continue
 
-            filled = float(data.get("filled_amount", remaining))
-            remaining -= filled
+            filled = float(data.get("filled_amount", 0.0) or 0.0)
+            remaining = max(0.0, remaining - filled) if filled > 0 else 0.0
             if remaining <= 0:
                 return data
         else:
