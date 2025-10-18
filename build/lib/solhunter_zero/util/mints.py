@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import re
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -60,13 +61,48 @@ def _extract_candidate(text: str) -> str:
     return m.group(1) if m else t
 
 
-def clean_candidate_mints(mints: Sequence[object] | str) -> Tuple[List[str], List[object]]:
+_LOGGER = logging.getLogger(__name__)
+_LOGGED_INVALID_SOURCES: set[tuple[str, str]] = set()
+
+
+def _summarise_value(value: Any, *, limit: int = 80) -> str:
+    try:
+        rendered = str(value)
+    except Exception:
+        return "<unrenderable>"
+    if len(rendered) > limit:
+        return f"{rendered[: limit - 3]}..."
+    return rendered
+
+
+def _log_invalid_source(source: str | None, value: Any, reason: str) -> None:
+    if not source:
+        return
+    key = (source, reason)
+    if key in _LOGGED_INVALID_SOURCES:
+        return
+    _LOGGED_INVALID_SOURCES.add(key)
+    summary = _summarise_value(value)
+    _LOGGER.warning(
+        "Invalid mint filtered from %s (%s): %s",
+        source,
+        reason,
+        summary,
+    )
+
+
+def clean_candidate_mints(
+    mints: Sequence[object] | str,
+    source: str | None = None,
+) -> Tuple[List[str], List[object]]:
     """Backwards-compatible API: returns (valid, dropped)."""
-    res = clean_mints(mints)
+    res = clean_mints(mints, source=source)
     return res.valid, res.dropped
 
 
-def clean_mints(mints: Sequence[object] | str) -> MintCleanResult:
+def clean_mints(
+    mints: Sequence[object] | str, *, source: str | None = None
+) -> MintCleanResult:
     """Split, extract, validate, and dedupe potential mint addresses."""
     seen: set[str] = set()
     valid: List[str] = []
@@ -90,24 +126,29 @@ def clean_mints(mints: Sequence[object] | str) -> MintCleanResult:
         if not cand:
             dropped.append(orig)
             reasons[orig] = "empty"
+            _log_invalid_source(source, orig, "empty")
             continue
         if not (32 <= len(cand) <= 44):
             dropped.append(orig)
             reasons[orig] = "bad_length"
+            _log_invalid_source(source, orig, "bad_length")
             continue
         if any(ch not in _BASE58_ALPHABET for ch in cand):
             dropped.append(orig)
             reasons[orig] = "invalid_chars"
+            _log_invalid_source(source, orig, "invalid_chars")
             continue
         try:
             raw_bytes = base58.b58decode(cand)
         except Exception:
             dropped.append(orig)
             reasons[orig] = "b58decode_error"
+            _log_invalid_source(source, orig, "b58decode_error")
             continue
         if len(raw_bytes) != 32:
             dropped.append(orig)
             reasons[orig] = "decoded_len!=32"
+            _log_invalid_source(source, orig, "decoded_len!=32")
             continue
         if cand in seen:
             # silently dedupe
