@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
@@ -9,9 +11,10 @@ import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
-from typing import Any, Callable, Dict, Iterable, List, MutableMapping, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple, Union
 
 import aiohttp
+import base58
 
 from solhunter_zero.lru import TTLCache
 
@@ -41,7 +44,7 @@ BIRDEYE_PRICE_URL = os.getenv("BIRDEYE_PRICE_URL", "https://public-api.birdeye.s
 BIRDEYE_CHAIN = os.getenv("BIRDEYE_CHAIN", "solana")
 BIRDEYE_MAX_BATCH = max(1, int(os.getenv("BIRDEYE_BATCH_SIZE", "50") or 50))
 
-PYTH_PRICE_URL = os.getenv("PYTH_PRICE_URL", "https://hermes.pyth.network/v2/updates/price/latest")
+PYTH_PRICE_URL = os.getenv("PYTH_PRICE_URL", "https://hermes.pyth.network/v2/price_feeds")
 
 SYNTHETIC_HINTS_ENV = "SYNTHETIC_PRICE_HINTS"
 OFFLINE_PRICE_DEFAULT = os.getenv("OFFLINE_PRICE_DEFAULT")
@@ -53,6 +56,125 @@ _BIRDEYE_KEY_FINGERPRINT: str | None = None
 _PYTH_BOOT_TIMEOUT = max(0.5, float(os.getenv("PYTH_BOOT_TIMEOUT", "3.0") or 3.0))
 _PYTH_VALIDATE_FLAG = (os.getenv("PYTH_VALIDATE_ON_BOOT") or "1").strip().lower()
 _PYTH_VALIDATE_ENABLED = _PYTH_VALIDATE_FLAG not in {"0", "false", "no", "off"}
+
+
+DEFAULT_PYTH_PRICE_IDS: Dict[str, str] = {
+    "So11111111111111111111111111111111111111112": "J83JdAq8FDeC8v2WFE2QyXkJhtCmvYzu3d6PvMfo4WwS",
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9": "GkzKf5qcF6edCbnMD4HzyBbs6k8ZZrVSu2Ce279b9EcT",
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "7sxNXmAf6oMzFxLpyR4V6kRDeo63HgNbUsVTNff7kX2Z",
+}
+
+
+def _mask_identifier(value: str, *, prefix: int = 6, suffix: int = 4) -> str:
+    candidate = (value or "").strip()
+    if len(candidate) <= prefix + suffix + 1:
+        return candidate
+    return f"{candidate[:prefix]}…{candidate[-suffix:]}"
+
+
+def _normalize_pyth_id(value: str) -> str:
+    candidate = (value or "").strip()
+    if not candidate:
+        raise ValueError("empty price id")
+
+    errors: List[str] = []
+
+    def _format_length_error(codec: str, decoded: bytes) -> str:
+        return f"{codec} decoded length {len(decoded)} bytes (expected 32)"
+
+    # Hex (with or without 0x prefix)
+    hex_candidate = candidate[2:] if candidate.lower().startswith("0x") else candidate
+    try:
+        if hex_candidate:
+            decoded = bytes.fromhex(hex_candidate)
+        else:
+            decoded = b""
+    except ValueError as exc:
+        errors.append(f"hex decode failed: {exc}")
+    else:
+        if len(decoded) == 32:
+            return "0x" + decoded.hex()
+        if decoded:
+            errors.append(_format_length_error("hex", decoded))
+        else:
+            errors.append("hex decode failed: empty input")
+
+    # Base58
+    try:
+        decoded = base58.b58decode(candidate)
+    except ValueError as exc:
+        errors.append(f"base58 decode failed: {exc}")
+    else:
+        if len(decoded) == 32:
+            return "0x" + decoded.hex()
+        errors.append(_format_length_error("base58", decoded))
+
+    # Base64
+    try:
+        decoded = base64.b64decode(candidate, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        errors.append(f"base64 decode failed: {exc}")
+    else:
+        if len(decoded) == 32:
+            return "0x" + decoded.hex()
+        errors.append(_format_length_error("base64", decoded))
+
+    raise ValueError("; ".join(errors) if errors else "invalid price id format")
+
+
+def _normalize_pyth_mapping(
+    mapping: Mapping[str, str], extras: Iterable[str]
+) -> Tuple[Dict[str, str], List[str], List[Tuple[str | None, str, str]]]:
+    normalized_mapping: Dict[str, str] = {}
+    normalized_extras: List[str] = []
+    issues: List[Tuple[str | None, str, str]] = []
+
+    for mint, raw_id in mapping.items():
+        try:
+            normalized_mapping[mint] = _normalize_pyth_id(raw_id)
+        except ValueError as exc:
+            issues.append((mint, raw_id, str(exc)))
+
+    for raw_id in extras:
+        try:
+            normalized_extras.append(_normalize_pyth_id(raw_id))
+        except ValueError as exc:
+            issues.append((None, raw_id, str(exc)))
+
+    return normalized_mapping, normalized_extras, issues
+
+
+def _log_pyth_issues(issues: Iterable[Tuple[str | None, str, str]]) -> None:
+    for mint, raw_id, reason in issues:
+        masked_id = _mask_identifier(raw_id)
+        if mint:
+            logger.error(
+                "Invalid Pyth price id for %s (%s): %s",
+                _mask_identifier(mint),
+                masked_id,
+                reason,
+            )
+        else:
+            logger.error("Invalid extra Pyth price id %s: %s", masked_id, reason)
+
+
+def _build_pyth_boot_url(base_url: str, ids: Sequence[str]) -> str:
+    parsed = urllib.parse.urlsplit(base_url)
+    query_items = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    for value in ids:
+        query_items.append(("ids[]", value))
+    encoded_query = urllib.parse.urlencode(query_items)
+    return urllib.parse.urlunsplit(parsed._replace(query=encoded_query))
+
+
+def _mark_pyth_provider_unhealthy(status: int | None, detail: str) -> None:
+    state = PROVIDER_HEALTH.get("pyth")
+    if state:
+        cooldown = 60.0 if status and 400 <= status < 500 else None
+        state.record_failure(status, cooldown=cooldown)
+    stats = PROVIDER_STATS.get("pyth")
+    if stats:
+        stats.record_failure(status, 0.0, RuntimeError(detail))
 
 
 def _monotonic() -> float:
@@ -638,82 +760,116 @@ def _load_custom_pyth_ids() -> Tuple[Dict[str, str], List[str]]:
 
 def _parse_pyth_mapping() -> Tuple[Dict[str, str], List[str]]:
     mapping, extras = _load_custom_pyth_ids()
-    default_mapping = {
-        "So11111111111111111111111111111111111111112": "J83JdAq8FDeC8v2WFE2QyXkJhtCmvYzu3d6PvMfo4WwS",
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9": "GkzKf5qcF6edCbnMD4HzyBbs6k8ZZrVSu2Ce279b9EcT",
-        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "7sxNXmAf6oMzFxLpyR4V6kRDeo63HgNbUsVTNff7kX2Z",
-    }
-    for mint, price_id in default_mapping.items():
+    for mint, price_id in DEFAULT_PYTH_PRICE_IDS.items():
         mapping.setdefault(mint, price_id)
-    return mapping, extras
+    normalized_mapping, normalized_extras, issues = _normalize_pyth_mapping(mapping, extras)
+    if issues:
+        _log_pyth_issues(issues)
+    return normalized_mapping, normalized_extras
 
 
 @lru_cache(maxsize=1)
 def validate_pyth_overrides_on_boot(*, network_required: bool = True) -> None:
     if not _PYTH_VALIDATE_ENABLED or not network_required:
         return
-    mapping, extras = _load_custom_pyth_ids()
-    ids: set[str] = {str(value) for value in mapping.values() if value}
-    ids.update(str(value) for value in extras if value)
+    raw_mapping, extras = _load_custom_pyth_ids()
+    normalized_mapping, _, issues = _normalize_pyth_mapping(raw_mapping, extras)
+    if issues:
+        _log_pyth_issues(issues)
+    id_sources: Dict[str, List[Tuple[str | None, str]]] = {}
+    for mint, normalized in normalized_mapping.items():
+        raw_value = raw_mapping.get(mint, "")
+        id_sources.setdefault(normalized, []).append((mint, raw_value))
+    for raw_value in extras:
+        try:
+            normalized = _normalize_pyth_id(raw_value)
+        except ValueError:
+            continue
+        id_sources.setdefault(normalized, []).append((None, raw_value))
+    ids = sorted(id_sources)
     if not ids:
         return
-    base_url = PYTH_PRICE_URL.strip() or "https://hermes.pyth.network/v2/updates/price/latest"
-    for price_id in sorted(ids):
-        try:
-            encoded = urllib.parse.quote(price_id, safe="")
-            url = f"{base_url}?ids={encoded}"
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=_PYTH_BOOT_TIMEOUT) as resp:
-                resp.read(1)
-        except urllib.error.HTTPError as exc:
-            if exc.code == 400:
-                detail = exc.read() if hasattr(exc, "read") else b""
-                preview = detail.decode("utf-8", errors="replace")[:120]
-                raise RuntimeError(
-                    f"Invalid PYTH_PRICE_IDS entry {price_id}: HTTP 400 {preview}"
-                ) from exc
-            logger.debug(
-                "Pyth override validation received HTTP %s for %s", exc.code, price_id
+    base_url = PYTH_PRICE_URL.strip() or "https://hermes.pyth.network/v2/price_feeds"
+    url = _build_pyth_boot_url(base_url, ids)
+    headers = {"Accept": "application/json"}
+    try:
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        with urllib.request.urlopen(req, timeout=_PYTH_BOOT_TIMEOUT) as resp:
+            resp.read(1)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read() if hasattr(exc, "read") else b""
+        preview = detail.decode("utf-8", errors="replace").strip()[:200]
+        status = exc.code
+        if status and 400 <= status < 500:
+            entries: List[str] = []
+            for normalized in ids:
+                for mint, raw_value in id_sources.get(normalized, []):
+                    masked_value = _mask_identifier(raw_value)
+                    if mint:
+                        entries.append(
+                            f"{_mask_identifier(mint)}→{masked_value or _mask_identifier(normalized)}"
+                        )
+                    else:
+                        entries.append(f"extra:{masked_value or _mask_identifier(normalized)}")
+            detail_text = preview or exc.reason or "client error"
+            logger.error(
+                "PYTH_BOOT_VALIDATION_FAILED status=%s count=%d detail=%s entries=%s",
+                status,
+                len(entries),
+                detail_text,
+                ", ".join(entries) if entries else "<unknown>",
             )
-        except Exception as exc:  # pragma: no cover - network best effort
-            logger.debug(
-                "Pyth override validation encountered %s for %s", exc, price_id
-            )
+            _mark_pyth_provider_unhealthy(status, detail_text)
+            return
+        logger.debug(
+            "Pyth override validation received HTTP %s for ids=%s", status, ",".join(ids)
+        )
+    except Exception as exc:  # pragma: no cover - network best effort
+        logger.debug(
+            "Pyth override validation encountered %s for ids=%s", exc, ",".join(ids)
+        )
 
 
 async def _fetch_quotes_pyth(
     session: aiohttp.ClientSession, tokens: Sequence[str]
 ) -> Dict[str, PriceQuote]:
     mapping, extras = _parse_pyth_mapping()
-    reverse = {v: k for k, v in mapping.items()}
+    reverse: Dict[str, str] = {}
+    for mint, price_id in mapping.items():
+        reverse[price_id] = mint
     requested_tokens = set(tokens)
-    ids = {str(mapping[token]) for token in tokens if token in mapping}
-    ids.update(str(value) for value in extras)
+    ids = {mapping[token] for token in tokens if token in mapping}
+    ids.update(extras)
     if not ids:
         return {}
-    ids_param = ",".join(sorted(ids))
-    params = {"ids": ids_param}
+    params: List[Tuple[str, str]] = [("ids[]", value) for value in sorted(ids)]
+    headers = {"Accept": "application/json"}
     try:
-        payload = await _request_json(session, PYTH_PRICE_URL, "Pyth", params=params)
+        payload = await _request_json(
+            session, PYTH_PRICE_URL, "Pyth", params=params, headers=headers
+        )
     except aiohttp.ClientResponseError as exc:
         if exc.status == 400:
             logger.error(
                 "Pyth price request returned HTTP 400 for ids=%s (tokens=%s)",
-                ids_param,
+                ",".join(sorted(ids)),
                 ",".join(sorted(requested_tokens)),
             )
         raise
-    if not isinstance(payload, MutableMapping):
-        return {}
     records: List[MutableMapping[str, Any]] = []
-    if isinstance(payload.get("parsed"), list):
-        records.extend([item for item in payload["parsed"] if isinstance(item, MutableMapping)])
-    if isinstance(payload.get("data"), list):
-        records.extend([item for item in payload["data"] if isinstance(item, MutableMapping)])
-    if isinstance(payload.get("prices"), list):
-        records.extend([item for item in payload["prices"] if isinstance(item, MutableMapping)])
-    if not records and isinstance(payload.get("result"), list):
-        records.extend([item for item in payload["result"] if isinstance(item, MutableMapping)])
+    if isinstance(payload, list):
+        records.extend([item for item in payload if isinstance(item, MutableMapping)])
+    if isinstance(payload, MutableMapping):
+        if isinstance(payload.get("parsed"), list):
+            records.extend([item for item in payload["parsed"] if isinstance(item, MutableMapping)])
+        if isinstance(payload.get("data"), list):
+            records.extend([item for item in payload["data"] if isinstance(item, MutableMapping)])
+        if isinstance(payload.get("prices"), list):
+            records.extend([item for item in payload["prices"] if isinstance(item, MutableMapping)])
+        if not records and isinstance(payload.get("result"), list):
+            records.extend([item for item in payload["result"] if isinstance(item, MutableMapping)])
+    if not records:
+        return {}
     quotes: Dict[str, PriceQuote] = {}
     for entry in records:
         price = _pyth_price_from_info(entry.get("price"))
@@ -724,13 +880,17 @@ async def _fetch_quotes_pyth(
         if price is None:
             continue
         token_id = entry.get("id") or entry.get("price_id")
-        if not token_id:
+        if not isinstance(token_id, str):
             continue
-        token = reverse.get(str(token_id))
+        try:
+            normalized_id = _normalize_pyth_id(token_id)
+        except ValueError:
+            normalized_id = str(token_id)
+        token = reverse.get(normalized_id)
         if not token:
             inferred = _infer_pyth_mint(entry, str(token_id), requested_tokens)
             if inferred:
-                reverse[str(token_id)] = inferred
+                reverse[normalized_id] = inferred
                 token = inferred
         if not token or token not in requested_tokens:
             continue
