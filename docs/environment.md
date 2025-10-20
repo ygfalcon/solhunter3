@@ -2,6 +2,12 @@
 
 This document lists environment variables recognized by the project.
 
+## Production environment precedence
+
+The `load_production_env` helper reads candidate production environment files in
+priority order. Values defined in an earlier file take precedence over later
+files unless the loader is invoked with `overwrite=True`.
+
 | Variable | Default | Description |
 |---|---|---|
 | `ACTIVITY_MODEL_PATH` | `` | Path to activity model |
