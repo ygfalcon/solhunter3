@@ -11,7 +11,7 @@ import asyncio
 import logging
 import os
 import random
-from typing import Any, Dict
+from typing import Any, Callable, Dict, List
 
 from .. import event_bus
 try:
@@ -34,14 +34,25 @@ class TradeExecutor:
     def __init__(self, memory: Memory, portfolio: Portfolio) -> None:
         self.memory = memory
         self.portfolio = portfolio
-        self._task: asyncio.Task | None = None
         self._n = 0
+        self._subscriptions: List[Callable[[], None]] = []
+        self._tasks: List[asyncio.Task] = []
 
     def start(self) -> None:
-        event_bus.subscribe("action_decision", self._on_decision)
+        self._subscriptions.append(event_bus.subscribe("action_decision", self._on_decision))
 
-    def stop(self) -> None:
-        pass
+    async def stop(self) -> None:
+        for unsub in list(self._subscriptions):
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._subscriptions.clear()
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
 
     def _build_execution_plan(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         token = str(payload.get("token") or payload.get("mint") or "").strip()
@@ -224,7 +235,9 @@ class TradeExecutor:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                asyncio.create_task(_exec())
+                task = asyncio.create_task(_exec())
+                self._tasks.append(task)
+                task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
             else:
                 loop.run_until_complete(_exec())
         except RuntimeError:
