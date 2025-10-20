@@ -10,6 +10,7 @@ from solhunter_zero.production.env import (
     detect_placeholder,
     format_configured_providers,
     load_env_file,
+    load_production_env,
     validate_providers,
     write_env_manifest,
 )
@@ -63,3 +64,29 @@ def test_load_env_file(tmp_path: Path, monkeypatch):
     loaded = load_env_file(env_file, overwrite=True)
     assert loaded == {"SAMPLE_KEY": "value"}
     assert os.environ["SAMPLE_KEY"] == "value"
+
+
+def test_load_production_env_respects_precedence(tmp_path: Path, monkeypatch):
+    first = tmp_path / "first.env"
+    second = tmp_path / "second.env"
+    first.write_text("SHARED_KEY=first\n")
+    second.write_text("SHARED_KEY=second\n")
+    monkeypatch.delenv("SHARED_KEY", raising=False)
+
+    loaded = load_production_env((first, second), env={"BASE": "1"})
+
+    assert loaded == {"SHARED_KEY": "first"}
+    assert os.environ["SHARED_KEY"] == "first"
+
+
+def test_load_production_env_overwrite_true(tmp_path: Path, monkeypatch):
+    first = tmp_path / "first.env"
+    second = tmp_path / "second.env"
+    first.write_text("SHARED_KEY=first\n")
+    second.write_text("SHARED_KEY=second\n")
+    monkeypatch.delenv("SHARED_KEY", raising=False)
+
+    loaded = load_production_env((first, second), overwrite=True, env={"BASE": "1"})
+
+    assert loaded == {"SHARED_KEY": "second"}
+    assert os.environ["SHARED_KEY"] == "second"
