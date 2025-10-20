@@ -12,6 +12,7 @@ MAC_SETUP_MARKER = CACHE_DIR / "mac_setup_complete"
 TOOLS_OK_MARKER = CACHE_DIR / "macos_tools_ok"
 CARGO_MARKER = CACHE_DIR / "cargo-installed"
 VENV_OK_MARKER = CACHE_DIR / "venv_ok"
+RUNTIME_LOCK_PATH = CACHE_DIR / "runtime.lock"
 
 __all__ = [
     "CACHE_DIR",
@@ -20,4 +21,5 @@ __all__ = [
     "TOOLS_OK_MARKER",
     "CARGO_MARKER",
     "VENV_OK_MARKER",
+    "RUNTIME_LOCK_PATH",
 ]

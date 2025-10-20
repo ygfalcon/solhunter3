@@ -14,7 +14,25 @@ from functools import lru_cache
 from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple, Union
 
 import aiohttp
-import base58
+try:
+    import base58
+except ImportError:  # pragma: no cover - lightweight fallback
+    class _Base58Fallback:
+        _alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        _index = {ch: idx for idx, ch in enumerate(_alphabet)}
+
+        @classmethod
+        def b58decode(cls, value: str) -> bytes:
+            num = 0
+            for char in value:
+                if char not in cls._index:
+                    raise ValueError(f"Invalid base58 character {char!r}")
+                num = num * 58 + cls._index[char]
+            result = num.to_bytes((num.bit_length() + 7) // 8, "big") if num else b""
+            leading = len(value) - len(value.lstrip("1"))
+            return b"\x00" * leading + result
+
+    base58 = _Base58Fallback()  # type: ignore[assignment]
 
 from solhunter_zero.lru import TTLCache
 
@@ -58,6 +76,28 @@ _PYTH_VALIDATE_FLAG = (os.getenv("PYTH_VALIDATE_ON_BOOT") or "1").strip().lower(
 _PYTH_VALIDATE_ENABLED = _PYTH_VALIDATE_FLAG not in {"0", "false", "no", "off"}
 
 
+# ---------------------------------------------------------------------------
+# Pyth identifier handling
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PythIdentifier:
+    """Normalized view of a Pyth feed identifier or price account."""
+
+    feed_id: str
+    account: str | None
+    raw: str
+
+    @property
+    def kind(self) -> str:
+        return "account" if self.account else "feed"
+
+    @property
+    def request_value(self) -> str:
+        return self.account or self.feed_id
+
+
 DEFAULT_PYTH_PRICE_IDS: Dict[str, str] = {
     "So11111111111111111111111111111111111111112": "J83JdAq8FDeC8v2WFE2QyXkJhtCmvYzu3d6PvMfo4WwS",
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9": "GkzKf5qcF6edCbnMD4HzyBbs6k8ZZrVSu2Ce279b9EcT",
@@ -72,7 +112,7 @@ def _mask_identifier(value: str, *, prefix: int = 6, suffix: int = 4) -> str:
     return f"{candidate[:prefix]}…{candidate[-suffix:]}"
 
 
-def _normalize_pyth_id(value: str) -> str:
+def _normalize_pyth_identifier(value: str) -> PythIdentifier:
     candidate = (value or "").strip()
     if not candidate:
         raise ValueError("empty price id")
@@ -85,59 +125,63 @@ def _normalize_pyth_id(value: str) -> str:
     # Hex (with or without 0x prefix)
     hex_candidate = candidate[2:] if candidate.lower().startswith("0x") else candidate
     try:
-        if hex_candidate:
-            decoded = bytes.fromhex(hex_candidate)
-        else:
-            decoded = b""
+        decoded_hex = bytes.fromhex(hex_candidate) if hex_candidate else b""
     except ValueError as exc:
         errors.append(f"hex decode failed: {exc}")
     else:
-        if len(decoded) == 32:
-            return "0x" + decoded.hex()
-        if decoded:
-            errors.append(_format_length_error("hex", decoded))
+        if len(decoded_hex) == 32:
+            normalized = "0x" + decoded_hex.hex()
+            return PythIdentifier(feed_id=normalized, account=None, raw=candidate)
+        if decoded_hex:
+            errors.append(_format_length_error("hex", decoded_hex))
         else:
             errors.append("hex decode failed: empty input")
 
     # Base58
     try:
-        decoded = base58.b58decode(candidate)
+        decoded_b58 = base58.b58decode(candidate)
     except ValueError as exc:
         errors.append(f"base58 decode failed: {exc}")
     else:
-        if len(decoded) == 32:
-            return "0x" + decoded.hex()
-        errors.append(_format_length_error("base58", decoded))
+        if len(decoded_b58) == 32:
+            normalized = "0x" + decoded_b58.hex()
+            return PythIdentifier(feed_id=normalized, account=candidate, raw=candidate)
+        errors.append(_format_length_error("base58", decoded_b58))
 
     # Base64
     try:
-        decoded = base64.b64decode(candidate, validate=True)
+        decoded_b64 = base64.b64decode(candidate, validate=True)
     except (binascii.Error, ValueError) as exc:
         errors.append(f"base64 decode failed: {exc}")
     else:
-        if len(decoded) == 32:
-            return "0x" + decoded.hex()
-        errors.append(_format_length_error("base64", decoded))
+        if len(decoded_b64) == 32:
+            normalized = "0x" + decoded_b64.hex()
+            return PythIdentifier(feed_id=normalized, account=None, raw=candidate)
+        errors.append(_format_length_error("base64", decoded_b64))
 
     raise ValueError("; ".join(errors) if errors else "invalid price id format")
 
 
+def _normalize_pyth_id(value: str) -> str:
+    return _normalize_pyth_identifier(value).feed_id
+
+
 def _normalize_pyth_mapping(
     mapping: Mapping[str, str], extras: Iterable[str]
-) -> Tuple[Dict[str, str], List[str], List[Tuple[str | None, str, str]]]:
-    normalized_mapping: Dict[str, str] = {}
-    normalized_extras: List[str] = []
+) -> Tuple[Dict[str, PythIdentifier], List[PythIdentifier], List[Tuple[str | None, str, str]]]:
+    normalized_mapping: Dict[str, PythIdentifier] = {}
+    normalized_extras: List[PythIdentifier] = []
     issues: List[Tuple[str | None, str, str]] = []
 
     for mint, raw_id in mapping.items():
         try:
-            normalized_mapping[mint] = _normalize_pyth_id(raw_id)
+            normalized_mapping[mint] = _normalize_pyth_identifier(raw_id)
         except ValueError as exc:
             issues.append((mint, raw_id, str(exc)))
 
     for raw_id in extras:
         try:
-            normalized_extras.append(_normalize_pyth_id(raw_id))
+            normalized_extras.append(_normalize_pyth_identifier(raw_id))
         except ValueError as exc:
             issues.append((None, raw_id, str(exc)))
 
@@ -158,11 +202,15 @@ def _log_pyth_issues(issues: Iterable[Tuple[str | None, str, str]]) -> None:
             logger.error("Invalid extra Pyth price id %s: %s", masked_id, reason)
 
 
-def _build_pyth_boot_url(base_url: str, ids: Sequence[str]) -> str:
+def _build_pyth_boot_url(
+    base_url: str, *, feed_ids: Sequence[str], accounts: Sequence[str]
+) -> str:
     parsed = urllib.parse.urlsplit(base_url)
     query_items = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    for value in ids:
+    for value in feed_ids:
         query_items.append(("ids[]", value))
+    for account in accounts:
+        query_items.append(("accounts[]", account))
     encoded_query = urllib.parse.urlencode(query_items)
     return urllib.parse.urlunsplit(parsed._replace(query=encoded_query))
 
@@ -205,6 +253,7 @@ class ProviderHealth:
     consecutive_failures: int = 0
     last_status: int | None = None
     healthy: bool = True
+    last_cooldown_log: float = 0.0
 
     def in_cooldown(self) -> bool:
         return _monotonic() < self.cooldown_until
@@ -214,6 +263,7 @@ class ProviderHealth:
         self.consecutive_failures = 0
         self.last_status = None
         self.healthy = True
+        self.last_cooldown_log = 0.0
 
     def record_failure(self, status: int | None, *, cooldown: float | None = None) -> None:
         self.consecutive_failures += 1
@@ -228,6 +278,7 @@ class ProviderHealth:
         self.consecutive_failures = 0
         self.last_status = None
         self.healthy = True
+        self.last_cooldown_log = 0.0
 
 
 @dataclass(slots=True)
@@ -261,26 +312,37 @@ class ProviderConfig:
     requires_key: Callable[[], str | None] | None = None
 
 
-_PROVIDER_NAMES = ["birdeye", "jupiter", "dexscreener", "pyth", "synthetic"]
+_DEFAULT_PROVIDER_ORDER = ["birdeye", "jupiter", "dexscreener", "pyth", "synthetic"]
+
+
+def _parse_provider_roster(raw: str | None) -> List[str]:
+    if not raw:
+        return list(_DEFAULT_PROVIDER_ORDER)
+    tokens = [token.strip().lower() for token in raw.replace(";", ",").split(",")]
+    resolved: List[str] = []
+    for token in tokens:
+        if not token:
+            continue
+        if token not in _ALL_PROVIDER_CONFIGS:
+            logger.warning("Unknown price provider '%s' ignored", token)
+            continue
+        if token not in resolved:
+            resolved.append(token)
+    return resolved or list(_DEFAULT_PROVIDER_ORDER)
+
+
+_ACTIVE_PROVIDER_NAMES: List[str] = []
 
 
 def _init_provider_health() -> Dict[str, ProviderHealth]:
-    return {name: ProviderHealth(name=name) for name in _PROVIDER_NAMES}
+    return {name: ProviderHealth(name=name) for name in _ACTIVE_PROVIDER_NAMES}
 
 
 def _init_provider_stats() -> Dict[str, ProviderStats]:
-    return {name: ProviderStats(name=name) for name in _PROVIDER_NAMES}
+    return {name: ProviderStats(name=name) for name in _ACTIVE_PROVIDER_NAMES}
 
 
-PROVIDER_HEALTH: Dict[str, ProviderHealth] = _init_provider_health()
-PROVIDER_STATS: Dict[str, ProviderStats] = _init_provider_stats()
-
-# Treat Jupiter as unverified until a quote succeeds.
-if "jupiter" in PROVIDER_HEALTH:
-    PROVIDER_HEALTH["jupiter"].healthy = False
-
-
-PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
+_ALL_PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
     "birdeye": ProviderConfig(
         name="birdeye",
         fetcher="_fetch_quotes_birdeye",
@@ -311,6 +373,25 @@ PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
     ),
 }
 
+PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {}
+PROVIDER_HEALTH: Dict[str, ProviderHealth] = {}
+PROVIDER_STATS: Dict[str, ProviderStats] = {}
+
+
+def _rebuild_provider_tables() -> None:
+    global _ACTIVE_PROVIDER_NAMES, PROVIDER_CONFIGS, PROVIDER_HEALTH, PROVIDER_STATS
+    _ACTIVE_PROVIDER_NAMES = _parse_provider_roster(os.getenv("PRICE_PROVIDERS"))
+    PROVIDER_CONFIGS = {
+        name: _ALL_PROVIDER_CONFIGS[name] for name in _ACTIVE_PROVIDER_NAMES
+    }
+    PROVIDER_HEALTH = _init_provider_health()
+    PROVIDER_STATS = _init_provider_stats()
+    if "jupiter" in PROVIDER_HEALTH:
+        PROVIDER_HEALTH["jupiter"].healthy = False
+
+
+_rebuild_provider_tables()
+
 
 def _is_valid_birdeye_key(value: str | None) -> str | None:
     if not value:
@@ -339,7 +420,11 @@ def _get_birdeye_api_key() -> str | None:
             _log_birdeye_key_fingerprint(key)
         else:
             _BIRDEYE_KEY_FINGERPRINT = None
-        if key and key != _LAST_BIRDEYE_FAILURE_KEY:
+        if (
+            key
+            and key != _LAST_BIRDEYE_FAILURE_KEY
+            and "birdeye" in PROVIDER_HEALTH
+        ):
             PROVIDER_HEALTH["birdeye"].clear()
             _LAST_BIRDEYE_FAILURE_KEY = None
     return key
@@ -347,8 +432,7 @@ def _get_birdeye_api_key() -> str | None:
 
 def reset_provider_health() -> None:
     global PROVIDER_HEALTH, PROVIDER_STATS, _LAST_BIRDEYE_KEY, _LAST_BIRDEYE_FAILURE_KEY
-    PROVIDER_HEALTH = _init_provider_health()
-    PROVIDER_STATS = _init_provider_stats()
+    _rebuild_provider_tables()
     _LAST_BIRDEYE_KEY = None
     _LAST_BIRDEYE_FAILURE_KEY = None
 
@@ -758,7 +842,7 @@ def _load_custom_pyth_ids() -> Tuple[Dict[str, str], List[str]]:
     return mapping, extras
 
 
-def _parse_pyth_mapping() -> Tuple[Dict[str, str], List[str]]:
+def _parse_pyth_mapping() -> Tuple[Dict[str, PythIdentifier], List[PythIdentifier]]:
     mapping, extras = _load_custom_pyth_ids()
     for mint, price_id in DEFAULT_PYTH_PRICE_IDS.items():
         mapping.setdefault(mint, price_id)
@@ -776,22 +860,32 @@ def validate_pyth_overrides_on_boot(*, network_required: bool = True) -> None:
     normalized_mapping, _, issues = _normalize_pyth_mapping(raw_mapping, extras)
     if issues:
         _log_pyth_issues(issues)
-    id_sources: Dict[str, List[Tuple[str | None, str]]] = {}
-    for mint, normalized in normalized_mapping.items():
+    id_sources: Dict[Tuple[str, str], List[Tuple[str | None, str]]] = {}
+    feed_ids: List[str] = []
+    accounts: List[str] = []
+    for mint, identifier in normalized_mapping.items():
         raw_value = raw_mapping.get(mint, "")
-        id_sources.setdefault(normalized, []).append((mint, raw_value))
-    for raw_value in extras:
-        try:
-            normalized = _normalize_pyth_id(raw_value)
-        except ValueError:
-            continue
-        id_sources.setdefault(normalized, []).append((None, raw_value))
-    ids = sorted(id_sources)
-    if not ids:
+        key = (identifier.kind, identifier.request_value)
+        id_sources.setdefault(key, []).append((mint, raw_value))
+        if identifier.account:
+            accounts.append(identifier.account)
+        feed_ids.append(identifier.feed_id)
+    for identifier in extras:
+        key = (identifier.kind, identifier.request_value)
+        id_sources.setdefault(key, []).append((None, identifier.raw))
+        if identifier.account:
+            accounts.append(identifier.account)
+        feed_ids.append(identifier.feed_id)
+    unique_feed_ids = sorted({fid for fid in feed_ids if fid})
+    unique_accounts = sorted({acc for acc in accounts if acc})
+    if not unique_feed_ids and not unique_accounts:
         return
     base_url = PYTH_PRICE_URL.strip() or "https://hermes.pyth.network/v2/price_feeds"
-    url = _build_pyth_boot_url(base_url, ids)
+    url = _build_pyth_boot_url(base_url, feed_ids=unique_feed_ids, accounts=unique_accounts)
     headers = {"Accept": "application/json"}
+    logger.debug(
+        "Validating custom Pyth overrides via %s", url
+    )
     try:
         req = urllib.request.Request(url, method="GET", headers=headers)
         with urllib.request.urlopen(req, timeout=_PYTH_BOOT_TIMEOUT) as resp:
@@ -802,31 +896,33 @@ def validate_pyth_overrides_on_boot(*, network_required: bool = True) -> None:
         status = exc.code
         if status and 400 <= status < 500:
             entries: List[str] = []
-            for normalized in ids:
-                for mint, raw_value in id_sources.get(normalized, []):
+            for key, sources in id_sources.items():
+                _, normalized_value = key
+                for mint, raw_value in sources:
                     masked_value = _mask_identifier(raw_value)
                     if mint:
                         entries.append(
-                            f"{_mask_identifier(mint)}→{masked_value or _mask_identifier(normalized)}"
+                            f"{_mask_identifier(mint)}→{masked_value or _mask_identifier(normalized_value)}"
                         )
                     else:
-                        entries.append(f"extra:{masked_value or _mask_identifier(normalized)}")
+                        entries.append(f"extra:{masked_value or _mask_identifier(normalized_value)}")
             detail_text = preview or exc.reason or "client error"
             logger.error(
-                "PYTH_BOOT_VALIDATION_FAILED status=%s count=%d detail=%s entries=%s",
+                "PYTH_BOOT_VALIDATION_FAILED status=%s count=%d detail=%s entries=%s url=%s",
                 status,
                 len(entries),
                 detail_text,
                 ", ".join(entries) if entries else "<unknown>",
+                url,
             )
             _mark_pyth_provider_unhealthy(status, detail_text)
             return
         logger.debug(
-            "Pyth override validation received HTTP %s for ids=%s", status, ",".join(ids)
+            "Pyth override validation received HTTP %s from %s", status, url
         )
     except Exception as exc:  # pragma: no cover - network best effort
         logger.debug(
-            "Pyth override validation encountered %s for ids=%s", exc, ",".join(ids)
+            "Pyth override validation encountered %s via %s", exc, url
         )
 
 
@@ -835,15 +931,33 @@ async def _fetch_quotes_pyth(
 ) -> Dict[str, PriceQuote]:
     mapping, extras = _parse_pyth_mapping()
     reverse: Dict[str, str] = {}
-    for mint, price_id in mapping.items():
-        reverse[price_id] = mint
+    account_reverse: Dict[str, str] = {}
+    for mint, identifier in mapping.items():
+        reverse[identifier.feed_id] = mint
+        if identifier.account:
+            account_reverse[identifier.account] = mint
     requested_tokens = set(tokens)
-    ids = {mapping[token] for token in tokens if token in mapping}
-    ids.update(extras)
-    if not ids:
+    feed_ids = {mapping[token].feed_id for token in tokens if token in mapping}
+    feed_ids.update(identifier.feed_id for identifier in extras)
+    account_ids = {
+        mapping[token].account
+        for token in tokens
+        if token in mapping and mapping[token].account
+    }
+    account_ids.update(identifier.account for identifier in extras if identifier.account)
+    feed_ids = {fid for fid in feed_ids if fid}
+    account_ids = {acc for acc in account_ids if acc}
+    if not feed_ids and not account_ids:
         return {}
-    params: List[Tuple[str, str]] = [("ids[]", value) for value in sorted(ids)]
+    sorted_feeds = sorted(feed_ids)
+    sorted_accounts = sorted(account_ids)
+    params: List[Tuple[str, str]] = []
+    params.extend(("ids[]", value) for value in sorted_feeds)
+    params.extend(("accounts[]", value) for value in sorted_accounts)
     headers = {"Accept": "application/json"}
+    request_url = _build_pyth_boot_url(
+        PYTH_PRICE_URL, feed_ids=sorted_feeds, accounts=sorted_accounts
+    )
     try:
         payload = await _request_json(
             session, PYTH_PRICE_URL, "Pyth", params=params, headers=headers
@@ -851,8 +965,8 @@ async def _fetch_quotes_pyth(
     except aiohttp.ClientResponseError as exc:
         if exc.status == 400:
             logger.error(
-                "Pyth price request returned HTTP 400 for ids=%s (tokens=%s)",
-                ",".join(sorted(ids)),
+                "Pyth price request returned HTTP 400 via %s (tokens=%s)",
+                request_url,
                 ",".join(sorted(requested_tokens)),
             )
         raise
@@ -879,7 +993,12 @@ async def _fetch_quotes_pyth(
             price = _pyth_price_from_info(entry.get("aggregate_price"))
         if price is None:
             continue
-        token_id = entry.get("id") or entry.get("price_id")
+        token_id = (
+            entry.get("id")
+            or entry.get("price_id")
+            or entry.get("priceAccount")
+            or entry.get("price_account")
+        )
         if not isinstance(token_id, str):
             continue
         try:
@@ -888,9 +1007,13 @@ async def _fetch_quotes_pyth(
             normalized_id = str(token_id)
         token = reverse.get(normalized_id)
         if not token:
+            token = account_reverse.get(token_id)
+        if not token:
             inferred = _infer_pyth_mint(entry, str(token_id), requested_tokens)
             if inferred:
                 reverse[normalized_id] = inferred
+                if token_id:
+                    account_reverse[token_id] = inferred
                 token = inferred
         if not token or token not in requested_tokens:
             continue
@@ -945,10 +1068,10 @@ async def _fetch_quotes_synthetic(
 
 
 def _provider_priority() -> List[str]:
-    order = ["jupiter", "dexscreener", "birdeye", "pyth", "synthetic"]
+    order = [name for name in _DEFAULT_PROVIDER_ORDER if name in PROVIDER_CONFIGS]
     state = PROVIDER_HEALTH.get("birdeye")
     key = _get_birdeye_api_key() if state else None
-    if state and key and not state.in_cooldown() and state.healthy:
+    if state and key and not state.in_cooldown() and state.healthy and "birdeye" in order:
         order.remove("birdeye")
         order.insert(0, "birdeye")
     return order
@@ -992,26 +1115,35 @@ def _record_provider_failure(name: str, exc: BaseException, latency_ms: float) -
     if name == "birdeye" and isinstance(exc, aiohttp.ClientResponseError) and exc.status in (401, 403):
         global _LAST_BIRDEYE_FAILURE_KEY
         _LAST_BIRDEYE_FAILURE_KEY = _LAST_BIRDEYE_KEY
-    PROVIDER_HEALTH[name].record_failure(status, cooldown=cooldown)
+    state = PROVIDER_HEALTH[name]
+    previous_cooldown = state.cooldown_until
+    state.record_failure(status, cooldown=cooldown)
     PROVIDER_STATS[name].record_failure(status, latency_ms, exc)
-    if isinstance(exc, aiohttp.ClientResponseError):
-        warn_once_per(
-            1.0,
-            f"prices-http:{name}:{exc.status}",
-            "Prices: %s HTTP error %s",
-            name,
-            exc.status,
-            logger=logger,
-        )
-    else:
-        warn_once_per(
-            1.0,
-            f"prices-failure:{name}:{exc.__class__.__name__}",
-            "Prices: %s failure %s",
-            name,
-            exc,
-            logger=logger,
-        )
+    if cooldown:
+        now = _monotonic()
+        if previous_cooldown <= now and (now - state.last_cooldown_log) > 0.1:
+            logger.warning(
+                "Prices: %s entering cooldown for %.1fs (status=%s, error=%s)",
+                name,
+                cooldown,
+                status,
+                exc,
+            )
+            state.last_cooldown_log = now
+        return
+    key = (
+        f"prices-http:{name}:{getattr(exc, 'status', 'unknown')}"
+        if isinstance(exc, aiohttp.ClientResponseError)
+        else f"prices-failure:{name}:{exc.__class__.__name__}"
+    )
+    warn_once_per(
+        1.0,
+        key,
+        "Prices: %s failure %s",
+        name,
+        exc,
+        logger=logger,
+    )
 
 
 async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:

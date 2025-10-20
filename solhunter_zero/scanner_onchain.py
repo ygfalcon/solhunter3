@@ -758,10 +758,21 @@ def _to_pubkey(token: str | bytes | Pubkey) -> Pubkey:
     text = str(token).strip()
     if not text:
         raise ValueError("token is required")
-    result = PublicKey(text)
-    if isinstance(result, Pubkey):
-        return result
-    return result  # type: ignore[return-value]
+    try:
+        return Pubkey.from_string(text)
+    except Exception:
+        normalized = text.lower()
+        if normalized.startswith("0x"):
+            candidate = normalized[2:]
+        else:
+            candidate = normalized
+        try:
+            raw = bytes.fromhex(candidate)
+        except ValueError as exc:
+            raise ValueError(f"invalid pubkey: {text}") from exc
+        if len(raw) != 32:
+            raise ValueError(f"invalid pubkey length: {len(raw)}")
+        return Pubkey.from_bytes(raw)
 
 
 def _is_helius_url(rpc_url: str) -> bool:

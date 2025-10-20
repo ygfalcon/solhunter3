@@ -9,7 +9,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, MutableMapping, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
@@ -218,6 +218,8 @@ async def _post_rpc(
     }
     prepared_headers = dict(headers or {})
     prepared_headers.setdefault("Content-Type", "application/json")
+    rate_limit_logged = False
+    retry_logged = False
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             async with session.post(
@@ -234,16 +236,18 @@ async def _post_rpc(
                         delay = backoff
                     jitter = random.uniform(0, delay * 0.25)
                     wait_for = min(delay + jitter, _BACKOFF_CAP)
-                    log.warning(
-                        "DAS request hit 429",
-                        extra={
-                            "op": op,
-                            "attempt": attempt,
-                            "status": resp.status,
-                            "retry_after": retry_after,
-                            "delay": wait_for,
-                        },
-                    )
+                    if not rate_limit_logged:
+                        log.warning(
+                            "DAS request hit 429",
+                            extra={
+                                "op": op,
+                                "attempt": attempt,
+                                "status": resp.status,
+                                "retry_after": retry_after,
+                                "delay": wait_for,
+                            },
+                        )
+                        rate_limit_logged = True
                     if attempt >= _MAX_RETRIES:
                         raise RuntimeError("DAS RPC rate limited (429)")
                     await asyncio.sleep(wait_for)
@@ -269,16 +273,18 @@ async def _post_rpc(
                 break
             jitter = random.uniform(0, backoff * 0.25)
             wait_for = min(backoff + jitter, _BACKOFF_CAP)
-            log.warning(
-                "Retrying DAS request",
-                extra={
-                    "op": op,
-                    "attempt": attempt,
-                    "delay": wait_for,
-                    "error_type": type(exc).__name__,
-                    "status": getattr(exc, "status", None),
-                },
-            )
+            if not retry_logged:
+                log.warning(
+                    "Retrying DAS request",
+                    extra={
+                        "op": op,
+                        "attempt": attempt,
+                        "delay": wait_for,
+                        "error_type": type(exc).__name__,
+                        "status": getattr(exc, "status", None),
+                    },
+                )
+                retry_logged = True
             await asyncio.sleep(wait_for)
             backoff = min(backoff * 2, _BACKOFF_CAP)
     if last_exception is not None:
@@ -328,6 +334,11 @@ def _filter_valid_mints(mints: Iterable[str]) -> List[str]:
     return filtered
 
 
+def _should_retry_legacy_schema(message: str) -> bool:
+    lowered = message.lower()
+    return "unknown field \"query\"" in lowered or "unknown field query" in lowered
+
+
 async def search_fungible_recent(
     session: aiohttp.ClientSession,
     *,
@@ -364,6 +375,7 @@ async def search_fungible_recent(
     )
     data: Dict[str, Any] | None = None
     last_error: Exception | None = None
+    legacy_attempted = False
     for variant in sort_variants:
         params: Dict[str, Any] = dict(base_params)
         if variant is not None:
@@ -381,6 +393,30 @@ async def search_fungible_recent(
         except RuntimeError as exc:
             last_error = exc
             message = str(exc).lower()
+            if not legacy_attempted and _should_retry_legacy_schema(message):
+                legacy_attempted = True
+                legacy_params = dict(params)
+                token_type = legacy_params.pop("tokenType", None)
+                query_obj: Dict[str, Any] = {}
+                if isinstance(legacy_params.get("query"), MutableMapping):
+                    query_obj = dict(legacy_params["query"])
+                if token_type is not None:
+                    query_obj.setdefault("tokenType", token_type)
+                if query_obj:
+                    legacy_params["query"] = query_obj
+                legacy_payload = _clean_payload(legacy_params)
+                try:
+                    data = await _post_rpc(
+                        session,
+                        "searchAssets",
+                        legacy_payload,
+                        op="searchAssets",
+                    )
+                except RuntimeError as retry_exc:
+                    last_error = retry_exc
+                else:
+                    _log_success_payload(legacy_payload)
+                    break
             if (
                 "sortby" not in message
                 or "missing" not in message

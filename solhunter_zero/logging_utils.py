@@ -126,6 +126,9 @@ def setup_stdout_logging(
     root = logging.getLogger()
     root.setLevel(level)
 
+    sentinel_key = "_solhunter_stdout_handler"
+    existing = getattr(root, sentinel_key, None)
+
     stdout_aliases: set[Any] = {sys.stdout}
     stderr_aliases: set[Any] = {sys.stderr}
     stdout_alias_fds: set[int] = set()
@@ -157,6 +160,8 @@ def setup_stdout_logging(
             _register_alias(extra, for_stdout=False)
 
     stream_handler: logging.StreamHandler | None = None
+    if isinstance(existing, logging.StreamHandler) and existing in root.handlers:
+        stream_handler = existing
     for handler in list(root.handlers):
         if not isinstance(handler, logging.StreamHandler):
             continue
@@ -200,6 +205,9 @@ def setup_stdout_logging(
 
     for name in propagate_off:
         logging.getLogger(name).propagate = False
+
+    setattr(root, sentinel_key, stream_handler)
+    root.propagate = False
 
     return stream_handler
 

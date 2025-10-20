@@ -1519,13 +1519,22 @@ async def _helius_search_assets(
             url.split("?", 1)[0],
         )
 
+    force_legacy_schema = False
+
+    def _should_retry_legacy(message: str) -> bool:
+        lowered = message.lower()
+        return "unknown field \"query\"" in lowered or "unknown field query" in lowered
+
     while len(normalized) < limit:
         params: Dict[str, Any] = {
-            "query": {"tokenType": "fungible"},
             "page": page,
             "limit": per_page,
             "sortBy": {"field": "created", "direction": "desc"},
         }
+        if force_legacy_schema:
+            params["query"] = {"tokenType": "fungible"}
+        else:
+            params["tokenType"] = "fungible"
 
         payload = {
             "jsonrpc": "2.0",
@@ -1542,11 +1551,30 @@ async def _helius_search_assets(
             async with session.post(url, json=payload, timeout=_HELIUS_TIMEOUT) as resp:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
+        except aiohttp.ClientResponseError as exc:  # pragma: no cover - network failure
+            logger.warning("Helius searchAssets fetch failed: %s", exc)
+            break
         except aiohttp.ClientError as exc:  # pragma: no cover - network failure
             logger.warning("Helius searchAssets fetch failed: %s", exc)
             break
         except Exception as exc:  # pragma: no cover - parsing failure
             logger.exception("Helius searchAssets unexpected error: %s", exc)
+            break
+
+        error_payload = data.get("error") if isinstance(data, dict) else None
+        if error_payload:
+            if isinstance(error_payload, dict):
+                message = str(error_payload.get("message") or error_payload)
+            else:
+                message = str(error_payload)
+            if not force_legacy_schema and _should_retry_legacy(message):
+                force_legacy_schema = True
+                logger.info(
+                    "Helius searchAssets retrying with legacy query schema after error: %s",
+                    message,
+                )
+                continue
+            logger.warning("Helius searchAssets returned error: %s", message)
             break
 
         result = data.get("result") if isinstance(data, dict) else None
