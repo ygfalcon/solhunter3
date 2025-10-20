@@ -1,0 +1,178 @@
+{
+  "script": "env_doctor",
+  "status": "pass",
+  "start": "2025-10-20T19:29:07-04:00",
+  "end": "2025-10-20T19:29:09-04:00",
+  "duration_sec": 2,
+  "commit": "f34a5118",
+  "host": "Seans-MacBook-Pro.local",
+  "env": {
+    "mode": "paper",
+    "micro_mode": "1",
+    "redis_url": "redis://localhost:6399/0",
+    "script": "env_doctor"
+  },
+  "events": [
+    {
+      "status": "pass",
+      "message": "command:bash",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "command:jq",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "command:redis-cli",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "command:curl",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "env:MODE",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "env:MICRO_MODE",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "env:REDIS_URL",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "env:SOLANA_RPC_URL",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "env:HELIUS_API_KEY",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "env:NEW_DAS_DISCOVERY",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "env:EXIT_FEATURES_ON",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "env:RL_WEIGHTS_DISABLED",
+      "ts": "2025-10-20T19:29:07-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "rpc:getHealth",
+      "ts": "2025-10-20T19:29:08-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "helius:jsonrpc",
+      "ts": "2025-10-20T19:29:09-04:00"
+    },
+    {
+      "status": "pass",
+      "message": "redis:PING",
+      "ts": "2025-10-20T19:29:09-04:00"
+    }
+  ],
+  "extra": {
+    "checks": [
+      {
+        "type": "command",
+        "name": "bash",
+        "status": "pass"
+      },
+      {
+        "type": "command",
+        "name": "jq",
+        "status": "pass"
+      },
+      {
+        "type": "command",
+        "name": "redis-cli",
+        "status": "pass"
+      },
+      {
+        "type": "command",
+        "name": "curl",
+        "status": "pass"
+      },
+      {
+        "type": "env",
+        "name": "MODE",
+        "value": "paper",
+        "status": "pass"
+      },
+      {
+        "type": "env",
+        "name": "MICRO_MODE",
+        "value": "1",
+        "status": "pass"
+      },
+      {
+        "type": "env",
+        "name": "REDIS_URL",
+        "value": "redis://localhost:6399/0",
+        "status": "pass"
+      },
+      {
+        "type": "env",
+        "name": "SOLANA_RPC_URL",
+        "value": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+        "status": "pass"
+      },
+      {
+        "type": "env",
+        "name": "HELIUS_API_KEY",
+        "value": "af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+        "status": "pass"
+      },
+      {
+        "type": "env",
+        "name": "NEW_DAS_DISCOVERY",
+        "value": "1",
+        "status": "pass"
+      },
+      {
+        "type": "env",
+        "name": "EXIT_FEATURES_ON",
+        "value": "1",
+        "status": "pass"
+      },
+      {
+        "type": "env",
+        "name": "RL_WEIGHTS_DISABLED",
+        "value": "0",
+        "status": "pass"
+      },
+      {
+        "type": "rpc",
+        "status": "pass"
+      },
+      {
+        "type": "das",
+        "status": "pass",
+        "http_status": "200",
+        "attempts": 4
+      },
+      {
+        "type": "redis",
+        "status": "pass"
+      }
+    ]
+  }
+}
