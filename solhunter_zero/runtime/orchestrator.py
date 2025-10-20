@@ -3,16 +3,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import errno
+import inspect
 import logging
 import os
 import signal
 import socket
 import sys
 from contextlib import closing, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from werkzeug.serving import make_server
 
@@ -110,10 +111,19 @@ class RuntimeHandles:
     ui_threads: dict[str, Any] | None = None
     ui_server: Any | None = None
     bus_started: bool = False
-    tasks: list[asyncio.Task] | None = None
+    tasks: list[asyncio.Task] = field(default_factory=list)
     ui_state: Any | None = None
     depth_proc: Any | None = None
     runtime_wiring: RuntimeWiring | None = None
+    bus_subscriptions: list[Callable[[], None]] = field(default_factory=list)
+    agent_runtime: Any | None = None
+    trade_executor: Any | None = None
+
+
+async def maybe_await(result: Any) -> Any:
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 class RuntimeOrchestrator:
@@ -125,7 +135,7 @@ class RuntimeOrchestrator:
     def __init__(self, *, config_path: str | None = None, run_http: bool = True) -> None:
         self.config_path = config_path
         self.run_http = run_http
-        self.handles = RuntimeHandles(tasks=[])
+        self.handles = RuntimeHandles()
         self._closed = False
         self._golden_service: Any | None = None
         self._golden_enabled: bool = False
@@ -520,6 +530,9 @@ class RuntimeOrchestrator:
         execu = TradeExecutor(memory, portfolio)
         execu.start()
 
+        self.handles.agent_runtime = aruntime
+        self.handles.trade_executor = execu
+
         async def _discovery_loop():
             agent = DiscoveryAgent()
             method = discovery_method
@@ -568,7 +581,8 @@ class RuntimeOrchestrator:
             if cmd == "stop":
                 asyncio.get_event_loop().create_task(self.stop_all())
 
-        event_bus.subscribe("control", _ctl)
+        unsub = event_bus.subscribe("control", _ctl)
+        self.handles.bus_subscriptions.append(unsub)
 
         # 1) UI, 2) Bus, 3) Agents
         await self.start_ui()
@@ -598,14 +612,28 @@ class RuntimeOrchestrator:
         self._closed = True
         await self._publish_stage("runtime:stopping", True)
         # Cancel tasks
-        for t in list(self.handles.tasks or []):
-            t.cancel()
-        for t in list(self.handles.tasks or []):
+        tasks = list(self.handles.tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.handles.tasks.clear()
+        for unsub in list(self.handles.bus_subscriptions):
             try:
-                await t
+                unsub()
             except Exception:
                 pass
-        self.handles.tasks = []
+        self.handles.bus_subscriptions.clear()
+        if self.handles.agent_runtime is not None:
+            try:
+                await maybe_await(self.handles.agent_runtime.stop())
+            finally:
+                self.handles.agent_runtime = None
+        if self.handles.trade_executor is not None:
+            try:
+                await maybe_await(self.handles.trade_executor.stop())
+            finally:
+                self.handles.trade_executor = None
         # Stop wiring subscriptions
         try:
             wiring = self.handles.runtime_wiring
