@@ -10,7 +10,7 @@ import time
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, MutableMapping, Sequence
 
 from solhunter_zero.paths import ROOT
 
@@ -120,11 +120,15 @@ def load_env_file(
     path: Path,
     *,
     overwrite: bool = False,
-    env: Mapping[str, str] | None = None,
+    env: MutableMapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Load environment variables from *path* into *env* (defaults to ``os.environ``)."""
 
-    env_map = dict(env or os.environ)
+    target_env: MutableMapping[str, str]
+    if env is not None:
+        target_env = env
+    else:
+        target_env = os.environ
     if not path.exists():
         logger.debug("Environment file %s not found", path)
         return {}
@@ -135,11 +139,10 @@ def load_env_file(
         if not parsed:
             continue
         key, value = parsed
-        if not overwrite and key in env_map:
+        if not overwrite and key in target_env:
             logger.debug("Preserving existing env %s", key)
             continue
-        os.environ[key] = value
-        env_map[key] = value
+        target_env[key] = value
         loaded[key] = value
     logger.info("Loaded %d environment variables from %s", len(loaded), path)
     return loaded
@@ -149,7 +152,7 @@ def load_production_env(
     paths: Sequence[Path] | None = None,
     *,
     overwrite: bool = False,
-    env: Mapping[str, str] | None = None,
+    env: MutableMapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Load production environment files in priority order.
 
@@ -157,7 +160,10 @@ def load_production_env(
     overwritten when ``overwrite=True``).
     """
 
-    env_map = dict(env or os.environ)
+    if env is not None:
+        env_map = env
+    else:
+        env_map = os.environ
     search_paths: list[Path] = []
     if paths:
         search_paths.extend(Path(p) for p in paths)
