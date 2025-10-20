@@ -41,6 +41,14 @@ def _env_int(name: str, default: str, *, minimum: int = 1) -> int:
             return minimum
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    normalized = str(raw).strip().lower()
+    return normalized in {"1", "true", "yes", "on"}
+
+
 class RateLimiter:
     """Token bucket limiter that works with asyncio coroutines."""
 
@@ -129,6 +137,7 @@ _CONNECT_TIMEOUT = _env_float("DAS_TIMEOUT_CONNECT", "1.5") or 1.5
 _MAX_RETRIES = _env_int("DAS_MAX_RETRIES", "8", minimum=1)
 _BACKOFF_BASE = max(0.1, _env_float("DAS_BACKOFF_BASE", "0.4"))
 _BACKOFF_CAP = max(_BACKOFF_BASE, _env_float("DAS_BACKOFF_CAP", "5.0"))
+_DISABLE_CREATED_SORT = _env_flag("DAS_DISABLE_CREATED_SORT", "0")
 
 _rl = RateLimiter(
     rps=_env_float("DAS_RPS", "2"),
@@ -218,6 +227,8 @@ async def _post_rpc(
     }
     prepared_headers = dict(headers or {})
     prepared_headers.setdefault("Content-Type", "application/json")
+    rate_limit_logged = False
+    retry_logged = False
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             async with session.post(
@@ -234,16 +245,18 @@ async def _post_rpc(
                         delay = backoff
                     jitter = random.uniform(0, delay * 0.25)
                     wait_for = min(delay + jitter, _BACKOFF_CAP)
-                    log.warning(
-                        "DAS request hit 429",
-                        extra={
-                            "op": op,
-                            "attempt": attempt,
-                            "status": resp.status,
-                            "retry_after": retry_after,
-                            "delay": wait_for,
-                        },
-                    )
+                    if not rate_limit_logged:
+                        log.warning(
+                            "DAS request hit 429",
+                            extra={
+                                "op": op,
+                                "attempt": attempt,
+                                "status": resp.status,
+                                "retry_after": retry_after,
+                                "delay": wait_for,
+                            },
+                        )
+                        rate_limit_logged = True
                     if attempt >= _MAX_RETRIES:
                         raise RuntimeError("DAS RPC rate limited (429)")
                     await asyncio.sleep(wait_for)
@@ -269,16 +282,18 @@ async def _post_rpc(
                 break
             jitter = random.uniform(0, backoff * 0.25)
             wait_for = min(backoff + jitter, _BACKOFF_CAP)
-            log.warning(
-                "Retrying DAS request",
-                extra={
-                    "op": op,
-                    "attempt": attempt,
-                    "delay": wait_for,
-                    "error_type": type(exc).__name__,
-                    "status": getattr(exc, "status", None),
-                },
-            )
+            if not retry_logged:
+                log.warning(
+                    "Retrying DAS request",
+                    extra={
+                        "op": op,
+                        "attempt": attempt,
+                        "delay": wait_for,
+                        "error_type": type(exc).__name__,
+                        "status": getattr(exc, "status", None),
+                    },
+                )
+                retry_logged = True
             await asyncio.sleep(wait_for)
             backoff = min(backoff * 2, _BACKOFF_CAP)
     if last_exception is not None:
@@ -328,6 +343,52 @@ def _filter_valid_mints(mints: Iterable[str]) -> List[str]:
     return filtered
 
 
+def _should_retry_legacy_schema(message: str) -> bool:
+    lowered = message.lower()
+    return "unknown field \"query\"" in lowered or "unknown field query" in lowered
+
+
+def _normalize_sort_direction(direction: str) -> tuple[str, str]:
+    raw = (direction or "desc").strip()
+    lower = raw.lower()
+    if lower not in {"asc", "desc"}:
+        lower = "desc"
+    upper = lower.upper()
+    return lower, upper
+
+
+def build_sort_variants(direction: str) -> Tuple[Any, ...]:
+    lower, upper = _normalize_sort_direction(direction)
+    variants: List[Any] = []
+    if not _DISABLE_CREATED_SORT:
+        variants.extend(
+            [
+                {"sortBy": "created", "sortDirection": upper},
+                {"field": "created", "sortDirection": upper},
+                {"field": "created", "direction": upper},
+                {"field": "created", "direction": lower},
+                "created",
+            ]
+        )
+    variants.append(None)
+    return tuple(variants)
+
+
+_SORT_ERROR_TOKENS = ("sortby", "sortdirection", "sort field", "assetsorting")
+_SORT_ERROR_HINTS = ("missing", "unknown", "invalid", "expected")
+
+
+def should_try_next_sort_variant(message: str, variant: Any) -> bool:
+    if variant is None:
+        return False
+    lowered = message.lower()
+    if not any(token in lowered for token in _SORT_ERROR_TOKENS):
+        return False
+    if not any(hint in lowered for hint in _SORT_ERROR_HINTS):
+        return False
+    return True
+
+
 async def search_fungible_recent(
     session: aiohttp.ClientSession,
     *,
@@ -357,37 +418,49 @@ async def search_fungible_recent(
         "page": page_number,
         "limit": resolved_limit,
     }
-    sort_variants: Tuple[Any, ...] = (
-        {"field": "created", "direction": sort_direction},
-        "created",
-        None,
-    )
     data: Dict[str, Any] | None = None
     last_error: Exception | None = None
-    for variant in sort_variants:
-        params: Dict[str, Any] = dict(base_params)
-        if variant is not None:
-            params["sortBy"] = variant
-        payload = _clean_payload(params)
-        try:
-            data = await _post_rpc(
-                session,
-                "searchAssets",
-                payload,
-                op="searchAssets",
-            )
-            _log_success_payload(payload)
-            break
-        except RuntimeError as exc:
-            last_error = exc
-            message = str(exc).lower()
-            if (
-                "sortby" not in message
-                or "missing" not in message
-                or variant is None
-            ):
+    legacy_mode = False
+    while True:
+        legacy_switched = False
+        for variant in build_sort_variants(sort_direction):
+            params: Dict[str, Any] = dict(base_params)
+            if legacy_mode:
+                token_type = params.pop("tokenType", None)
+                query_obj: Dict[str, Any] = {"tokenType": "fungible"}
+                if token_type is not None:
+                    query_obj.setdefault("tokenType", token_type)
+                params["query"] = query_obj
+            if variant is not None:
+                params["sortBy"] = variant
+            payload = _clean_payload(params)
+            try:
+                data = await _post_rpc(
+                    session,
+                    "searchAssets",
+                    payload,
+                    op="searchAssets",
+                )
+                _log_success_payload(payload)
+                break
+            except RuntimeError as exc:
+                last_error = exc
+                message = str(exc)
+                lowered = message.lower()
+                if not legacy_mode and _should_retry_legacy_schema(lowered):
+                    legacy_mode = True
+                    legacy_switched = True
+                    break
+                if should_try_next_sort_variant(lowered, variant):
+                    continue
                 raise
+        if data is not None:
+            break
+        if legacy_switched:
             continue
+        if last_error is not None:
+            raise last_error
+        return [], None
     if data is None:
         if last_error is not None:
             raise last_error
@@ -475,4 +548,6 @@ __all__ = [
     "search_fungible_recent",
     "get_asset_batch",
     "RateLimiter",
+    "build_sort_variants",
+    "should_try_next_sort_variant",
 ]

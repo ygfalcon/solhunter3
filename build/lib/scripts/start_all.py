@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import errno
 import logging
 import os
 import subprocess
@@ -42,11 +44,65 @@ from solhunter_zero.production import (
     write_env_manifest,
     ConnectivityChecker,
 )
+from solhunter_zero.cache_paths import RUNTIME_LOCK_PATH
 
 
 log = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:  # pragma: no cover - platform differences
+        if exc.errno in {errno.ESRCH, getattr(errno, "EPERM", None)}:
+            return exc.errno != errno.ESRCH
+        return False
+    return True
+
+
+@contextlib.contextmanager
+def _acquire_runtime_lock(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            existing_pid: int | None = None
+            try:
+                existing_pid = int(path.read_text(encoding="utf-8").strip())
+            except Exception:
+                existing_pid = None
+            if existing_pid and _process_alive(existing_pid):
+                raise SystemExit(
+                    f"SolHunter runtime already running (pid {existing_pid}); "
+                    "terminate it or remove the lock file."
+                )
+            try:
+                path.unlink()
+            except OSError:
+                raise SystemExit(
+                    "SolHunter runtime lock is held and could not be cleared; "
+                    "remove artifacts/.cache/runtime.lock if the process exited."
+                ) from None
+            continue
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(str(os.getpid()))
+                handle.flush()
+            break
+    try:
+        yield
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
 
 
 @dataclass
@@ -307,29 +363,30 @@ def main(argv: list[str] | None = None) -> int:
     stage_results: list[StageResult] = []
     exit_code = 0
 
-    try:
-        if not args.skip_clean:
-            run_stage("process-cleanup", kill_lingering_processes, stage_results)
-        env = run_stage("ensure-environment", lambda: ensure_environment(args.config), stage_results)
-        cfg_path = env["config_path"]
-        loaded_env = run_stage("load-production-env", _load_production_environment, stage_results)
-        run_stage("validate-keys", _validate_keys, stage_results)
-        run_stage("write-env-manifest", lambda: _write_manifest(loaded_env), stage_results)
-        run_stage("connectivity-check", _connectivity_check, stage_results)
-        run_stage("connectivity-soak", _connectivity_soak, stage_results)
+    with _acquire_runtime_lock(RUNTIME_LOCK_PATH):
+        try:
+            if not args.skip_clean:
+                run_stage("process-cleanup", kill_lingering_processes, stage_results)
+            env = run_stage("ensure-environment", lambda: ensure_environment(args.config), stage_results)
+            cfg_path = env["config_path"]
+            loaded_env = run_stage("load-production-env", _load_production_environment, stage_results)
+            run_stage("validate-keys", _validate_keys, stage_results)
+            run_stage("write-env-manifest", lambda: _write_manifest(loaded_env), stage_results)
+            run_stage("connectivity-check", _connectivity_check, stage_results)
+            run_stage("connectivity-soak", _connectivity_soak, stage_results)
 
-        if args.foreground:
-            run_stage("launch-foreground", lambda: launch_foreground(args, cfg_path), stage_results)
-        elif args.non_interactive:
-            run_stage("launch-detached", lambda: launch_detached(args, cfg_path), stage_results)
-        else:
-            run_stage("launch-detached", lambda: launch_detached(args, cfg_path), stage_results)
-    except Exception as exc:
-        exit_code = 1
-        log.critical("Startup pipeline aborted: %s", exc)
-        log.debug("Detailed traceback:\n%s", "".join(traceback.format_exception(exc)))
-    finally:
-        summarize_stages(stage_results)
+            if args.foreground:
+                run_stage("launch-foreground", lambda: launch_foreground(args, cfg_path), stage_results)
+            elif args.non_interactive:
+                run_stage("launch-detached", lambda: launch_detached(args, cfg_path), stage_results)
+            else:
+                run_stage("launch-detached", lambda: launch_detached(args, cfg_path), stage_results)
+        except Exception as exc:
+            exit_code = 1
+            log.critical("Startup pipeline aborted: %s", exc)
+            log.debug("Detailed traceback:\n%s", "".join(traceback.format_exception(exc)))
+        finally:
+            summarize_stages(stage_results)
 
     return exit_code
 

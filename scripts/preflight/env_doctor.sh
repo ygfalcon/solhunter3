@@ -105,53 +105,80 @@ main() {
         fi
         das_url="${das_url}${delimiter}api-key=${helius_key}"
       fi
-      local das_payload='{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1,"sortBy":{"field":"created","direction":"desc"}}}'
-      local das_output=""
+      local disable_sort=0
+      if [[ ${DAS_DISABLE_CREATED_SORT:-} =~ ^([Tt]rue|[Yy]es|[Oo]n|1)$ ]]; then
+        disable_sort=1
+      fi
+
+      local -a das_payloads=()
+      if (( disable_sort )); then
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1}}')
+      else
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1,"sortBy":{"sortBy":"created","sortDirection":"DESC"}}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1,"sortBy":{"field":"created","direction":"desc"}}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1,"sortBy":"created"}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1}}')
+      fi
+
+      local das_payload_used=""
+      local das_body=""
+      local http_status="000"
       local das_status=0
-      if ! das_output=$(run_with_timeout 5 curl -sS -X POST "$das_url" \
-        -H "Content-Type: application/json" \
-        -d "$das_payload" -w '\n%{http_code}'); then
-        das_status=$?
-      fi
-      local http_status="${das_output##*$'\n'}"
-      local das_body="$das_output"
-      if [[ $das_output == *$'\n'* ]]; then
-        das_body="${das_output%$'\n'$http_status}"
-      fi
-      if [[ ! $http_status =~ ^[0-9][0-9][0-9]$ ]]; then
-        http_status="000"
-      fi
-
       local das_ok=0
-      if [[ $das_status -eq 0 && $http_status =~ ^2 ]]; then
-        if jq -re '
-          def items_from:
-            if type == "array" then .
-            elif type == "object" then (
-              (.items? // empty | select(type == "array")),
-              (.tokens? // empty | select(type == "array")),
-              (.assets? // empty | select(type == "array")),
-              (.result? | items_from)
-            )
-            else empty end;
-          .result? as $result | ($result | items_from) | length > 0
-        ' <<<"$das_body" >/dev/null 2>&1; then
-          das_ok=1
+      local attempt=0
+      for das_payload in "${das_payloads[@]}"; do
+        das_payload_used=$das_payload
+        ((attempt++))
+        local das_output=""
+        das_status=0
+        if ! das_output=$(run_with_timeout 5 curl -sS -X POST "$das_url" \
+          -H "Content-Type: application/json" \
+          -d "$das_payload" -w '\n%{http_code}'); then
+          das_status=$?
         fi
-      fi
+        http_status="${das_output##*$'\n'}"
+        das_body="$das_output"
+        if [[ $das_output == *$'\n'* ]]; then
+          das_body="${das_output%$'\n'$http_status}"
+        fi
+        if [[ ! $http_status =~ ^[0-9][0-9][0-9]$ ]]; then
+          http_status="000"
+        fi
 
-      local req_preview="${das_payload:0:240}"
-      [[ ${#das_payload} -gt 240 ]] && req_preview+="..."
+        if [[ $das_status -eq 0 && $http_status =~ ^2 ]]; then
+          if jq -re '
+            def items_from:
+              if type == "array" then .
+              elif type == "object" then (
+                (.items? // empty | select(type == "array")),
+                (.tokens? // empty | select(type == "array")),
+                (.assets? // empty | select(type == "array")),
+                (.result? | items_from)
+              )
+              else empty end;
+            .result? as $result | ($result | items_from) | length > 0
+          ' <<<"$das_body" >/dev/null 2>&1; then
+            das_ok=1
+            break
+          fi
+        fi
+      done
+
+      local req_preview="${das_payload_used:0:240}"
+      [[ ${#das_payload_used} -gt 240 ]] && req_preview+="..."
       local resp_preview="${das_body:0:240}"
       [[ ${#das_body} -gt 240 ]] && resp_preview+="..."
 
       if (( das_ok )); then
+        if (( attempt > 1 )); then
+          warn "DAS probe succeeded after fallback payload (attempt $attempt)"
+        fi
         pass "DAS reachable (JSON-RPC)"
-        check_details+=("$(jq -n --arg status "$http_status" '{type:"das",status:"pass",http_status:$status}')")
+        check_details+=("$(jq -n --arg status "$http_status" --argjson attempts "$attempt" '{type:"das",status:"pass",http_status:$status,attempts:$attempts}')")
         record_audit pass "helius:jsonrpc"
       else
-        fail "DAS probe failed (JSON-RPC): status=$http_status request=$req_preview response=$resp_preview next=try fallback sortBy variant"
-        check_details+=("$(jq -n --arg status "$http_status" --arg payload "$das_payload" --arg response "$resp_preview" '{type:"das",status:"fail",http_status:$status,payload:$payload,response:$response}')")
+        fail "DAS probe failed (JSON-RPC): status=$http_status request=$req_preview response=$resp_preview attempts=$attempt"
+        check_details+=("$(jq -n --arg status "$http_status" --arg payload "$das_payload_used" --arg response "$resp_preview" '{type:"das",status:"fail",http_status:$status,payload:$payload,response:$response}')")
         record_audit fail "helius:jsonrpc"
         ((failures++))
       fi
