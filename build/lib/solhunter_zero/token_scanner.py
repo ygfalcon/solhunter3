@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import os
+import random
 import time
 from collections import deque
-import random
 from typing import Any, Dict, Iterable, List, Sequence, Set
 from urllib.parse import parse_qs, urlparse
 
@@ -185,7 +186,26 @@ def _birdeye_trending_allowed() -> bool:
     ):
         return False
     return True
-_HELIUS_TIMEOUT = float(os.getenv("FAST_HELIUS_TIMEOUT", "4.0")) if FAST_MODE else 8.0
+def _parse_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+_DAS_TIMEOUT_TOTAL = _parse_float_env("DAS_TIMEOUT_TOTAL", 12.0)
+_DAS_TIMEOUT_CONNECT = _parse_float_env("DAS_TIMEOUT_CONNECT", 1.5)
+if FAST_MODE:
+    _HELIUS_TIMEOUT_TOTAL = _parse_float_env("FAST_HELIUS_TIMEOUT", _DAS_TIMEOUT_TOTAL)
+else:
+    _HELIUS_TIMEOUT_TOTAL = _DAS_TIMEOUT_TOTAL
+_HELIUS_TIMEOUT = aiohttp.ClientTimeout(total=_HELIUS_TIMEOUT_TOTAL, connect=_DAS_TIMEOUT_CONNECT)
 _SOLSCAN_TIMEOUT = float(os.getenv("FAST_SOLSCAN_TIMEOUT", "4.0")) if FAST_MODE else 8.0
 
 _ALLOW_PARTIAL_RESULTS = (
@@ -1647,7 +1667,16 @@ async def _helius_search_assets(
     normalized: List[Dict[str, Any]] = []
     seen: Set[str] = set()
     page = 1
-    per_page = max(1, min(int(limit) if limit > 0 else 50, 100))
+    try:
+        env_limit_default = max(1, int(os.getenv("DAS_DISCOVERY_LIMIT", "60")))
+    except (TypeError, ValueError):
+        env_limit_default = 60
+    target_limit = limit if limit > 0 else env_limit_default
+    try:
+        resolved_target = int(target_limit)
+    except (TypeError, ValueError):
+        resolved_target = env_limit_default
+    per_page = max(1, min(resolved_target, env_limit_default, 100))
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "Helius searchAssets: requesting up to %s token(s) via %s",
@@ -1687,6 +1716,11 @@ async def _helius_search_assets(
                         break
 
                     try:
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(
+                                "Helius searchAssets payload: %s",
+                                json.dumps(payload, separators=(",", ":")),
+                            )
                         async with session.post(url, json=payload, timeout=_HELIUS_TIMEOUT) as resp:
                             resp.raise_for_status()
                             data = await resp.json(content_type=None)
