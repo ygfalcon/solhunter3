@@ -48,6 +48,7 @@ from .main_state import TradingState
 from .memory import Memory, load_snapshot
 from .portfolio import Portfolio
 from . import prices
+from .feature_flags import get_feature_flags
 from .strategy_manager import StrategyManager
 from .agent_manager import AgentManager
 from .onchain_metrics import fetch_dex_metrics_async
@@ -69,14 +70,31 @@ def _log_active_keypair_path() -> None:
         if alt:
             candidate = alt
             source = "SOLANA_KEYPAIR"
+    flags = get_feature_flags()
+    mode = flags.mode.lower()
     if not candidate:
-        log.info("No KEYPAIR_PATH or SOLANA_KEYPAIR configured; running without signing key")
-        return
+        if mode == "paper":
+            log.info(
+                "Paper mode: running without signing key (ephemeral keypair will be used)"
+            )
+            return
+        message = "Live trading requires KEYPAIR_PATH or SOLANA_KEYPAIR to be configured"
+        log.error(message)
+        raise SystemExit(message)
     path = Path(candidate).expanduser()
     if path.exists():
         log.info("Using keypair from %s (%s)", source, path)
-    else:
-        log.warning("Configured %s points to missing path %s", source, path)
+        return
+    if mode == "paper":
+        log.info(
+            "Paper mode: configured %s (%s) missing; proceeding with ephemeral keypair",
+            source,
+            path,
+        )
+        return
+    message = f"Configured {source} points to missing path {path}"
+    log.error(message)
+    raise SystemExit(message)
 
 _ORIGINAL_STRATEGY_MANAGER = StrategyManager
 

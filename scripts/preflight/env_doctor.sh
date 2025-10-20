@@ -105,7 +105,7 @@ main() {
         fi
         das_url="${das_url}${delimiter}api-key=${helius_key}"
       fi
-      local das_payload='{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"query":{"tokenType":"fungible"},"page":1,"limit":1,"sortBy":{"field":"created","direction":"desc"}}}'
+      local das_payload='{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1,"sortBy":{"field":"created","direction":"desc"}}}'
       local das_output=""
       local das_status=0
       if ! das_output=$(run_with_timeout 5 curl -sS -X POST "$das_url" \

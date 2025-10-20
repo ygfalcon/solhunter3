@@ -20,17 +20,23 @@ def test_normalize_default_pyth_ids_length(price_id: str) -> None:
 
 def test_build_pyth_boot_url_uses_repeated_ids() -> None:
     base_url = "https://hermes.pyth.network/v2/price_feeds?chain=solana-mainnet"
-    ids = [
+    feed_ids = [
         "0x" + "ab" * 32,
         "0x" + "cd" * 32,
     ]
-    url = prices._build_pyth_boot_url(base_url, ids)
+    accounts = [
+        "J83JdAq8FDeC8v2WFE2QyXkJhtCmvYzu3d6PvMfo4WwS",
+    ]
+    url = prices._build_pyth_boot_url(
+        base_url, feed_ids=feed_ids, accounts=accounts
+    )
     parsed = urllib.parse.urlsplit(url)
     query = urllib.parse.parse_qs(parsed.query)
     assert parsed.scheme == "https"
     assert parsed.path == "/v2/price_feeds"
     assert query["chain"] == ["solana-mainnet"]
-    assert query["ids[]"] == ids
+    assert query["ids[]"] == feed_ids
+    assert query["accounts[]"] == accounts
     assert "id" not in query
 
 
@@ -41,7 +47,9 @@ def test_build_pyth_boot_url_uses_repeated_ids() -> None:
 def test_pyth_endpoint_returns_payload() -> None:
     default_feed = next(iter(prices.DEFAULT_PYTH_PRICE_IDS.values()))
     normalized = prices._normalize_pyth_id(default_feed)
-    url = prices._build_pyth_boot_url(prices.PYTH_PRICE_URL, [normalized])
+    url = prices._build_pyth_boot_url(
+        prices.PYTH_PRICE_URL, feed_ids=[normalized], accounts=[]
+    )
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=5) as resp:
         assert resp.status == 200
