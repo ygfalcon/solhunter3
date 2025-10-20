@@ -230,6 +230,10 @@ async def run_rpc_mint_stream() -> None:
                                 "mint": mint,
                                 "tx": signature,
                                 "tags": ["pump"] if is_pump else [],
+                                "interface": "FungibleToken",
+                                "discovery": {
+                                    "method": "pump_logs" if is_pump else "rpc_logs",
+                                },
                             }
                             await redis_client.publish(channel, json.dumps(event, separators=(",", ":")))
 
