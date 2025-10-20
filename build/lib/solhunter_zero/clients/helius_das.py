@@ -134,9 +134,9 @@ DAS_BASE = _resolve_base_url()
 _DEFAULT_LIMIT = _env_int("DAS_DISCOVERY_LIMIT", "60")
 _SESSION_TIMEOUT = _env_float("DAS_TIMEOUT_TOTAL", "5.0") or 5.0
 _CONNECT_TIMEOUT = _env_float("DAS_TIMEOUT_CONNECT", "1.5") or 1.5
-_MAX_RETRIES = _env_int("DAS_MAX_RETRIES", "8", minimum=1)
-_BACKOFF_BASE = max(0.1, _env_float("DAS_BACKOFF_BASE", "0.4"))
-_BACKOFF_CAP = max(_BACKOFF_BASE, _env_float("DAS_BACKOFF_CAP", "5.0"))
+_MAX_RETRIES = max(1, min(2, _env_int("DAS_MAX_RETRIES", "2", minimum=1)))
+_BACKOFF_BASE = max(0.1, min(0.4, _env_float("DAS_BACKOFF_BASE", "0.4")))
+_BACKOFF_CAP = max(_BACKOFF_BASE, min(0.8, _env_float("DAS_BACKOFF_CAP", "0.8")))
 _DISABLE_CREATED_SORT = _env_flag("DAS_DISABLE_CREATED_SORT", "0")
 
 _rl = RateLimiter(
@@ -343,9 +343,14 @@ def _filter_valid_mints(mints: Iterable[str]) -> List[str]:
     return filtered
 
 
-def _should_retry_legacy_schema(message: str) -> bool:
+def should_disable_query(message: str) -> bool:
     lowered = message.lower()
     return "unknown field \"query\"" in lowered or "unknown field query" in lowered
+
+
+def should_disable_token_type(message: str) -> bool:
+    lowered = message.lower()
+    return "owner_address" in lowered and "token_type" in lowered
 
 
 def _normalize_sort_direction(direction: str) -> tuple[str, str]:
@@ -389,6 +394,37 @@ def should_try_next_sort_variant(message: str, variant: Any) -> bool:
     return True
 
 
+def build_search_param_variants(
+    *,
+    allow_query: bool = True,
+    include_token_type: bool = True,
+) -> Tuple[Dict[str, Any], ...]:
+    variants: List[Dict[str, Any]] = []
+    if allow_query:
+        variants.append({"query": {"conditionType": "and", "interface": "FungibleToken"}})
+    if include_token_type:
+        variants.append({"tokenType": "fungible"})
+        if allow_query:
+            variants.append({"query": {"conditionType": "and", "tokenType": "fungible"}})
+    variants.append({})
+    return tuple(variants)
+
+
+def uses_query_variant(variant: Dict[str, Any]) -> bool:
+    query = variant.get("query")
+    return isinstance(query, dict)
+
+
+def uses_token_type_variant(variant: Dict[str, Any]) -> bool:
+    if "tokenType" in variant:
+        return True
+    query = variant.get("query")
+    if isinstance(query, dict):
+        token_type = query.get("tokenType") or query.get("token_type")
+        return token_type is not None
+    return False
+
+
 async def search_fungible_recent(
     session: aiohttp.ClientSession,
     *,
@@ -420,43 +456,62 @@ async def search_fungible_recent(
     }
     data: Dict[str, Any] | None = None
     last_error: Exception | None = None
-    legacy_mode = False
+    allow_query = True
+    allow_token_type = True
     while True:
-        legacy_switched = False
-        for variant in build_sort_variants(sort_direction):
+        config_changed = False
+        for variant_params in build_search_param_variants(
+            allow_query=allow_query,
+            include_token_type=allow_token_type,
+        ):
+            if not allow_query and uses_query_variant(variant_params):
+                continue
+            if not allow_token_type and uses_token_type_variant(variant_params):
+                continue
             params: Dict[str, Any] = dict(base_params)
-            if legacy_mode:
-                token_type = params.pop("tokenType", None)
-                query_obj: Dict[str, Any] = {"tokenType": "fungible"}
-                if token_type is not None:
-                    query_obj.setdefault("tokenType", token_type)
-                params["query"] = query_obj
-            if variant is not None:
-                params["sortBy"] = variant
-            payload = _clean_payload(params)
-            try:
-                data = await _post_rpc(
-                    session,
-                    "searchAssets",
-                    payload,
-                    op="searchAssets",
-                )
-                _log_success_payload(payload)
-                break
-            except RuntimeError as exc:
-                last_error = exc
-                message = str(exc)
-                lowered = message.lower()
-                if not legacy_mode and _should_retry_legacy_schema(lowered):
-                    legacy_mode = True
-                    legacy_switched = True
+            if "tokenType" in variant_params:
+                params["tokenType"] = variant_params["tokenType"]
+            query_obj = variant_params.get("query")
+            if isinstance(query_obj, dict):
+                params["query"] = dict(query_obj)
+            result_data: Dict[str, Any] | None = None
+            for sort_variant in build_sort_variants(sort_direction):
+                params_with_sort = dict(params)
+                if sort_variant is not None:
+                    params_with_sort["sortBy"] = sort_variant
+                payload = _clean_payload(params_with_sort)
+                try:
+                    result_data = await _post_rpc(
+                        session,
+                        "searchAssets",
+                        payload,
+                        op="searchAssets",
+                    )
+                    _log_success_payload(payload)
                     break
-                if should_try_next_sort_variant(lowered, variant):
-                    continue
-                raise
+                except RuntimeError as exc:
+                    last_error = exc
+                    message = str(exc)
+                    lowered = message.lower()
+                    if allow_query and should_disable_query(lowered):
+                        allow_query = False
+                        config_changed = True
+                        break
+                    if allow_token_type and should_disable_token_type(lowered):
+                        allow_token_type = False
+                        config_changed = True
+                        break
+                    if should_try_next_sort_variant(lowered, sort_variant):
+                        continue
+                    raise
+            if result_data is not None:
+                data = result_data
+                break
+            if config_changed:
+                break
         if data is not None:
             break
-        if legacy_switched:
+        if config_changed:
             continue
         if last_error is not None:
             raise last_error
@@ -550,4 +605,9 @@ __all__ = [
     "RateLimiter",
     "build_sort_variants",
     "should_try_next_sort_variant",
+    "build_search_param_variants",
+    "uses_query_variant",
+    "uses_token_type_variant",
+    "should_disable_query",
+    "should_disable_token_type",
 ]

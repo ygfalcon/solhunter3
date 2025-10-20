@@ -67,7 +67,7 @@ DEFAULT_BIRDEYE_API_KEY = "b1e60d72780940d1bd929b9b2e9225e6"
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", DEFAULT_BIRDEYE_API_KEY)
 
 # Birdeye base (key goes in X-API-KEY header)
-BIRDEYE_BASE = "https://public-api.birdeye.so"  # requires ?chain=solana
+BIRDEYE_BASE = "https://api.birdeye.so"  # requires ?chain=solana
 
 # Helius slippage / price impact endpoint
 HELIUS_PRICE_IMPACT_URL = os.getenv(

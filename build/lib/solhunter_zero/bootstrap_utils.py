@@ -538,10 +538,10 @@ def ensure_endpoints(cfg: dict) -> None:
     urls: dict[str, tuple[str, dict[str, str] | None, str, str]] = {}
     if cfg.get("birdeye_api_key"):
         urls["BirdEye"] = (
-            "https://public-api.birdeye.so/defi/tokenlist",
+            "https://api.birdeye.so/defi/tokenlist",
             None,
             "https",
-            "public-api.birdeye.so",
+            "api.birdeye.so",
         )
     for key, val in cfg.items():
         if not isinstance(val, str):

@@ -12,13 +12,19 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
+from . import prices
 from .discovery.mint_resolver import normalize_candidate
 from .logging_utils import warn_once_per
 from .token_aliases import canonical_mint, validate_mint
 from .clients.helius_das import (
+    build_search_param_variants,
     build_sort_variants,
     get_asset_batch,
+    should_disable_query,
+    should_disable_token_type,
     should_try_next_sort_variant,
+    uses_query_variant,
+    uses_token_type_variant,
 )
 from .util.mints import clean_candidate_mints
 
@@ -32,7 +38,7 @@ def _default_enrich_rpc() -> str:
 
 DEFAULT_SOLANA_RPC = _default_enrich_rpc()
 
-BIRDEYE_BASE = "https://public-api.birdeye.so"
+BIRDEYE_BASE = "https://api.birdeye.so"
 
 HELIUS_BASE = os.getenv("HELIUS_PRICE_BASE_URL", "https://api.helius.xyz")
 HELIUS_TREND_PATH = os.getenv("HELIUS_PRICE_PATH", "/v1/trending-tokens")
@@ -155,7 +161,33 @@ def _birdeye_enabled(candidate: str | None = None) -> bool:
     flag = os.getenv("BIRDEYE_ENABLED")
     if flag is not None and flag.strip():
         return flag.lower() in {"1", "true", "yes", "on"}
-    return _resolve_birdeye_key(candidate) is not None
+    if _resolve_birdeye_key(candidate) is None:
+        return False
+    if _env_flag("BIRDEYE_DISABLE_TRENDING") and _env_flag("BIRDEYE_DISABLE_TOP_MOVERS"):
+        return False
+    return True
+
+
+def _env_flag(name: str) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _birdeye_trending_allowed() -> bool:
+    trend_type = (
+        os.getenv("BIRDEYE_TRENDING_TYPE")
+        or os.getenv("BIRDEYE_TYPE")
+        or "trending"
+    ).strip().lower()
+    if trend_type in {"trending", "trend"} and _env_flag("BIRDEYE_DISABLE_TRENDING"):
+        return False
+    if trend_type in {"top_movers", "top-movers", "movers"} and _env_flag(
+        "BIRDEYE_DISABLE_TOP_MOVERS"
+    ):
+        return False
+    return True
 _HELIUS_TIMEOUT = float(os.getenv("FAST_HELIUS_TIMEOUT", "4.0")) if FAST_MODE else 8.0
 _SOLSCAN_TIMEOUT = float(os.getenv("FAST_SOLSCAN_TIMEOUT", "4.0")) if FAST_MODE else 8.0
 
@@ -495,7 +527,7 @@ async def _birdeye_trending(
     """Fetch trending token mints from Birdeye's trending/top-mover endpoint."""
 
     api_key = api_key or ""
-    if not api_key:
+    if not api_key or not _birdeye_trending_allowed():
         logger.debug("Birdeye API key missing; skipping trending fetch")
         return []
 
@@ -789,7 +821,157 @@ async def _dexscreener_trending_movers(
         "https://api.dexscreener.com/latest/dex/tokens/trending",
     ).strip()
     if not url:
+    return []
+
+
+async def _dexscreener_new_pairs(
+    session: aiohttp.ClientSession,
+    *,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    url = os.getenv(
+        "DEXSCREENER_NEW_PAIRS_URL",
+        "https://api.dexscreener.com/latest/dex/tokens/new",
+    ).strip()
+    if not url:
         return []
+    params = {
+        "chain": os.getenv("DEXSCREENER_TRENDING_CHAIN", "solana"),
+        "limit": max(1, int(limit)),
+    }
+    try:
+        async with session.get(url, params=params, timeout=_HELIUS_TIMEOUT) as resp:
+            resp.raise_for_status()
+            payload = await resp.json(content_type=None)
+    except Exception as exc:  # pragma: no cover - network/runtime failures
+        logger.debug("Dexscreener new pairs request failed: %s", exc)
+        return []
+
+    items: Any = []
+    if isinstance(payload, dict):
+        for key in ("pairs", "tokens", "items", "data", "results"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                items = candidate
+                break
+        else:
+            items = payload
+    else:
+        items = payload
+
+    if isinstance(items, dict):
+        for key in ("items", "tokens", "pairs", "results"):
+            candidate = items.get(key)
+            if isinstance(candidate, list):
+                items = candidate
+                break
+        else:
+            items = list(items.values())
+
+    if not isinstance(items, list):
+        return []
+
+    seen: Set[str] = set()
+    results: List[Dict[str, Any]] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        candidates: List[object] = [
+            raw.get("tokenAddress"),
+            raw.get("address"),
+            raw.get("mint"),
+            raw.get("mintAddress"),
+            raw.get("baseMint"),
+        ]
+        base_token = raw.get("baseToken") or raw.get("token")
+        if isinstance(base_token, dict):
+            candidates.extend(
+                [
+                    base_token.get("address"),
+                    base_token.get("mint"),
+                    base_token.get("mintAddress"),
+                ]
+            )
+        token_info = raw.get("tokenInfo")
+        if isinstance(token_info, dict):
+            candidates.extend(
+                [
+                    token_info.get("address"),
+                    token_info.get("mint"),
+                    token_info.get("mintAddress"),
+                ]
+            )
+        mint: str | None = None
+        for candidate in candidates:
+            mint = _normalize_mint_candidate(candidate)
+            if mint:
+                break
+        if not mint or mint in seen:
+            continue
+        seen.add(mint)
+        entry = {
+            "address": mint,
+            "source": "dexscreener_new",
+            "sources": ["dexscreener", "dexscreener_new"],
+            "raw": raw,
+        }
+        price = _search_numeric(
+            raw,
+            ("priceUsd", "price_usd", "price", "tokenPrice"),
+        )
+        if price is not None:
+            entry["price"] = _nz_pos(price)
+        liquidity = _search_numeric(
+            raw,
+            ("liquidity", "liquidityUsd", "usdLiquidity", "liquidityUSD"),
+        )
+        if liquidity is not None:
+            entry["liquidity"] = _nz_pos(liquidity)
+        volume = _search_numeric(
+            raw,
+            ("volume24h", "volumeUsd", "usdVolume"),
+        )
+        if volume is not None:
+            entry["volume"] = _nz_pos(volume)
+        symbol = raw.get("symbol") or raw.get("tokenSymbol")
+        if isinstance(symbol, str) and symbol:
+            entry["symbol"] = symbol
+        name = raw.get("name") or raw.get("tokenName")
+        if isinstance(name, str) and name:
+            entry["name"] = name
+        _finalize_sources(entry)
+        results.append(entry)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _pyth_seed_entries() -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    try:
+        mapping, _ = prices._parse_pyth_mapping()
+    except Exception as exc:  # pragma: no cover - defensive import/runtime
+        logger.debug("Pyth seed generation failed: %s", exc)
+        return entries
+    for idx, (mint, identifier) in enumerate(sorted(mapping.items())):
+        canonical = canonical_mint(mint)
+        if not validate_mint(canonical):
+            continue
+        entry = {
+            "address": canonical,
+            "source": "pyth",  # marked separately to influence ranking
+            "sources": ["pyth"],
+            "rank": idx,
+            "metadata": {
+                "pyth": {
+                    "feed_id": identifier.feed_id,
+                    "account": identifier.account,
+                }
+            },
+        }
+        _finalize_sources(entry)
+        entries.append(entry)
+    return entries
     params = {
         "type": os.getenv("DEXSCREENER_TRENDING_TYPE", "movers"),
         "chain": os.getenv("DEXSCREENER_TRENDING_CHAIN", "solana"),
@@ -1022,6 +1204,7 @@ async def _collect_trending_seeds(
     *,
     limit: int,
     birdeye_api_key: str | None,
+    rpc_url: str,
 ) -> List[Dict[str, Any]]:
     if not hasattr(session, "post"):
         return []
@@ -1030,34 +1213,80 @@ async def _collect_trending_seeds(
     seeds: List[Dict[str, Any]] = []
     seen: Set[str] = set()
 
-    async def _gather_sources() -> None:
-        nonlocal seeds, seen
-        dexscreener_candidates = await _dexscreener_trending_movers(session, limit=desired)
-        if logger.isEnabledFor(logging.INFO):
-            logger.info("Dexscreener returned %d candidate(s)", len(dexscreener_candidates))
-        for item in dexscreener_candidates:
-            mint = _normalize_mint_candidate(item.get("address"))
-            if not mint or mint in seen:
-                continue
-            entry = dict(item)
-            entry["address"] = mint
-            sources = entry.setdefault("sources", [])
-            if not isinstance(sources, list):
-                sources = list(sources) if isinstance(sources, (set, tuple)) else []
-                entry["sources"] = sources
-            if "dexscreener" not in sources:
-                sources.append("dexscreener")
-            _finalize_sources(entry)
-            metadata = _ensure_metadata(entry)
-            raw_meta = entry.get("raw")
-            if isinstance(raw_meta, dict) and raw_meta is not entry:
-                metadata.setdefault("dexscreener", raw_meta)
-            seeds.append(entry)
-            seen.add(mint)
+    def _append_seed(entry: Dict[str, Any], default_source: str) -> None:
+        mint = _normalize_mint_candidate(entry.get("address"))
+        if not mint or mint in seen:
+            return
+        candidate = dict(entry)
+        candidate["address"] = mint
+        sources = candidate.setdefault("sources", [])
+        if not isinstance(sources, list):
+            sources = list(sources) if isinstance(sources, (set, tuple)) else []
+            candidate["sources"] = sources
+        if default_source and default_source not in sources:
+            sources.append(default_source)
+        _finalize_sources(candidate)
+        metadata = _ensure_metadata(candidate)
+        raw_meta = candidate.get("raw")
+        if isinstance(raw_meta, dict) and raw_meta is not candidate:
+            metadata.setdefault(default_source, raw_meta)
+        seeds.append(candidate)
+        seen.add(mint)
+
+    new_pairs = await _dexscreener_new_pairs(session, limit=desired)
+    if new_pairs:
+        logger.info("Dexscreener new pairs returned %d candidate(s)", len(new_pairs))
+    for entry in new_pairs:
+        _append_seed(entry, "dexscreener")
+        if len(seeds) >= desired:
+            break
+
+    if len(seeds) < desired:
+        for entry in _pyth_seed_entries():
+            _append_seed(entry, "pyth")
             if len(seeds) >= desired:
                 break
 
-        if birdeye_api_key and len(seeds) < desired:
+    minimum_before_das = min(desired, max(5, limit // 2))
+    if len(seeds) < minimum_before_das:
+        helius_results = await _helius_search_assets(
+            session,
+            limit=desired,
+            rpc_url=rpc_url,
+        )
+        if helius_results and logger.isEnabledFor(logging.INFO):
+            logger.info("Helius searchAssets provided %d candidate(s)", len(helius_results))
+        for item in helius_results:
+            if not isinstance(item, dict):
+                continue
+            entry = dict(item)
+            entry.setdefault("source", "helius_search")
+            entry.setdefault("sources", [entry.get("source") or "helius_search"])
+            _append_seed(entry, "helius_search")
+            if len(seeds) >= desired:
+                break
+
+    async def _gather_sources() -> None:
+        nonlocal seeds, seen
+        if len(seeds) < desired:
+            dexscreener_candidates = await _dexscreener_trending_movers(
+                session, limit=desired
+            )
+            if logger.isEnabledFor(logging.INFO):
+                logger.info(
+                    "Dexscreener trending returned %d candidate(s)",
+                    len(dexscreener_candidates),
+                )
+            for item in dexscreener_candidates:
+                _append_seed(item, "dexscreener")
+                if len(seeds) >= desired:
+                    break
+
+        if (
+            birdeye_api_key
+            and _birdeye_trending_allowed()
+            and len(seeds) < desired
+        ):
             birdeye_limit = max(desired - len(seeds), desired)
             try:
                 birdeye_entries = await _birdeye_trending(
@@ -1081,58 +1310,7 @@ async def _collect_trending_seeds(
                     birdeye_limit,
                 )
             for entry in birdeye_entries:
-                if not isinstance(entry, dict):
-                    continue
-                mint = _normalize_mint_candidate(entry.get("address"))
-                if not mint:
-                    continue
-                existing: Dict[str, Any] | None = None
-                for candidate in seeds:
-                    if candidate.get("address") == mint:
-                        existing = candidate
-                        break
-                if existing is not None:
-                    sources = existing.setdefault("sources", [])
-                    if not isinstance(sources, list):
-                        sources = list(sources) if isinstance(sources, (set, tuple)) else []
-                        existing["sources"] = sources
-                    if "birdeye" not in sources:
-                        sources.append("birdeye")
-                    _finalize_sources(existing)
-                    meta_store = _ensure_metadata(existing)
-                    if "birdeye" not in meta_store:
-                        raw_meta = entry.get("raw")
-                        if isinstance(raw_meta, dict) and raw_meta is not entry:
-                            meta_store["birdeye"] = raw_meta
-                    liquidity_val = entry.get("liquidity")
-                    if "liquidity" not in existing and isinstance(
-                        liquidity_val, (int, float)
-                    ):
-                        existing["liquidity"] = _nz_pos(liquidity_val)
-                    volume_val = entry.get("volume")
-                    if "volume" not in existing and isinstance(volume_val, (int, float)):
-                        existing["volume"] = _nz_pos(volume_val)
-                    if not existing.get("symbol") and isinstance(entry.get("symbol"), str):
-                        existing["symbol"] = entry["symbol"]
-                    if not existing.get("name") and isinstance(entry.get("name"), str):
-                        existing["name"] = entry["name"]
-                    continue
-                new_entry = dict(entry)
-                new_entry["address"] = mint
-                sources = new_entry.setdefault("sources", [])
-                if not isinstance(sources, list):
-                    sources = list(sources) if isinstance(sources, (set, tuple)) else []
-                    new_entry["sources"] = sources
-                if "birdeye" not in sources:
-                    sources.append("birdeye")
-                _finalize_sources(new_entry)
-                metadata = _ensure_metadata(new_entry)
-                if "birdeye" not in metadata:
-                    raw_meta = new_entry.get("raw")
-                    if isinstance(raw_meta, dict) and raw_meta is not new_entry:
-                        metadata["birdeye"] = raw_meta
-                seeds.append(new_entry)
-                seen.add(mint)
+                _append_seed(entry, "birdeye")
                 if len(seeds) >= desired:
                     break
 
@@ -1523,86 +1701,104 @@ async def _helius_search_assets(
             url.split("?", 1)[0],
         )
 
-    force_legacy_schema = False
-
-    def _should_retry_legacy(message: str) -> bool:
-        lowered = message.lower()
-        return "unknown field \"query\"" in lowered or "unknown field query" in lowered
+    allow_query = True
+    allow_token_type = True
 
     while len(normalized) < limit:
-        switch_to_legacy = False
         params: Dict[str, Any] = {
             "page": page,
             "limit": per_page,
+            "conditionType": "all",
+            "interface": "FungibleToken",
         }
-        if force_legacy_schema:
-            params["query"] = {"tokenType": "fungible"}
-        else:
-            params["tokenType"] = "fungible"
-
         das_data: Dict[str, Any] | None = None
         last_error_message: str | None = None
         logged_error = False
-        for sort_variant in build_sort_variants("desc"):
-            params_for_request = dict(params)
-            if sort_variant is not None:
-                params_for_request["sortBy"] = sort_variant
-            payload = {
-                "jsonrpc": "2.0",
-                "id": f"trending-{len(normalized)}",
-                "method": "searchAssets",
-                "params": params_for_request,
-            }
-
-            if not hasattr(session, "post"):
-                logger.debug("Helius searchAssets session missing post(); skipping request")
-                break
-
-            try:
-                async with session.post(url, json=payload, timeout=_HELIUS_TIMEOUT) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json(content_type=None)
-            except aiohttp.ClientResponseError as exc:  # pragma: no cover - network failure
-                logger.warning("Helius searchAssets fetch failed: %s", exc)
-                das_data = None
-                break
-            except aiohttp.ClientError as exc:  # pragma: no cover - network failure
-                logger.warning("Helius searchAssets fetch failed: %s", exc)
-                das_data = None
-                break
-            except Exception as exc:  # pragma: no cover - parsing failure
-                logger.exception("Helius searchAssets unexpected error: %s", exc)
-                das_data = None
-                break
-
-            error_payload = data.get("error") if isinstance(data, dict) else None
-            if error_payload:
-                if isinstance(error_payload, dict):
-                    message = str(error_payload.get("message") or error_payload)
-                else:
-                    message = str(error_payload)
-                last_error_message = message
-                if not force_legacy_schema and _should_retry_legacy(message):
-                    force_legacy_schema = True
-                    switch_to_legacy = True
-                    logger.info(
-                        "Helius searchAssets retrying with legacy query schema after error: %s",
-                        message,
-                    )
-                    break
-                if should_try_next_sort_variant(message, sort_variant):
+        while True:
+            adjusted_config = False
+            for variant_params in build_search_param_variants(
+                allow_query=True,
+                include_token_type=True,
+            ):
+                if not allow_query and uses_query_variant(variant_params):
                     continue
-                logger.warning("Helius searchAssets returned error: %s", message)
-                logged_error = True
-                das_data = None
-                break
+                if not allow_token_type and uses_token_type_variant(variant_params):
+                    continue
+                params_for_request = dict(params)
+                if "tokenType" in variant_params:
+                    params_for_request["tokenType"] = variant_params["tokenType"]
+                query_obj = variant_params.get("query")
+                if isinstance(query_obj, dict):
+                    params_for_request["query"] = dict(query_obj)
+                request_failed = False
+                for sort_variant in build_sort_variants("desc"):
+                    payload_params = dict(params_for_request)
+                    if sort_variant is not None:
+                        payload_params["sortBy"] = sort_variant
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "id": f"trending-{len(normalized)}",
+                        "method": "searchAssets",
+                        "params": payload_params,
+                    }
 
-            das_data = data if isinstance(data, dict) else None
-            if das_data is not None:
-                break
+                    if not hasattr(session, "post"):
+                        logger.debug("Helius searchAssets session missing post(); skipping request")
+                        request_failed = True
+                        break
 
-        if switch_to_legacy:
-            continue
+                    try:
+                        async with session.post(url, json=payload, timeout=_HELIUS_TIMEOUT) as resp:
+                            resp.raise_for_status()
+                            data = await resp.json(content_type=None)
+                    except aiohttp.ClientResponseError as exc:  # pragma: no cover - network failure
+                        logger.warning("Helius searchAssets fetch failed: %s", exc)
+                        request_failed = True
+                        break
+                    except aiohttp.ClientError as exc:  # pragma: no cover - network failure
+                        logger.warning("Helius searchAssets fetch failed: %s", exc)
+                        request_failed = True
+                        break
+                    except Exception as exc:  # pragma: no cover - parsing failure
+                        logger.exception("Helius searchAssets unexpected error: %s", exc)
+                        request_failed = True
+                        break
+
+                    error_payload = data.get("error") if isinstance(data, dict) else None
+                    if error_payload:
+                        if isinstance(error_payload, dict):
+                            message = str(error_payload.get("message") or error_payload)
+                        else:
+                            message = str(error_payload)
+                        last_error_message = message
+                        lowered = message.lower()
+                        if allow_query and should_disable_query(lowered):
+                            allow_query = False
+                            adjusted_config = True
+                            break
+                        if allow_token_type and should_disable_token_type(lowered):
+                            allow_token_type = False
+                            adjusted_config = True
+                            break
+                        if should_try_next_sort_variant(lowered, sort_variant):
+                            continue
+                        logger.warning("Helius searchAssets returned error: %s", message)
+                        logged_error = True
+                        request_failed = True
+                        break
+
+                    das_data = data if isinstance(data, dict) else None
+                    if das_data is not None:
+                        break
+
+                if adjusted_config:
+                    break
+                if das_data is not None or request_failed:
+                    break
+
+            if adjusted_config:
+                continue
+            break
 
         if das_data is None:
             if last_error_message and not logged_error:
@@ -1696,7 +1892,7 @@ async def _scan_tokens_async_locked(
     api_key = api_key or ""
 
     resolved_birdeye_key = _resolve_birdeye_key(api_key)
-    birdeye_allowed = _birdeye_enabled(resolved_birdeye_key)
+    birdeye_allowed = _birdeye_enabled(resolved_birdeye_key) and _birdeye_trending_allowed()
 
     now = time.time()
 
@@ -1807,6 +2003,7 @@ async def _scan_tokens_async_locked(
                 session,
                 limit=requested,
                 birdeye_api_key=birdeye_key,
+                rpc_url=os.getenv("SOLANA_RPC_URL", DEFAULT_SOLANA_RPC),
             )
         except BirdeyeThrottleError as exc:
             reason = str(exc)
