@@ -316,7 +316,7 @@ class ProviderConfig:
     requires_key: Callable[[], str | None] | None = None
 
 
-_DEFAULT_PROVIDER_ORDER = ["pyth", "birdeye", "jupiter", "dexscreener", "synthetic"]
+_DEFAULT_PROVIDER_ORDER = ["pyth", "helius", "birdeye", "jupiter", "dexscreener", "synthetic"]
 
 
 def _parse_provider_roster(raw: str | None) -> List[str]:
@@ -347,6 +347,11 @@ def _init_provider_stats() -> Dict[str, ProviderStats]:
 
 
 _ALL_PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
+    "helius": ProviderConfig(
+        name="helius",
+        fetcher="_fetch_quotes_helius",
+        label="Helius",
+    ),
     "birdeye": ProviderConfig(
         name="birdeye",
         fetcher="_fetch_quotes_birdeye",
@@ -810,6 +815,60 @@ async def _fetch_quotes_birdeye(
                     asof=asof,
                     quality="aggregate",
                 )
+    return quotes
+
+
+async def _fetch_quotes_helius(
+    session: aiohttp.ClientSession, tokens: Sequence[str]
+) -> Dict[str, PriceQuote]:
+    api_url = (os.getenv("HELIUS_PRICE_REST_URL") or "").strip()
+    api_key = (os.getenv("HELIUS_API_KEY") or os.getenv("HELIUS_API_TOKEN") or "").strip()
+    if not tokens or not api_url or not api_key:
+        return {}
+    url = api_url.rstrip("/")
+    headers = {
+        "x-helius-api-key": api_key,
+    }
+    quotes: Dict[str, PriceQuote] = {}
+    for chunk in _chunked(tokens, 50):
+        params = {"ids": ",".join(chunk), "api-key": api_key}
+        start = _monotonic()
+        try:
+            payload = await _request_json(
+                session,
+                url,
+                "HeliusPrice",
+                headers=headers,
+                params=params,
+                method="GET",
+            )
+        except Exception as exc:
+            _record_provider_failure("helius", exc, 0.0)
+            continue
+        else:
+            latency_ms = (_monotonic() - start) * 1000.0
+            _record_provider_success("helius", latency_ms)
+        if not isinstance(payload, MutableMapping):
+            continue
+        data = payload.get("data")
+        if not isinstance(data, MutableMapping):
+            data = payload
+        timestamp = int(payload.get("timestamp", _now_ms()))
+        if timestamp < 1_000_000_000_000:
+            timestamp = _now_ms()
+        for token in chunk:
+            entry = data.get(token)
+            price = _extract_price(entry)
+            if price is None and isinstance(entry, MutableMapping):
+                price = _extract_price(entry.get("prices"))
+            if price is None:
+                continue
+            quotes[token] = PriceQuote(
+                price_usd=price,
+                source="helius",
+                asof=timestamp,
+                quality="aggregate",
+            )
     return quotes
 
 
