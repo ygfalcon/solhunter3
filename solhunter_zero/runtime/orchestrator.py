@@ -33,6 +33,7 @@ from ..strategy_manager import StrategyManager
 from ..agent_manager import AgentManager
 from ..loop import trading_loop as _trading_loop
 from .. import ui as _ui_module
+from .runtime_wiring import RuntimeWiring, initialise_runtime_wiring, resolve_golden_enabled
 
 if hasattr(_ui_module, "create_app"):
     _create_ui_app = _ui_module.create_app  # type: ignore[attr-defined]
@@ -112,6 +113,7 @@ class RuntimeHandles:
     tasks: list[asyncio.Task] | None = None
     ui_state: Any | None = None
     depth_proc: Any | None = None
+    runtime_wiring: RuntimeWiring | None = None
 
 
 class RuntimeOrchestrator:
@@ -125,6 +127,8 @@ class RuntimeOrchestrator:
         self.run_http = run_http
         self.handles = RuntimeHandles(tasks=[])
         self._closed = False
+        self._golden_service: Any | None = None
+        self._golden_enabled: bool = False
 
     def _emit_ui_ready(self, host: str, port: int) -> None:
         """Log and persist UI readiness details for downstream consumers."""
@@ -226,6 +230,11 @@ class RuntimeOrchestrator:
                 state_obj = _ui_module.UIState()
             except Exception:
                 state_obj = None
+        if state_obj is not None:
+            try:
+                self.handles.runtime_wiring = initialise_runtime_wiring(state_obj)
+            except Exception:
+                log.exception("Failed to initialise runtime wiring for UI state")
         app = _create_ui_app(state_obj)
         threads = _start_ui_ws() if callable(_start_ui_ws) else {}
         if hasattr(_ui_module, "get_ws_urls"):
@@ -365,6 +374,46 @@ class RuntimeOrchestrator:
         else:
             agent_manager = AgentManager.from_default()
             strategy_manager = None if agent_manager is not None else StrategyManager(strategies)
+
+        # Golden pipeline service wiring
+        golden_enabled = resolve_golden_enabled(cfg)
+        self._golden_enabled = golden_enabled
+        if golden_enabled and agent_manager is not None and portfolio is not None:
+            try:
+                from ..golden_pipeline.service import GoldenPipelineService
+
+                service = GoldenPipelineService(
+                    agent_manager=agent_manager,
+                    portfolio=portfolio,
+                )
+                await service.start()
+                self._golden_service = service
+                agent_count = len(getattr(agent_manager, "agents", []) or [])
+                await self._publish_stage(
+                    "golden:start",
+                    True,
+                    f"providers={agent_count}",
+                )
+                log.info("GOLDEN_READY topic=x:mint.golden providers=%s", agent_count)
+                wiring = self.handles.runtime_wiring
+                if wiring is not None:
+                    ready = await wiring.wait_for_topic("x:mint.golden", timeout=5.0)
+                else:
+                    ready = True
+                if not ready:
+                    detail = "missing topic x:mint.golden"
+                    await self._publish_stage("golden:ready", False, detail)
+                    raise RuntimeError(detail)
+                await self._publish_stage("golden:ready", True, "topic=x:mint.golden")
+            except Exception as exc:
+                await self._publish_stage("golden:start", False, str(exc))
+                log.exception("Failed to start Golden pipeline service")
+                with suppress(Exception):
+                    await service.stop()
+                self._golden_service = None
+                raise
+        else:
+            await self._publish_stage("golden:start", True, "disabled")
 
         # Announce loaded agents
         try:
@@ -554,6 +603,21 @@ class RuntimeOrchestrator:
             except Exception:
                 pass
         self.handles.tasks = []
+        # Stop wiring subscriptions
+        try:
+            wiring = self.handles.runtime_wiring
+            if wiring is not None:
+                wiring.close()
+        except Exception:
+            pass
+        self.handles.runtime_wiring = None
+        # Stop Golden pipeline service
+        if self._golden_service is not None:
+            try:
+                await self._golden_service.stop()
+            except Exception:
+                pass
+            self._golden_service = None
         # Stop bus server
         if self.handles.bus_started:
             try:
