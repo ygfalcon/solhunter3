@@ -20,11 +20,8 @@ from .clients.helius_das import (
     build_search_param_variants,
     build_sort_variants,
     get_asset_batch,
-    should_disable_query,
     should_disable_token_type,
     should_try_next_sort_variant,
-    uses_query_variant,
-    uses_token_type_variant,
 )
 from .util.mints import clean_candidate_mints
 
@@ -1658,38 +1655,23 @@ async def _helius_search_assets(
             url.split("?", 1)[0],
         )
 
-    allow_query = True
-    allow_token_type = True
+    include_token_type = True
 
     while len(normalized) < limit:
-        params: Dict[str, Any] = {
-            "page": page,
-            "limit": per_page,
-            "conditionType": "all",
-            "interface": "FungibleToken",
-        }
         das_data: Dict[str, Any] | None = None
         last_error_message: str | None = None
         logged_error = False
         while True:
             adjusted_config = False
             for variant_params in build_search_param_variants(
-                allow_query=True,
-                include_token_type=True,
+                page=page,
+                limit=per_page,
+                sort_direction="desc",
+                include_token_type=include_token_type,
             ):
-                if not allow_query and uses_query_variant(variant_params):
-                    continue
-                if not allow_token_type and uses_token_type_variant(variant_params):
-                    continue
-                params_for_request = dict(params)
-                if "tokenType" in variant_params:
-                    params_for_request["tokenType"] = variant_params["tokenType"]
-                query_obj = variant_params.get("query")
-                if isinstance(query_obj, dict):
-                    params_for_request["query"] = dict(query_obj)
                 request_failed = False
                 for sort_variant in build_sort_variants("desc"):
-                    payload_params = dict(params_for_request)
+                    payload_params = dict(variant_params)
                     if sort_variant is not None:
                         payload_params["sortBy"] = sort_variant
                     payload = {
@@ -1729,12 +1711,11 @@ async def _helius_search_assets(
                             message = str(error_payload)
                         last_error_message = message
                         lowered = message.lower()
-                        if allow_query and should_disable_query(lowered):
-                            allow_query = False
+                        if include_token_type and should_disable_token_type(lowered):
+                            include_token_type = False
                             adjusted_config = True
                             break
-                        if allow_token_type and should_disable_token_type(lowered):
-                            allow_token_type = False
+                        if "unknown field `query`" in lowered:
                             adjusted_config = True
                             break
                         if should_try_next_sort_variant(lowered, sort_variant):

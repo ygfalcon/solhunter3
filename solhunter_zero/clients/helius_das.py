@@ -314,6 +314,8 @@ _MINT_PARAM_KEYS = {"ids", "mintIds", "mint_ids", "tokenAddresses", "mintAddress
 
 
 def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop ``None``/empty values while preserving falsy scalars like ``0``/``False``."""
+
     cleaned: Dict[str, Any] = {}
     for key, value in payload.items():
         if value is None:
@@ -328,7 +330,12 @@ def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             normalized_single = normalize_mint_or_none(value)
             if normalized_single:
                 cleaned[key] = normalized_single
-                continue
+            continue
+        if isinstance(value, str) and value == "":
+            continue
+        if isinstance(value, (list, tuple, set, frozenset)) and not value:
+            continue
+        if isinstance(value, dict) and not value:
             continue
         cleaned[key] = value
     return cleaned
@@ -341,11 +348,6 @@ def _filter_valid_mints(mints: Iterable[str]) -> List[str]:
         if normalized:
             filtered.append(normalized)
     return filtered
-
-
-def should_disable_query(message: str) -> bool:
-    lowered = message.lower()
-    return "unknown field \"query\"" in lowered or "unknown field query" in lowered
 
 
 def should_disable_token_type(message: str) -> bool:
@@ -396,33 +398,32 @@ def should_try_next_sort_variant(message: str, variant: Any) -> bool:
 
 def build_search_param_variants(
     *,
-    allow_query: bool = True,
+    page: Optional[int],
+    limit: Optional[int],
+    sort_direction: str = "desc",
     include_token_type: bool = True,
+    owner_address: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], ...]:
-    variants: List[Dict[str, Any]] = []
-    if allow_query:
-        variants.append({"query": {"conditionType": "and", "interface": "FungibleToken"}})
-    if include_token_type:
-        variants.append({"tokenType": "fungible"})
-        if allow_query:
-            variants.append({"query": {"conditionType": "and", "tokenType": "fungible"}})
-    variants.append({})
-    return tuple(variants)
+    """Return parameter variants compatible with DAS ``searchAssets``."""
 
+    base = {
+        "page": page,
+        "limit": limit,
+        "sortBy": {"sort_by": "created", "sort_direction": sort_direction},
+    }
 
-def uses_query_variant(variant: Dict[str, Any]) -> bool:
-    query = variant.get("query")
-    return isinstance(query, dict)
+    variants: List[Dict[str, Any]] = [{**base, "interface": "FungibleToken"}]
 
+    if include_token_type and owner_address:
+        variants.append(
+            {
+                **base,
+                "tokenType": "fungible",
+                "ownerAddress": owner_address,
+            }
+        )
 
-def uses_token_type_variant(variant: Dict[str, Any]) -> bool:
-    if "tokenType" in variant:
-        return True
-    query = variant.get("query")
-    if isinstance(query, dict):
-        token_type = query.get("tokenType") or query.get("token_type")
-        return token_type is not None
-    return False
+    return tuple(_clean_payload(variant) for variant in variants)
 
 
 async def search_fungible_recent(
@@ -432,6 +433,7 @@ async def search_fungible_recent(
     cursor: Optional[int] = None,
     limit: Optional[int] = None,
     sort_direction: str = "desc",
+    owner_address: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     """Fetch the most recently active fungible assets via searchAssets."""
 
@@ -449,34 +451,20 @@ async def search_fungible_recent(
             page_number = max(1, int(page_hint))
         except (TypeError, ValueError):
             page_number = 1
-    base_params: Dict[str, Any] = {
-        "tokenType": "fungible",
-        "page": page_number,
-        "limit": resolved_limit,
-    }
     data: Dict[str, Any] | None = None
     last_error: Exception | None = None
-    allow_query = True
-    allow_token_type = True
+    include_token_type = True
     while True:
-        config_changed = False
         for variant_params in build_search_param_variants(
-            allow_query=allow_query,
-            include_token_type=allow_token_type,
+            page=page_number,
+            limit=resolved_limit,
+            sort_direction=sort_direction,
+            include_token_type=include_token_type,
+            owner_address=owner_address,
         ):
-            if not allow_query and uses_query_variant(variant_params):
-                continue
-            if not allow_token_type and uses_token_type_variant(variant_params):
-                continue
-            params: Dict[str, Any] = dict(base_params)
-            if "tokenType" in variant_params:
-                params["tokenType"] = variant_params["tokenType"]
-            query_obj = variant_params.get("query")
-            if isinstance(query_obj, dict):
-                params["query"] = dict(query_obj)
             result_data: Dict[str, Any] | None = None
             for sort_variant in build_sort_variants(sort_direction):
-                params_with_sort = dict(params)
+                params_with_sort = dict(variant_params)
                 if sort_variant is not None:
                     params_with_sort["sortBy"] = sort_variant
                 payload = _clean_payload(params_with_sort)
@@ -493,13 +481,10 @@ async def search_fungible_recent(
                     last_error = exc
                     message = str(exc)
                     lowered = message.lower()
-                    if allow_query and should_disable_query(lowered):
-                        allow_query = False
-                        config_changed = True
+                    if include_token_type and should_disable_token_type(lowered):
+                        include_token_type = False
                         break
-                    if allow_token_type and should_disable_token_type(lowered):
-                        allow_token_type = False
-                        config_changed = True
+                    if "unknown field `query`" in lowered:
                         break
                     if should_try_next_sort_variant(lowered, sort_variant):
                         continue
@@ -507,58 +492,36 @@ async def search_fungible_recent(
             if result_data is not None:
                 data = result_data
                 break
-            if config_changed:
-                break
         if data is not None:
             break
-        if config_changed:
-            continue
         if last_error is not None:
             raise last_error
         return [], None
-    if data is None:
-        if last_error is not None:
-            raise last_error
+    if not isinstance(data, dict):
         return [], None
-    result = data.get("result") if isinstance(data, dict) else None
-    next_page: Optional[int] = None
+
+    result = data.get("result")
     if isinstance(result, list):
         items = result
     elif isinstance(result, dict):
-        items = (
-            result.get("items")
-            or result.get("tokens")
-            or result.get("assets")
-            or []
-        )
-        pagination = result.get("pagination") if isinstance(result.get("pagination"), dict) else {}
-        for key in ("nextPage", "next_page", "next", "page"):
-            value = pagination.get(key)
-            if value is None and isinstance(result, dict):
-                value = result.get(key) if key != "next" else None
-            if value is None:
-                continue
-            try:
-                next_page = int(value)
-                break
-            except Exception:
-                continue
+        items = result.get("items") or result.get("tokens") or result.get("assets") or []
     else:
-        fallback = []
-        if isinstance(data, dict):
-            for key in ("items", "tokens", "assets"):
-                candidate = data.get(key)
-                if isinstance(candidate, list):
-                    fallback = candidate
-                    break
-        items = fallback
-    if next_page is None and isinstance(items, list) and len(items) >= resolved_limit:
-        next_page = page_number + 1
-    if isinstance(items, list):
-        cleaned_items = [item for item in items if isinstance(item, dict)]
-    else:
-        cleaned_items = []
-    return cleaned_items, next_page if isinstance(next_page, int) and next_page > page_number else None
+        items = data.get("items") or data.get("tokens") or data.get("assets") or []
+
+    cleaned_items = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    if isinstance(result, dict):
+        next_page = result.get("page")
+        if isinstance(next_page, int) and next_page > page_number:
+            return cleaned_items, next_page
+        cursor_val = result.get("cursor") or result.get("next")
+        if cursor_val:
+            return cleaned_items, cursor_val
+
+    if len(cleaned_items) >= resolved_limit:
+        return cleaned_items, page_number + 1
+
+    return cleaned_items, None
 
 
 async def get_asset_batch(
@@ -606,8 +569,5 @@ __all__ = [
     "build_sort_variants",
     "should_try_next_sort_variant",
     "build_search_param_variants",
-    "uses_query_variant",
-    "uses_token_type_variant",
-    "should_disable_query",
     "should_disable_token_type",
 ]

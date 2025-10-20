@@ -11,7 +11,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from ... import event_bus
 from ...agent_manager import AgentManager
@@ -38,18 +38,32 @@ class AgentRuntime:
         self._running = False
         self._tokens: set[str] = set()
         self._ewma: dict[str, float] = {}
+        self._subscriptions: list[Callable[[], None]] = []
 
     async def start(self) -> None:
         self._running = True
         # Subscribe to token discovery and price updates for decision generation
-        event_bus.subscribe("token_discovered", self._on_tokens)
-        event_bus.subscribe("price_update", self._on_price)
+        self._subscriptions.append(event_bus.subscribe("token_discovered", self._on_tokens))
+        self._subscriptions.append(event_bus.subscribe("price_update", self._on_price))
         # Start price backfill loop (optional)
         if os.getenv("PRICE_BACKFILL", "1").lower() in {"1", "true", "yes"}:
-            self._tasks.append(asyncio.create_task(self._price_backfill_loop()))
+            task = asyncio.create_task(self._price_backfill_loop())
+            self._tasks.append(task)
+            task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         self._running = False
+        for unsub in list(self._subscriptions):
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._subscriptions.clear()
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
 
     def _emit(self, p: Proposal) -> None:
         try:
@@ -67,7 +81,9 @@ class AgentRuntime:
                 self._tokens.add(str(token))
             except Exception:
                 pass
-            asyncio.create_task(self._evaluate_and_publish(str(token)))
+            task = asyncio.create_task(self._evaluate_and_publish(str(token)))
+            self._tasks.append(task)
+            task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
 
     def _on_price(self, payload: Any) -> None:
         # Update portfolio price history so agents can use volatility/correlation
