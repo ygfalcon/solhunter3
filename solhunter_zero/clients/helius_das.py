@@ -134,9 +134,9 @@ DAS_BASE = _resolve_base_url()
 _DEFAULT_LIMIT = _env_int("DAS_DISCOVERY_LIMIT", "60")
 _SESSION_TIMEOUT = _env_float("DAS_TIMEOUT_TOTAL", "5.0") or 5.0
 _CONNECT_TIMEOUT = _env_float("DAS_TIMEOUT_CONNECT", "1.5") or 1.5
-_MAX_RETRIES = max(1, min(2, _env_int("DAS_MAX_RETRIES", "2", minimum=1)))
-_BACKOFF_BASE = max(0.1, min(0.4, _env_float("DAS_BACKOFF_BASE", "0.4")))
-_BACKOFF_CAP = max(_BACKOFF_BASE, min(0.8, _env_float("DAS_BACKOFF_CAP", "0.8")))
+_MAX_RETRIES = _env_int("DAS_MAX_RETRIES", "2", minimum=1)
+_BACKOFF_BASE = max(0.1, _env_float("DAS_BACKOFF_BASE", "0.4"))
+_BACKOFF_CAP = max(_BACKOFF_BASE, _env_float("DAS_BACKOFF_CAP", "0.8"))
 _DISABLE_CREATED_SORT = _env_flag("DAS_DISABLE_CREATED_SORT", "0")
 
 _rl = RateLimiter(
@@ -231,6 +231,7 @@ async def _post_rpc(
     retry_logged = False
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
+            log.debug("DAS payload: %s", json.dumps(payload, separators=(",", ":")))
             async with session.post(
                 url,
                 json=payload,
@@ -459,6 +460,7 @@ async def search_fungible_recent(
     last_error: Exception | None = None
     include_token_type = True
     while True:
+        retry_without_token_type = False
         for variant_params in build_search_param_variants(
             page=page_number,
             limit=resolved_limit,
@@ -487,17 +489,22 @@ async def search_fungible_recent(
                     lowered = message.lower()
                     if include_token_type and should_disable_token_type(lowered):
                         include_token_type = False
+                        retry_without_token_type = True
                         break
                     if "unknown field `query`" in lowered:
                         break
                     if should_try_next_sort_variant(lowered, sort_variant):
                         continue
                     raise
+            if retry_without_token_type:
+                break
             if result_data is not None:
                 data = result_data
                 break
         if data is not None:
             break
+        if retry_without_token_type:
+            continue
         if last_error is not None:
             raise last_error
         return [], None
