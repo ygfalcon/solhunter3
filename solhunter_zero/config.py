@@ -720,7 +720,7 @@ def load_dex_config(config: Mapping[str, Any] | None = None) -> DEXConfig:
         "solana_rpc_url": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
         "dex_base_url": "https://swap.helius.dev",
         "dex_partner_urls": {
-            "birdeye": "https://public-api.birdeye.so",
+            "birdeye": "https://api.birdeye.so",
             "jupiter": "https://quote-api.jup.ag",
         },
         "dex_swap_paths": {

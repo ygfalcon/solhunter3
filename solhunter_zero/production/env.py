@@ -177,7 +177,10 @@ def load_production_env(
         )
     loaded: dict[str, str] = {}
     for candidate in search_paths:
-        loaded.update(load_env_file(candidate, overwrite=overwrite, env=env_map))
+        file_loaded = load_env_file(candidate, overwrite=overwrite, env=env_map)
+        if file_loaded:
+            env_map.update(file_loaded)
+            loaded.update(file_loaded)
     return loaded
 
 

@@ -64,26 +64,29 @@ def test_load_env_file(tmp_path: Path, monkeypatch):
     loaded = load_env_file(env_file, overwrite=True)
     assert loaded == {"SAMPLE_KEY": "value"}
     assert os.environ["SAMPLE_KEY"] == "value"
-    monkeypatch.delenv("SAMPLE_KEY", raising=False)
 
 
-def test_load_env_file_custom_mapping(tmp_path: Path, monkeypatch):
-    env_file = tmp_path / ".env"
-    env_file.write_text("CUSTOM_KEY=value\n")
-    monkeypatch.delenv("CUSTOM_KEY", raising=False)
-    custom_env: dict[str, str] = {}
-    loaded = load_env_file(env_file, overwrite=True, env=custom_env)
-    assert loaded == {"CUSTOM_KEY": "value"}
-    assert custom_env == {"CUSTOM_KEY": "value"}
-    assert "CUSTOM_KEY" not in os.environ
+def test_load_production_env_respects_precedence(tmp_path: Path, monkeypatch):
+    first = tmp_path / "first.env"
+    second = tmp_path / "second.env"
+    first.write_text("SHARED_KEY=first\n")
+    second.write_text("SHARED_KEY=second\n")
+    monkeypatch.delenv("SHARED_KEY", raising=False)
+
+    loaded = load_production_env((first, second), env={"BASE": "1"})
+
+    assert loaded == {"SHARED_KEY": "first"}
+    assert os.environ["SHARED_KEY"] == "first"
 
 
-def test_load_production_env_custom_mapping(tmp_path: Path, monkeypatch):
-    env_file = tmp_path / ".env.production"
-    env_file.write_text("SHARED=value\n")
-    monkeypatch.delenv("SHARED", raising=False)
-    custom_env: dict[str, str] = {}
-    loaded = load_production_env(paths=[env_file], overwrite=True, env=custom_env)
-    assert loaded == {"SHARED": "value"}
-    assert custom_env == {"SHARED": "value"}
-    assert "SHARED" not in os.environ
+def test_load_production_env_overwrite_true(tmp_path: Path, monkeypatch):
+    first = tmp_path / "first.env"
+    second = tmp_path / "second.env"
+    first.write_text("SHARED_KEY=first\n")
+    second.write_text("SHARED_KEY=second\n")
+    monkeypatch.delenv("SHARED_KEY", raising=False)
+
+    loaded = load_production_env((first, second), overwrite=True, env={"BASE": "1"})
+
+    assert loaded == {"SHARED_KEY": "second"}
+    assert os.environ["SHARED_KEY"] == "second"

@@ -813,7 +813,7 @@ def test_ensure_endpoints_success(monkeypatch):
     urls = {u for u, _ in calls}
     assert urls == {
         "https://quote-api.jup.ag",
-        "https://public-api.birdeye.so/defi/tokenlist",
+        "https://api.birdeye.so/defi/tokenlist",
     }
     assert all(m == "HEAD" for _, m in calls)
     assert ws_calls == [
