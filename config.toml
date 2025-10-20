@@ -125,7 +125,7 @@ gpu_memory_index = "False"
 memory_sync_interval = "5.0"
 rl_build_mmap_dataset = "True"
 rl_prefetch_buffer = "0"
-solana_keypair = "/Users/sfredx/Documents/Python/Solsniper-zero-main/keypairs/default.json"
+solana_keypair = "keypairs/default.json"
 jito_rpc_url = "https://mainnet.block-engine.jito.wtf"
 
 [agent_weights]

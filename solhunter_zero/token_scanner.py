@@ -17,9 +17,14 @@ from .discovery.mint_resolver import normalize_candidate
 from .logging_utils import warn_once_per
 from .token_aliases import canonical_mint, validate_mint
 from .clients.helius_das import (
+    build_search_param_variants,
     build_sort_variants,
     get_asset_batch,
+    should_disable_query,
+    should_disable_token_type,
     should_try_next_sort_variant,
+    uses_query_variant,
+    uses_token_type_variant,
 )
 from .util.mints import clean_candidate_mints
 
@@ -1696,6 +1701,9 @@ async def _helius_search_assets(
             url.split("?", 1)[0],
         )
 
+    allow_query = True
+    allow_token_type = True
+
     while len(normalized) < limit:
         params: Dict[str, Any] = {
             "page": page,
@@ -1706,63 +1714,91 @@ async def _helius_search_assets(
         das_data: Dict[str, Any] | None = None
         last_error_message: str | None = None
         logged_error = False
-        for sort_variant in build_sort_variants("desc"):
-            params_for_request = dict(params)
-            if sort_variant is not None:
-                if isinstance(sort_variant, dict):
-                    params_for_request["sortBy"] = sort_variant
-                elif isinstance(sort_variant, str):
-                    params_for_request["sortBy"] = {
-                        "sortBy": sort_variant,
-                        "sortDirection": "desc",
+        while True:
+            adjusted_config = False
+            for variant_params in build_search_param_variants(
+                allow_query=True,
+                include_token_type=True,
+            ):
+                if not allow_query and uses_query_variant(variant_params):
+                    continue
+                if not allow_token_type and uses_token_type_variant(variant_params):
+                    continue
+                params_for_request = dict(params)
+                if "tokenType" in variant_params:
+                    params_for_request["tokenType"] = variant_params["tokenType"]
+                query_obj = variant_params.get("query")
+                if isinstance(query_obj, dict):
+                    params_for_request["query"] = dict(query_obj)
+                request_failed = False
+                for sort_variant in build_sort_variants("desc"):
+                    payload_params = dict(params_for_request)
+                    if sort_variant is not None:
+                        payload_params["sortBy"] = sort_variant
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "id": f"trending-{len(normalized)}",
+                        "method": "searchAssets",
+                        "params": payload_params,
                     }
-                else:
-                    continue
-            payload = {
-                "jsonrpc": "2.0",
-                "id": f"trending-{len(normalized)}",
-                "method": "searchAssets",
-                "params": params_for_request,
-            }
 
-            if not hasattr(session, "post"):
-                logger.debug("Helius searchAssets session missing post(); skipping request")
-                break
+                    if not hasattr(session, "post"):
+                        logger.debug("Helius searchAssets session missing post(); skipping request")
+                        request_failed = True
+                        break
 
-            try:
-                async with session.post(url, json=payload, timeout=_HELIUS_TIMEOUT) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json(content_type=None)
-            except aiohttp.ClientResponseError as exc:  # pragma: no cover - network failure
-                logger.warning("Helius searchAssets fetch failed: %s", exc)
-                das_data = None
-                break
-            except aiohttp.ClientError as exc:  # pragma: no cover - network failure
-                logger.warning("Helius searchAssets fetch failed: %s", exc)
-                das_data = None
-                break
-            except Exception as exc:  # pragma: no cover - parsing failure
-                logger.exception("Helius searchAssets unexpected error: %s", exc)
-                das_data = None
-                break
+                    try:
+                        async with session.post(url, json=payload, timeout=_HELIUS_TIMEOUT) as resp:
+                            resp.raise_for_status()
+                            data = await resp.json(content_type=None)
+                    except aiohttp.ClientResponseError as exc:  # pragma: no cover - network failure
+                        logger.warning("Helius searchAssets fetch failed: %s", exc)
+                        request_failed = True
+                        break
+                    except aiohttp.ClientError as exc:  # pragma: no cover - network failure
+                        logger.warning("Helius searchAssets fetch failed: %s", exc)
+                        request_failed = True
+                        break
+                    except Exception as exc:  # pragma: no cover - parsing failure
+                        logger.exception("Helius searchAssets unexpected error: %s", exc)
+                        request_failed = True
+                        break
 
-            error_payload = data.get("error") if isinstance(data, dict) else None
-            if error_payload:
-                if isinstance(error_payload, dict):
-                    message = str(error_payload.get("message") or error_payload)
-                else:
-                    message = str(error_payload)
-                last_error_message = message
-                if should_try_next_sort_variant(message, sort_variant):
-                    continue
-                logger.warning("Helius searchAssets returned error: %s", message)
-                logged_error = True
-                das_data = None
-                break
+                    error_payload = data.get("error") if isinstance(data, dict) else None
+                    if error_payload:
+                        if isinstance(error_payload, dict):
+                            message = str(error_payload.get("message") or error_payload)
+                        else:
+                            message = str(error_payload)
+                        last_error_message = message
+                        lowered = message.lower()
+                        if allow_query and should_disable_query(lowered):
+                            allow_query = False
+                            adjusted_config = True
+                            break
+                        if allow_token_type and should_disable_token_type(lowered):
+                            allow_token_type = False
+                            adjusted_config = True
+                            break
+                        if should_try_next_sort_variant(lowered, sort_variant):
+                            continue
+                        logger.warning("Helius searchAssets returned error: %s", message)
+                        logged_error = True
+                        request_failed = True
+                        break
 
-            das_data = data if isinstance(data, dict) else None
-            if das_data is not None:
-                break
+                    das_data = data if isinstance(data, dict) else None
+                    if das_data is not None:
+                        break
+
+                if adjusted_config:
+                    break
+                if das_data is not None or request_failed:
+                    break
+
+            if adjusted_config:
+                continue
+            break
 
         if das_data is None:
             if last_error_message and not logged_error:

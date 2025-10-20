@@ -112,12 +112,16 @@ main() {
 
       local -a das_payloads=()
       if (( disable_sort )); then
-        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"page":1,"limit":1,"query":{"conditionType":"and","interface":"FungibleToken"}}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"page":1,"limit":1,"tokenType":"fungible"}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"page":1,"limit":1,"query":{"conditionType":"and","tokenType":"fungible"}}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"page":1,"limit":1}}')
       else
-        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1,"sortBy":{"sortBy":"created","sortDirection":"DESC"}}}')
-        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1,"sortBy":{"field":"created","direction":"desc"}}}')
-        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1,"sortBy":"created"}}')
-        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"tokenType":"fungible","page":1,"limit":1}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"page":1,"limit":1,"sortBy":{"sortBy":"created","sortDirection":"DESC"},"query":{"conditionType":"and","interface":"FungibleToken"}}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"page":1,"limit":1,"sortBy":{"sortBy":"created","sortDirection":"DESC"},"tokenType":"fungible"}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"page":1,"limit":1,"sortBy":{"field":"created","direction":"desc"}}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"page":1,"limit":1,"sortBy":"created"}}')
+        das_payloads+=('{"jsonrpc":"2.0","id":"env-doctor","method":"searchAssets","params":{"page":1,"limit":1}}')
       fi
 
       local das_payload_used=""
