@@ -9,7 +9,7 @@ import os
 import socket
 import ssl
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from urllib.error import HTTPError
 from urllib.parse import quote_plus, urlparse
 from urllib.request import Request, urlopen
@@ -214,92 +214,119 @@ def check_helius_das(*, timeout: float = 5.0) -> CheckResult:
         delimiter = "&" if "?" in rpc_base else "?"
         endpoint = f"{rpc_base}{delimiter}api-key={quote_plus(token)}"
 
+    params: Dict[str, Any] = {
+        "tokenType": "fungible",
+        "page": 1,
+        "limit": 1,
+        "sortBy": {"field": "created", "direction": "desc"},
+    }
     payload_dict = {
         "jsonrpc": "2.0",
         "id": "env-doctor",
         "method": "searchAssets",
-        "params": {
-            "query": {"tokenType": "fungible"},
-            "page": 1,
-            "limit": 1,
-            "sortBy": {"field": "created", "direction": "desc"},
-        },
+        "params": params,
     }
-    payload_text = json.dumps(payload_dict)
-    payload = payload_text.encode("utf-8")
-
-    req = Request(
-        endpoint,
-        data=payload,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-
+    force_legacy = False
+    attempts = 0
+    parsed: Dict[str, Any] | None = None
+    payload_text = ""
     response_bytes: bytes | None = None
+    body_text = ""
 
-    try:
-        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - controlled endpoint
-            status = resp.status
-            response_bytes = resp.read()
-    except HTTPError as exc:
-        body = exc.read() if hasattr(exc, "read") else None
-        response_bytes = body
-        request_info = _shorten(payload_text)
-        response_info = _shorten(body)
-        return _fail(
-            "HELIUS_API_KEY",
-            (
-                "Helius DAS probe failed: HTTP"
-                f" {exc.code} (request={request_info} response={response_info}"
-                " next=try fallback sortBy variant)"
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001
-        request_info = _shorten(payload_text)
-        response_info = _shorten(response_bytes)
-        return _fail(
-            "HELIUS_API_KEY",
-            (
-                "Helius DAS probe failed:"
-                f" {exc} (request={request_info} response={response_info}"
-                " next=try fallback sortBy variant)"
-            ),
+    while attempts < 2:
+        attempts += 1
+        effective_params = dict(params)
+        if force_legacy:
+            token_type = effective_params.pop("tokenType", None)
+            legacy_query: Dict[str, Any] = {"tokenType": token_type} if token_type else {}
+            legacy_query.update(effective_params.get("query", {}))
+            effective_params["query"] = legacy_query
+        payload_dict["params"] = effective_params
+        payload_text = json.dumps(payload_dict)
+        payload = payload_text.encode("utf-8")
+
+        req = Request(
+            endpoint,
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
         )
 
-    if status >= 400:
-        request_info = _shorten(payload_text)
-        response_info = _shorten(response_bytes)
-        return _fail(
-            "HELIUS_API_KEY",
-            (
-                "Helius DAS probe failed: HTTP"
-                f" {status} (request={request_info} response={response_info}"
-                " next=try fallback sortBy variant)"
-            ),
-        )
+        try:
+            with urlopen(req, timeout=timeout) as resp:  # noqa: S310 - controlled endpoint
+                status = resp.status
+                response_bytes = resp.read()
+        except HTTPError as exc:
+            body = exc.read() if hasattr(exc, "read") else None
+            response_bytes = body
+            request_info = _shorten(payload_text)
+            response_info = _shorten(body)
+            return _fail(
+                "HELIUS_API_KEY",
+                (
+                    "Helius DAS probe failed: HTTP"
+                    f" {exc.code} (request={request_info} response={response_info}"
+                    " next=try fallback sortBy variant)"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            request_info = _shorten(payload_text)
+            response_info = _shorten(response_bytes)
+            return _fail(
+                "HELIUS_API_KEY",
+                (
+                    "Helius DAS probe failed:"
+                    f" {exc} (request={request_info} response={response_info}"
+                    " next=try fallback sortBy variant)"
+                ),
+            )
 
-    body_text = _shorten(response_bytes)
+        if status >= 400:
+            request_info = _shorten(payload_text)
+            response_info = _shorten(response_bytes)
+            return _fail(
+                "HELIUS_API_KEY",
+                (
+                    "Helius DAS probe failed: HTTP"
+                    f" {status} (request={request_info} response={response_info}"
+                    " next=try fallback sortBy variant)"
+                ),
+            )
 
-    try:
-        parsed = json.loads(response_bytes.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        return _fail(
-            "HELIUS_API_KEY",
-            (
-                "Helius DAS probe failed: invalid JSON"
-                f" ({exc}) (request={_shorten(payload_text)} response={body_text})"
-            ),
-        )
+        body_text = _shorten(response_bytes)
 
-    if parsed.get("error"):
-        return _fail(
-            "HELIUS_API_KEY",
-            (
-                "Helius DAS probe failed:"
-                f" {parsed['error']} (request={_shorten(payload_text)} response={body_text}"
-                " next=try fallback sortBy variant)"
-            ),
-        )
+        try:
+            parsed = json.loads(response_bytes.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(
+                "HELIUS_API_KEY",
+                (
+                    "Helius DAS probe failed: invalid JSON"
+                    f" ({exc}) (request={_shorten(payload_text)} response={body_text})"
+                ),
+            )
+
+        error_payload = parsed.get("error") if isinstance(parsed, dict) else None
+        if error_payload:
+            message = error_payload.get("message") if isinstance(error_payload, dict) else error_payload
+            if (
+                not force_legacy
+                and isinstance(message, str)
+                and "unknown field" in message.lower()
+                and "query" in message.lower()
+            ):
+                force_legacy = True
+                continue
+            return _fail(
+                "HELIUS_API_KEY",
+                (
+                    "Helius DAS probe failed:"
+                    f" {error_payload} (request={_shorten(payload_text)} response={body_text}"
+                    " next=try fallback sortBy variant)"
+                ),
+            )
+
+        break
 
     assets = list(_iter_asset_nodes(parsed.get("result")))
     if not assets:
