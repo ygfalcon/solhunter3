@@ -186,6 +186,8 @@ def _birdeye_trending_allowed() -> bool:
     ):
         return False
     return True
+
+
 def _parse_float_env(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -199,13 +201,42 @@ def _parse_float_env(name: str, default: float) -> float:
         return default
 
 
+def _parse_int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return max(minimum, default)
+    raw = raw.strip()
+    if not raw:
+        return max(minimum, default)
+    try:
+        return max(minimum, int(raw))
+    except (TypeError, ValueError):
+        return max(minimum, default)
+
+
 _DAS_TIMEOUT_TOTAL = _parse_float_env("DAS_TIMEOUT_TOTAL", 12.0)
 _DAS_TIMEOUT_CONNECT = _parse_float_env("DAS_TIMEOUT_CONNECT", 1.5)
 if FAST_MODE:
     _HELIUS_TIMEOUT_TOTAL = _parse_float_env("FAST_HELIUS_TIMEOUT", _DAS_TIMEOUT_TOTAL)
 else:
     _HELIUS_TIMEOUT_TOTAL = _DAS_TIMEOUT_TOTAL
-_HELIUS_TIMEOUT = aiohttp.ClientTimeout(total=_HELIUS_TIMEOUT_TOTAL, connect=_DAS_TIMEOUT_CONNECT)
+_SOCK_CONNECT_TIMEOUT = min(
+    max(0.1, _HELIUS_TIMEOUT_TOTAL * 0.25),
+    max(0.1, _DAS_TIMEOUT_CONNECT),
+    3.0,
+)
+_SOCK_READ_TIMEOUT = max(0.1, _HELIUS_TIMEOUT_TOTAL * 0.75)
+_HELIUS_TIMEOUT = aiohttp.ClientTimeout(
+    total=_HELIUS_TIMEOUT_TOTAL,
+    sock_connect=_SOCK_CONNECT_TIMEOUT,
+    sock_read=_SOCK_READ_TIMEOUT,
+)
+_DAS_BACKOFF_BASE = max(0.1, _parse_float_env("DAS_BACKOFF_BASE", 0.6))
+_DAS_BACKOFF_CAP = max(_DAS_BACKOFF_BASE, _parse_float_env("DAS_BACKOFF_CAP", 8.0))
+_DAS_MAX_ATTEMPTS = _parse_int_env("DAS_MAX_RETRIES", 10, minimum=1)
+_DAS_TIMEOUT_THRESHOLD = _parse_int_env("DAS_TIMEOUT_THRESHOLD", 3, minimum=1)
+_DAS_DEGRADED_COOLDOWN = _parse_float_env("DAS_DEGRADED_COOLDOWN", 90.0)
+_DAS_MIN_LIMIT = _parse_int_env("DAS_MIN_LIMIT", 5, minimum=1)
 _SOLSCAN_TIMEOUT = float(os.getenv("FAST_SOLSCAN_TIMEOUT", "4.0")) if FAST_MODE else 8.0
 
 _ALLOW_PARTIAL_RESULTS = (
@@ -260,6 +291,7 @@ _MIN_SCAN_INTERVAL = max(0.0, float(os.getenv("TOKEN_SCAN_MIN_INTERVAL", "45")))
 _LAST_TRENDING_RESULT: Dict[str, Any] = {"mints": [], "metadata": {}, "timestamp": 0.0}
 _FAILURE_COUNT = 0
 _COOLDOWN_UNTIL = 0.0
+_DAS_CIRCUIT_OPEN_UNTIL = 0.0
 
 
 def _clear_trending_cache_for_tests() -> None:
@@ -1222,12 +1254,21 @@ async def _collect_trending_seeds(
                 break
 
     minimum_before_das = min(desired, max(5, limit // 2))
+    helius_results: List[Dict[str, Any]] = []
     if len(seeds) < minimum_before_das:
-        helius_results = await _helius_search_assets(
-            session,
-            limit=desired,
-            rpc_url=rpc_url,
-        )
+        now = time.monotonic()
+        if now < _DAS_CIRCUIT_OPEN_UNTIL:
+            remaining = max(0.0, _DAS_CIRCUIT_OPEN_UNTIL - now)
+            logger.info(
+                "Skipping Helius searchAssets (degraded circuit %.1fs remaining)",
+                remaining,
+            )
+        else:
+            helius_results = await _helius_search_assets(
+                session,
+                limit=desired,
+                rpc_url=rpc_url,
+            )
         if helius_results and logger.isEnabledFor(logging.INFO):
             logger.info("Helius searchAssets provided %d candidate(s)", len(helius_results))
         for item in helius_results:
@@ -1684,23 +1725,40 @@ async def _helius_search_assets(
             url.split("?", 1)[0],
         )
 
-    include_token_type = True
+    include_interface = True
+    attempts = 0
+    consecutive_timeouts = 0
+    current_limit = per_page
+    global _DAS_CIRCUIT_OPEN_UNTIL
 
     while len(normalized) < limit:
+        if attempts >= _DAS_MAX_ATTEMPTS:
+            logger.warning(
+                "Helius searchAssets retries exhausted after %d attempt(s) (limit=%d)",
+                attempts,
+                current_limit,
+            )
+            break
         das_data: Dict[str, Any] | None = None
         last_error_message: str | None = None
         logged_error = False
+        request_failed_outer = False
+        server_timeout = False
+        client_timeout = False
         while True:
             adjusted_config = False
+            server_timeout = False
+            client_timeout = False
             for variant_params in build_search_param_variants(
                 page=page,
-                limit=per_page,
+                limit=current_limit,
                 sort_direction="desc",
-                include_token_type=include_token_type,
+                include_interface=include_interface,
             ):
                 request_failed = False
                 for sort_variant in build_sort_variants("desc"):
                     payload_params = dict(variant_params)
+                    payload_params["limit"] = current_limit
                     if sort_variant is not None:
                         payload_params["sortBy"] = sort_variant
                     payload = {
@@ -1718,12 +1776,22 @@ async def _helius_search_assets(
                     try:
                         if logger.isEnabledFor(logging.DEBUG):
                             logger.debug(
-                                "Helius searchAssets payload: %s",
+                                "DAS payload -> %s",
                                 json.dumps(payload, separators=(",", ":")),
                             )
                         async with session.post(url, json=payload, timeout=_HELIUS_TIMEOUT) as resp:
                             resp.raise_for_status()
                             data = await resp.json(content_type=None)
+                    except asyncio.TimeoutError:
+                        client_timeout = True
+                        request_failed = True
+                        last_error_message = "client timeout"
+                        logger.warning(
+                            "Helius searchAssets client timeout (limit=%d, attempt=%d)",
+                            current_limit,
+                            attempts + 1,
+                        )
+                        break
                     except aiohttp.ClientResponseError as exc:  # pragma: no cover - network failure
                         logger.warning("Helius searchAssets fetch failed: %s", exc)
                         request_failed = True
@@ -1741,16 +1809,21 @@ async def _helius_search_assets(
                     if error_payload:
                         if isinstance(error_payload, dict):
                             message = str(error_payload.get("message") or error_payload)
+                            if error_payload.get("code") == -32504:
+                                server_timeout = True
                         else:
                             message = str(error_payload)
                         last_error_message = message
                         lowered = message.lower()
-                        if include_token_type and should_disable_token_type(lowered):
-                            include_token_type = False
+                        if include_interface and should_disable_token_type(lowered):
+                            include_interface = False
                             adjusted_config = True
                             break
                         if "unknown field `query`" in lowered:
                             adjusted_config = True
+                            break
+                        if server_timeout:
+                            request_failed = True
                             break
                         if should_try_next_sort_variant(lowered, sort_variant):
                             continue
@@ -1763,19 +1836,66 @@ async def _helius_search_assets(
                     if das_data is not None:
                         break
 
-                if adjusted_config:
+                if adjusted_config or server_timeout or client_timeout:
                     break
                 if das_data is not None or request_failed:
                     break
 
             if adjusted_config:
                 continue
+            request_failed_outer = request_failed
             break
 
         if das_data is None:
+            if server_timeout or client_timeout:
+                attempts += 1
+                consecutive_timeouts += 1
+                if current_limit > _DAS_MIN_LIMIT:
+                    current_limit = max(_DAS_MIN_LIMIT, current_limit // 2)
+                delay = min(_DAS_BACKOFF_CAP, _DAS_BACKOFF_BASE * (2 ** attempts))
+                delay *= 1.0 + random.random() * 0.3
+                logger.warning(
+                    "Retrying DAS after timeout (%d/%d, limit=%d, sleep=%.2fs)",
+                    attempts,
+                    _DAS_MAX_ATTEMPTS,
+                    current_limit,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                if consecutive_timeouts >= _DAS_TIMEOUT_THRESHOLD:
+                    _DAS_CIRCUIT_OPEN_UNTIL = time.monotonic() + _DAS_DEGRADED_COOLDOWN
+                    logger.warning(
+                        "DAS circuit open for %.0fs after %d consecutive timeouts",
+                        _DAS_DEGRADED_COOLDOWN,
+                        consecutive_timeouts,
+                    )
+                    break
+                continue
             if last_error_message and not logged_error:
                 logger.warning("Helius searchAssets returned error: %s", last_error_message)
+            if request_failed_outer:
+                attempts += 1
+                if attempts >= _DAS_MAX_ATTEMPTS:
+                    logger.warning(
+                        "Helius searchAssets aborting after %d consecutive failure(s)",
+                        attempts,
+                    )
+                    break
+                delay = min(_DAS_BACKOFF_CAP, _DAS_BACKOFF_BASE * (2 ** attempts))
+                delay *= 1.0 + random.random() * 0.3
+                logger.debug(
+                    "Retrying DAS after failure (%d/%d, sleep=%.2fs)",
+                    attempts,
+                    _DAS_MAX_ATTEMPTS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
             break
+        consecutive_timeouts = 0
+        attempts = 0
+        _DAS_CIRCUIT_OPEN_UNTIL = 0.0
+        per_page = current_limit
 
         result = das_data.get("result")
         next_page: int | None = None
