@@ -67,11 +67,11 @@ _CACHE_LOCK = Lock()
 _BIRDEYE_DISABLED_INFO = False
 
 _BIRDEYE_TOKENLIST_URL = (
-    (os.getenv("BIRDEYE_TOKENLIST_URL") or "https://public-api.birdeye.so/defi/tokenlist")
+    (os.getenv("BIRDEYE_TOKENLIST_URL") or "https://api.birdeye.so/defi/tokenlist")
     .strip()
 )
 if not _BIRDEYE_TOKENLIST_URL:
-    _BIRDEYE_TOKENLIST_URL = "https://public-api.birdeye.so/defi/tokenlist"
+    _BIRDEYE_TOKENLIST_URL = "https://api.birdeye.so/defi/tokenlist"
 
 
 def _cache_get(key: str) -> List[TokenEntry] | None:

@@ -134,9 +134,9 @@ DAS_BASE = _resolve_base_url()
 _DEFAULT_LIMIT = _env_int("DAS_DISCOVERY_LIMIT", "60")
 _SESSION_TIMEOUT = _env_float("DAS_TIMEOUT_TOTAL", "5.0") or 5.0
 _CONNECT_TIMEOUT = _env_float("DAS_TIMEOUT_CONNECT", "1.5") or 1.5
-_MAX_RETRIES = _env_int("DAS_MAX_RETRIES", "8", minimum=1)
-_BACKOFF_BASE = max(0.1, _env_float("DAS_BACKOFF_BASE", "0.4"))
-_BACKOFF_CAP = max(_BACKOFF_BASE, _env_float("DAS_BACKOFF_CAP", "5.0"))
+_MAX_RETRIES = max(1, min(2, _env_int("DAS_MAX_RETRIES", "2", minimum=1)))
+_BACKOFF_BASE = max(0.1, min(0.4, _env_float("DAS_BACKOFF_BASE", "0.4")))
+_BACKOFF_CAP = max(_BACKOFF_BASE, min(0.8, _env_float("DAS_BACKOFF_CAP", "0.8")))
 _DISABLE_CREATED_SORT = _env_flag("DAS_DISABLE_CREATED_SORT", "0")
 
 _rl = RateLimiter(

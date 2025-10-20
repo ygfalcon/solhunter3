@@ -82,18 +82,18 @@ def test_fill_rate_resolves_with_multiple_providers(monkeypatch):
     assert result[SOL_MINT].source == "pyth"
     assert result[USDC_MINT].source == "jupiter"
     assert result[OBSCURE_MINT].source == "dexscreener"
-    assert calls[0][0] == "jupiter"
-    assert any(name == "pyth" for name, _ in calls)
+    assert calls[0][0] == "pyth"
+    assert any(name == "jupiter" for name, _ in calls)
 
 
 def test_birdeye_auth_failure_cooldown_and_recovery(monkeypatch):
     calls: List[Tuple[str, Tuple[str, ...]]] = []
 
     request_info = RequestInfo(
-        url=URL("https://public-api.birdeye.so/defi/multi_price"),
+        url=URL("https://api.birdeye.so/defi/multi_price"),
         method="GET",
         headers={},
-        real_url=URL("https://public-api.birdeye.so/defi/multi_price"),
+        real_url=URL("https://api.birdeye.so/defi/multi_price"),
     )
     exc = aiohttp.ClientResponseError(
         request_info,
@@ -152,10 +152,10 @@ def test_birdeye_429_cooldown_skip(monkeypatch):
     retry_headers: Dict[str, str] = {"Retry-After": "7"}
 
     request_info = RequestInfo(
-        url=URL("https://public-api.birdeye.so/defi/multi_price"),
+        url=URL("https://api.birdeye.so/defi/multi_price"),
         method="GET",
         headers={},
-        real_url=URL("https://public-api.birdeye.so/defi/multi_price"),
+        real_url=URL("https://api.birdeye.so/defi/multi_price"),
     )
     rate_exc = aiohttp.ClientResponseError(
         request_info,
