@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import random
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
@@ -51,16 +52,19 @@ PRICE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
 QUOTE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
 BATCH_CACHE: TTLCache = TTLCache(maxsize=256, ttl=PRICE_CACHE_TTL)
 
-JUPITER_PRICE_URL = os.getenv("JUPITER_PRICE_URL", "https://price.jup.ag/v3/price")
+JUPITER_PRICE_URL = os.getenv("JUPITER_PRICE_URL", "https://price.jup.ag/v4/price")
 JUPITER_BATCH_SIZE = max(1, int(os.getenv("JUPITER_BATCH_SIZE", "64") or 64))
 
 DEXSCREENER_PRICE_URL = os.getenv(
     "DEXSCREENER_PRICE_URL", "https://api.dexscreener.com/latest/dex/tokens"
 )
 
-BIRDEYE_PRICE_URL = os.getenv("BIRDEYE_PRICE_URL", "https://public-api.birdeye.so")
+BIRDEYE_PRICE_URL = os.getenv("BIRDEYE_PRICE_URL", "https://api.birdeye.so")
 BIRDEYE_CHAIN = os.getenv("BIRDEYE_CHAIN", "solana")
-BIRDEYE_MAX_BATCH = max(1, int(os.getenv("BIRDEYE_BATCH_SIZE", "50") or 50))
+BIRDEYE_MAX_BATCH = max(1, int(os.getenv("BIRDEYE_BATCH_SIZE", "20") or 20))
+
+if not os.getenv("HTTP_FORCE_IPV4"):
+    os.environ.setdefault("HTTP_FORCE_IPV4", "1")
 
 PYTH_PRICE_URL = os.getenv("PYTH_PRICE_URL", "https://hermes.pyth.network/v2/price_feeds")
 
@@ -211,7 +215,7 @@ def _build_pyth_boot_url(
         query_items.append(("ids[]", value))
     for account in accounts:
         query_items.append(("accounts[]", account))
-    encoded_query = urllib.parse.urlencode(query_items)
+    encoded_query = urllib.parse.urlencode(query_items, doseq=True, safe="[]")
     return urllib.parse.urlunsplit(parsed._replace(query=encoded_query))
 
 
@@ -312,7 +316,7 @@ class ProviderConfig:
     requires_key: Callable[[], str | None] | None = None
 
 
-_DEFAULT_PROVIDER_ORDER = ["birdeye", "jupiter", "dexscreener", "pyth", "synthetic"]
+_DEFAULT_PROVIDER_ORDER = ["pyth", "birdeye", "jupiter", "dexscreener", "synthetic"]
 
 
 def _parse_provider_roster(raw: str | None) -> List[str]:
@@ -574,7 +578,10 @@ async def _request_json(
             if attempt == PRICE_RETRY_ATTEMPTS - 1:
                 break
             delay = PRICE_RETRY_BACKOFF * (2 ** attempt)
-            await asyncio.sleep(delay)
+            if isinstance(exc, aiohttp.ClientConnectorError):
+                delay = max(delay, 0.2)
+            jitter = random.uniform(0.05, 0.25)
+            await asyncio.sleep(delay + jitter)
     if last_error:
         raise last_error
     return None
@@ -769,7 +776,7 @@ async def _fetch_quotes_birdeye(
         return {}
     url = f"{BIRDEYE_PRICE_URL.rstrip('/')}/defi/multi_price"
     headers = {
-        "X-API-KEY": api_key,
+        "x-api-key": api_key,
         "accept": "application/json",
         "x-chain": BIRDEYE_CHAIN,
     }
@@ -854,7 +861,7 @@ def _parse_pyth_mapping() -> Tuple[Dict[str, PythIdentifier], List[PythIdentifie
 
 @lru_cache(maxsize=1)
 def validate_pyth_overrides_on_boot(*, network_required: bool = True) -> None:
-    if not _PYTH_VALIDATE_ENABLED or not network_required:
+    if not _PYTH_VALIDATE_ENABLED:
         return
     raw_mapping, extras = _load_custom_pyth_ids()
     normalized_mapping, _, issues = _normalize_pyth_mapping(raw_mapping, extras)
@@ -886,6 +893,7 @@ def validate_pyth_overrides_on_boot(*, network_required: bool = True) -> None:
     logger.debug(
         "Validating custom Pyth overrides via %s", url
     )
+    strict = bool(network_required)
     try:
         req = urllib.request.Request(url, method="GET", headers=headers)
         with urllib.request.urlopen(req, timeout=_PYTH_BOOT_TIMEOUT) as resp:
@@ -907,7 +915,8 @@ def validate_pyth_overrides_on_boot(*, network_required: bool = True) -> None:
                     else:
                         entries.append(f"extra:{masked_value or _mask_identifier(normalized_value)}")
             detail_text = preview or exc.reason or "client error"
-            logger.error(
+            log_fn = logger.error if strict else logger.warning
+            log_fn(
                 "PYTH_BOOT_VALIDATION_FAILED status=%s count=%d detail=%s entries=%s url=%s",
                 status,
                 len(entries),
@@ -916,14 +925,23 @@ def validate_pyth_overrides_on_boot(*, network_required: bool = True) -> None:
                 url,
             )
             _mark_pyth_provider_unhealthy(status, detail_text)
+            if strict:
+                raise RuntimeError(
+                    f"Pyth override validation failed (status={status}): {detail_text}"
+                )
             return
         logger.debug(
             "Pyth override validation received HTTP %s from %s", status, url
         )
     except Exception as exc:  # pragma: no cover - network best effort
-        logger.debug(
-            "Pyth override validation encountered %s via %s", exc, url
-        )
+        if strict:
+            logger.debug(
+                "Pyth override validation encountered %s via %s", exc, url
+            )
+        else:
+            logger.warning(
+                "Pyth override validation skipped due to %s (url=%s)", exc, url
+            )
 
 
 async def _fetch_quotes_pyth(
@@ -1152,6 +1170,29 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
     session = await get_session()
     resolved: Dict[str, PriceQuote] = {}
     order = _provider_priority()
+
+    if "pyth" in order:
+        mapping, _ = _parse_pyth_mapping()
+        override_tokens = [token for token in tokens if token in mapping]
+        if override_tokens:
+            start = _monotonic()
+            try:
+                quotes = await _fetch_quotes_pyth(session, tuple(override_tokens))
+            except Exception as exc:  # noqa: BLE001 - deliberate broad catch
+                latency_ms = (_monotonic() - start) * 1000.0
+                _record_provider_failure("pyth", exc, latency_ms)
+            else:
+                latency_ms = (_monotonic() - start) * 1000.0
+                if quotes:
+                    _record_provider_success("pyth", latency_ms)
+                    resolved.update(quotes)
+                else:
+                    _record_provider_failure(
+                        "pyth",
+                        RuntimeError("no quotes returned"),
+                        latency_ms,
+                    )
+            order = [name for name in order if name != "pyth"]
     for idx, provider_name in enumerate(order):
         config = PROVIDER_CONFIGS[provider_name]
         state = PROVIDER_HEALTH[provider_name]

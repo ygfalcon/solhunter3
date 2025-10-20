@@ -105,7 +105,7 @@ def _coerce_limit(limit: Any) -> Optional[int]:
 # ---------------------------------------------------------------------
 # BirdEye config – hardwire your key if desired
 # ---------------------------------------------------------------------
-BIRDEYE_API: str = "https://public-api.birdeye.so"
+BIRDEYE_API: str = "https://api.birdeye.so"
 
 refresh_runtime_values()
 
