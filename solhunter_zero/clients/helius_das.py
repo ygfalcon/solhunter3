@@ -410,23 +410,31 @@ def build_search_param_variants(
     page: Optional[int],
     limit: Optional[int],
     sort_direction: str = "desc",
-    include_token_type: bool = True,
+    include_interface: bool = True,
     owner_address: Optional[str] = None,
+    allow_created_sort: Optional[bool] = None,
 ) -> Tuple[Dict[str, Any], ...]:
     """Return parameter variants compatible with DAS ``searchAssets``."""
 
-    base = {"page": page, "limit": limit, **_maybe_sort_by(sort_direction)}
+    if allow_created_sort is None:
+        allow_created_sort = not _DISABLE_CREATED_SORT
 
-    variants: List[Dict[str, Any]] = [{**base, "interface": "FungibleToken"}]
+    base: Dict[str, Any] = {"page": page, "limit": limit}
+    if allow_created_sort:
+        base.update(_maybe_sort_by(sort_direction))
 
-    if include_token_type and owner_address:
-        variants.append(
-            {
-                **base,
-                "tokenType": "fungible",
-                "ownerAddress": owner_address,
-            }
-        )
+    variants: List[Dict[str, Any]] = []
+    interface_variant = dict(base)
+    if include_interface:
+        interface_variant["interface"] = "FungibleToken"
+    variants.append(interface_variant)
+
+    if owner_address:
+        owner_variant = dict(base)
+        owner_variant["ownerAddress"] = owner_address
+        if include_interface:
+            owner_variant["interface"] = "FungibleToken"
+        variants.append(owner_variant)
 
     return tuple(_clean_payload(variant) for variant in variants)
 
@@ -458,15 +466,16 @@ async def search_fungible_recent(
             page_number = 1
     data: Dict[str, Any] | None = None
     last_error: Exception | None = None
-    include_token_type = True
+    include_interface = True
     while True:
-        retry_without_token_type = False
+        retry_without_interface = False
         for variant_params in build_search_param_variants(
             page=page_number,
             limit=resolved_limit,
             sort_direction=sort_direction,
-            include_token_type=include_token_type,
+            include_interface=include_interface,
             owner_address=owner_address,
+            allow_created_sort=not _DISABLE_CREATED_SORT,
         ):
             result_data: Dict[str, Any] | None = None
             for sort_variant in build_sort_variants(sort_direction):
@@ -487,23 +496,23 @@ async def search_fungible_recent(
                     last_error = exc
                     message = str(exc)
                     lowered = message.lower()
-                    if include_token_type and should_disable_token_type(lowered):
-                        include_token_type = False
-                        retry_without_token_type = True
+                    if include_interface and should_disable_token_type(lowered):
+                        include_interface = False
+                        retry_without_interface = True
                         break
                     if "unknown field `query`" in lowered:
                         break
                     if should_try_next_sort_variant(lowered, sort_variant):
                         continue
                     raise
-            if retry_without_token_type:
+            if retry_without_interface:
                 break
             if result_data is not None:
                 data = result_data
                 break
         if data is not None:
             break
-        if retry_without_token_type:
+        if retry_without_interface:
             continue
         if last_error is not None:
             raise last_error

@@ -205,7 +205,17 @@ if FAST_MODE:
     _HELIUS_TIMEOUT_TOTAL = _parse_float_env("FAST_HELIUS_TIMEOUT", _DAS_TIMEOUT_TOTAL)
 else:
     _HELIUS_TIMEOUT_TOTAL = _DAS_TIMEOUT_TOTAL
-_HELIUS_TIMEOUT = aiohttp.ClientTimeout(total=_HELIUS_TIMEOUT_TOTAL, connect=_DAS_TIMEOUT_CONNECT)
+_SOCK_CONNECT_TIMEOUT = min(
+    max(0.1, _HELIUS_TIMEOUT_TOTAL * 0.25),
+    max(0.1, _DAS_TIMEOUT_CONNECT),
+    3.0,
+)
+_SOCK_READ_TIMEOUT = max(0.1, _HELIUS_TIMEOUT_TOTAL * 0.75)
+_HELIUS_TIMEOUT = aiohttp.ClientTimeout(
+    total=_HELIUS_TIMEOUT_TOTAL,
+    sock_connect=_SOCK_CONNECT_TIMEOUT,
+    sock_read=_SOCK_READ_TIMEOUT,
+)
 _SOLSCAN_TIMEOUT = float(os.getenv("FAST_SOLSCAN_TIMEOUT", "4.0")) if FAST_MODE else 8.0
 
 _ALLOW_PARTIAL_RESULTS = (
@@ -1684,7 +1694,7 @@ async def _helius_search_assets(
             url.split("?", 1)[0],
         )
 
-    include_token_type = True
+    include_interface = True
 
     while len(normalized) < limit:
         das_data: Dict[str, Any] | None = None
@@ -1696,7 +1706,7 @@ async def _helius_search_assets(
                 page=page,
                 limit=per_page,
                 sort_direction="desc",
-                include_token_type=include_token_type,
+                include_interface=include_interface,
             ):
                 request_failed = False
                 for sort_variant in build_sort_variants("desc"):
@@ -1718,7 +1728,7 @@ async def _helius_search_assets(
                     try:
                         if logger.isEnabledFor(logging.DEBUG):
                             logger.debug(
-                                "Helius searchAssets payload: %s",
+                                "DAS payload -> %s",
                                 json.dumps(payload, separators=(",", ":")),
                             )
                         async with session.post(url, json=payload, timeout=_HELIUS_TIMEOUT) as resp:
@@ -1745,8 +1755,8 @@ async def _helius_search_assets(
                             message = str(error_payload)
                         last_error_message = message
                         lowered = message.lower()
-                        if include_token_type and should_disable_token_type(lowered):
-                            include_token_type = False
+                        if include_interface and should_disable_token_type(lowered):
+                            include_interface = False
                             adjusted_config = True
                             break
                         if "unknown field `query`" in lowered:
