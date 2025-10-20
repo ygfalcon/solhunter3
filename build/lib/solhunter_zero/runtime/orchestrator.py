@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import errno
+import importlib
 import inspect
 import logging
 import os
@@ -66,6 +67,74 @@ install_uvloop()
 log = logging.getLogger(__name__)
 
 
+_UI_TOPIC_DEFAULTS: dict[str, str] = {
+    "discovery": "x:discovery.candidates",
+    "token_facts": "x:token.snap",
+    "market_ohlcv": "x:market.ohlcv.5m",
+    "market_depth": "x:market.depth",
+    "golden": "x:mint.golden",
+    "suggestions": "x:trade.suggested",
+    "votes": "x:vote.decisions",
+    "virtual_fills": "x:virt.fills",
+    "live_fills": "x:live.fills",
+}
+
+
+class _UIPanelForwarder:
+    """Subscribe to event-bus topics and push snapshots to the UI."""
+
+    def __init__(
+        self,
+        *,
+        push_event: Callable[[Any], bool],
+        topic_map: dict[str, str] | None = None,
+    ) -> None:
+        self._push = push_event
+        self._topic_map = dict(topic_map or _UI_TOPIC_DEFAULTS)
+        self._subscriptions: list[Callable[[], None]] = []
+        self._started = False
+        self._closed = False
+
+    def start(self) -> None:
+        if self._started or self._closed:
+            return
+        self._started = True
+
+        for panel, topic in self._topic_map.items():
+            async def _handler(event: Any, _panel: str = panel, _topic: str = topic) -> None:
+                message = {"panel": _panel, "topic": _topic, "data": event}
+                try:
+                    self._push(message)
+                except Exception:
+                    log.exception(
+                        "Failed to push UI event", extra={"panel": _panel, "topic": _topic}
+                    )
+
+            unsub = event_bus.subscribe(topic, _handler)
+            self._subscriptions.append(unsub)
+
+    async def flush(self) -> None:
+        """Emit an initial empty payload for each wired panel."""
+
+        for panel, topic in self._topic_map.items():
+            try:
+                self._push({"panel": panel, "topic": topic, "data": None})
+            except Exception:
+                log.debug("UI flush failed for panel %s", panel, exc_info=True)
+                continue
+
+    def stop(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for unsub in self._subscriptions:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._subscriptions.clear()
+
+
 def _runtime_artifact_dir() -> Path:
     """Return the directory where runtime artifacts should be written."""
 
@@ -118,6 +187,7 @@ class RuntimeHandles:
     bus_subscriptions: list[Callable[[], None]] = field(default_factory=list)
     agent_runtime: Any | None = None
     trade_executor: Any | None = None
+    ui_forwarder: Any | None = None
 
 
 async def maybe_await(result: Any) -> Any:
@@ -139,6 +209,7 @@ class RuntimeOrchestrator:
         self._closed = False
         self._golden_service: Any | None = None
         self._golden_enabled: bool = False
+        self._ui_forwarder: _UIPanelForwarder | None = None
 
     def _emit_ui_ready(self, host: str, port: int) -> None:
         """Log and persist UI readiness details for downstream consumers."""
@@ -185,6 +256,97 @@ class RuntimeOrchestrator:
             pass
         if os.getenv("ORCH_VERBOSE", "").lower() in {"1", "true", "yes"}:
             log.info("stage=%s ok=%s detail=%s", stage, ok, detail)
+
+    async def _ensure_ui_forwarder(self) -> None:
+        if self._ui_forwarder is not None:
+            return
+
+        ui_state_obj: Any | None = None
+        try:
+            ui_state_mod = importlib.import_module("solhunter_zero.ui.state")
+        except ModuleNotFoundError:
+            ui_state_mod = None
+        except Exception:
+            log.debug("Failed to import solhunter_zero.ui.state", exc_info=True)
+            ui_state_mod = None
+
+        if ui_state_mod is not None:
+            UIStateCls = getattr(ui_state_mod, "UIState", None)
+            topic_map = getattr(ui_state_mod, "TOPIC_MAP", None)
+            if callable(UIStateCls):
+                try:
+                    ui_state_obj = UIStateCls()
+                except Exception:
+                    log.exception("Failed to initialise streaming UI state")
+                    ui_state_obj = None
+
+            if ui_state_obj is not None:
+                bus_instance: Any | None = None
+                try:
+                    bus_mod = importlib.import_module("solhunter_zero.bus")
+                except ModuleNotFoundError:
+                    bus_mod = None
+                except Exception:
+                    log.debug("Failed to import solhunter_zero.bus", exc_info=True)
+                    bus_mod = None
+
+                if bus_mod is not None:
+                    bus_instance = getattr(bus_mod, "BUS", None)
+                    if bus_instance is None:
+                        EventBusCls = getattr(bus_mod, "EventBus", None)
+                        if callable(EventBusCls):
+                            try:
+                                bus_instance = EventBusCls()
+                            except Exception:
+                                log.exception("Failed to instantiate EventBus for UI state")
+                                bus_instance = None
+
+                if bus_instance is not None and callable(getattr(bus_instance, "stream", None)):
+                    topics = topic_map if isinstance(topic_map, dict) and topic_map else _UI_TOPIC_DEFAULTS
+                    add_provider = getattr(ui_state_obj, "add_provider", None)
+                    if callable(add_provider):
+                        for panel, topic in topics.items():
+                            try:
+                                stream = bus_instance.stream(topic)
+                            except Exception:
+                                log.exception("Failed to create bus stream for panel %s", panel)
+                                continue
+                            try:
+                                add_provider(panel, stream)
+                            except Exception:
+                                log.exception(
+                                    "Failed to add UI provider for panel %s (topic %s)",
+                                    panel,
+                                    topic,
+                                )
+                        self._ui_forwarder = ui_state_obj
+                        self.handles.ui_forwarder = ui_state_obj
+                        flush = getattr(ui_state_obj, "flush", None)
+                        if callable(flush):
+                            try:
+                                await maybe_await(flush())
+                            except Exception:
+                                log.debug("UI state flush failed", exc_info=True)
+                        return
+
+        push_event = getattr(_ui_module, "push_event", None)
+        if not callable(push_event):
+            return
+
+        forwarder = _UIPanelForwarder(push_event=push_event)
+        try:
+            forwarder.start()
+        except Exception:
+            log.exception("Failed to initialise UI panel forwarders")
+            forwarder.stop()
+            return
+
+        self._ui_forwarder = forwarder
+        self.handles.ui_forwarder = forwarder
+        try:
+            await maybe_await(forwarder.flush())
+        except Exception:
+            log.debug("UI forwarder flush failed", exc_info=True)
 
     async def start_bus(self) -> None:
         await self._publish_stage("bus:init", True)
@@ -360,6 +522,8 @@ class RuntimeOrchestrator:
         await self._publish_stage("agents:startup", True)
         cfg, runtime_cfg, proc = await perform_startup_async(self.config_path, offline=False, dry_run=False)
         self.handles.depth_proc = proc
+
+        await self._ensure_ui_forwarder()
 
         # Build runtime services
         memory_path = os.getenv("MEMORY_PATH", "sqlite:///memory.db")
@@ -618,6 +782,14 @@ class RuntimeOrchestrator:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.handles.tasks.clear()
+        forwarder = self._ui_forwarder or self.handles.ui_forwarder
+        if forwarder is not None:
+            try:
+                forwarder.stop()
+            except Exception:
+                pass
+        self._ui_forwarder = None
+        self.handles.ui_forwarder = None
         for unsub in list(self.handles.bus_subscriptions):
             try:
                 unsub()
