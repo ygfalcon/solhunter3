@@ -333,10 +333,14 @@ start_log_stream() {
   local log=$1
   local label=$2
   touch "$log"
+  local __last_line=""
   {
     tail -n +1 -F "$log" 2>/dev/null |
       while IFS= read -r line; do
-        printf '[%s] [%s] %s\n' "$(timestamp)" "$label" "$line"
+        if [[ ${line} != "${__last_line:-}" ]]; then
+          printf '[%s] [%s] %s\n' "$(timestamp)" "$label" "$line"
+        fi
+        __last_line=$line
       done
   } &
   local tail_pid=$!
