@@ -13,9 +13,18 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import aiohttp
 import redis.asyncio as aioredis
 
+DEFAULT_STABLE_TOKENS = {
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9",  # USDC
+    "So11111111111111111111111111111111111111112",  # wSOL
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+    "USDH1M9swnX8i1C5mFZWw577zvuEwmwqsJLAC9B5S3y",  # USDH
+}
+
 
 _SEEN_POOLS: Dict[str, float] = {}
 _SEEN_MINT: Dict[str, float] = {}
+_PROMOTED: Dict[str, float] = {}
+_PRICED: Dict[str, float] = {}
 
 
 def _now() -> float:
@@ -141,6 +150,104 @@ def _extract_candidate_mints(entry: Dict[str, object]) -> List[str]:
     return list(seen.keys())
 
 
+def _extract_pair(entry: Dict[str, object]) -> Tuple[str | None, str | None]:
+    pairs = [
+        (entry.get("baseMint"), entry.get("quoteMint")),
+        (entry.get("mintA"), entry.get("mintB")),
+        (entry.get("tokenMintA"), entry.get("tokenMintB")),
+        (entry.get("tokenA"), entry.get("tokenB")),
+        (entry.get("tokenMint"), entry.get("quoteToken")),
+    ]
+    for base, quote in pairs:
+        if isinstance(base, dict):
+            base = base.get("mint") or base.get("address") or base.get("publicKey")
+        if isinstance(quote, dict):
+            quote = quote.get("mint") or quote.get("address") or quote.get("publicKey")
+        if isinstance(base, str) and isinstance(quote, str):
+            return base, quote
+    return None, None
+
+
+def _extract_price(entry: Dict[str, object], base: str | None, quote: str | None) -> float | None:
+    price_keys = ["price", "price_usd", "priceUsd", "midPrice", "mid_price", "lastPrice"]
+    for key in price_keys:
+        value = entry.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+        if isinstance(value, str):
+            with contextlib.suppress(ValueError):
+                parsed = float(value)
+                if parsed > 0:
+                    return parsed
+    reserve_pairs = [
+        ("baseReserve", "quoteReserve"),
+        ("reserveBase", "reserveQuote"),
+        ("tokenAmountA", "tokenAmountB"),
+        ("base_liquidity", "quote_liquidity"),
+        ("coinVault", "pcVault"),
+    ]
+    for base_key, quote_key in reserve_pairs:
+        base_res = entry.get(base_key)
+        quote_res = entry.get(quote_key)
+        try:
+            base_val = float(base_res)
+            quote_val = float(quote_res)
+            if base_val > 0 and quote_val > 0:
+                return quote_val / base_val
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _extract_liquidity(entry: Dict[str, object]) -> float:
+    keys = [
+        "liquidityUsd",
+        "liquidity_usd",
+        "liquidity",
+        "totalLiquidity",
+        "total_liquidity",
+        "volume24hUsd",
+        "volume24h",
+        "tvl",
+        "tvlUsd",
+    ]
+    for key in keys:
+        value = entry.get(key)
+        try:
+            liquidity = float(value)
+            if liquidity > 0:
+                return liquidity
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _choose_focus_mint(
+    base: str | None,
+    quote: str | None,
+    candidates: Sequence[str],
+    stable_tokens: Sequence[str],
+) -> Tuple[str | None, str | None]:
+    stable_set = set(stable_tokens)
+    if base and base not in stable_set and quote and quote in stable_set:
+        return base, quote
+    if quote and quote not in stable_set and base and base in stable_set:
+        return quote, base
+    for candidate in candidates:
+        if candidate not in stable_set:
+            if candidate == base and quote:
+                return candidate, quote
+            if candidate == quote and base:
+                return candidate, base
+    if candidates:
+        focus = candidates[0]
+        if focus == base:
+            return focus, quote
+        if focus == quote:
+            return focus, base
+    return base, quote
+
+
 async def _fetch_json(session: aiohttp.ClientSession, url: str) -> object:
     async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
         resp.raise_for_status()
@@ -177,6 +284,9 @@ async def run_amm_pool_watcher() -> None:
         raise RuntimeError("No AMM endpoints configured for AMM watcher")
 
     redis_client = aioredis.from_url(redis_url, decode_responses=True)
+    stable_tokens = set(DEFAULT_STABLE_TOKENS)
+    stable_tokens.update(_parse_list_env("STABLE_TOKENS"))
+    stable_tokens.update(_parse_list_env("GOLDEN_SEED_MINTS"))
 
     while True:
         try:
@@ -192,13 +302,15 @@ async def run_amm_pool_watcher() -> None:
                             if pool_id in _SEEN_POOLS:
                                 continue
                             _SEEN_POOLS[pool_id] = _now()
-                        for mint in _extract_candidate_mints(entry):
+                        now_ts = _now()
+                        candidates = _extract_candidate_mints(entry)
+                        for mint in candidates:
                             if mint in _SEEN_MINT:
                                 continue
-                            _SEEN_MINT[mint] = _now()
+                            _SEEN_MINT[mint] = now_ts
                             event = {
                                 "topic": "token_discovered",
-                                "ts": _now(),
+                                "ts": now_ts,
                                 "source": "amm_watch",
                                 "mint": mint,
                                 "tx": pool_id or "",
@@ -210,6 +322,57 @@ async def run_amm_pool_watcher() -> None:
                                 },
                             }
                             await redis_client.publish(channel, json.dumps(event, separators=(",", ":")))
+                        base, quote = _extract_pair(entry)
+                        focus_mint, quote_token = _choose_focus_mint(base, quote, candidates, stable_tokens)
+                        if not focus_mint or not quote_token:
+                            continue
+                        if focus_mint in _PROMOTED:
+                            continue
+                        liquidity = _extract_liquidity(entry)
+                        price = _extract_price(entry, base, quote)
+                        _PROMOTED[focus_mint] = now_ts
+                        promoted = {
+                            "topic": "token_promoted",
+                            "ts": now_ts,
+                            "source": "amm_watch",
+                            "mint": focus_mint,
+                            "pool": pool_id or "",
+                            "quote": quote_token,
+                            "liquidity": liquidity,
+                            "price": price,
+                            "dex": label,
+                        }
+                        await redis_client.publish(channel, json.dumps(promoted, separators=(",", ":")))
+                        if liquidity > 0:
+                            depth_payload = {
+                                "topic": "depth_update",
+                                "entries": {
+                                    focus_mint: {
+                                        "bids": liquidity,
+                                        "asks": liquidity,
+                                        "dex": {
+                                            label: {
+                                                "bids": liquidity,
+                                                "asks": liquidity,
+                                                "tx_rate": 0.0,
+                                            }
+                                        },
+                                        "tx_rate": 0.0,
+                                        "ts": int(now_ts),
+                                    }
+                                },
+                            }
+                            await redis_client.publish(channel, json.dumps(depth_payload, separators=(",", ":")))
+                        if price and (_PRICED.get(focus_mint, 0) + 30) < now_ts:
+                            _PRICED[focus_mint] = now_ts
+                            price_event = {
+                                "topic": "price_update",
+                                "venue": f"{label}_bootstrap",
+                                "token": focus_mint,
+                                "price": price,
+                                "ts": now_ts,
+                            }
+                            await redis_client.publish(channel, json.dumps(price_event, separators=(",", ":")))
         except Exception:
             await asyncio.sleep(min(5, poll_interval))
         else:
@@ -217,4 +380,5 @@ async def run_amm_pool_watcher() -> None:
         finally:
             _keep_ttl(_SEEN_POOLS, dedup_ttl)
             _keep_ttl(_SEEN_MINT, dedup_ttl)
-
+            _keep_ttl(_PROMOTED, dedup_ttl)
+            _keep_ttl(_PRICED, dedup_ttl)

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
 from typing import List, Tuple
 
 import redis.asyncio as aioredis
+
+from . import prices
 
 
 def _parse_tokens(name: str) -> Tuple[str, ...]:
@@ -67,7 +70,26 @@ async def run_seed_token_publisher() -> None:
                 "discovery": {"method": "seeded"},
             }
             payloads.append(json.dumps(event, separators=(",", ":")))
-        for payload in payloads:
-            await redis_client.publish(channel, payload)
-        await asyncio.sleep(interval)
 
+        try:
+            quotes = await prices.fetch_price_quotes_async(tokens)
+        except Exception:
+            quotes = {}
+
+        price_payloads = []
+        for token in tokens:
+            quote = quotes.get(token)
+            if quote and getattr(quote, "price_usd", 0.0) > 0:
+                price_event = {
+                    "topic": "price_update",
+                    "venue": quote.source or "seed_bootstrap",
+                    "token": token,
+                    "price": float(quote.price_usd),
+                    "ts": now,
+                }
+                price_payloads.append(json.dumps(price_event, separators=(",", ":")))
+
+        for payload in payloads + price_payloads:
+            await redis_client.publish(channel, payload)
+
+        await asyncio.sleep(interval)

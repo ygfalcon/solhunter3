@@ -241,6 +241,27 @@ def _candidate_mints(
     return []
 
 
+def _score_signal(info: Dict[str, object]) -> float:
+    score = 0.3
+    if info.get("token"):
+        score += 0.2
+    if info.get("metadata"):
+        score += 0.3
+    if info.get("pump"):
+        score += 0.3
+    if info.get("amm"):
+        score += 0.2
+    if info.get("ata"):
+        score += 0.05
+    if info.get("system"):
+        score += 0.05
+    if info.get("metadata") and info.get("token"):
+        score = max(score, 0.85)
+    if info.get("pump") and info.get("amm"):
+        score = max(score, 0.9)
+    return min(score, 0.99)
+
+
 async def run_jito_mempool_stream() -> None:
     ws_url = os.getenv("MEMPOOL_STREAM_WS_URL") or os.getenv("JITO_WS_URL")
     auth_token = os.getenv("MEMPOOL_STREAM_AUTH") or os.getenv("JITO_WS_AUTH")
@@ -262,6 +283,7 @@ async def run_jito_mempool_stream() -> None:
     backoff_start = _parse_float_env("MEMPOOL_STREAM_BACKOFF_START", 1.0, minimum=0.5)
     backoff_cap = _parse_float_env("MEMPOOL_STREAM_BACKOFF_CAP", 20.0, minimum=backoff_start)
     dedup_ttl = _parse_float_env("MEMPOOL_STREAM_DEDUP_TTL_SEC", 3600.0, minimum=60.0)
+    min_confidence = _parse_float_env("MEMPOOL_STREAM_MIN_CONFIDENCE", 0.45, minimum=0.0)
 
     redis_client = aioredis.from_url(redis_url, decode_responses=True)
     backoff = backoff_start
@@ -312,6 +334,7 @@ async def run_jito_mempool_stream() -> None:
                         continue
                     _SEEN_SIG[signature] = _now()
 
+                    mint_signals: Dict[str, Dict[str, object]] = {}
                     for ix in instructions:
                         program_id = _resolve_program_id(ix, account_keys)
                         if not program_id:
@@ -319,35 +342,80 @@ async def run_jito_mempool_stream() -> None:
                         accounts = _resolve_account_keys(ix, account_keys)
                         if not accounts:
                             continue
-                        if program_id not in seen_programs:
-                            if prefilter:
-                                continue
+                        if program_id not in seen_programs and prefilter:
+                            continue
                         candidates = _candidate_mints(program_id, accounts, pump_ids, amm_ids)
                         if not candidates and program_id in {TOKEN_PROGRAM, TOKEN2022_PROGRAM} and not prefilter:
                             for acct in accounts:
                                 if _looks_like_pubkey(acct):
                                     candidates = [(acct, [])]
                                     break
+                        if not candidates:
+                            continue
                         for mint, tags in candidates:
                             if not _looks_like_pubkey(mint):
                                 continue
-                            if mint in _SEEN_MINT:
-                                continue
-                            _SEEN_MINT[mint] = _now()
-                            event = {
-                                "topic": "token_discovered",
-                                "ts": _now(),
-                                "source": "jito_mempool",
-                                "mint": mint,
-                                "tx": signature,
-                                "tags": tags,
-                                "interface": "FungibleToken",
-                                "discovery": {
-                                    "method": "jito_mempool",
-                                    "program": program_id,
+                            info = mint_signals.setdefault(
+                                mint,
+                                {
+                                    "tags": set(),
+                                    "programs": set(),
+                                    "pump": False,
+                                    "metadata": False,
+                                    "amm": False,
+                                    "token": False,
+                                    "ata": False,
+                                    "system": False,
                                 },
-                            }
-                            await redis_client.publish(channel, json.dumps(event, separators=(",", ":")))
+                            )
+                            info["programs"].add(program_id)
+                            info["tags"].update(tags)
+                            if program_id in pump_ids:
+                                info["pump"] = True
+                                info["tags"].add("pump")
+                            if program_id in amm_ids:
+                                info["amm"] = True
+                                info["tags"].add("amm")
+                            if program_id == METAPLEX_METADATA_PROGRAM:
+                                info["metadata"] = True
+                                info["tags"].add("metadata")
+                            if program_id in {TOKEN_PROGRAM, TOKEN2022_PROGRAM}:
+                                info["token"] = True
+                                info["tags"].add("token")
+                            if program_id == ASSOCIATED_TOKEN_PROGRAM:
+                                info["ata"] = True
+                            if program_id == SYSTEM_PROGRAM:
+                                info["system"] = True
+
+                    now_ts = _now()
+                    for mint, info in mint_signals.items():
+                        if mint in _SEEN_MINT:
+                            continue
+                        if prefilter and not (
+                            info.get("metadata") or info.get("pump") or info.get("amm")
+                        ):
+                            continue
+                        confidence = _score_signal(info)
+                        if confidence < min_confidence:
+                            continue
+                        _SEEN_MINT[mint] = now_ts
+                        tags = sorted(set(info.get("tags") or []))
+                        event = {
+                            "topic": "token_discovered",
+                            "ts": now_ts,
+                            "source": "jito_mempool",
+                            "mint": mint,
+                            "tx": signature,
+                            "tags": tags,
+                            "preconfirm": True,
+                            "confidence": round(confidence, 3),
+                            "interface": "FungibleToken",
+                            "discovery": {
+                                "method": "jito_mempool",
+                                "programs": sorted(info.get("programs", [])),
+                            },
+                        }
+                        await redis_client.publish(channel, json.dumps(event, separators=(",", ":")))
 
                     _keep_ttl(_SEEN_SIG, dedup_ttl)
                     _keep_ttl(_SEEN_MINT, dedup_ttl)
