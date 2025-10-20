@@ -16,6 +16,19 @@ import websockets
 
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+SYSTEM_PROGRAM = "11111111111111111111111111111111"
+ASSOCIATED_TOKEN_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+METAPLEX_METADATA_PROGRAM = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+
+DEFAULT_STREAM_PROGRAMS = (
+    SYSTEM_PROGRAM,
+    TOKEN_PROGRAM,
+    TOKEN2022_PROGRAM,
+    ASSOCIATED_TOKEN_PROGRAM,
+    METAPLEX_METADATA_PROGRAM,
+)
+
+__all__ = ["run_rpc_mint_stream", "DEFAULT_STREAM_PROGRAMS"]
 
 _SEEN_SIG: Dict[str, float] = {}
 _SEEN_MINT: Dict[str, float] = {}
@@ -138,11 +151,11 @@ async def run_rpc_mint_stream() -> None:
     http_url = os.getenv("MINT_STREAM_HTTP_URL")
     redis_url = os.getenv("MINT_STREAM_REDIS_URL", "redis://localhost:6379/0")
     channel = os.getenv("MINT_STREAM_BROKER_CHANNEL", "solhunter-events-v2")
-    pump_ids = [
-        candidate.strip()
-        for candidate in (os.getenv("PUMP_PROGRAM_IDS") or "").split(",")
-        if candidate.strip()
-    ]
+    base_programs = _parse_program_list("MINT_STREAM_PROGRAM_IDS", DEFAULT_STREAM_PROGRAMS)
+    pump_ids = _parse_program_list("PUMP_FUN_PROGRAM_IDS", ())
+    if not pump_ids:
+        pump_ids = _parse_program_list("PUMP_PROGRAM_IDS", ())
+    amm_ids = _parse_program_list("AMM_PROGRAM_IDS", ())
 
     prefilter = os.getenv("MINT_STREAM_PREFILTER", "1") != "0"
     max_queue = _safe_int_env("MINT_STREAM_MAX_QUEUE", 512, minimum=64)
@@ -158,12 +171,20 @@ async def run_rpc_mint_stream() -> None:
 
     redis_client = aioredis.from_url(redis_url, decode_responses=True)
     backoff = backoff_start
-    sub_ids: List[Tuple[str, int]] = [
-        (TOKEN_PROGRAM, 1001),
-        (TOKEN2022_PROGRAM, 1002),
-    ]
+    seen_programs: set[str] = set()
+    sub_ids: List[Tuple[str, int]] = []
+
+    def _add_subscription(program: str, sub_id: int) -> None:
+        if program and program not in seen_programs:
+            seen_programs.add(program)
+            sub_ids.append((program, sub_id))
+
+    for idx, program_id in enumerate(base_programs, start=1000):
+        _add_subscription(program_id, idx)
     for idx, program_id in enumerate(pump_ids, start=2000):
-        sub_ids.append((program_id, idx))
+        _add_subscription(program_id, idx)
+    for idx, program_id in enumerate(amm_ids, start=3000):
+        _add_subscription(program_id, idx)
 
     while True:
         try:
@@ -210,10 +231,29 @@ async def run_rpc_mint_stream() -> None:
                     is_token_program = any(
                         pid in mentions for pid in (TOKEN_PROGRAM, TOKEN2022_PROGRAM)
                     )
+                    is_metadata = METAPLEX_METADATA_PROGRAM in mentions
+                    is_associated = ASSOCIATED_TOKEN_PROGRAM in mentions
+                    is_system = SYSTEM_PROGRAM in mentions
+                    is_amm = any(pid in mentions for pid in amm_ids)
 
-                    if not is_pump and not is_token_program:
+                    if (
+                        not is_pump
+                        and not is_token_program
+                        and not is_metadata
+                        and not is_associated
+                        and not is_system
+                        and not is_amm
+                    ):
                         continue
-                    if not is_pump and not _should_fetch_logs(prefilter, logs):
+                    if (
+                        prefilter
+                        and not is_pump
+                        and not is_metadata
+                        and not is_associated
+                        and not is_system
+                        and not is_amm
+                        and not _should_fetch_logs(True, logs)
+                    ):
                         continue
 
                     with contextlib.suppress(Exception):
@@ -223,16 +263,34 @@ async def run_rpc_mint_stream() -> None:
                             if mint in _SEEN_MINT:
                                 continue
                             _SEEN_MINT[mint] = _now()
+                            if is_pump:
+                                source = "pump_logs"
+                            elif is_amm:
+                                source = "amm_logs"
+                            elif is_metadata:
+                                source = "metadata_logs"
+                            elif is_associated:
+                                source = "ata_logs"
+                            elif is_system:
+                                source = "system_logs"
+                            elif is_token_program:
+                                source = "token_logs"
+                            else:
+                                source = "rpc_logs"
                             event = {
                                 "topic": "token_discovered",
                                 "ts": _now(),
-                                "source": "pump_logs" if is_pump else "rpc_logs",
+                                "source": source,
                                 "mint": mint,
                                 "tx": signature,
-                                "tags": ["pump"] if is_pump else [],
+                                "tags": (
+                                    ["pump"]
+                                    if is_pump
+                                    else (["amm"] if is_amm else [])
+                                ),
                                 "interface": "FungibleToken",
                                 "discovery": {
-                                    "method": "pump_logs" if is_pump else "rpc_logs",
+                                    "method": source,
                                 },
                             }
                             await redis_client.publish(channel, json.dumps(event, separators=(",", ":")))
@@ -242,6 +300,18 @@ async def run_rpc_mint_stream() -> None:
         except Exception:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 1.6 + random.uniform(0, 0.5), backoff_cap)
+
+
+def _parse_program_list(name: str, default: Iterable[str] | Tuple[str, ...]) -> Tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return tuple(default)
+    tokens = []
+    for candidate in raw.split(","):
+        candidate = candidate.strip()
+        if candidate:
+            tokens.append(candidate)
+    return tuple(tokens)
 
 
 def _safe_int_env(name: str, default: int, *, minimum: int) -> int:
