@@ -396,6 +396,14 @@ def should_try_next_sort_variant(message: str, variant: Any) -> bool:
     return True
 
 
+def _maybe_sort_by(sort_direction: str) -> Dict[str, Any]:
+    """Return a ``sortBy`` payload when created-sort is enabled."""
+
+    if _DISABLE_CREATED_SORT:
+        return {}
+    return {"sortBy": {"sortBy": "created", "sortDirection": sort_direction}}
+
+
 def build_search_param_variants(
     *,
     page: Optional[int],
@@ -406,11 +414,7 @@ def build_search_param_variants(
 ) -> Tuple[Dict[str, Any], ...]:
     """Return parameter variants compatible with DAS ``searchAssets``."""
 
-    base = {
-        "page": page,
-        "limit": limit,
-        "sortBy": {"sort_by": "created", "sort_direction": sort_direction},
-    }
+    base = {"page": page, "limit": limit, **_maybe_sort_by(sort_direction)}
 
     variants: List[Dict[str, Any]] = [{**base, "interface": "FungibleToken"}]
 
