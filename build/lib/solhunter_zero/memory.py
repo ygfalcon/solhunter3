@@ -79,7 +79,13 @@ class Memory(BaseMemory):
             url = url.replace("sqlite://", "sqlite+aiosqlite://", 1)
 
         # Keep connections healthy for long-lived processes and remote DBs
-        pool_recycle = int(os.getenv("MEMORY_POOL_RECYCLE_SEC", "0") or 0) or None
+        raw_recycle = os.getenv("MEMORY_POOL_RECYCLE_SEC", "").strip()
+        pool_recycle: int
+        try:
+            value = int(raw_recycle) if raw_recycle else 0
+        except Exception:
+            value = 0
+        pool_recycle = value if value > 0 else -1
         self.engine = create_async_engine(
             url,
             echo=False,

@@ -821,7 +821,91 @@ async def _dexscreener_trending_movers(
         "https://api.dexscreener.com/latest/dex/tokens/trending",
     ).strip()
     if not url:
-    return []
+        return []
+
+    params = {
+        "type": os.getenv("DEXSCREENER_TRENDING_TYPE", "movers"),
+        "chain": os.getenv("DEXSCREENER_TRENDING_CHAIN", "solana"),
+        "limit": max(1, int(limit)),
+    }
+    try:
+        async with session.get(url, params=params, timeout=_HELIUS_TIMEOUT) as resp:
+            resp.raise_for_status()
+            payload = await resp.json(content_type=None)
+    except Exception as exc:  # pragma: no cover - network/runtime failures
+        logger.debug("Dexscreener trending request failed: %s", exc)
+        return []
+
+    items: Any = []
+    if isinstance(payload, dict):
+        for key in ("movers", "tokens", "pairs", "items", "data", "results"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                items = candidate
+                break
+        else:
+            items = payload.get("data") or payload
+    else:
+        items = payload
+
+    if isinstance(items, dict):
+        for key in ("items", "tokens", "pairs", "results"):
+            candidate = items.get(key)
+            if isinstance(candidate, list):
+                items = candidate
+                break
+        else:
+            items = list(items.values())
+
+    if not isinstance(items, list):
+        return []
+
+    seen: Set[str] = set()
+    results: List[Dict[str, Any]] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        candidates: List[object] = [
+            raw.get("tokenAddress"),
+            raw.get("address"),
+            raw.get("mint"),
+            raw.get("baseTokenAddress"),
+            raw.get("baseToken"),
+        ]
+        mint: Optional[str] = None
+        for candidate in candidates:
+            mint = _normalize_mint_candidate(candidate)
+            if mint:
+                break
+        if not mint or mint in seen:
+            continue
+        seen.add(mint)
+        entry: Dict[str, Any] = {
+            "address": mint,
+            "source": "dexscreener_trending",
+            "rank": len(results),
+            "raw": raw,
+        }
+        liquidity = _search_numeric(raw, ("liquidityUsd", "liquidity"))
+        if liquidity is not None:
+            entry["liquidity"] = _nz_pos(liquidity)
+        volume = _search_numeric(
+            raw,
+            ("volume24h", "volumeUsd", "usdVolume"),
+        )
+        if volume is not None:
+            entry["volume"] = _nz_pos(volume)
+        symbol = raw.get("symbol") or raw.get("tokenSymbol")
+        if isinstance(symbol, str) and symbol:
+            entry["symbol"] = symbol
+        name = raw.get("name") or raw.get("tokenName")
+        if isinstance(name, str) and name:
+            entry["name"] = name
+        _finalize_sources(entry)
+        results.append(entry)
+        if len(results) >= limit:
+            break
+    return results
 
 
 async def _dexscreener_new_pairs(
@@ -972,133 +1056,6 @@ def _pyth_seed_entries() -> List[Dict[str, Any]]:
         _finalize_sources(entry)
         entries.append(entry)
     return entries
-    params = {
-        "type": os.getenv("DEXSCREENER_TRENDING_TYPE", "movers"),
-        "chain": os.getenv("DEXSCREENER_TRENDING_CHAIN", "solana"),
-        "limit": max(1, int(limit)),
-    }
-    try:
-        async with session.get(url, params=params, timeout=_HELIUS_TIMEOUT) as resp:
-            resp.raise_for_status()
-            payload = await resp.json(content_type=None)
-    except Exception as exc:  # pragma: no cover - network/runtime failures
-        logger.debug("Dexscreener trending request failed: %s", exc)
-        return []
-
-    items: Any = []
-    if isinstance(payload, dict):
-        for key in ("movers", "tokens", "pairs", "items", "data", "results"):
-            candidate = payload.get(key)
-            if isinstance(candidate, list):
-                items = candidate
-                break
-        else:
-            items = payload.get("data") or payload
-    else:
-        items = payload
-
-    if isinstance(items, dict):
-        for key in ("items", "tokens", "pairs", "results"):
-            candidate = items.get(key)
-            if isinstance(candidate, list):
-                items = candidate
-                break
-        else:
-            items = list(items.values())
-
-    if not isinstance(items, list):
-        return []
-
-    seen: Set[str] = set()
-    results: List[Dict[str, Any]] = []
-    for raw in items:
-        if not isinstance(raw, dict):
-            continue
-        candidates: List[object] = [
-            raw.get("tokenAddress"),
-            raw.get("address"),
-            raw.get("mint"),
-            raw.get("mintAddress"),
-            raw.get("baseMint"),
-        ]
-        base_token = raw.get("baseToken") or raw.get("token")
-        if isinstance(base_token, dict):
-            candidates.extend(
-                [
-                    base_token.get("address"),
-                    base_token.get("mint"),
-                    base_token.get("mintAddress"),
-                ]
-            )
-        token_info = raw.get("tokenInfo")
-        if isinstance(token_info, dict):
-            candidates.extend(
-                [
-                    token_info.get("address"),
-                    token_info.get("mint"),
-                    token_info.get("mintAddress"),
-                ]
-            )
-        mint: str | None = None
-        for candidate in candidates:
-            mint = _normalize_mint_candidate(candidate)
-            if mint:
-                break
-        if not mint or mint in seen:
-            continue
-        seen.add(mint)
-        record: Dict[str, Any] = {
-            "address": mint,
-            "source": "dexscreener",
-            "raw": raw,
-        }
-        record["sources"] = ["dexscreener"]
-        _ensure_metadata(record)["dexscreener"] = raw
-        _finalize_sources(record)
-        liquidity_dict = raw.get("liquidity") if isinstance(raw.get("liquidity"), dict) else None
-        liquidity_val = None
-        if isinstance(liquidity_dict, dict):
-            liquidity_val = _coerce_float(liquidity_dict.get("usd"))
-        if liquidity_val is None:
-            liquidity_val = _search_numeric(
-                raw,
-                ("liquidityusd", "usdliquidity", "totalliquidity", "liquidity"),
-            )
-        if liquidity_val is not None:
-            record["liquidity"] = _nz_pos(liquidity_val)
-
-        volume_val: float | None = None
-        volume_info = raw.get("volume")
-        if isinstance(volume_info, dict):
-            for key in ("h24", "h6", "h1", "m5"):
-                value = _coerce_float(volume_info.get(key))
-                if value:
-                    volume_val = value
-                    break
-        if volume_val is None:
-            volume_val = _search_numeric(
-                raw,
-                ("volume24h", "volumeusd", "usdvolume", "volume"),
-                avoid=("ratio", "change"),
-            )
-        if volume_val is not None:
-            record["volume"] = _nz_pos(volume_val)
-
-        base_meta = raw.get("baseToken") or raw.get("token") or {}
-        if isinstance(base_meta, dict):
-            symbol = base_meta.get("symbol") or base_meta.get("tokenSymbol")
-            if isinstance(symbol, str) and symbol:
-                record["symbol"] = symbol
-            name = base_meta.get("name") or base_meta.get("tokenName")
-            if isinstance(name, str) and name:
-                record["name"] = name
-
-        results.append(record)
-        if len(results) >= limit:
-            break
-
-    return results
-
 
 async def _das_enrich_candidates(
     session: aiohttp.ClientSession,

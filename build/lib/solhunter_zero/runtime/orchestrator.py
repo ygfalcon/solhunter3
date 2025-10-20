@@ -396,15 +396,18 @@ class RuntimeOrchestrator:
                 )
                 log.info("GOLDEN_READY topic=x:mint.golden providers=%s", agent_count)
                 wiring = self.handles.runtime_wiring
+                ready = True
                 if wiring is not None:
                     ready = await wiring.wait_for_topic("x:mint.golden", timeout=5.0)
-                else:
-                    ready = True
                 if not ready:
                     detail = "missing topic x:mint.golden"
+                    log.warning(
+                        "Golden pipeline topic x:mint.golden not observed within readiness window; continuing (detail=%s)",
+                        detail,
+                    )
                     await self._publish_stage("golden:ready", False, detail)
-                    raise RuntimeError(detail)
-                await self._publish_stage("golden:ready", True, "topic=x:mint.golden")
+                else:
+                    await self._publish_stage("golden:ready", True, "topic=x:mint.golden")
             except Exception as exc:
                 await self._publish_stage("golden:start", False, str(exc))
                 log.exception("Failed to start Golden pipeline service")

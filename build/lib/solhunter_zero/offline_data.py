@@ -73,7 +73,13 @@ class OfflineData:
     def __init__(self, url: str = "sqlite:///offline_data.db") -> None:
         if url.startswith("sqlite:///") and "+" not in url:
             url = url.replace("sqlite:///", "sqlite+aiosqlite:///")
-        pool_recycle = int(os.getenv("OFFLINE_POOL_RECYCLE_SEC", "0") or 0) or None
+        raw_recycle = os.getenv("OFFLINE_POOL_RECYCLE_SEC", "").strip()
+        pool_recycle: int
+        try:
+            value = int(raw_recycle) if raw_recycle else 0
+        except Exception:
+            value = 0
+        pool_recycle = value if value > 0 else -1
         self.engine = create_async_engine(
             url,
             echo=False,
