@@ -69,6 +69,25 @@ def _extract_helius_key() -> str:
 
 logger = logging.getLogger(__name__)
 
+def _env_token_list(name: str) -> tuple[str, ...]:
+    tokens: list[str] = []
+    raw_value = os.getenv(name, "")
+    if not raw_value:
+        return tuple()
+    for raw in raw_value.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        canonical = canonical_mint(token)
+        if validate_mint(canonical):
+            tokens.append(canonical)
+    return tuple(tokens)
+
+
+DEXSCREENER_DISABLED = parse_bool_env("DEXSCREENER_DISABLED", False)
+STATIC_SEED_TOKENS = _env_token_list("STATIC_SEED_TOKENS")
+PUMP_STATIC_TOKENS = _env_token_list("PUMP_FUN_TOKENS")
+
 USE_DAS_DISCOVERY = parse_bool_env("USE_DAS_DISCOVERY", False)
 
 
@@ -1242,13 +1261,14 @@ async def _collect_trending_seeds(
         seeds.append(candidate)
         seen.add(mint)
 
-    new_pairs = await _dexscreener_new_pairs(session, limit=desired)
-    if new_pairs:
-        logger.info("Dexscreener new pairs returned %d candidate(s)", len(new_pairs))
-    for entry in new_pairs:
-        _append_seed(entry, "dexscreener")
-        if len(seeds) >= desired:
-            break
+    if not DEXSCREENER_DISABLED:
+        new_pairs = await _dexscreener_new_pairs(session, limit=desired)
+        if new_pairs:
+            logger.info("Dexscreener new pairs returned %d candidate(s)", len(new_pairs))
+        for entry in new_pairs:
+            _append_seed(entry, "dexscreener")
+            if len(seeds) >= desired:
+                break
 
     if len(seeds) < desired:
         for entry in _pyth_seed_entries():
@@ -1288,7 +1308,7 @@ async def _collect_trending_seeds(
 
     async def _gather_sources() -> None:
         nonlocal seeds, seen
-        if len(seeds) < desired:
+        if not DEXSCREENER_DISABLED and len(seeds) < desired:
             dexscreener_candidates = await _dexscreener_trending_movers(
                 session, limit=desired
             )
@@ -1691,6 +1711,30 @@ async def _pump_trending(
     if tokens and logger.isEnabledFor(logging.INFO):
         logger.info("Pump.fun leaderboard returned %d candidate(s)", len(tokens))
 
+    if not tokens and PUMP_STATIC_TOKENS:
+        static_tokens: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for canonical in PUMP_STATIC_TOKENS:
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            meta: Dict[str, Any] = {
+                "address": canonical,
+                "source": "pumpfun_static",
+                "sources": ["pumpfun_static"],
+                "rank": len(static_tokens),
+            }
+            _finalize_sources(meta)
+            static_tokens.append(meta)
+            if len(static_tokens) >= limit:
+                break
+        if static_tokens and logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "Pump.fun static fallback supplied %d candidate(s)",
+                len(static_tokens),
+            )
+        tokens = static_tokens
+
     return tokens
 
 
@@ -2023,24 +2067,29 @@ async def _scan_tokens_async_locked(
 
     def _apply_static() -> List[str]:
         TRENDING_METADATA.clear()
-        fallback = [
+        defaults = [
             "So11111111111111111111111111111111111111112",  # SOL
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
             "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
             "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",  # JUP
         ]
+        candidates: List[str] = list(STATIC_SEED_TOKENS)
+        candidates.extend(defaults)
         fallback_valid: List[str] = []
-        for candidate in fallback:
-            canonical = canonical_mint(candidate)
-            if not validate_mint(canonical):
+        seen: set[str] = set()
+        for candidate in candidates:
+            canonical = candidate if candidate in STATIC_SEED_TOKENS else canonical_mint(candidate)
+            if not validate_mint(canonical) or canonical in seen:
                 continue
+            seen.add(canonical)
             fallback_valid.append(canonical)
+            source = "static_env" if canonical in STATIC_SEED_TOKENS else "static"
             entry = TRENDING_METADATA.setdefault(
                 canonical,
                 {
                     "address": canonical,
-                    "source": "static",
-                    "sources": ["static"],
+                    "source": source,
+                    "sources": [source],
                     "rank": len(TRENDING_METADATA),
                 },
             )
@@ -2443,7 +2492,7 @@ async def _scan_tokens_async_locked(
                 ),
             )
 
-        if not mints:
+        if not mints and USE_DAS_DISCOVERY:
             search_items = await _helius_search_assets(
                 session,
                 limit=requested,
@@ -2491,8 +2540,12 @@ async def _scan_tokens_async_locked(
             if mints:
                 logger.info("Helius searchAssets filled %d candidates", len(mints))
                 success = True
+        elif not mints and not USE_DAS_DISCOVERY:
+            logger.debug("DAS discovery disabled; skipping searchAssets fallback")
 
-        if not mints and not forced_cooldown_reason:
+        if not mints and (
+            not forced_cooldown_reason or forced_cooldown_reason == "seed-empty"
+        ):
             pump_tokens = await _pump_trending(session, limit=requested)
             for meta in pump_tokens:
                 mint = _normalize_mint_candidate(meta.get("address"))
@@ -2505,6 +2558,8 @@ async def _scan_tokens_async_locked(
             if pump_tokens:
                 logger.info("Pump.fun fallback supplied %d candidate(s)", len(pump_tokens))
                 success = True
+                if forced_cooldown_reason == "seed-empty":
+                    forced_cooldown_reason = None
 
         if not mints:
             cached = _apply_cached()
