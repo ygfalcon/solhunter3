@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -39,6 +40,63 @@ log = logging.getLogger(__name__)
 
 _GLOBAL_CAP_ENV = "SWARM_AGENT_GLOBAL_CAP_USD"
 _AGENT_CAPS_ENV = "SWARM_AGENT_AGENT_CAPS_USD"
+_AGENT_TIMEOUT_ENV_VARS = (
+    "GOLDEN_AGENT_TIMEOUT_SEC",
+    "GOLDEN_AGENT_TIMEOUT",
+    "AGENT_TIMEOUT",
+)
+_TIMEOUT_CONFIG_KEYS = (
+    "agent_timeout_sec",
+    "agent_timeout",
+    "timeout_sec",
+    "timeout",
+)
+_TOP_LEVEL_TIMEOUT_KEYS = (
+    "golden_agent_timeout_sec",
+    "golden_agent_timeout",
+)
+_DEFAULT_AGENT_TIMEOUT_SEC = 1.5
+
+
+def _interpret_timeout(value: Any) -> tuple[bool, float | None]:
+    coerced = _coerce_float(value)
+    if coerced is None:
+        return False, None
+    if not math.isfinite(coerced):
+        return True, None
+    if coerced <= 0:
+        return True, None
+    return True, coerced
+
+
+def _resolve_timeout_from_mapping(
+    mapping: Mapping[str, Any] | None,
+    keys: Sequence[str],
+) -> tuple[bool, float | None]:
+    if not isinstance(mapping, Mapping):
+        return False, None
+    for key in keys:
+        if key in mapping:
+            explicit, value = _interpret_timeout(mapping.get(key))
+            if explicit:
+                return True, value
+    return False, None
+
+
+def _resolve_timeout_from_config(
+    cfg: Mapping[str, Any] | None,
+) -> tuple[bool, float | None]:
+    explicit, value = _resolve_timeout_from_mapping(cfg, _TOP_LEVEL_TIMEOUT_KEYS)
+    if explicit:
+        return explicit, value
+    if not isinstance(cfg, Mapping):
+        return False, None
+    for section in ("golden", "golden_pipeline"):
+        nested = cfg.get(section)
+        explicit, value = _resolve_timeout_from_mapping(nested, _TIMEOUT_CONFIG_KEYS)
+        if explicit:
+            return explicit, value
+    return False, None
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -605,6 +663,32 @@ class AgentManagerAgent(BaseAgent):
 class GoldenPipelineService:
     """Orchestrate Golden pipeline ingestion from existing runtime events."""
 
+    DEFAULT_AGENT_TIMEOUT_SEC = _DEFAULT_AGENT_TIMEOUT_SEC
+
+    @staticmethod
+    def resolve_agent_timeout(
+        cfg: Mapping[str, Any] | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+        default: float | None = None,
+    ) -> float | None:
+        explicit, value = _resolve_timeout_from_config(cfg)
+        if explicit:
+            return value
+
+        env_map = env or os.environ
+        for name in _AGENT_TIMEOUT_ENV_VARS:
+            explicit, value = _interpret_timeout(env_map.get(name))
+            if explicit:
+                return value
+
+        resolved_default = (
+            default if default is not None else GoldenPipelineService.DEFAULT_AGENT_TIMEOUT_SEC
+        )
+        if resolved_default is None:
+            return None
+        return resolved_default if resolved_default > 0 else None
+
     def __init__(
         self,
         *,
@@ -612,6 +696,7 @@ class GoldenPipelineService:
         portfolio: Portfolio,
         enrichment_fetcher: Optional[Callable[[Iterable[str]], Awaitable[Dict[str, TokenSnapshot]]]] = None,
         event_bus: EventBus | None = None,
+        agent_timeout_sec: float | None = None,
     ) -> None:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
@@ -625,6 +710,12 @@ class GoldenPipelineService:
             bus=shared_bus,
             rejection_stream=STREAMS.trade_rejected,
         )
+        resolved_timeout = (
+            agent_timeout_sec
+            if agent_timeout_sec is not None
+            else self.resolve_agent_timeout()
+        )
+
         self.pipeline = GoldenPipeline(
             enrichment_fetcher=enrichment_fetcher,
             agents=[manager_agent],
@@ -634,6 +725,7 @@ class GoldenPipelineService:
             on_virtual_fill=self._handle_virtual_fill,
             on_virtual_pnl=self._handle_virtual_pnl,
             bus=shared_bus,
+            agent_timeout_sec=resolved_timeout,
         )
 
         self._subscriptions: List[Callable[[], None]] = []

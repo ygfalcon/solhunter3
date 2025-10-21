@@ -757,9 +757,11 @@ class RuntimeOrchestrator:
             try:
                 from ..golden_pipeline.service import GoldenPipelineService
 
+                agent_timeout = GoldenPipelineService.resolve_agent_timeout(cfg)
                 service = GoldenPipelineService(
                     agent_manager=agent_manager,
                     portfolio=portfolio,
+                    agent_timeout_sec=agent_timeout,
                 )
                 await service.start()
                 self._golden_service = service

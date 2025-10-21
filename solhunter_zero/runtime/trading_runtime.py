@@ -918,9 +918,11 @@ class TradingRuntime:
             try:
                 from ..golden_pipeline.service import GoldenPipelineService
 
+                agent_timeout = GoldenPipelineService.resolve_agent_timeout(self.cfg)
                 self._golden_service = GoldenPipelineService(
                     agent_manager=self.agent_manager,
                     portfolio=self.portfolio,
+                    agent_timeout_sec=agent_timeout,
                 )
                 await self._golden_service.start()
                 self.activity.add("golden_pipeline", "enabled")

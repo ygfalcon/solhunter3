@@ -99,6 +99,7 @@ class GoldenPipeline:
         vote_quorum: int = 2,
         vote_min_score: float = 0.04,
         allow_inmemory_bus_for_tests: bool = False,
+        agent_timeout_sec: float | None = None,
     ) -> None:
         mode = (os.getenv("SOLHUNTER_MODE") or "test").strip().lower() or "test"
         if bus is None:
@@ -166,6 +167,7 @@ class GoldenPipeline:
             cooldown_sec=agent_cooldown_sec,
             max_spread_bps=max_agent_spread_bps,
             min_depth1_pct_usd=min_agent_depth1_usd,
+            agent_timeout_sec=agent_timeout_sec,
         )
 
         async def _emit_decision(decision: Decision) -> None:

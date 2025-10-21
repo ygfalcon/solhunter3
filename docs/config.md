@@ -42,3 +42,10 @@ additional instrumentation.
   credentials as part of bring-up.
 * `scripts/bus_smoke.py` proves the event bus can create streams, publish
   messages, and respect TTLs.
+
+## Golden pipeline configuration
+
+* `golden.agent_timeout_sec` (environment `GOLDEN_AGENT_TIMEOUT_SEC`) controls
+  how long the Golden pipeline waits for each agent to respond before the stage
+  cancels the task and emits a warning. Setting the value to `0` disables the
+  timeout entirely.

@@ -128,6 +128,9 @@ rl_prefetch_buffer = "0"
 solana_keypair = "keypairs/default.json"
 jito_rpc_url = "https://mainnet.block-engine.jito.wtf"
 
+[golden]
+agent_timeout_sec = 1.5
+
 [resource_limits]
 cpu_percent = 80.0
 cpu_action = "throttle"

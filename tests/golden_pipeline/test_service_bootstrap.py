@@ -1,8 +1,11 @@
 import asyncio
+import os
 import sys
 import types
 from types import SimpleNamespace
 from typing import Iterable
+
+import pytest
 
 if "solhunter_zero.agent_manager" not in sys.modules:
     agent_manager_stub = types.ModuleType("solhunter_zero.agent_manager")
@@ -65,6 +68,38 @@ class RecordingAgentManager:
 
 
 MINT = "MintAphex1111111111111111111111111111111"
+
+
+def _clear_timeout_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("GOLDEN_AGENT_TIMEOUT_SEC", "GOLDEN_AGENT_TIMEOUT", "AGENT_TIMEOUT"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_resolve_agent_timeout_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_timeout_env(monkeypatch)
+    timeout = GoldenPipelineService.resolve_agent_timeout({}, env={})
+    assert timeout == pytest.approx(GoldenPipelineService.DEFAULT_AGENT_TIMEOUT_SEC)
+
+
+def test_resolve_agent_timeout_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_timeout_env(monkeypatch)
+    cfg = {"golden": {"agent_timeout_sec": 2.25}}
+    timeout = GoldenPipelineService.resolve_agent_timeout(cfg, env={})
+    assert timeout == pytest.approx(2.25)
+
+
+def test_resolve_agent_timeout_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_timeout_env(monkeypatch)
+    monkeypatch.setenv("GOLDEN_AGENT_TIMEOUT", "2.75")
+    timeout = GoldenPipelineService.resolve_agent_timeout({}, env=dict(os.environ))
+    assert timeout == pytest.approx(2.75)
+
+
+def test_resolve_agent_timeout_disable(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_timeout_env(monkeypatch)
+    monkeypatch.setenv("GOLDEN_AGENT_TIMEOUT_SEC", "0")
+    timeout = GoldenPipelineService.resolve_agent_timeout({}, env=dict(os.environ))
+    assert timeout is None
 
 def test_agents_receive_bootstrapped_snapshot() -> None:
     async def _run() -> None:

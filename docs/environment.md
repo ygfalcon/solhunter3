@@ -13,6 +13,7 @@ files unless the loader is invoked with `overwrite=True`.
 | `ACTIVITY_MODEL_PATH` | `` | Path to activity model |
 | `AGENTS` | `` | Configures agents |
 | `AGENT_WEIGHTS` | `` | Configures agent weights |
+| `GOLDEN_AGENT_TIMEOUT_SEC` | `1.5` | Maximum time in seconds to wait for a Golden agent before cancelling it (set to `0` to disable). |
 | `ARBITRAGE_AMOUNT` | `0` | Configures arbitrage amount |
 | `ARBITRAGE_THRESHOLD` | `0` | Threshold for arbitrage |
 | `ARBITRAGE_TOKENS` | `` | Configures arbitrage tokens |

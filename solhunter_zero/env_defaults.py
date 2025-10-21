@@ -23,6 +23,7 @@ DEFAULTS: dict[str, str] = {
     "DEX_BASE_URL": "https://swap.helius.dev",
     "AGENTS": "['sim']",
     "AGENT_WEIGHTS": "{'sim': 1.0}",
+    "GOLDEN_AGENT_TIMEOUT_SEC": "1.5",
 
     # Depth service paths and settings
     "DEPTH_SERVICE_SOCKET": "/tmp/depth_service.sock",
