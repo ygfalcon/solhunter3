@@ -23,6 +23,15 @@ def test_ui_smoke_synth_values(runtime, bus, kv, synth_seed):
     assert shadow.get("paper_positions")
     assert shadow["paper_positions"][0]["unrealized_usd"] > 0.0
 
+    token_facts = runtime.ui_state.snapshot_token_facts()
+    assert token_facts.get("tokens")
+
+    rl_panel = runtime.ui_state.snapshot_rl_panel()
+    assert "weights" in rl_panel
+
+    settings = runtime.ui_state.snapshot_settings()
+    assert len(settings.get("controls", [])) >= 3
+
     status = runtime.ui_state.snapshot_status()
     for key in ("bus_latency_ms", "ohlcv_lag_ms", "depth_lag_ms", "golden_lag_ms"):
         value = status.get(key)
@@ -38,6 +47,10 @@ def test_ui_smoke_synth_values(runtime, bus, kv, synth_seed):
     assert summary.get("acceptance_rate") == pytest.approx(66.7, rel=1e-3)
     pnl = summary.get("paper_pnl", {})
     assert pnl.get("pnl_1d") == pytest.approx(64.0, rel=1e-3)
+
+    collector_summary = runtime.wiring.collectors.summary_snapshot()
+    assert "paper_pnl" in collector_summary
+    assert "execution" in collector_summary
 
     vote_state = runtime.ui_state.snapshot_vote_windows()
     assert len(vote_state.get("windows", [])) >= 2
