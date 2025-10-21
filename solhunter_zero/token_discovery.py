@@ -7,8 +7,10 @@ import math
 import os
 import logging
 import threading
+import time
+from datetime import datetime, timezone
 from threading import Lock
-from typing import Dict, List, Any, Union
+from typing import Any, Dict, Iterable, List
 
 from aiohttp import ClientTimeout
 import aiohttp
@@ -60,7 +62,49 @@ _BIRDEYE_THROTTLE_MARKERS = (
     "throttle",
 )
 
-TokenEntry = Dict[str, Union[float, str, List[str]]]
+_ENABLE_DEXSCREENER = (
+    os.getenv("DISCOVERY_ENABLE_DEXSCREENER", "1").lower() in {"1", "true", "yes", "on"}
+)
+_DEXSCREENER_URL = (
+    os.getenv("DEXSCREENER_TOKENS_URL")
+    or "https://api.dexscreener.com/latest/dex/tokens?chainId=solana"
+).strip()
+_DEXSCREENER_TIMEOUT = float(os.getenv("DEXSCREENER_TIMEOUT", "8.0") or 8.0)
+_DEXSCREENER_MAX_AGE_SECONDS = float(
+    os.getenv("DEXSCREENER_MAX_AGE_SECONDS", "3600") or 3600.0
+)
+
+_ENABLE_METEORA = (
+    os.getenv("DISCOVERY_ENABLE_METEORA", "1").lower() in {"1", "true", "yes", "on"}
+)
+_METEORA_POOLS_URL = (
+    os.getenv("METEORA_POOLS_URL")
+    or os.getenv("METEORA_DISCOVERY_URL")
+    or "https://dlmm-api.meteora.ag/api/pools/latest"
+).strip()
+_METEORA_TIMEOUT = float(os.getenv("METEORA_TIMEOUT", "8.0") or 8.0)
+
+_ENABLE_DEXLAB = (
+    os.getenv("DISCOVERY_ENABLE_DEXLAB", "1").lower() in {"1", "true", "yes", "on"}
+)
+_DEXLAB_LIST_URL = (
+    os.getenv("DEXLAB_LIST_URL") or "https://api.dexlab.space/v1/token/list"
+).strip()
+_DEXLAB_TIMEOUT = float(os.getenv("DEXLAB_TIMEOUT", "8.0") or 8.0)
+
+_ENABLE_SOLSCAN = (
+    os.getenv("DISCOVERY_ENABLE_SOLSCAN", "1").lower() in {"1", "true", "yes", "on"}
+)
+_SOLSCAN_META_URL = (
+    os.getenv("DISCOVERY_SOLSCAN_META_URL")
+    or os.getenv("SOLSCAN_DISCOVERY_URL")
+    or "https://public-api.solscan.io/token/meta"
+).strip()
+_SOLSCAN_API_KEY = (os.getenv("SOLSCAN_API_KEY") or "").strip()
+_SOLSCAN_TIMEOUT = float(os.getenv("DISCOVERY_SOLSCAN_TIMEOUT", "6.0") or 6.0)
+_SOLSCAN_ENRICH_LIMIT = max(0, int(os.getenv("DISCOVERY_SOLSCAN_LIMIT", "8") or 8))
+
+TokenEntry = Dict[str, Any]
 
 _BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
 _CACHE_LOCK = Lock()
@@ -101,6 +145,20 @@ def _cache_clear() -> None:
 
 def _current_cache_key() -> str:
     return f"tokens:{int(_MIN_VOLUME)}:{int(_MIN_LIQUIDITY)}:{_PAGE_LIMIT}"
+
+
+def _make_timeout(value: Any) -> ClientTimeout | None:
+    if isinstance(value, ClientTimeout):
+        return value
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return ClientTimeout(total=numeric)
 
 
 async def get_session(*, timeout: ClientTimeout | None = None) -> aiohttp.ClientSession:
@@ -156,6 +214,162 @@ def _extract_numeric_from_item(item: Dict[str, Any], *keys: str) -> float:
         if not math.isnan(numeric):
             return numeric
     return 0.0
+
+
+def _merge_candidate_entry(
+    candidates: Dict[str, Dict[str, Any]],
+    token: Dict[str, Any],
+    source: str,
+) -> Dict[str, Any] | None:
+    if not isinstance(token, dict):
+        return None
+    raw_address = token.get("address") or token.get("mint")
+    if not raw_address:
+        return None
+    address = str(raw_address)
+    if not is_valid_solana_mint(address):
+        return None
+
+    liquidity = _coerce_numeric(
+        token.get("liquidity")
+        or token.get("liquidity_usd")
+        or token.get("liquidityUsd")
+    )
+    volume = _coerce_numeric(
+        token.get("volume")
+        or token.get("volume24h")
+        or token.get("volume_usd")
+        or token.get("volumeUsd")
+    )
+    price = _coerce_numeric(token.get("price") or token.get("price_usd"))
+    change = _coerce_numeric(token.get("price_change") or token.get("change"))
+
+    name = token.get("name") or token.get("tokenName")
+    symbol = token.get("symbol") or token.get("tokenSymbol")
+
+    entry = candidates.get(address)
+    discovered_at = _parse_timestamp(
+        token.get("discovered_at")
+        or token.get("created_at")
+        or token.get("createdAt")
+        or token.get("pairCreatedAt")
+    )
+
+    if entry is None:
+        entry = {
+            "address": address,
+            "symbol": str(symbol or ""),
+            "name": str(name or symbol or address),
+            "liquidity": liquidity,
+            "volume": volume,
+            "price": price,
+            "price_change": change,
+            "sources": set(),
+        }
+        if discovered_at is not None:
+            entry["discovered_at"] = discovered_at
+        for extra_key in (
+            "verified",
+            "decimals",
+            "holders",
+            "supply",
+            "dex_pair_url",
+            "pair_address",
+            "pool_address",
+            "quote_token",
+        ):
+            if extra_key in token and token[extra_key] is not None:
+                entry[extra_key] = token[extra_key]
+        candidates[address] = entry
+    else:
+        if symbol and not entry.get("symbol"):
+            entry["symbol"] = str(symbol)
+        if name and (not entry.get("name") or entry.get("name") == entry.get("address")):
+            entry["name"] = str(name)
+        entry["liquidity"] = max(
+            _coerce_numeric(entry.get("liquidity")), liquidity
+        )
+        entry["volume"] = max(_coerce_numeric(entry.get("volume")), volume)
+        if price > 0:
+            entry["price"] = price
+        if change != 0:
+            entry["price_change"] = change
+        if discovered_at is not None:
+            existing = entry.get("discovered_at")
+            if not isinstance(existing, (int, float)) or discovered_at < float(existing):
+                entry["discovered_at"] = discovered_at
+        for extra_key in ("verified", "decimals", "holders", "supply"):
+            if (
+                extra_key in token
+                and token[extra_key] is not None
+                and extra_key not in entry
+            ):
+                entry[extra_key] = token[extra_key]
+        for extra_key in ("dex_pair_url", "pair_address", "pool_address", "quote_token"):
+            if extra_key in token and extra_key not in entry:
+                entry[extra_key] = token[extra_key]
+
+    entry.setdefault("sources", set()).add(source)
+    return entry
+
+
+def _parse_timestamp(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e12:
+            ts /= 1000.0
+        if ts <= 0:
+            return None
+        return ts
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.isdigit():
+            return _parse_timestamp(float(raw))
+        try:
+            numeric = float(raw)
+        except (TypeError, ValueError):
+            numeric = None
+        if numeric is not None:
+            return _parse_timestamp(numeric)
+        try:
+            normalized = raw.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    return None
+
+
+async def _http_get_json(
+    url: str,
+    *,
+    params: Dict[str, Any] | None = None,
+    headers: Dict[str, str] | None = None,
+    timeout: Any = None,
+) -> Any:
+    request_timeout = _make_timeout(timeout)
+    try:
+        session_cm = await get_session(timeout=request_timeout)
+    except TypeError:
+        session_cm = await get_session()
+    async with session_cm as session:
+        try:
+            async with session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=request_timeout,
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.json(content_type=None)
+        except Exception:
+            raise
 
 
 async def _fetch_birdeye_tokens() -> List[TokenEntry]:
@@ -408,6 +622,409 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
     return result
 
 
+async def _fetch_dexscreener_tokens() -> List[TokenEntry]:
+    if not _ENABLE_DEXSCREENER or not _DEXSCREENER_URL:
+        return []
+
+    try:
+        payload = await _http_get_json(
+            _DEXSCREENER_URL,
+            headers={"accept": "application/json"},
+            timeout=_DEXSCREENER_TIMEOUT,
+        )
+    except Exception as exc:
+        logger.debug("DexScreener discovery request failed: %s", exc)
+        return []
+
+    if isinstance(payload, dict):
+        candidates = payload.get("pairs") or payload.get("data") or payload.get("results")
+    else:
+        candidates = payload
+
+    if not isinstance(candidates, list):
+        return []
+
+    now = time.time()
+    max_age = max(0.0, float(_DEXSCREENER_MAX_AGE_SECONDS))
+
+    tokens: Dict[str, Dict[str, Any]] = {}
+
+    for pair in candidates:
+        if not isinstance(pair, dict):
+            continue
+        chain_id = str(pair.get("chainId") or pair.get("chain_id") or "").lower()
+        if chain_id and chain_id not in {"solana", ""}:
+            continue
+
+        base = pair.get("baseToken") or pair.get("base_token")
+        if isinstance(base, dict):
+            mint = base.get("address") or base.get("mint") or base.get("id")
+            name = base.get("name")
+            symbol = base.get("symbol")
+        else:
+            mint = None
+            name = None
+            symbol = None
+
+        if not isinstance(mint, str):
+            mint = str(mint) if mint is not None else ""
+
+        if not mint or not is_valid_solana_mint(mint):
+            continue
+
+        created_ts = _parse_timestamp(
+            pair.get("pairCreatedAt") or pair.get("createdAt") or pair.get("created_at")
+        )
+        if max_age and created_ts is not None and now - created_ts > max_age:
+            continue
+
+        liquidity = 0.0
+        liq_raw = pair.get("liquidity")
+        if isinstance(liq_raw, dict):
+            liquidity = _coerce_numeric(
+                liq_raw.get("usd")
+                or liq_raw.get("usdValue")
+                or liq_raw.get("value")
+            )
+        else:
+            liquidity = _coerce_numeric(liq_raw)
+
+        volume = 0.0
+        vol_raw = pair.get("volume")
+        if isinstance(vol_raw, dict):
+            for key in ("h24", "h6", "h1", "m5", "usd"):
+                if key in vol_raw:
+                    volume = max(volume, _coerce_numeric(vol_raw.get(key)))
+        else:
+            volume = _coerce_numeric(vol_raw)
+
+        price = _coerce_numeric(pair.get("priceUsd") or pair.get("price"))
+        change_raw = pair.get("priceChange")
+        if isinstance(change_raw, dict):
+            change = 0.0
+            for key in ("h1", "h6", "h24"):
+                if key in change_raw:
+                    change = _coerce_numeric(change_raw.get(key))
+                    if change != 0:
+                        break
+        else:
+            change = _coerce_numeric(change_raw)
+
+        payload_token: Dict[str, Any] = {
+            "address": mint,
+            "symbol": symbol,
+            "name": name,
+            "liquidity": liquidity,
+            "volume": volume,
+            "price": price,
+            "price_change": change,
+            "discovered_at": created_ts,
+        }
+
+        pair_addr = pair.get("pairAddress") or pair.get("pair_address")
+        if isinstance(pair_addr, str):
+            payload_token["pair_address"] = pair_addr
+
+        url = pair.get("url")
+        if isinstance(url, str):
+            payload_token["dex_pair_url"] = url
+
+        quote = pair.get("quoteToken") or pair.get("quote_token")
+        if isinstance(quote, dict):
+            payload_token["quote_token"] = {
+                "address": quote.get("address") or quote.get("mint"),
+                "symbol": quote.get("symbol"),
+                "name": quote.get("name"),
+            }
+
+        _merge_candidate_entry(tokens, payload_token, "dexscreener")
+
+    return list(tokens.values())
+
+
+async def _fetch_meteora_tokens() -> List[TokenEntry]:
+    if not _ENABLE_METEORA or not _METEORA_POOLS_URL:
+        return []
+
+    try:
+        payload = await _http_get_json(
+            _METEORA_POOLS_URL,
+            headers={"accept": "application/json"},
+            timeout=_METEORA_TIMEOUT,
+        )
+    except Exception as exc:
+        logger.debug("Meteora discovery request failed: %s", exc)
+        return []
+
+    if isinstance(payload, dict):
+        pools = (
+            payload.get("pools")
+            or payload.get("data")
+            or payload.get("results")
+            or payload.get("items")
+            or payload.get("latestPools")
+        )
+    else:
+        pools = payload
+
+    if not isinstance(pools, list):
+        return []
+
+    tokens: Dict[str, Dict[str, Any]] = {}
+
+    for pool in pools:
+        if not isinstance(pool, dict):
+            continue
+
+        mint = (
+            pool.get("tokenMint")
+            or pool.get("token_mint")
+            or pool.get("baseMint")
+            or pool.get("mint")
+            or pool.get("lpMint")
+        )
+        if isinstance(mint, dict):
+            mint = mint.get("address") or mint.get("mint")
+
+        if not isinstance(mint, str):
+            mint = str(mint) if mint is not None else ""
+
+        if not mint or not is_valid_solana_mint(mint):
+            continue
+
+        liquidity_raw = (
+            pool.get("liquidity")
+            or pool.get("liquidityUsd")
+            or pool.get("tvl")
+            or pool.get("liquidity_usd")
+        )
+        if isinstance(liquidity_raw, dict):
+            liquidity = _coerce_numeric(
+                liquidity_raw.get("usd")
+                or liquidity_raw.get("usdValue")
+                or liquidity_raw.get("value")
+            )
+        else:
+            liquidity = _coerce_numeric(liquidity_raw)
+
+        volume_raw = (
+            pool.get("volume24h")
+            or pool.get("volume_24h")
+            or pool.get("volume")
+            or pool.get("volumeUsd")
+        )
+        if isinstance(volume_raw, dict):
+            volume = _coerce_numeric(
+                volume_raw.get("usd")
+                or volume_raw.get("usdValue")
+                or volume_raw.get("value")
+            )
+        else:
+            volume = _coerce_numeric(volume_raw)
+
+        created = (
+            pool.get("createdAt")
+            or pool.get("created_at")
+            or pool.get("created_at_ts")
+            or pool.get("timestamp")
+        )
+
+        payload_token: Dict[str, Any] = {
+            "address": mint,
+            "symbol": pool.get("tokenSymbol") or pool.get("symbol"),
+            "name": pool.get("tokenName") or pool.get("name"),
+            "liquidity": liquidity,
+            "volume": volume,
+            "price": _coerce_numeric(
+                pool.get("price")
+                or pool.get("priceUsd")
+                or pool.get("price_usd")
+            ),
+            "price_change": _coerce_numeric(
+                pool.get("priceChange") or pool.get("price_change")
+            ),
+            "discovered_at": _parse_timestamp(created),
+        }
+
+        pool_addr = pool.get("poolAddress") or pool.get("id") or pool.get("address")
+        if isinstance(pool_addr, str):
+            payload_token["pool_address"] = pool_addr
+
+        _merge_candidate_entry(tokens, payload_token, "meteora")
+
+    return list(tokens.values())
+
+
+async def _fetch_dexlab_tokens() -> List[TokenEntry]:
+    if not _ENABLE_DEXLAB or not _DEXLAB_LIST_URL:
+        return []
+
+    try:
+        payload = await _http_get_json(
+            _DEXLAB_LIST_URL,
+            headers={"accept": "application/json"},
+            timeout=_DEXLAB_TIMEOUT,
+        )
+    except Exception as exc:
+        logger.debug("DexLab discovery request failed: %s", exc)
+        return []
+
+    if isinstance(payload, dict):
+        items = (
+            payload.get("data")
+            or payload.get("list")
+            or payload.get("tokens")
+            or payload.get("results")
+        )
+    else:
+        items = payload
+
+    if not isinstance(items, list):
+        return []
+
+    tokens: Dict[str, Dict[str, Any]] = {}
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        mint = (
+            item.get("mint")
+            or item.get("tokenMint")
+            or item.get("token_address")
+            or item.get("address")
+        )
+        if not isinstance(mint, str):
+            mint = str(mint) if mint is not None else ""
+
+        if not mint or not is_valid_solana_mint(mint):
+            continue
+
+        payload_token: Dict[str, Any] = {
+            "address": mint,
+            "symbol": item.get("symbol") or item.get("tokenSymbol"),
+            "name": item.get("name") or item.get("tokenName"),
+            "liquidity": _coerce_numeric(
+                item.get("liquidity") or item.get("liquidityUsd")
+            ),
+            "volume": _coerce_numeric(
+                item.get("volume")
+                or item.get("volume24h")
+                or item.get("volumeUsd")
+            ),
+            "discovered_at": _parse_timestamp(
+                item.get("createdAt")
+                or item.get("created_at")
+                or item.get("launchDate")
+            ),
+            "verified": item.get("isVerified") or item.get("verified"),
+        }
+
+        decimals = item.get("decimals")
+        if decimals is not None:
+            try:
+                payload_token["decimals"] = int(decimals)
+            except Exception:
+                pass
+
+        _merge_candidate_entry(tokens, payload_token, "dexlab")
+
+    return list(tokens.values())
+
+
+async def _enrich_with_solscan(
+    candidates: Dict[str, Dict[str, Any]],
+    *,
+    addresses: Iterable[str] | None = None,
+) -> None:
+    if (
+        not _ENABLE_SOLSCAN
+        or not _SOLSCAN_META_URL
+        or _SOLSCAN_ENRICH_LIMIT <= 0
+        or not candidates
+    ):
+        return
+
+    allowed = set(addresses) if addresses is not None else None
+    pending: List[str] = []
+    for addr, entry in candidates.items():
+        if allowed is not None and addr not in allowed:
+            continue
+        needs_symbol = not entry.get("symbol")
+        needs_name = not entry.get("name") or entry.get("name") == addr
+        needs_decimals = "decimals" not in entry
+        if needs_symbol or needs_name or needs_decimals:
+            pending.append(addr)
+        if len(pending) >= _SOLSCAN_ENRICH_LIMIT:
+            break
+
+    if not pending:
+        return
+
+    headers = {"accept": "application/json"}
+    if _SOLSCAN_API_KEY:
+        headers["token"] = _SOLSCAN_API_KEY
+
+    timeout = _make_timeout(_SOLSCAN_TIMEOUT)
+
+    try:
+        session_cm = await get_session(timeout=timeout)
+    except TypeError:
+        session_cm = await get_session()
+
+    async with session_cm as session:
+        for addr in pending:
+            params = {"tokenAddress": addr, "address": addr}
+            try:
+                async with session.get(
+                    _SOLSCAN_META_URL,
+                    params=params,
+                    headers=headers,
+                    timeout=timeout,
+                ) as resp:
+                    if resp.status == 404:
+                        continue
+                    resp.raise_for_status()
+                    payload = await resp.json(content_type=None)
+            except Exception as exc:
+                logger.debug("Solscan metadata fetch failed for %s: %s", addr, exc)
+                continue
+
+            data = payload
+            if isinstance(payload, dict):
+                data = payload.get("data") or payload.get("token") or payload
+            if not isinstance(data, dict):
+                continue
+
+            entry = candidates.get(addr)
+            if entry is None:
+                continue
+
+            name = data.get("name") or data.get("symbolName")
+            symbol = data.get("symbol")
+            decimals = data.get("decimals")
+            supply = data.get("supply") or data.get("totalSupply")
+            holders = data.get("holder") or data.get("holders")
+            verified = data.get("verified")
+
+            if symbol and not entry.get("symbol"):
+                entry["symbol"] = str(symbol)
+            if name and (not entry.get("name") or entry.get("name") == addr):
+                entry["name"] = str(name)
+            if decimals is not None:
+                try:
+                    entry["decimals"] = int(decimals)
+                except Exception:
+                    pass
+            if supply is not None:
+                entry["supply"] = _coerce_numeric(supply)
+            if holders is not None:
+                entry["holders"] = _coerce_numeric(holders)
+            if isinstance(verified, bool):
+                entry["verified"] = verified
+
+            entry.setdefault("sources", set()).add("solscan")
+
 async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, Dict[str, float]]:
     """Collect a small batch of ranked mempool candidates (with depth)."""
     scores: Dict[str, Dict[str, float]] = {}
@@ -451,11 +1068,18 @@ async def discover_candidates(
     if _ENABLE_MEMPOOL and rpc_url:
         logger.debug("Discovery mempool threshold=%.3f", mempool_threshold)
 
-    tasks = [bird_task]
-    task_labels = ["bird"]
+    source_tasks: List[tuple[str, asyncio.Task[Any]]] = [("bird", bird_task)]
     if mempool_task is not None:
-        tasks.append(mempool_task)
-        task_labels.append("mempool")
+        source_tasks.append(("mempool", mempool_task))
+    if _ENABLE_DEXSCREENER and _DEXSCREENER_URL:
+        source_tasks.append(("dexscreener", asyncio.create_task(_fetch_dexscreener_tokens())))
+    if _ENABLE_METEORA and _METEORA_POOLS_URL:
+        source_tasks.append(("meteora", asyncio.create_task(_fetch_meteora_tokens())))
+    if _ENABLE_DEXLAB and _DEXLAB_LIST_URL:
+        source_tasks.append(("dexlab", asyncio.create_task(_fetch_dexlab_tokens())))
+
+    tasks = [task for _, task in source_tasks]
+    task_labels = [label for label, _ in source_tasks]
 
     overall_timeout_raw = os.getenv("DISCOVERY_OVERALL_TIMEOUT", "0")
     try:
@@ -488,6 +1112,9 @@ async def discover_candidates(
 
     bird_tokens: List[TokenEntry] = []
     mempool: Dict[str, Dict[str, float]] = {}
+    dexscreener_tokens: List[TokenEntry] = []
+    meteora_tokens: List[TokenEntry] = []
+    dexlab_tokens: List[TokenEntry] = []
 
     for label, res in zip(task_labels, results):
         if label == "bird":
@@ -500,33 +1127,48 @@ async def discover_candidates(
                 logger.debug("Mempool signals unavailable: %s", res)
             else:
                 mempool = dict(res or {})
+        elif label == "dexscreener":
+            if isinstance(res, Exception):
+                logger.debug("DexScreener discovery unavailable: %s", res)
+            else:
+                dexscreener_tokens = list(res or [])
+        elif label == "meteora":
+            if isinstance(res, Exception):
+                logger.debug("Meteora discovery unavailable: %s", res)
+            else:
+                meteora_tokens = list(res or [])
+        elif label == "dexlab":
+            if isinstance(res, Exception):
+                logger.debug("DexLab discovery unavailable: %s", res)
+            else:
+                dexlab_tokens = list(res or [])
 
     candidates: Dict[str, Dict[str, Any]] = {}
-    bird_addresses = set()
+
     for token in bird_tokens:
-        addr = token.get("address")
-        if not addr:
-            continue
-        entry = dict(token)
-        entry["sources"] = set(token.get("sources") or ["birdeye"])
-        candidates[addr] = entry
-        bird_addresses.add(addr)
+        _merge_candidate_entry(candidates, dict(token), "birdeye")
+
+    for token in dexscreener_tokens:
+        _merge_candidate_entry(candidates, dict(token), "dexscreener")
+
+    for token in meteora_tokens:
+        _merge_candidate_entry(candidates, dict(token), "meteora")
+
+    for token in dexlab_tokens:
+        _merge_candidate_entry(candidates, dict(token), "dexlab")
 
     for addr, mp in mempool.items():
-        entry = candidates.setdefault(
-            addr,
-            {
-                "address": str(addr),
-                "symbol": str(mp.get("symbol") or ""),
-                "name": str(mp.get("name") or addr),
-                "liquidity": float(mp.get("liquidity", 0.0) or 0.0),
-                "volume": float(mp.get("volume", 0.0) or 0.0),
-                "price": float(mp.get("price", 0.0) or 0.0),
-                "price_change": 0.0,
-                "sources": set(),
-            },
-        )
-        entry.setdefault("sources", set()).add("mempool")
+        mp_token: Dict[str, Any] = {
+            "address": str(addr),
+            "symbol": mp.get("symbol"),
+            "name": mp.get("name") or str(addr),
+            "liquidity": mp.get("liquidity"),
+            "volume": mp.get("volume"),
+            "price": mp.get("price"),
+        }
+        entry = _merge_candidate_entry(candidates, mp_token, "mempool")
+        if entry is None:
+            continue
         for key in ("score", "momentum", "anomaly", "wallet_concentration", "avg_swap_size"):
             val = mp.get(key)
             if val is not None:
@@ -535,12 +1177,13 @@ async def discover_candidates(
                 except Exception:
                     pass
 
+    try:
+        await _enrich_with_solscan(candidates)
+    except Exception as exc:
+        logger.debug("Solscan enrichment unavailable: %s", exc)
+
     for addr, entry in candidates.items():
-        entry_sources = entry.setdefault("sources", set())
-        if addr in bird_addresses:
-            entry_sources.add("birdeye")
-        if addr in mempool:
-            entry_sources.add("mempool")
+        entry.setdefault("sources", set())
 
         liquidity = float(entry.get("liquidity", 0.0) or 0.0)
         volume = float(entry.get("volume", 0.0) or 0.0)
@@ -591,9 +1234,12 @@ async def discover_candidates(
 
     top_score = final[0]["score"] if final and "score" in final[0] else None
     logger.debug(
-        "Discovery combine summary bird=%s mempool=%s final=%s top_score=%s",
+        "Discovery combine summary bird=%s mempool=%s dexscreener=%s meteora=%s dexlab=%s final=%s top_score=%s",
         len(bird_tokens),
         len(mempool),
+        len(dexscreener_tokens),
+        len(meteora_tokens),
+        len(dexlab_tokens),
         len(final),
         f"{top_score:.4f}" if isinstance(top_score, (int, float)) else "n/a",
     )
