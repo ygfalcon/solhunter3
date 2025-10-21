@@ -735,6 +735,7 @@ def test_golden_snapshot_metrics_and_determinism():
             low=0.9,
             close=1.1,
             vol_usd=500.0,
+            vol_base=50.0,
             trades=10,
             buyers=5,
             flow_usd=100.0,

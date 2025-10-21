@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import asdict
-from typing import Awaitable, Callable, Dict, Iterable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 
 from .agents import AgentStage, BaseAgent
 from .bus import InMemoryBus, MessageBus
@@ -32,7 +32,7 @@ from .types import (
     VirtualPnL,
 )
 from .voting import VotingStage
-from .utils import now_ts
+from .utils import canonical_hash, now_ts
 
 
 class _PaperPositionState:
@@ -131,7 +131,31 @@ class GoldenPipeline:
             self._context.record(snapshot)
             self._latest_snapshots[snapshot.mint] = snapshot
             self.metrics.record(snapshot)
-            await self._publish(STREAMS.golden_snapshot, asdict(snapshot))
+            payload = asdict(snapshot)
+            px = snapshot.px or {}
+            if isinstance(px, Mapping):
+                payload.setdefault("px_mid_usd", px.get("mid_usd"))
+            liq = snapshot.liq or {}
+            depth_map: Mapping[str, Any] | None = None
+            if isinstance(liq, Mapping):
+                depth_map = liq.get("depth_usd_by_pct") or liq.get("depth_pct")
+                if depth_map is None:
+                    depth_map = None
+            depth_1pct = None
+            if isinstance(depth_map, Mapping):
+                for key in ("1", "1.0", "100", "100bps"):
+                    if key in depth_map:
+                        try:
+                            depth_1pct = float(depth_map[key])
+                        except Exception:
+                            depth_1pct = None
+                        else:
+                            break
+            payload.setdefault("liq_depth_1pct_usd", depth_1pct)
+            payload.setdefault(
+                "content_hash", snapshot.content_hash or snapshot.hash
+            )
+            await self._publish(STREAMS.golden_snapshot, payload)
             await self._publish_metrics(snapshot)
             if self._on_golden:
                 await self._on_golden(snapshot)
@@ -265,22 +289,28 @@ class GoldenPipeline:
             await self._coalescer.update_metadata(snapshot)
 
         async def _on_bar(bar: OHLCVBar) -> None:
-            await self._publish(
-                STREAMS.market_ohlcv,
-                {
-                    "mint": bar.mint,
-                    "o": bar.open,
-                    "h": bar.high,
-                    "l": bar.low,
-                    "c": bar.close,
-                    "vol_usd": bar.vol_usd,
-                    "trades": bar.trades,
-                    "buyers": bar.buyers,
-                    "zret": bar.zret,
-                    "zvol": bar.zvol,
-                    "asof_close": bar.asof_close,
-                },
-            )
+            payload = {
+                "mint": bar.mint,
+                "o": bar.open,
+                "h": bar.high,
+                "l": bar.low,
+                "c": bar.close,
+                "close": bar.close,
+                "vol_usd": bar.vol_usd,
+                "volume": bar.vol_usd,
+                "volume_usd": bar.vol_usd,
+                "vol_base": bar.vol_base,
+                "volume_base": bar.vol_base,
+                "trades": bar.trades,
+                "buyers": bar.buyers,
+                "zret": bar.zret,
+                "zvol": bar.zvol,
+                "asof_close": bar.asof_close,
+                "schema_version": bar.schema_version,
+            }
+            payload_for_hash = dict(payload)
+            payload["content_hash"] = canonical_hash(payload_for_hash)
+            await self._publish(STREAMS.market_ohlcv, payload)
             await self._coalescer.update_bar(bar)
 
         async def _on_depth(depth: DepthSnapshot) -> None:

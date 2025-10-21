@@ -8,7 +8,13 @@ from typing import Any, Awaitable, Callable, Dict
 
 from .contracts import golden_hash_key
 from .kv import KeyValueStore
-from .types import DepthSnapshot, GoldenSnapshot, OHLCVBar, TokenSnapshot
+from .types import (
+    DepthSnapshot,
+    GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    GoldenSnapshot,
+    OHLCVBar,
+    TokenSnapshot,
+)
 from .utils import canonical_hash, now_ts
 from ..lru import TTLCache
 
@@ -149,6 +155,31 @@ class SnapshotCoalescer:
         if not (meta and bar and depth):
             return
         now = now_ts()
+        depth_pct = dict(depth.depth_pct)
+        ohlcv_payload = {
+            "o": bar.open,
+            "h": bar.high,
+            "l": bar.low,
+            "c": bar.close,
+            "close": bar.close,
+            "vol_usd": bar.vol_usd,
+            "volume": bar.vol_usd,
+            "volume_usd": bar.vol_usd,
+            "vol_base": bar.vol_base,
+            "volume_base": bar.vol_base,
+            "buyers": bar.buyers,
+            "flow_usd": bar.flow_usd,
+            "zret": bar.zret,
+            "zvol": bar.zvol,
+            "asof_close": bar.asof_close,
+            "schema_version": bar.schema_version,
+        }
+        ohlcv_payload["content_hash"] = canonical_hash(dict(ohlcv_payload))
+        liq_payload = {
+            "depth_pct": depth_pct,
+            "depth_usd_by_pct": depth_pct,
+            "asof": depth.asof,
+        }
         payload = {
             "mint": mint,
             "meta": {
@@ -161,23 +192,22 @@ class SnapshotCoalescer:
                 "mid_usd": depth.mid_usd,
                 "spread_bps": depth.spread_bps,
             },
-            "liq": {
-                "depth_pct": depth.depth_pct,
-                "asof": depth.asof,
-            },
-            "ohlcv5m": {
-                "o": bar.open,
-                "h": bar.high,
-                "l": bar.low,
-                "c": bar.close,
-                "vol_usd": bar.vol_usd,
-                "buyers": bar.buyers,
-                "flow_usd": bar.flow_usd,
-                "zret": bar.zret,
-                "zvol": bar.zvol,
-                "asof_close": bar.asof_close,
-            },
+            "liq": liq_payload,
+            "ohlcv5m": ohlcv_payload,
+            "schema_version": GOLDEN_SNAPSHOT_SCHEMA_VERSION,
         }
+        payload["px_mid_usd"] = depth.mid_usd
+        depth_1pct = None
+        for key in ("1", "1.0", "100", "100bps"):
+            if key in depth_pct:
+                try:
+                    depth_1pct = float(depth_pct[key])
+                except Exception:
+                    depth_1pct = None
+                else:
+                    break
+        payload["liq_depth_1pct_usd"] = depth_1pct
+        payload["content_hash"] = canonical_hash({k: v for k, v in payload.items() if k != "content_hash"})
         snapshot_hash = canonical_hash(payload)
         async with lock:
             if self._versions.get(mint, 0) != version:
@@ -204,6 +234,7 @@ class SnapshotCoalescer:
             liq=payload["liq"],
             ohlcv5m=payload["ohlcv5m"],
             hash=snapshot_hash,
+            content_hash=payload.get("content_hash", snapshot_hash),
             metrics={
                 "emitted_at": now,
                 "latency_ms": latency_ms,

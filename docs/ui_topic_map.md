@@ -32,7 +32,7 @@ staleness rules.
 
 ### OHLCV (5m)
 - **Topic:** `x:market.ohlcv.5m`
-- **Fields:** Candle chart by `mint`, `open`, `high`, `low`, `close`, `volume`, `asof_close`
+- **Fields:** Candle chart by `mint`, `open`, `high`, `low`, `close`, `volume` (USD) and `volume_base`, `asof_close`
 - **Staleness:** Badge if `now - asof_close > 2m`.
 
 ### Depth & Spread
@@ -44,7 +44,7 @@ staleness rules.
 
 ### Golden Panel
 - **Topic:** `x:mint.golden`
-- **Fields:** `hash`, `meta`, `px`, `liq`, embedded `ohlcv5m`, `asof`
+- **Fields:** `hash`, `meta`, `px_mid_usd`, `liq_depth_1pct_usd`, nested `px`/`liq`, embedded `ohlcv5m`, `asof`
 - **Badges:** Publish cadence stats (emit rate, change ratio).  Flag if `now - asof > 60s`.
 
 ## Agents
