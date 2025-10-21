@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from solhunter_zero.golden_pipeline.coalescer import SnapshotCoalescer
+from solhunter_zero.golden_pipeline.kv import InMemoryKeyValueStore
 from solhunter_zero.golden_pipeline.types import (
     DepthSnapshot,
     GoldenSnapshot,
@@ -134,5 +135,54 @@ def test_hash_cache_expires_inactive_mints(monkeypatch: pytest.MonkeyPatch) -> N
 
         clock["value"] += 2.0
         assert len(coalescer._hash_cache) == 0
+
+    asyncio.run(run())
+
+
+def test_prewarmed_hash_cache_skips_initial_emit() -> None:
+    class RecordingKeyValueStore(InMemoryKeyValueStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.get_calls = 0
+
+        async def get(self, key: str) -> str | None:
+            self.get_calls += 1
+            return await super().get(key)
+
+    async def run() -> None:
+        kv = RecordingKeyValueStore()
+        mint = "mint-prewarm"
+        emitted: list[GoldenSnapshot] = []
+
+        async def emit(snapshot: GoldenSnapshot) -> None:
+            emitted.append(snapshot)
+
+        coalescer = SnapshotCoalescer(emit, kv=kv)
+        meta = _make_token_snapshot(mint, asof=1.0)
+        bar = _make_bar(mint, asof=1.0)
+        depth = _make_depth(mint, asof=1.0)
+        await coalescer.update_metadata(meta)
+        await coalescer.update_bar(bar)
+        await coalescer.update_depth(depth)
+
+        assert len(emitted) == 1
+
+        kv.get_calls = 0
+        emitted.clear()
+
+        warmed: list[GoldenSnapshot] = []
+
+        async def warmed_emit(snapshot: GoldenSnapshot) -> None:
+            warmed.append(snapshot)
+
+        coalescer_restarted = SnapshotCoalescer(warmed_emit, kv=kv)
+        await asyncio.sleep(0)
+
+        await coalescer_restarted.update_metadata(_make_token_snapshot(mint, asof=1.0))
+        await coalescer_restarted.update_bar(_make_bar(mint, asof=1.0))
+        await coalescer_restarted.update_depth(_make_depth(mint, asof=1.0))
+
+        assert warmed == []
+        assert kv.get_calls == 0
 
     asyncio.run(run())
