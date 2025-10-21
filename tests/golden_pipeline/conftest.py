@@ -166,7 +166,13 @@ class FakeBroker:
         self.published: list[tuple[str, dict[str, Any]]] = []
         self._closed: list[str] = []
 
-    async def publish(self, stream: str, payload: Mapping[str, Any]) -> None:
+    async def publish(
+        self,
+        stream: str,
+        payload: Mapping[str, Any],
+        *,
+        dedupe_key: str | None = None,
+    ) -> None:
         materialised = dict(payload)
         self.published.append((stream, materialised))
         self.events[stream].append(materialised)

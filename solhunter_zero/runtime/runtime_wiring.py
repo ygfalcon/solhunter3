@@ -357,6 +357,7 @@ class RuntimeEventCollectors:
         self._decision_counts: Dict[str, int] = {}
         self._decision_recent: Deque[Tuple[str, float]] = deque()
         self._decision_first_seen: Dict[str, float] = {}
+        self._mint_sequences: Dict[str, int] = {}
         fills_limit = _int_env("UI_FILLS_LIMIT", 400)
         self._virtual_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
         self._live_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
@@ -372,6 +373,23 @@ class RuntimeEventCollectors:
         }
         pnl_limit = _int_env("UI_VIRTUAL_PNL_LIMIT", 400)
         self._virtual_pnls: Deque[Dict[str, Any]] = deque(maxlen=pnl_limit)
+
+    def _parse_sequence(self, value: Any) -> Optional[int]:
+        if value in (None, "", False):
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _accept_sequence(self, mint: str, sequence: Optional[int]) -> bool:
+        if sequence is None:
+            return True
+        last = self._mint_sequences.get(mint)
+        if last is not None and sequence <= last:
+            return False
+        self._mint_sequences[mint] = sequence
+        return True
 
     def start(self) -> None:
         def _normalize_event(event: Any) -> Dict[str, Any]:
@@ -453,7 +471,11 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            sequence = self._parse_sequence(payload.get("sequence"))
+            mint_key = str(mint)
             with self._swarm_lock:
+                if not self._accept_sequence(mint_key, sequence):
+                    return
                 self._agent_suggestions.appendleft(payload)
 
         async def _on_vote_decision(event: Any) -> None:
@@ -462,8 +484,12 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            sequence = self._parse_sequence(payload.get("sequence"))
             client_id = payload.get("clientOrderId") or payload.get("client_order_id")
+            mint_key = str(mint)
             with self._swarm_lock:
+                if not self._accept_sequence(mint_key, sequence):
+                    return
                 if client_id:
                     now_ts = time.time()
                     client_id_str = str(client_id)

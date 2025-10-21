@@ -116,6 +116,7 @@ class TradeSuggestion:
     must_exit: bool = False
     hot_watch: bool = False
     exit_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    sequence: int = 0
 
 
 @dataclass(slots=True)
@@ -130,6 +131,7 @@ class Decision:
     client_order_id: str
     agents: List[str]
     ts: Timestamp
+    sequence: int = 0
 
 
 @dataclass(slots=True)

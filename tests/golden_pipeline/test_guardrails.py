@@ -244,10 +244,16 @@ def test_pipeline_uses_injected_bus_in_live_mode(monkeypatch):
         def __init__(self) -> None:
             self.sent: list[tuple[str, dict[str, object]]] = []
 
-        async def publish(self, stream: str, payload: Mapping[str, object]) -> None:
-            record = (stream, dict(payload))
+        async def publish(
+            self,
+            stream: str,
+            payload: Mapping[str, object],
+            *,
+            dedupe_key: str | None = None,
+        ) -> None:
+            record = (stream, dict(payload), dedupe_key)
             self.sent.append(record)
-            await adapter.publish(stream, payload)
+            await adapter.publish(stream, payload, dedupe_key=dedupe_key)
 
     spy_bus = SpyBus()
 

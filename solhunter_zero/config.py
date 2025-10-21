@@ -391,10 +391,10 @@ class ConfigFileNotFound(FileNotFoundError):
 # Internal publish helper
 # ---------------------------------------------------------------------------
 
-def _publish(topic: str, payload: Any) -> None:
+def _publish(topic: str, payload: Any, *, dedupe_key: str | None = None) -> None:
     """Proxy to :func:`event_bus.publish` imported lazily."""
     ev = import_module("solhunter_zero.event_bus")
-    ev.publish(topic, payload)
+    ev.publish(topic, payload, dedupe_key=dedupe_key)
 
 
 # ---------------------------------------------------------------------------

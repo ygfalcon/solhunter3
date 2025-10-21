@@ -39,9 +39,20 @@ from solhunter_zero.ui import UIState
 class BridgedBus(InMemoryBus):
     """In-memory bus that also forwards events to the global event bus."""
 
-    async def publish(self, stream: str, payload: Mapping[str, object]) -> None:  # type: ignore[override]
-        await super().publish(stream, payload)
-        event_bus.publish(stream, dict(payload), _broadcast=False)
+    async def publish(
+        self,
+        stream: str,
+        payload: Mapping[str, object],
+        *,
+        dedupe_key: str | None = None,
+    ) -> None:  # type: ignore[override]
+        await super().publish(stream, payload, dedupe_key=dedupe_key)
+        event_bus.publish(
+            stream,
+            dict(payload),
+            dedupe_key=dedupe_key,
+            _broadcast=False,
+        )
 
 
 @dataclass
