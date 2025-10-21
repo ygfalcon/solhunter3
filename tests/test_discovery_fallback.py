@@ -8,6 +8,7 @@ def _reset_state(token_scanner):
     token_scanner._FAILURE_COUNT = 0
     token_scanner._COOLDOWN_UNTIL = 0.0
     token_scanner._DAS_CIRCUIT_OPEN_UNTIL = 0.0
+    token_scanner._NEXT_DAS_REQUEST_AT = 0.0
 
 
 def test_scan_tokens_uses_pump_fallback_when_dex_disabled(monkeypatch):

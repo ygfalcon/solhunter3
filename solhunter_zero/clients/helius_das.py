@@ -371,10 +371,12 @@ def build_sort_variants(direction: str) -> Tuple[Any, ...]:
     if not _DISABLE_CREATED_SORT:
         variants.extend(
             [
+                {"sortBy": "created", "sortDirection": lower},
                 {"sortBy": "created", "sortDirection": upper},
+                {"field": "created", "sortDirection": lower},
                 {"field": "created", "sortDirection": upper},
-                {"field": "created", "direction": upper},
                 {"field": "created", "direction": lower},
+                {"field": "created", "direction": upper},
                 "created",
             ]
         )

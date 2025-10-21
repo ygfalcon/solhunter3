@@ -170,7 +170,7 @@ _SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 _TOKEN_2022_PREFIX = "Tokenz"
 _TRENDING_MIN_LIQUIDITY = float(os.getenv("TRENDING_MIN_LIQUIDITY_USD", "7500") or 7500.0)
 _TRENDING_MIN_VOLUME = float(os.getenv("TRENDING_MIN_VOLUME_USD", "20000") or 20000.0)
-_MAX_DAS_CHUNK = max(1, int(os.getenv("DAS_TRENDING_CHUNK", "80") or 80))
+_MAX_DAS_CHUNK = max(1, int(os.getenv("DAS_TRENDING_CHUNK", "10") or 10))
 
 def _resolve_birdeye_key(candidate: str | None = None) -> str | None:
     key = (candidate or os.getenv("BIRDEYE_API_KEY") or "").strip()
@@ -236,7 +236,7 @@ def _parse_int_env(name: str, default: int, *, minimum: int = 1) -> int:
         return max(minimum, default)
 
 
-_DAS_TIMEOUT_TOTAL = _parse_float_env("DAS_TIMEOUT_TOTAL", 12.0)
+_DAS_TIMEOUT_TOTAL = _parse_float_env("DAS_TIMEOUT_TOTAL", 9.0)
 _DAS_TIMEOUT_CONNECT = _parse_float_env("DAS_TIMEOUT_CONNECT", 1.5)
 if FAST_MODE:
     _HELIUS_TIMEOUT_TOTAL = _parse_float_env("FAST_HELIUS_TIMEOUT", _DAS_TIMEOUT_TOTAL)
@@ -253,12 +253,13 @@ _HELIUS_TIMEOUT = aiohttp.ClientTimeout(
     sock_connect=_SOCK_CONNECT_TIMEOUT,
     sock_read=_SOCK_READ_TIMEOUT,
 )
-_DAS_BACKOFF_BASE = max(0.1, _parse_float_env("DAS_BACKOFF_BASE", 0.6))
-_DAS_BACKOFF_CAP = max(_DAS_BACKOFF_BASE, _parse_float_env("DAS_BACKOFF_CAP", 8.0))
-_DAS_MAX_ATTEMPTS = _parse_int_env("DAS_MAX_RETRIES", 10, minimum=1)
+_DAS_BACKOFF_BASE = max(0.1, _parse_float_env("DAS_BACKOFF_BASE", 0.8))
+_DAS_BACKOFF_CAP = max(_DAS_BACKOFF_BASE, _parse_float_env("DAS_BACKOFF_CAP", 12.0))
+_DAS_MAX_ATTEMPTS = _parse_int_env("DAS_MAX_RETRIES", 6, minimum=1)
 _DAS_TIMEOUT_THRESHOLD = _parse_int_env("DAS_TIMEOUT_THRESHOLD", 3, minimum=1)
 _DAS_DEGRADED_COOLDOWN = _parse_float_env("DAS_DEGRADED_COOLDOWN", 90.0)
 _DAS_MIN_LIMIT = _parse_int_env("DAS_MIN_LIMIT", 5, minimum=1)
+_DAS_REQUEST_INTERVAL = max(0.0, _parse_float_env("DAS_REQUEST_INTERVAL", 1.0))
 _SOLSCAN_TIMEOUT = float(os.getenv("FAST_SOLSCAN_TIMEOUT", "4.0")) if FAST_MODE else 8.0
 
 _ALLOW_PARTIAL_RESULTS = (
@@ -314,6 +315,7 @@ _LAST_TRENDING_RESULT: Dict[str, Any] = {"mints": [], "metadata": {}, "timestamp
 _FAILURE_COUNT = 0
 _COOLDOWN_UNTIL = 0.0
 _DAS_CIRCUIT_OPEN_UNTIL = 0.0
+_NEXT_DAS_REQUEST_AT = 0.0
 
 
 def _clear_trending_cache_for_tests() -> None:
@@ -322,9 +324,10 @@ def _clear_trending_cache_for_tests() -> None:
     TRENDING_METADATA.clear()
     _LAST_TRENDING_RESULT.clear()
     _LAST_TRENDING_RESULT.update({"mints": [], "metadata": {}, "timestamp": 0.0})
-    global _FAILURE_COUNT, _COOLDOWN_UNTIL
+    global _FAILURE_COUNT, _COOLDOWN_UNTIL, _NEXT_DAS_REQUEST_AT
     _FAILURE_COUNT = 0
     _COOLDOWN_UNTIL = 0.0
+    _NEXT_DAS_REQUEST_AT = 0.0
 
 __all__ = [
     "scan_tokens_async",
@@ -1738,6 +1741,30 @@ async def _pump_trending(
     return tokens
 
 
+async def _respect_das_rate_limit() -> None:
+    """Sleep if needed to keep DAS search calls under the configured rate."""
+
+    if _DAS_REQUEST_INTERVAL <= 0:
+        return
+    global _NEXT_DAS_REQUEST_AT
+    now = time.monotonic()
+    if _NEXT_DAS_REQUEST_AT > now:
+        await asyncio.sleep(_NEXT_DAS_REQUEST_AT - now)
+        now = time.monotonic()
+    _NEXT_DAS_REQUEST_AT = now + _DAS_REQUEST_INTERVAL
+
+
+def _schedule_das_pause(duration: float) -> None:
+    """Delay the next DAS request by at least ``duration`` seconds."""
+
+    if duration <= 0:
+        return
+    global _NEXT_DAS_REQUEST_AT
+    target = time.monotonic() + duration
+    if target > _NEXT_DAS_REQUEST_AT:
+        _NEXT_DAS_REQUEST_AT = target
+
+
 async def _helius_search_assets(
     session: aiohttp.ClientSession,
     *,
@@ -1758,9 +1785,9 @@ async def _helius_search_assets(
     seen: Set[str] = set()
     page = 1
     try:
-        env_limit_default = max(1, int(os.getenv("DAS_DISCOVERY_LIMIT", "60")))
+        env_limit_default = max(1, int(os.getenv("DAS_DISCOVERY_LIMIT", "10")))
     except (TypeError, ValueError):
-        env_limit_default = 60
+        env_limit_default = 10
     target_limit = limit if limit > 0 else env_limit_default
     try:
         resolved_target = int(target_limit)
@@ -1828,6 +1855,7 @@ async def _helius_search_assets(
                                 "DAS payload -> %s",
                                 json.dumps(payload, separators=(",", ":")),
                             )
+                        await _respect_das_rate_limit()
                         async with session.post(url, json=payload, timeout=_HELIUS_TIMEOUT) as resp:
                             resp.raise_for_status()
                             data = await resp.json(content_type=None)
@@ -1835,6 +1863,7 @@ async def _helius_search_assets(
                         client_timeout = True
                         request_failed = True
                         last_error_message = "client timeout"
+                        _schedule_das_pause(_DAS_BACKOFF_BASE)
                         logger.warning(
                             "Helius searchAssets client timeout (limit=%d, attempt=%d)",
                             current_limit,
@@ -1843,14 +1872,31 @@ async def _helius_search_assets(
                         break
                     except aiohttp.ClientResponseError as exc:  # pragma: no cover - network failure
                         logger.warning("Helius searchAssets fetch failed: %s", exc)
+                        status = getattr(exc, "status", None)
+                        if status in {429, 503, 504}:
+                            retry_delay = max(_DAS_REQUEST_INTERVAL, _DAS_BACKOFF_BASE)
+                            headers = getattr(exc, "headers", None)
+                            retry_after_raw = None
+                            if headers:
+                                retry_after_raw = headers.get("Retry-After") or headers.get("retry-after")
+                            if retry_after_raw:
+                                try:
+                                    retry_after = float(retry_after_raw)
+                                except (TypeError, ValueError):
+                                    retry_after = None
+                                if retry_after and retry_after > 0:
+                                    retry_delay = max(retry_delay, float(retry_after))
+                            _schedule_das_pause(retry_delay)
                         request_failed = True
                         break
                     except aiohttp.ClientError as exc:  # pragma: no cover - network failure
                         logger.warning("Helius searchAssets fetch failed: %s", exc)
+                        _schedule_das_pause(_DAS_BACKOFF_BASE)
                         request_failed = True
                         break
                     except Exception as exc:  # pragma: no cover - parsing failure
                         logger.exception("Helius searchAssets unexpected error: %s", exc)
+                        _schedule_das_pause(_DAS_BACKOFF_BASE)
                         request_failed = True
                         break
 
@@ -1877,6 +1923,7 @@ async def _helius_search_assets(
                         if should_try_next_sort_variant(lowered, sort_variant):
                             continue
                         logger.warning("Helius searchAssets returned error: %s", message)
+                        _schedule_das_pause(_DAS_BACKOFF_BASE)
                         logged_error = True
                         request_failed = True
                         break
@@ -1910,6 +1957,7 @@ async def _helius_search_assets(
                     current_limit,
                     delay,
                 )
+                _schedule_das_pause(delay)
                 await asyncio.sleep(delay)
                 if consecutive_timeouts >= _DAS_TIMEOUT_THRESHOLD:
                     _DAS_CIRCUIT_OPEN_UNTIL = time.monotonic() + _DAS_DEGRADED_COOLDOWN
@@ -1938,6 +1986,7 @@ async def _helius_search_assets(
                     _DAS_MAX_ATTEMPTS,
                     delay,
                 )
+                _schedule_das_pause(delay)
                 await asyncio.sleep(delay)
                 continue
             break
