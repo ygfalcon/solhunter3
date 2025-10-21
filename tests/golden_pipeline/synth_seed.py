@@ -31,6 +31,13 @@ if "base58" not in sys.modules:
 from solhunter_zero import event_bus
 from solhunter_zero.golden_pipeline.bus import InMemoryBus
 from solhunter_zero.golden_pipeline.contracts import STREAMS
+from solhunter_zero.golden_pipeline.types import (
+    DECISION_SCHEMA_VERSION,
+    DEPTH_SNAPSHOT_SCHEMA_VERSION,
+    GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    TRADE_SUGGESTION_SCHEMA_VERSION,
+    VIRTUAL_FILL_SCHEMA_VERSION,
+)
 from solhunter_zero.golden_pipeline.kv import InMemoryKeyValueStore
 from solhunter_zero.runtime.runtime_wiring import RuntimeWiring, initialise_runtime_wiring
 from solhunter_zero.ui import UIState
@@ -414,6 +421,7 @@ async def _seed_runtime(
                 "5": depth_usd[symbol] * 2.2,
             },
             "asof": base_ts,
+            "schema_version": DEPTH_SNAPSHOT_SCHEMA_VERSION,
         }
         await bus.publish(STREAMS.market_depth, depth_snapshot)
 
@@ -437,7 +445,11 @@ async def _seed_runtime(
                 "vol_1m_usd": vol_1m,
                 "liquidity_usd": liquidity,
             },
-            "liq": liquidity,
+            "liq": {
+                "depth_pct": depth_snapshot["depth_pct"],
+                "liquidity_usd": liquidity,
+                "asof": base_ts,
+            },
             "ohlcv5m": {
                 "o": latest_bar["o"],
                 "h": latest_bar["h"],
@@ -462,6 +474,7 @@ async def _seed_runtime(
                     "price": True,
                 },
             },
+            "schema_version": GOLDEN_SNAPSHOT_SCHEMA_VERSION,
         }
         await bus.publish(STREAMS.golden_snapshot, golden_payload)
 
@@ -513,7 +526,7 @@ async def _seed_runtime(
         },
     ]
 
-    for spec in suggestions_spec:
+    for sequence, spec in enumerate(suggestions_spec, start=1):
         mint = spec["mint"]
         suggestion = {
             "agent": spec["agent"],
@@ -536,9 +549,13 @@ async def _seed_runtime(
                 "expected_edge_bps": spec["edge"] * 10_000,
                 "breakeven_bps": spec["breakeven_bps"],
             },
+            "sequence": sequence,
+            "schema_version": TRADE_SUGGESTION_SCHEMA_VERSION,
         }
         suggestion_payloads.append(suggestion)
         await bus.publish(STREAMS.trade_suggested, suggestion)
+
+    suggestion_by_mint = {payload["mint"]: payload for payload in suggestion_payloads}
 
     await kv.set("x:agent.suggestions", json.dumps(suggestion_payloads))
 
@@ -549,14 +566,21 @@ async def _seed_runtime(
     }
 
     decisions: List[Dict[str, Any]] = []
-    for mint, score in window_scores.items():
+    for sequence, (mint, score) in enumerate(window_scores.items(), start=1):
+        suggestion = suggestion_by_mint.get(mint)
+        notional = float(suggestion.get("notional_usd", 0.0)) if suggestion else 0.0
+        agents = [suggestion.get("agent", "swarm")] if suggestion else ["swarm"]
         decision = {
             "mint": mint,
             "side": "buy" if mint != suggestion_payloads[2]["mint"] else "sell",
+            "notional_usd": notional,
             "score": score,
             "snapshot_hash": golden_hashes[mint],
             "client_order_id": hashlib.sha1((mint + str(score)).encode("utf-8")).hexdigest(),
             "ts": base_ts + 0.5,
+            "agents": agents,
+            "sequence": sequence,
+            "schema_version": DECISION_SCHEMA_VERSION,
         }
         decisions.append(decision)
         await bus.publish(STREAMS.vote_decisions, decision)
@@ -572,6 +596,7 @@ async def _seed_runtime(
         "snapshot_hash": golden_hashes[token_specs[5]["mint"]],
         "route": "paper",
         "ts": base_ts + 0.75,
+        "schema_version": VIRTUAL_FILL_SCHEMA_VERSION,
     }
     fill_payloads.append(shadow_fill)
     await bus.publish(STREAMS.virtual_fills, shadow_fill)

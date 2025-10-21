@@ -128,6 +128,99 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
     return result
 
 
+def _extract_nested_float(
+    value: Any, preferred_keys: Iterable[str] = ()
+) -> Optional[float]:
+    if isinstance(value, Mapping):
+        for key in preferred_keys:
+            if key in value:
+                numeric = _maybe_float(value.get(key))
+                if numeric is not None:
+                    return numeric
+        for candidate in value.values():
+            numeric = _extract_nested_float(candidate)
+            if numeric is not None:
+                return numeric
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            numeric = _extract_nested_float(item)
+            if numeric is not None:
+                return numeric
+        return None
+    return _maybe_float(value)
+
+
+def _extract_golden_mid(snapshot: Mapping[str, Any]) -> Optional[float]:
+    return _extract_nested_float(
+        snapshot.get("px"),
+        (
+            "mid_usd",
+            "midUsd",
+            "mid",
+            "mid_price_usd",
+            "price_usd",
+            "fair_price",
+            "price",
+        ),
+    )
+
+
+def _extract_golden_spread(snapshot: Mapping[str, Any]) -> Optional[float]:
+    return _extract_nested_float(
+        snapshot.get("px"),
+        (
+            "spread_bps",
+            "spreadBps",
+            "spread",
+            "spread_pct",
+            "spreadPct",
+        ),
+    )
+
+
+def _extract_golden_liquidity(snapshot: Mapping[str, Any]) -> Optional[float]:
+    liq = snapshot.get("liq")
+    if isinstance(liq, Mapping):
+        depth = liq.get("depth_pct") or liq.get("depth")
+        depth_value = _extract_nested_float(
+            depth,
+            ("1", "1.0", "100", "100bps"),
+        )
+        if depth_value is not None:
+            return depth_value
+        return _extract_nested_float(
+            liq,
+            (
+                "liquidity_usd",
+                "usd_total",
+                "usd",
+                "notional_usd",
+                "notional",
+            ),
+        )
+    return _maybe_float(liq)
+
+
+def _extract_golden_depths(snapshot: Mapping[str, Any]) -> Dict[str, float]:
+    liq = snapshot.get("liq")
+    depth_source: Any = None
+    if isinstance(liq, Mapping):
+        depth_source = liq.get("depth_pct") or liq.get("depth")
+    result: Dict[str, float] = {}
+    if isinstance(depth_source, Mapping):
+        for key, raw in depth_source.items():
+            numeric = _maybe_float(raw)
+            if numeric is None:
+                continue
+            label = str(key).strip()
+            if label.endswith("bps"):
+                label = label[: -3]
+            label = label.strip("% ")
+            if not label:
+                continue
+            result[label] = numeric
+    return result
 def _maybe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     numeric = _maybe_float(value)
     if numeric is None:
@@ -1225,13 +1318,43 @@ class RuntimeEventCollectors:
                     stale_flag = age > stale_threshold
                 else:
                     stale_flag = age > 60.0
+            px_mid = _extract_golden_mid(payload)
+            spread_bps = _extract_golden_spread(payload)
+            px_payload = payload.get("px")
+            px_detail = _serialize(px_payload) if isinstance(px_payload, Mapping) else None
+            liq_payload = payload.get("liq")
+            liq_detail = _serialize(liq_payload) if isinstance(liq_payload, Mapping) else None
+            liq_total_usd = None
+            if isinstance(liq_payload, Mapping):
+                liq_total_usd = _extract_nested_float(
+                    liq_payload,
+                    (
+                        "liquidity_usd",
+                        "usd_total",
+                        "usd",
+                        "notional_usd",
+                        "notional",
+                    ),
+                )
+            if liq_total_usd is None:
+                liq_total_usd = _maybe_float(liq_payload)
+            primary_liq = _extract_golden_liquidity(payload)
+            if primary_liq is None:
+                primary_liq = liq_total_usd
+            depth_pct = _extract_golden_depths(payload)
             snapshots.append(
                 {
                     "mint": mint,
                     "hash": hash_text,
                     "hash_short": _short_hash(hash_text),
-                    "px": _maybe_float(payload.get("px")),
-                    "liq": _maybe_float(payload.get("liq")),
+                    "px": px_mid,
+                    "px_mid_usd": px_mid,
+                    "px_detail": px_detail,
+                    "spread_bps": spread_bps,
+                    "liq": primary_liq,
+                    "liq_total_usd": liq_total_usd,
+                    "liq_depth_pct": depth_pct if depth_pct else None,
+                    "liq_detail": liq_detail,
                     "age_seconds": age,
                     "age_label": _format_age(age),
                     "stale": stale_flag,
