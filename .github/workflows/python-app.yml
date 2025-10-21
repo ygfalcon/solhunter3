@@ -44,6 +44,12 @@ jobs:
         pytest tests/test_full_system_integration.py \
           tests/test_investor_demo_cli.py \
           tests/test_wallet_cli.py
+    - name: Publish observability bundle
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: observability-bundle
+        path: docs/observability
 
     mac-startup:
       runs-on: ubuntu-latest
