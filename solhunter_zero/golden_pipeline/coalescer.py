@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from typing import Any, Awaitable, Callable, Dict
 
@@ -156,6 +158,45 @@ class SnapshotCoalescer:
             return
         now = now_ts()
         depth_pct = dict(depth.depth_pct)
+
+        def _normalize_pct(value: Any) -> float | None:
+            if value is None:
+                return None
+            raw = str(value).strip().lower()
+            if not raw:
+                return None
+            if raw.endswith("bps"):
+                raw = raw[:-3]
+                try:
+                    return float(raw) / 100.0
+                except Exception:
+                    return None
+            if raw.endswith("%"):
+                raw = raw[:-1]
+            try:
+                numeric = float(raw)
+            except Exception:
+                return None
+            if numeric > 1.0:
+                numeric = numeric / 100.0
+            if numeric < 0:
+                return None
+            return numeric
+
+        bands = []
+        depth_usd_by_pct: Dict[str, float] = {}
+        for key, value in depth_pct.items():
+            pct_value = _normalize_pct(key)
+            if pct_value is None:
+                continue
+            try:
+                usd_value = float(value)
+            except Exception:
+                continue
+            bands.append({"pct": pct_value, "usd": usd_value})
+            label = f"{pct_value:.3f}".rstrip("0").rstrip(".")
+            depth_usd_by_pct[label] = usd_value
+        bands.sort(key=lambda item: item["pct"])
         ohlcv_payload = {
             "o": bar.open,
             "h": bar.high,
@@ -177,9 +218,17 @@ class SnapshotCoalescer:
         ohlcv_payload["content_hash"] = canonical_hash(dict(ohlcv_payload))
         liq_payload = {
             "depth_pct": depth_pct,
-            "depth_usd_by_pct": depth_pct,
+            "depth_usd_by_pct": depth_usd_by_pct,
+            "bands": bands,
             "asof": depth.asof,
         }
+        mid_price = float(depth.mid_usd)
+        spread_bps = float(depth.spread_bps)
+        half_spread = 0.0
+        if mid_price > 0 and spread_bps > 0:
+            half_spread = mid_price * (spread_bps / 20000.0)
+        bid_usd = max(0.0, mid_price - half_spread)
+        ask_usd = max(0.0, mid_price + half_spread)
         payload = {
             "mint": mint,
             "meta": {
@@ -189,25 +238,38 @@ class SnapshotCoalescer:
                 "asof": meta.asof,
             },
             "px": {
-                "mid_usd": depth.mid_usd,
+                "mid_usd": mid_price,
                 "spread_bps": depth.spread_bps,
+                "bid_usd": bid_usd,
+                "ask_usd": ask_usd,
+                "ts": depth.asof,
             },
             "liq": liq_payload,
             "ohlcv5m": ohlcv_payload,
             "schema_version": GOLDEN_SNAPSHOT_SCHEMA_VERSION,
         }
-        payload["px_mid_usd"] = depth.mid_usd
-        depth_1pct = None
-        for key in ("1", "1.0", "100", "100bps"):
-            if key in depth_pct:
-                try:
-                    depth_1pct = float(depth_pct[key])
-                except Exception:
-                    depth_1pct = None
-                else:
-                    break
+        payload["px_mid_usd"] = mid_price
+
+        def _lookup_depth(target: float) -> float | None:
+            for band in bands:
+                if abs(band["pct"] - target) <= 1e-6:
+                    return band["usd"]
+            return None
+
+        depth_1pct = _lookup_depth(1.0)
         payload["liq_depth_1pct_usd"] = depth_1pct
         payload["content_hash"] = canonical_hash({k: v for k, v in payload.items() if k != "content_hash"})
+        idempotency_source = {
+            "mint": mint,
+            "meta": payload["meta"],
+            "px": payload["px"],
+            "liq": payload["liq"],
+            "ohlcv5m": payload["ohlcv5m"],
+            "schema_version": payload["schema_version"],
+        }
+        payload["idempotency_key"] = hashlib.sha1(
+            json.dumps(idempotency_source, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         snapshot_hash = canonical_hash(payload)
         async with lock:
             if self._versions.get(mint, 0) != version:
@@ -235,6 +297,7 @@ class SnapshotCoalescer:
             ohlcv5m=payload["ohlcv5m"],
             hash=snapshot_hash,
             content_hash=payload.get("content_hash", snapshot_hash),
+            idempotency_key=payload.get("idempotency_key", ""),
             metrics={
                 "emitted_at": now,
                 "latency_ms": latency_ms,

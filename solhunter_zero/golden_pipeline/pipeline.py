@@ -158,7 +158,10 @@ class GoldenPipeline:
             payload.setdefault(
                 "content_hash", snapshot.content_hash or snapshot.hash
             )
-            await self._publish(STREAMS.golden_snapshot, payload)
+            dedupe_key = snapshot.idempotency_key or snapshot.content_hash or snapshot.hash
+            if dedupe_key:
+                dedupe_key = f"{STREAMS.golden_snapshot}:{dedupe_key}"
+            await self._publish(STREAMS.golden_snapshot, payload, dedupe_key=dedupe_key)
             await self._publish_metrics(snapshot)
             if self._on_golden:
                 await self._on_golden(snapshot)

@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterable, Mapping, Optional
 
@@ -15,6 +18,38 @@ from .utils import CircuitBreaker, TTLCache
 log = logging.getLogger(__name__)
 
 _BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+
+
+class BloomFilter:
+    """Simple Bloom filter used to guard duplicate discovery per cycle."""
+
+    def __init__(self, size: int = 1 << 14, hashes: int = 5) -> None:
+        self.size = max(8, size)
+        self.hashes = max(1, hashes)
+        self._bits = bytearray((self.size + 7) // 8)
+
+    def _iter_hashes(self, value: str) -> Iterable[int]:
+        digest = hashlib.sha256(value.encode("utf-8")).digest()
+        for i in range(self.hashes):
+            start = i * 4
+            chunk = digest[start : start + 4]
+            if len(chunk) < 4:
+                chunk = (chunk + b"\x00" * 4)[:4]
+            yield int.from_bytes(chunk, "big") % self.size
+
+    def add(self, value: str) -> bool:
+        seen = True
+        for idx in self._iter_hashes(value):
+            byte = idx // 8
+            mask = 1 << (idx % 8)
+            if not self._bits[byte] & mask:
+                seen = False
+                self._bits[byte] |= mask
+        return not seen
+
+    def clear(self) -> None:
+        for i in range(len(self._bits)):
+            self._bits[i] = 0
 
 
 class DiscoveryStage:
@@ -45,6 +80,17 @@ class DiscoveryStage:
         self._lock = asyncio.Lock()
         self._metrics = DiscoveryStageMetrics()
         self._on_metrics = on_metrics
+        self._bloom = BloomFilter()
+        try:
+            window_raw = os.getenv("DISCOVERY_BLOOM_WINDOW_SEC", "60")
+            self._bloom_window = float(window_raw or 60.0)
+        except Exception:
+            self._bloom_window = 60.0
+        if self._bloom_window <= 0:
+            self._bloom_window = 0.0
+        self._bloom_next_reset = (
+            time.monotonic() + self._bloom_window if self._bloom_window > 0 else 0.0
+        )
 
     async def submit(self, candidate: DiscoveryCandidate) -> bool:
         """Validate and forward ``candidate`` if it passes all gates."""
@@ -53,13 +99,17 @@ class DiscoveryStage:
             accepted = False
             deduped = False
 
+            self._maybe_reset_bloom()
+
             if self._breaker.is_open:
                 log.debug("Discovery circuit breaker open; dropping %s", candidate.mint)
             elif not self._validate(candidate.mint):
                 log.debug("Rejected discovery candidate %s", candidate.mint)
                 self._record_failure()
             else:
-                if self._kv:
+                if not self._bloom.add(candidate.mint):
+                    deduped = True
+                elif self._kv:
                     key = discovery_seen_key(candidate.mint)
                     stored = await self._kv.set_if_absent(
                         key,
@@ -156,6 +206,14 @@ class DiscoveryStage:
         if not self._kv:
             return None
         return await self._kv.get(discovery_cursor_key())
+
+    def _maybe_reset_bloom(self) -> None:
+        if self._bloom_window <= 0:
+            return
+        now = time.monotonic()
+        if now >= self._bloom_next_reset:
+            self._bloom.clear()
+            self._bloom_next_reset = now + self._bloom_window
 
     def _record_success(self) -> None:
         self._breaker.record_success()
