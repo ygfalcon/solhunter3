@@ -41,7 +41,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        def get(self, url, headers=None, timeout=10):
+        def get(self, url, headers=None, timeout=10, params=None):
             self.calls.append(url)
             payload = {
                 "data": {
@@ -104,3 +104,41 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     assert results[0]["sources"] == ["mempool"]
     assert any("birdeye" in r["sources"] for r in results)
     assert len(fake_session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_mempool_signals_times_out(monkeypatch, caplog):
+    class SleepyStream:
+        def __init__(self):
+            self.calls = 0
+            self.closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.calls += 1
+            await asyncio.sleep(0.2)
+            return {"address": f"slow-{self.calls}"}
+
+        async def aclose(self):
+            self.closed = True
+
+    sleepy = SleepyStream()
+
+    monkeypatch.setattr(td, "_MEMPOOL_TIMEOUT", 0.05)
+    monkeypatch.setattr(td, "_MEMPOOL_TIMEOUT_RETRIES", 2)
+    monkeypatch.setattr(
+        td,
+        "stream_ranked_mempool_tokens_with_depth",
+        lambda *_args, **_kwargs: sleepy,
+    )
+
+    caplog.set_level("DEBUG")
+
+    scores = await td._collect_mempool_signals("https://rpc", threshold=0.0)
+
+    assert scores == {}
+    assert sleepy.calls >= td._MEMPOOL_TIMEOUT_RETRIES
+    assert sleepy.closed
+    assert any("timed out" in rec.message for rec in caplog.records)

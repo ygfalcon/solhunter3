@@ -49,6 +49,8 @@ files unless the loader is invoked with `overwrite=True`.
 | `DEX_METRIC_URLS` | `` | Configures dex metric urls |
 | `DISCORD_FEEDS` | `https://discord.com/api/guilds/613425648685547541/widget.json` | Configures discord feeds |
 | `DISCOVERY_METHOD` | `websocket` | Configures discovery method |
+| `DISCOVERY_MEMPOOL_TIMEOUT` | `2.5` | Seconds to wait for each mempool update during discovery before retrying |
+| `DISCOVERY_MEMPOOL_TIMEOUT_RETRIES` | `3` | Number of consecutive mempool timeouts tolerated before returning partial discovery results |
 | `DYNAMIC_CONCURRENCY_INTERVAL` | `` | Interval for dynamic concurrency |
 | `EDGE_CACHE_TTL` | `60` | TTL for edge cache cache |
 | `EVENT_BATCH_MS` | `` | Configures event batch ms |

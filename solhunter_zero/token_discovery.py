@@ -44,6 +44,10 @@ _OVERFETCH_FACTOR = float(os.getenv("DISCOVERY_OVERFETCH_FACTOR", "0.8") or 0.8)
 _CACHE_TTL = float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45)
 _MAX_OFFSET = int(os.getenv("DISCOVERY_MAX_OFFSET", "4000") or 4000)
 _MEMPOOL_LIMIT = int(os.getenv("DISCOVERY_MEMPOOL_LIMIT", "12") or 12)
+_MEMPOOL_TIMEOUT = float(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT", "2.5") or 2.5)
+_MEMPOOL_TIMEOUT_RETRIES = max(
+    1, int(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT_RETRIES", "3") or 3)
+)
 _VOLUME_WEIGHT = float(os.getenv("DISCOVERY_VOLUME_WEIGHT", "0.45") or 0.45)
 _LIQUIDITY_WEIGHT = float(os.getenv("DISCOVERY_LIQUIDITY_WEIGHT", "0.55") or 0.55)
 _MEMPOOL_BONUS = float(os.getenv("DISCOVERY_MEMPOOL_BONUS", "5.0") or 5.0)
@@ -406,15 +410,49 @@ async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, 
     gen = None
     try:
         gen = stream_ranked_mempool_tokens_with_depth(rpc_url, threshold=threshold)
-        async for item in gen:
+    except Exception as exc:
+        logger.debug("Mempool stream unavailable: %s", exc)
+        return scores
+
+    timeouts = 0
+    timeout = max(_MEMPOOL_TIMEOUT, 0.1)
+
+    try:
+        while len(scores) < _MEMPOOL_LIMIT:
+            try:
+                item = await asyncio.wait_for(anext(gen), timeout=timeout)
+            except asyncio.TimeoutError:
+                timeouts += 1
+                if timeouts >= _MEMPOOL_TIMEOUT_RETRIES:
+                    logger.debug(
+                        "Mempool stream timed out after %d attempts; returning %d partial signal(s)",
+                        timeouts,
+                        len(scores),
+                    )
+                    break
+                continue
+            except StopAsyncIteration:
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Mempool stream unavailable: %s", exc)
+                break
+            else:
+                timeouts = 0
+
+            if not isinstance(item, dict):
+                continue
+
             addr = item.get("address")
             if not addr:
                 continue
+
             scores[addr] = item
             if len(scores) >= _MEMPOOL_LIMIT:
                 break
-    except Exception as exc:
-        logger.debug("Mempool stream unavailable: %s", exc)
+    except asyncio.CancelledError:
+        raise
     finally:
         if gen is not None:
             with contextlib.suppress(Exception):
