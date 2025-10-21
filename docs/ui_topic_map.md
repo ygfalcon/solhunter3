@@ -80,6 +80,12 @@ staleness rules.
 - **Fields:** Aggregated PnL by agent, family, and total, including turnover, Sharpe proxy, drawdown.
 - **Staleness:** Badge if summary older than 5m.
 
+### Exit Diagnostics
+- **Endpoint:** `/swarm/exits` (served by `TradingRuntime._collect_exit_panel`).
+- **Topic:** `x:swarm.exits` / `x:exit.panel` when orchestrated via `RuntimeEventCollectors`.
+- **Fields:** `hot_watch`, `diagnostics`, `queue`, `closed`, `missed_exits` (all derived from `ExitManager.summary()`).
+- **Staleness:** Snapshot of the latest runtime state; highlight if unchanged for >2m while positions are open.
+
 ## Reinforcement Learning
 
 ### RL Weights
