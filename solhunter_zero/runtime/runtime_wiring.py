@@ -263,6 +263,77 @@ def _format_ttl(remaining: Optional[float], original: Optional[float]) -> str:
     return _format_countdown(remaining)
 
 
+def _compute_rl_uplift(
+    decisions: List[Dict[str, Any]],
+    suggestions: List[Dict[str, Any]],
+    now: float,
+) -> Dict[str, Any]:
+    window = 300.0
+    decision_scores: List[float] = []
+    for decision in decisions:
+        ts = _entry_timestamp(decision, "ts")
+        age = _age_seconds(ts, now)
+        if age is None and decision.get("_received") is not None:
+            try:
+                age = max(0.0, now - float(decision["_received"]))
+            except Exception:
+                age = None
+        if age is not None and age <= window:
+            score = _maybe_float(decision.get("score"))
+            if score is not None:
+                decision_scores.append(score)
+    suggestion_scores: List[float] = []
+    for suggestion in suggestions:
+        ts = _entry_timestamp(suggestion, "asof")
+        age = _age_seconds(ts, now)
+        if age is None and suggestion.get("_received") is not None:
+            try:
+                age = max(0.0, now - float(suggestion["_received"]))
+            except Exception:
+                age = None
+        if age is not None and age <= window:
+            edge = _maybe_float(suggestion.get("edge"))
+            if edge is not None:
+                suggestion_scores.append(edge)
+    rolling = 0.0
+    rl_avg = sum(decision_scores) / len(decision_scores) if decision_scores else 0.0
+    plain_avg = (
+        sum(suggestion_scores) / len(suggestion_scores)
+        if suggestion_scores
+        else 0.0
+    )
+    if decision_scores and suggestion_scores:
+        rolling = rl_avg - plain_avg
+    last_delta = 0.0
+    if decisions:
+        last_decision = decisions[0]
+        score_val = _maybe_float(last_decision.get("score"))
+        if score_val is not None:
+            related = [
+                _maybe_float(suggestion.get("edge"))
+                for suggestion in suggestions
+                if suggestion.get("mint") == last_decision.get("mint")
+                and (
+                    last_decision.get("snapshot_hash") is None
+                    or suggestion.get("inputs_hash")
+                    == last_decision.get("snapshot_hash")
+                )
+            ]
+            related = [value for value in related if value is not None]
+            if related:
+                last_delta = score_val - (sum(related) / len(related))
+    uplift_pct = 0.0
+    if plain_avg:
+        uplift_pct = (rl_avg - plain_avg) / abs(plain_avg) * 100.0
+    return {
+        "rolling_5m": rolling,
+        "last_decision_delta": last_delta,
+        "score_rl": rl_avg,
+        "score_plain": plain_avg,
+        "uplift_pct": uplift_pct,
+    }
+
+
 class RuntimeEventCollectors:
     """Mirror TradingRuntime's event subscriptions for UI hydration."""
 
@@ -291,6 +362,9 @@ class RuntimeEventCollectors:
         fills_limit = _int_env("UI_FILLS_LIMIT", 400)
         self._virtual_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
         self._live_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
+        self._rl_weights: Deque[Dict[str, Any]] = deque(
+            maxlen=_int_env("UI_RL_WEIGHTS_LIMIT", 240)
+        )
         self._subscriptions: List[Callable[[], None]] = []
         self._exit_summary: Dict[str, Any] = _sanitize_exit_payload(None)
         self._exit_lock = threading.Lock()
@@ -423,6 +497,17 @@ class RuntimeEventCollectors:
             with self._swarm_lock:
                 self._live_fills.appendleft(payload)
 
+        async def _on_rl_weights(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not isinstance(payload, dict):
+                return
+            mint = payload.get("mint")
+            if not mint:
+                return
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._rl_weights.appendleft(dict(payload))
+
         async def _on_exit_panel(event: Any) -> None:
             payload = _normalize_event(event)
             if not isinstance(payload, dict):
@@ -439,6 +524,7 @@ class RuntimeEventCollectors:
             ("x:vote.decisions", _on_vote_decision),
             ("x:virt.fills", _on_virtual_fill),
             ("x:live.fills", _on_live_fill),
+            ("rl:weights.applied", _on_rl_weights),
             ("x:swarm.exits", _on_exit_panel),
             ("x:exit.panel", _on_exit_panel),
         ):
@@ -494,6 +580,36 @@ class RuntimeEventCollectors:
         with self._discovery_lock:
             candidates = list(self._discovery_candidates)
         return {"candidates": candidates, "stats": {}}
+
+    def token_facts_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            facts = dict(self._token_facts)
+        ordered: Dict[str, Dict[str, Any]] = {}
+        for mint in sorted(facts.keys()):
+            payload = dict(facts[mint])
+            timestamp = _entry_timestamp(payload, "asof")
+            age = _age_seconds(timestamp, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            missing_meta = not payload.get("symbol") or not payload.get("name")
+            stale = (age is not None and age > 300.0) or missing_meta
+            ordered[mint] = {
+                "symbol": payload.get("symbol"),
+                "name": payload.get("name"),
+                "decimals": payload.get("decimals"),
+                "token_program": payload.get("token_program"),
+                "flags": payload.get("flags") or [],
+                "venues": payload.get("venues") or [],
+                "asof": payload.get("asof"),
+                "age_seconds": age,
+                "age_label": _format_age(age),
+                "stale": stale,
+            }
+        return {"tokens": ordered, "selected": None}
 
     def market_snapshot(self) -> Dict[str, Any]:
         now = time.time()
@@ -845,6 +961,63 @@ class RuntimeEventCollectors:
             "live_fills": live[:200],
         }
 
+    def rl_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            weights = list(self._rl_weights)
+            decisions = list(self._vote_decisions)
+            suggestions = list(self._agent_suggestions)
+        entries: List[Dict[str, Any]] = []
+        for payload in weights:
+            mint = payload.get("mint")
+            if not mint:
+                continue
+            ts = _entry_timestamp(payload, "asof")
+            if ts is None:
+                ts = _entry_timestamp(payload, "timestamp")
+            age = _age_seconds(ts, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            multipliers = (
+                payload.get("multipliers")
+                or payload.get("weights")
+                or payload.get("agents")
+            )
+            if isinstance(multipliers, dict):
+                parts: List[str] = []
+                for key, value in list(multipliers.items())[:3]:
+                    val = _maybe_float(value)
+                    if val is None:
+                        continue
+                    parts.append(f"{key}:{val:.2f}")
+                summary = ", ".join(parts)
+                if len(multipliers) > 3:
+                    summary = summary + " …" if summary else "…"
+                multiplier_map = {str(k): _maybe_float(v) for k, v in multipliers.items()}
+            else:
+                summary_val = _maybe_float(payload.get("multiplier"))
+                summary = f"{summary_val:.2f}" if summary_val is not None else "n/a"
+                multiplier_map = {"value": summary_val} if summary_val is not None else {}
+            entries.append(
+                {
+                    "mint": mint,
+                    "window_hash": payload.get("window_hash") or payload.get("hash"),
+                    "window_hash_short": _short_hash(
+                        payload.get("window_hash") or payload.get("hash")
+                    ),
+                    "multiplier": summary,
+                    "age_label": _format_age(age),
+                    "stale": age is not None and age > 600.0,
+                    "age_seconds": age,
+                    "multipliers": multiplier_map,
+                }
+            )
+        uplift = _compute_rl_uplift(decisions, suggestions, now)
+        return {"weights": entries[:120], "uplift": uplift}
+
 
 @dataclass
 class RuntimeWiring:
@@ -854,11 +1027,13 @@ class RuntimeWiring:
         ui_state.golden_snapshot_provider = self.collectors.golden_snapshot
         ui_state.discovery_provider = self.collectors.discovery_snapshot
         ui_state.discovery_console_provider = self.collectors.discovery_console_snapshot
+        ui_state.token_facts_provider = self.collectors.token_facts_snapshot
         ui_state.market_state_provider = self.collectors.market_snapshot
         ui_state.suggestions_provider = self.collectors.suggestions_snapshot
         ui_state.vote_windows_provider = self.collectors.vote_snapshot
         ui_state.shadow_provider = self.collectors.shadow_snapshot
         ui_state.exit_provider = self.collectors.exit_snapshot
+        ui_state.rl_provider = self.collectors.rl_snapshot
 
     def close(self) -> None:
         self.collectors.stop()
