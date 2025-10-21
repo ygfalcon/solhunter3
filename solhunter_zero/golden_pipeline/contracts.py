@@ -36,6 +36,12 @@ def discovery_cursor_key() -> str:
     return "discovery:cursor"
 
 
+def discovery_buffer_key() -> str:
+    """Return the key storing buffered discovery candidates."""
+
+    return "discovery:buffer"
+
+
 def golden_hash_key(mint: str) -> str:
     """Return the KV key storing the latest Golden hash for ``mint``."""
 
@@ -59,6 +65,7 @@ __all__ = [
     "StreamNames",
     "discovery_seen_key",
     "discovery_cursor_key",
+    "discovery_buffer_key",
     "golden_hash_key",
     "vote_dedupe_key",
     "vote_input_key",

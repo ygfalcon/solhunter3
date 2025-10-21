@@ -15,6 +15,9 @@ class DiscoveryCandidate:
 
     mint: str
     asof: Timestamp
+    source: str | None = None
+    score: float | None = None
+    cursor: str | None = None
 
 
 @dataclass(slots=True)

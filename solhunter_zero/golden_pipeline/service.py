@@ -19,7 +19,7 @@ from ..token_scanner import TRENDING_METADATA
 
 from .agents import BaseAgent
 from .bus import EventBusAdapter, MessageBus
-from .contracts import STREAMS
+from .contracts import STREAMS, discovery_buffer_key
 from .pipeline import GoldenPipeline
 from .types import (
     Decision,
@@ -646,6 +646,7 @@ class GoldenPipelineService:
         await self._ensure_bus_visible()
         self._running = True
         self._log_bus_configuration()
+        await self._restore_discovery_state()
         self._subscriptions.append(
             self._event_bus.subscribe("token_discovered", self._on_discovery)
         )
@@ -743,6 +744,80 @@ class GoldenPipelineService:
             url or "n/a",
         )
 
+    async def _restore_discovery_state(self) -> None:
+        stage = getattr(self.pipeline, "_discovery_stage", None)
+        if stage is None:
+            return
+        try:
+            cursor = await stage.load_cursor()
+        except Exception:
+            log.debug("Failed to load discovery cursor from storage", exc_info=True)
+        else:
+            if cursor:
+                log.debug("Restored discovery cursor from storage")
+        buffered = await self._load_buffered_discoveries()
+        if buffered:
+            log.info("Replaying %d buffered discovery candidates", len(buffered))
+            self._on_discovery({"tokens": buffered})
+
+    async def _load_buffered_discoveries(self) -> List[Any]:
+        kv = getattr(self.pipeline, "_kv", None)
+        if kv is None:
+            return []
+        try:
+            raw = await kv.get(discovery_buffer_key())
+        except Exception:
+            log.debug("Failed to load buffered discovery candidates", exc_info=True)
+            return []
+        if not raw:
+            return []
+        tokens = self._parse_buffered_discovery_payload(raw)
+        if not tokens:
+            return []
+        try:
+            await kv.delete(discovery_buffer_key())
+        except Exception:
+            log.debug("Failed to clear discovery buffer key", exc_info=True)
+        return tokens
+
+    def _parse_buffered_discovery_payload(self, raw: str) -> List[Any]:
+        if not isinstance(raw, str):
+            return []
+        payload = raw.strip()
+        if not payload:
+            return []
+        try:
+            data = json.loads(payload)
+        except Exception:
+            tokens: List[Any] = []
+            for piece in payload.replace("\n", ",").split(","):
+                token = piece.strip()
+                if token:
+                    tokens.append(token)
+            return tokens
+        if isinstance(data, list):
+            return list(data)
+        if isinstance(data, Mapping):
+            for key in ("tokens", "candidates", "items", "recent", "mints"):
+                value = data.get(key)
+                if not value:
+                    continue
+                if isinstance(value, list):
+                    return list(value)
+                if isinstance(value, Mapping):
+                    nested = (
+                        value.get("tokens")
+                        or value.get("mints")
+                        or value.get("items")
+                    )
+                    if nested is None:
+                        continue
+                    if isinstance(nested, list):
+                        return list(nested)
+                    return [nested]
+            return [data]
+        return [data]
+
     def _on_discovery(self, payload: Any) -> None:
         if not self._running:
             return
@@ -755,9 +830,60 @@ class GoldenPipelineService:
             return
         now = time.time()
         for raw in tokens:
-            mint = canonical_mint(str(raw))
-            candidate = DiscoveryCandidate(mint=mint, asof=now)
+            candidate = self._build_discovery_candidate(raw, default_asof=now)
+            if candidate is None:
+                continue
             self._spawn(self.pipeline.submit_discovery(candidate))
+
+    def _build_discovery_candidate(
+        self, raw: Any, *, default_asof: float
+    ) -> DiscoveryCandidate | None:
+        if isinstance(raw, Mapping):
+            mint_value = (
+                raw.get("mint")
+                or raw.get("token")
+                or raw.get("address")
+            )
+            if not mint_value:
+                return None
+            try:
+                mint = canonical_mint(str(mint_value))
+            except Exception:
+                return None
+            source_val = raw.get("source")
+            source = None
+            if isinstance(source_val, str):
+                source = source_val.strip() or None
+            score = _coerce_float(raw.get("score"))
+            cursor_val = raw.get("cursor")
+            cursor = None
+            if cursor_val is not None:
+                try:
+                    cursor_text = str(cursor_val).strip()
+                except Exception:
+                    cursor_text = ""
+                if cursor_text:
+                    cursor = cursor_text
+            timestamp_raw = raw.get("asof") or raw.get("timestamp")
+            ts_value = _coerce_float(timestamp_raw)
+            if ts_value is None and isinstance(timestamp_raw, str):
+                try:
+                    ts_value = float(timestamp_raw)
+                except Exception:
+                    ts_value = None
+            asof = float(ts_value) if ts_value is not None and ts_value > 0 else default_asof
+            return DiscoveryCandidate(
+                mint=mint,
+                asof=asof,
+                source=source,
+                score=score,
+                cursor=cursor,
+            )
+        try:
+            mint = canonical_mint(str(raw))
+        except Exception:
+            return None
+        return DiscoveryCandidate(mint=mint, asof=default_asof)
 
     def _on_price(self, payload: Any) -> None:
         if not self._running or not isinstance(payload, dict):

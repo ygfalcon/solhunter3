@@ -77,6 +77,18 @@ class DiscoveryStage:
                 self._breaker.record_failure()
                 return False
 
+            cursor_value = getattr(candidate, "cursor", None)
+            if cursor_value:
+                try:
+                    cursor_text = str(cursor_value).strip()
+                except Exception:
+                    cursor_text = ""
+                if cursor_text:
+                    try:
+                        await self.persist_cursor(cursor_text)
+                    except Exception:  # pragma: no cover - defensive persistence
+                        log.debug("Discovery cursor persistence failed", exc_info=True)
+
             self._breaker.record_success()
             return True
 
