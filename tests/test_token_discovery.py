@@ -104,3 +104,25 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     assert results[0]["sources"] == ["mempool"]
     assert any("birdeye" in r["sources"] for r in results)
     assert len(fake_session.calls) == 1
+
+
+def test_warm_cache_skips_without_birdeye_key(monkeypatch):
+    # Ensure environment does not provide a BirdEye key and guard short-circuits.
+    monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "")
+
+    thread_called = {"created": False, "started": False}
+
+    class DummyThread:
+        def __init__(self, *args, **kwargs):
+            thread_called["created"] = True
+
+        def start(self):
+            thread_called["started"] = True
+
+    monkeypatch.setattr(td.threading, "Thread", DummyThread)
+
+    td.warm_cache(rpc_url="")
+
+    assert thread_called["created"] is False
+    assert thread_called["started"] is False
