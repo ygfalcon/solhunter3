@@ -641,6 +641,7 @@ class GoldenPipelineService:
         self._pending: set[asyncio.Task] = set()
         self._running = False
         self._last_price: Dict[str, float] = {}
+        self._bootstrap_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         if self._running:
@@ -648,7 +649,6 @@ class GoldenPipelineService:
         await self._ensure_bus_visible()
         self._running = True
         self._log_bus_configuration()
-        bootstrapped = await self._bootstrap_trending_metadata()
         self._subscriptions.append(
             self._event_bus.subscribe("token_discovered", self._on_discovery)
         )
@@ -659,16 +659,11 @@ class GoldenPipelineService:
             self._event_bus.subscribe("depth_update", self._on_depth)
         )
         await self.pipeline.flush_market()
+        self._schedule_bootstrap_task()
         self._tasks.append(asyncio.create_task(self._market_flush_loop(), name="golden_market_flush"))
-        if bootstrapped:
-            log.info(
-                "GoldenPipelineService started (subscriptions=token_discovered, price_update, depth_update; bootstrapped=%d)",
-                bootstrapped,
-            )
-        else:
-            log.info(
-                "GoldenPipelineService started (subscriptions=token_discovered, price_update, depth_update)"
-            )
+        log.info(
+            "GoldenPipelineService started (subscriptions=token_discovered, price_update, depth_update; bootstrap=background)"
+        )
 
     async def stop(self) -> None:
         if not self._running:
@@ -688,6 +683,12 @@ class GoldenPipelineService:
                 await task
         self._tasks.clear()
 
+        if self._bootstrap_task is not None:
+            self._bootstrap_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._bootstrap_task
+            self._bootstrap_task = None
+
         for task in list(self._pending):
             task.cancel()
         for task in list(self._pending):
@@ -695,6 +696,29 @@ class GoldenPipelineService:
                 await task
         self._pending.clear()
         log.info("GoldenPipelineService stopped")
+
+    def _schedule_bootstrap_task(self) -> None:
+        if not self._running:
+            return
+        if self._bootstrap_task is not None and not self._bootstrap_task.done():
+            return
+        task = asyncio.create_task(
+            self._bootstrap_trending_metadata(),
+            name="golden_bootstrap_trending",
+        )
+        task.add_done_callback(self._on_bootstrap_task_done)
+        self._bootstrap_task = task
+
+    def _on_bootstrap_task_done(self, task: asyncio.Task[Any]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            log.debug("Bootstrap trending metadata task cancelled")
+        except Exception:
+            log.exception("Bootstrap trending metadata task failed")
+        finally:
+            if self._bootstrap_task is task:
+                self._bootstrap_task = None
 
     async def _market_flush_loop(self) -> None:
         try:
@@ -778,57 +802,121 @@ class GoldenPipelineService:
             url or "n/a",
         )
 
-    async def _bootstrap_trending_metadata(self) -> int:
+    async def _bootstrap_trending_metadata(self) -> None:
         """Seed cached trending metadata into the discovery pipeline."""
 
         snapshot = list(TRENDING_METADATA.items())
-        if not snapshot:
-            return 0
+        if not snapshot or not self._running:
+            return
 
+        chunk_size = 25
+        submit_timeout = 2.0
         seen: set[str] = set()
-        bootstrapped = 0
+        accepted = 0
+        deduped_or_rejected = 0
+        invalid = 0
+        failed = 0
+        processed = 0
+        total_entries = len(snapshot)
         now = time.time()
 
-        for key, meta in snapshot:
-            candidates: list[str] = []
-            if isinstance(meta, Mapping):
-                for field in ("address", "mint"):
-                    raw = meta.get(field)
-                    if isinstance(raw, str) and raw.strip():
-                        candidates.append(raw)
-            candidates.append(key)
+        log.info(
+            "Bootstrapping trending metadata (entries=%d)",
+            total_entries,
+        )
 
-            canonical = ""
-            for raw in candidates:
+        try:
+            for idx, (key, meta) in enumerate(snapshot, start=1):
+                if not self._running:
+                    log.debug(
+                        "Aborting trending metadata bootstrap after %d processed entries", processed
+                    )
+                    break
+
+                candidates: list[str] = []
+                if isinstance(meta, Mapping):
+                    for field in ("address", "mint"):
+                        raw = meta.get(field)
+                        if isinstance(raw, str) and raw.strip():
+                            candidates.append(raw)
+                candidates.append(key)
+
+                canonical = ""
+                duplicate = False
+                for raw in candidates:
+                    try:
+                        candidate = canonical_mint(str(raw))
+                    except Exception:
+                        continue
+                    if not candidate:
+                        continue
+                    if candidate in seen:
+                        duplicate = True
+                        continue
+                    canonical = candidate
+                    break
+
+                if not canonical:
+                    if duplicate:
+                        deduped_or_rejected += 1
+                    else:
+                        invalid += 1
+                    continue
+
+                seen.add(canonical)
+                processed += 1
+
+                candidate = DiscoveryCandidate(mint=canonical, asof=now)
                 try:
-                    candidate = canonical_mint(str(raw))
+                    accepted_candidate = await asyncio.wait_for(
+                        self.pipeline.submit_discovery(candidate),
+                        timeout=submit_timeout,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except asyncio.TimeoutError:
+                    failed += 1
+                    log.warning(
+                        "Bootstrap trending metadata timed out for mint %s", canonical
+                    )
+                    continue
                 except Exception:
+                    failed += 1
+                    log.exception(
+                        "Failed to bootstrap cached trending mint %s", canonical
+                    )
                     continue
-                if not candidate:
-                    continue
-                if candidate in seen:
-                    continue
-                canonical = candidate
-                break
 
-            if not canonical:
-                continue
+                if accepted_candidate:
+                    accepted += 1
+                else:
+                    deduped_or_rejected += 1
 
-            seen.add(canonical)
-            try:
-                accepted = await self.pipeline.submit_discovery(
-                    DiscoveryCandidate(mint=canonical, asof=now)
-                )
-            except Exception:
-                log.exception(
-                    "Failed to bootstrap cached trending mint %s", canonical
-                )
-                continue
-
-            if accepted:
-                bootstrapped += 1
-
-        return bootstrapped
+                if idx % chunk_size == 0:
+                    await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            log.info(
+                "Bootstrapping trending metadata cancelled (total=%d, processed=%d, accepted=%d, deduped_or_rejected=%d, invalid=%d, failed=%d)",
+                total_entries,
+                processed,
+                accepted,
+                deduped_or_rejected,
+                invalid,
+                failed,
+            )
+            raise
+        else:
+            status = "completed" if self._running else "stopped"
+            log.info(
+                "Bootstrapping trending metadata %s (total=%d, processed=%d, accepted=%d, deduped_or_rejected=%d, invalid=%d, failed=%d)",
+                status,
+                total_entries,
+                processed,
+                accepted,
+                deduped_or_rejected,
+                invalid,
+                failed,
+            )
 
     def _on_discovery(self, payload: Any) -> None:
         if not self._running:
