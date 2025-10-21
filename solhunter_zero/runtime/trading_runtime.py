@@ -1703,8 +1703,8 @@ class TradingRuntime:
                     "mint": mint,
                     "hash": hash_text,
                     "hash_short": _short_hash(hash_text),
-                    "px": _maybe_float(payload.get("px")),
-                    "liq": _maybe_float(payload.get("liq")),
+                    "px": _extract_golden_mid(payload),
+                    "liq": _extract_golden_liquidity(payload),
                     "age_seconds": age,
                     "age_label": _format_age(age),
                     "stale": stale_flag,
@@ -2024,7 +2024,7 @@ class TradingRuntime:
             fills = list(self._virtual_fills)
             golden_hashes = dict(self._latest_golden_hash)
             golden_prices = {
-                mint: _maybe_float(payload.get("px"))
+                mint: _extract_golden_mid(payload)
                 for mint, payload in self._golden_snapshots.items()
             }
         items: List[Dict[str, Any]] = []
@@ -2678,6 +2678,64 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
     if not math.isfinite(result):
         return default
     return result
+
+
+def _extract_nested_float(value: Any, preferred_keys: Iterable[str] = ()) -> Optional[float]:
+    if isinstance(value, Mapping):
+        for key in preferred_keys:
+            if key in value:
+                numeric = _maybe_float(value.get(key))
+                if numeric is not None:
+                    return numeric
+        for candidate in value.values():
+            numeric = _extract_nested_float(candidate)
+            if numeric is not None:
+                return numeric
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            numeric = _extract_nested_float(item)
+            if numeric is not None:
+                return numeric
+        return None
+    return _maybe_float(value)
+
+
+def _extract_golden_mid(snapshot: Mapping[str, Any]) -> Optional[float]:
+    return _extract_nested_float(
+        snapshot.get("px"),
+        (
+            "mid_usd",
+            "midUsd",
+            "mid",
+            "mid_price_usd",
+            "price_usd",
+            "fair_price",
+            "price",
+        ),
+    )
+
+
+def _extract_golden_liquidity(snapshot: Mapping[str, Any]) -> Optional[float]:
+    liq = snapshot.get("liq")
+    if isinstance(liq, Mapping):
+        depth = _extract_nested_float(
+            liq.get("depth_pct") or liq.get("depth"),
+            ("1", "1.0", "100", "100bps"),
+        )
+        if depth is not None:
+            return depth
+        return _extract_nested_float(
+            liq,
+            (
+                "liquidity_usd",
+                "usd_total",
+                "usd",
+                "notional_usd",
+                "notional",
+            ),
+        )
+    return _maybe_float(liq)
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
