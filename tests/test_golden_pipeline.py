@@ -9,6 +9,9 @@ from typing import Any
 import pytest
 
 from solhunter_zero.golden_pipeline.agents import BaseAgent
+from solhunter_zero.golden_pipeline.bus import InMemoryBus
+from solhunter_zero.golden_pipeline.contracts import STREAMS, golden_hash_key
+from solhunter_zero.golden_pipeline.kv import InMemoryKeyValueStore
 from solhunter_zero.golden_pipeline.market import MarketDataStage
 from solhunter_zero.golden_pipeline.depth import DepthStage
 from solhunter_zero.golden_pipeline.pipeline import GoldenPipeline
@@ -35,6 +38,27 @@ _sample_ticks.DEFAULT_PATH = ""
 _datasets_pkg.sample_ticks = _sample_ticks
 sys.modules.setdefault("solhunter_zero.datasets", _datasets_pkg)
 sys.modules.setdefault("solhunter_zero.datasets.sample_ticks", _sample_ticks)
+
+_token_scanner_stub = types.ModuleType("solhunter_zero.token_scanner")
+_token_scanner_stub.TRENDING_METADATA = {}
+sys.modules.setdefault("solhunter_zero.token_scanner", _token_scanner_stub)
+
+_portfolio_stub = types.ModuleType("solhunter_zero.portfolio")
+if "solhunter_zero.portfolio" not in sys.modules:
+    class _PortfolioStub:
+        pass
+
+    _portfolio_stub.Portfolio = _PortfolioStub
+    sys.modules["solhunter_zero.portfolio"] = _portfolio_stub
+
+_agent_manager_stub = types.ModuleType("solhunter_zero.agent_manager")
+if "solhunter_zero.agent_manager" not in sys.modules:
+    class _AgentManagerStub:
+        async def evaluate_with_swarm(self, mint: str, portfolio: object) -> SimpleNamespace:
+            return SimpleNamespace(actions=[])
+
+    _agent_manager_stub.AgentManager = _AgentManagerStub
+    sys.modules["solhunter_zero.agent_manager"] = _agent_manager_stub
 
 from solhunter_zero.golden_pipeline.service import AgentManagerAgent
 
@@ -340,31 +364,64 @@ def test_shadow_executor_emits_virtual_pnl():
 
 
 def test_pipeline_end_to_end_flow():
-    class StaticAgent(BaseAgent):
-        def __init__(self, name: str, side: str = "buy") -> None:
+    class VotingAgent(BaseAgent):
+        def __init__(self, name: str, *, notional: float, confidence: float) -> None:
             super().__init__(name)
-            self._side = side
+            self._notional = notional
+            self._confidence = confidence
 
         async def generate(self, snapshot: GoldenSnapshot):
+            gating = {
+                "edge_pass": True,
+                "edge_buffer_bps": 30.0,
+                "breakeven_bps": 10.0,
+                "expected_edge_bps": 40.0,
+            }
+            risk = {"expected_edge_bps": 40.0, "breakeven_bps": 10.0}
             return [
                 self.build_suggestion(
                     snapshot=snapshot,
-                    side=self._side,
-                    notional_usd=5_000.0,
-                    max_slippage_bps=40.0,
-                    risk={},
-                    confidence=0.6,
-                    ttl_sec=1.0,
+                    side="buy",
+                    notional_usd=self._notional,
+                    max_slippage_bps=50.0,
+                    risk=risk,
+                    confidence=self._confidence,
+                    ttl_sec=2.0,
+                    gating=gating,
                 )
             ]
 
     async def runner() -> None:
+        bus = InMemoryBus()
+        kv = InMemoryKeyValueStore()
+        base_ts = time.time() - 600.0
+        mint = "MintGdenTest111111111111111111111111111"
+
+        metadata_requests: list[list[str]] = []
         goldens: deque[GoldenSnapshot] = deque()
         suggestions: deque[TradeSuggestion] = deque()
         decisions: deque[Decision] = deque()
         virtual_fills: deque[VirtualFill] = deque()
         virtual_pnls: deque[VirtualPnL] = deque()
         live_fills: deque[LiveFill] = deque()
+
+        async def fetch_metadata(mints):
+            requested = [str(m) for m in mints]
+            metadata_requests.append(requested)
+            asof = time.time()
+            return {
+                mint_id: TokenSnapshot(
+                    mint=mint_id,
+                    symbol="GOLD",
+                    name="Golden Token",
+                    decimals=6,
+                    token_program="TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                    venues=("raydium", "orca"),
+                    flags={"source": "test"},
+                    asof=asof,
+                )
+                for mint_id in requested
+            }
 
         async def on_golden(snapshot: GoldenSnapshot) -> None:
             goldens.append(snapshot)
@@ -384,92 +441,192 @@ def test_pipeline_end_to_end_flow():
         async def on_live(fill: LiveFill) -> None:
             live_fills.append(fill)
 
-        async def fetch_metadata(mints):
-            return {
-                mint: TokenSnapshot(
-                    mint=mint,
-                    symbol="TEST",
-                    name="Test Token",
-                    decimals=6,
-                    token_program="Tokenkeg",
-                    asof=time.time(),
-                )
-                for mint in mints
-            }
-
         pipeline = GoldenPipeline(
             enrichment_fetcher=fetch_metadata,
-            agents=[StaticAgent("alpha"), StaticAgent("beta")],
+            agents=[
+                VotingAgent("alpha_agent", notional=5_000.0, confidence=0.22),
+                VotingAgent("beta_agent", notional=7_500.0, confidence=0.28),
+            ],
             on_golden=on_golden,
             on_suggestion=on_suggestion,
             on_decision=on_decision,
             on_virtual_fill=on_virtual_fill,
             on_virtual_pnl=on_virtual_pnl,
             live_fill_handler=on_live,
+            bus=bus,
+            kv=kv,
+            max_agent_spread_bps=200.0,
+            min_agent_depth1_usd=4_000.0,
+            vote_quorum=2,
+            vote_window_ms=400,
+            vote_min_score=0.05,
         )
 
-        mint = "Mint1111111111111111111111111111111111"
-        await pipeline.submit_discovery(DiscoveryCandidate(mint=mint, asof=time.time()))
+        candidate = DiscoveryCandidate(mint=mint, asof=base_ts)
+        accepted = await pipeline.submit_discovery(candidate)
+        assert accepted is True
+        assert metadata_requests and metadata_requests[0] == [mint]
 
-        depth = DepthSnapshot(
+        depth_asof = time.time()
+        depth_primary = DepthSnapshot(
             mint=mint,
-            venue="aggregated",
-            mid_usd=1.5,
-            spread_bps=20.0,
-            depth_pct={"1": 10_000.0, "2": 15_000.0, "5": 25_000.0},
-            asof=time.time(),
+            venue="alpha-venue",
+            mid_usd=1.0,
+            spread_bps=22.0,
+            depth_pct={"1": 12_000.0, "2": 18_000.0},
+            asof=depth_asof,
         )
-        await pipeline.submit_depth(depth)
+        depth_secondary = DepthSnapshot(
+            mint=mint,
+            venue="beta-venue",
+            mid_usd=1.01,
+            spread_bps=18.0,
+            depth_pct={"1": 8_000.0, "2": 15_000.0},
+            asof=depth_asof + 0.1,
+        )
+        await pipeline.submit_depth(depth_primary)
+        await pipeline.submit_depth(depth_secondary)
 
-        now = time.time() - 600.0
-        event = TapeEvent(
+        trade_a = TapeEvent(
             mint_base=mint,
-            mint_quote="USD",
-            amount_base=1_000.0,
-            amount_quote=1_500.0,
-            route="test",
-            program_id="prog",
-            pool="pool",
-            signer="signer",
-            signature="sig",
-            slot=0,
-            ts=now,
+            mint_quote="USDC",
+            amount_base=500.0,
+            amount_quote=500.0,
+            route="jupiter",
+            program_id="amm",
+            pool="pool-alpha",
+            signer="trader-a",
+            signature="sig-a",
+            slot=1,
+            ts=base_ts,
             fees_base=0.0,
-            price_usd=1.5,
-            fees_usd=0.0,
+            price_usd=1.0,
+            fees_usd=0.05,
             is_self=False,
-            buyer="trader",
+            buyer="wallet-a",
         )
-        await pipeline.submit_market_event(event)
+        trade_b = TapeEvent(
+            mint_base=mint,
+            mint_quote="USDC",
+            amount_base=300.0,
+            amount_quote=303.0,
+            route="jupiter",
+            program_id="amm",
+            pool="pool-beta",
+            signer="trader-b",
+            signature="sig-b",
+            slot=2,
+            ts=base_ts + 60.0,
+            fees_base=0.0,
+            price_usd=1.01,
+            fees_usd=0.04,
+            is_self=False,
+            buyer="wallet-b",
+        )
+        await pipeline.submit_market_event(trade_a)
+        await pipeline.submit_market_event(trade_b)
         await pipeline.flush_market()
 
-        await asyncio.sleep(0.2)
+        async def eventually(predicate, *, timeout: float = 2.0) -> None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("condition not satisfied within timeout")
 
-        assert len(goldens) == 1
-        golden = goldens[0]
-        assert golden.mint == mint
-        assert golden.hash
+        await eventually(lambda: len(decisions) == 1)
 
+        assert len(goldens) >= 1
         assert len(suggestions) == 2
-        for suggestion in suggestions:
-            assert suggestion.inputs_hash == golden.hash
-
-        await asyncio.sleep(0.5)
-        assert len(decisions) == 1
-        decision = decisions[0]
-        assert decision.snapshot_hash == golden.hash
-        assert decision.agents == ["alpha", "beta"]
-        assert decision.notional_usd > 0
-
-        await asyncio.sleep(0.2)
         assert len(virtual_fills) == 1
         assert len(virtual_pnls) == 1
         assert len(live_fills) == 1
-        virtual_fill = virtual_fills[0]
-        assert virtual_fill.snapshot_hash == golden.hash
-        assert pytest.approx(virtual_fill.qty_base, rel=1e-6) == pytest.approx(
-            decision.notional_usd / depth.mid_usd, rel=1e-6
+
+        assert STREAMS.discovery_candidates in bus.events
+        discovery_event = bus.events[STREAMS.discovery_candidates][0]
+        assert discovery_event["mint"] == mint
+
+        assert STREAMS.token_snapshot in bus.events
+        token_event = bus.events[STREAMS.token_snapshot][0]
+        assert token_event["mint"] == mint
+        assert token_event["symbol"] == "GOLD"
+
+        assert STREAMS.market_ohlcv in bus.events
+        market_events = bus.events[STREAMS.market_ohlcv]
+        assert market_events, "expected market OHLCV events"
+        market_event = market_events[0]
+        expected_close = ((base_ts // 300) * 300) + 300
+        assert market_event["mint"] == mint
+        assert market_event["trades"] == 2
+        assert market_event["buyers"] == 2
+        assert market_event["vol_usd"] == pytest.approx(803.0, rel=1e-6)
+        assert market_event["asof_close"] == pytest.approx(expected_close, rel=1e-6)
+
+        assert STREAMS.market_depth in bus.events
+        depth_events = bus.events[STREAMS.market_depth]
+        assert depth_events
+        depth_event = depth_events[-1]
+        assert depth_event["mint"] == mint
+        assert depth_event["venue"] == "aggregated"
+        assert depth_event["depth_pct"]["1"] == pytest.approx(20_000.0, rel=1e-6)
+        assert depth_event["mid_usd"] == pytest.approx(1.004, rel=1e-3)
+
+        assert STREAMS.golden_snapshot in bus.events
+        golden_event = bus.events[STREAMS.golden_snapshot][-1]
+        latest_snapshot = goldens[-1]
+        assert golden_event["mint"] == mint
+        assert golden_event["hash"] == latest_snapshot.hash
+        ohlcv_payload = golden_event["ohlcv5m"]
+        assert ohlcv_payload["vol_usd"] == pytest.approx(803.0, rel=1e-6)
+        assert ohlcv_payload["buyers"] == 2
+        assert ohlcv_payload["flow_usd"] == pytest.approx(803.0, rel=1e-6)
+        assert golden_event["liq"]["depth_pct"]["1"] == pytest.approx(20_000.0, rel=1e-6)
+
+        stored_hash = await kv.get(golden_hash_key(mint))
+        assert stored_hash == golden_event["hash"]
+
+        assert STREAMS.trade_suggested in bus.events
+        suggestion_events = bus.events[STREAMS.trade_suggested]
+        assert len(suggestion_events) == 2
+        assert sorted(event["agent"] for event in suggestion_events) == [
+            "alpha_agent",
+            "beta_agent",
+        ]
+
+        assert STREAMS.vote_decisions in bus.events
+        decision_events = bus.events[STREAMS.vote_decisions]
+        assert len(decision_events) == 1
+        decision_event = decision_events[0]
+        assert decision_event["mint"] == mint
+        assert decision_event["snapshot_hash"] == golden_event["hash"]
+        assert decision_event["agents"] == ["alpha_agent", "beta_agent"]
+        assert decision_event["notional_usd"] == pytest.approx(6_250.0, rel=1e-6)
+        assert decision_event["score"] == pytest.approx(0.25, rel=1e-6)
+
+        assert STREAMS.virtual_fills in bus.events
+        virtual_event = bus.events[STREAMS.virtual_fills][0]
+        assert virtual_event["mint"] == mint
+        assert virtual_event["snapshot_hash"] == golden_event["hash"]
+        assert virtual_event["qty_base"] == pytest.approx(
+            virtual_fills[0].qty_base, rel=1e-6
         )
+
+        assert STREAMS.live_fills in bus.events
+        live_event = bus.events[STREAMS.live_fills][0]
+        assert live_event["mint"] == mint
+        assert live_event["snapshot_hash"] == golden_event["hash"]
+
+        metrics = pipeline.metrics_snapshot()
+        assert metrics["latency_ms"]["count"] >= 1.0
+        assert metrics["candle_age_ms"]["max"] >= latest_snapshot.metrics["candle_age_ms"]
+
+        context_snapshot = pipeline.context.get(golden_event["hash"])
+        assert context_snapshot is not None
+
+        pnl = virtual_pnls[0]
+        assert pnl.mint == mint
+        assert pnl.snapshot_hash == golden_event["hash"]
 
     asyncio.run(runner())
 
