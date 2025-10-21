@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from .agents.discovery import (
     DISCOVERY_METHODS,
     resolve_discovery_method,
 )
+from .event_bus import publish as publish_event
 
 
 log = logging.getLogger(__name__)
@@ -1364,6 +1366,79 @@ _PAGE_TEMPLATE = """
             border: 1px solid rgba(88,166,255,0.12);
         }
         .control-card strong { display: block; margin-bottom: 6px; }
+        .settings-flags {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+        .flag-card {
+            border-radius: 12px;
+            padding: 12px 14px;
+            background: rgba(13,17,23,0.7);
+            border: 1px solid rgba(88,166,255,0.14);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .flag-card.status-ok { border-color: rgba(63,185,80,0.4); }
+        .flag-card.status-warn { border-color: rgba(242,204,96,0.45); }
+        .flag-card.status-danger { border-color: rgba(255,123,114,0.45); }
+        .flag-card.status-pending { border-color: rgba(88,166,255,0.35); }
+        .flag-card.status-idle { border-color: rgba(88,166,255,0.18); }
+        .flag-card .flag-title {
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+        .flag-card .flag-detail {
+            font-size: 0.85rem;
+            color: rgba(230, 237, 243, 0.7);
+        }
+        .flag-card .flag-age {
+            font-size: 0.75rem;
+            color: var(--muted);
+        }
+        .safety-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 16px;
+            margin-bottom: 18px;
+        }
+        .safety-card {
+            border-radius: 14px;
+            padding: 14px;
+            background: rgba(13,17,23,0.72);
+            border: 1px solid rgba(88,166,255,0.18);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .safety-card.status-danger { border-color: rgba(255,123,114,0.45); }
+        .safety-card.status-warn { border-color: rgba(242,204,96,0.45); }
+        .safety-card.status-pending { border-color: rgba(88,166,255,0.35); }
+        .safety-card.status-idle { border-color: rgba(88,166,255,0.2); }
+        .safety-trigger {
+            align-self: flex-start;
+            background: var(--accent);
+            color: #0d1117;
+            font-weight: 600;
+            border: none;
+            border-radius: 999px;
+            padding: 8px 16px;
+            cursor: pointer;
+            transition: opacity 0.2s ease;
+        }
+        .safety-trigger:hover { opacity: 0.85; }
+        .safety-trigger[disabled] {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .safety-status {
+            font-size: 0.78rem;
+            color: var(--muted);
+        }
+        .safety-status[data-state="ack"] { color: var(--success); }
+        .safety-status[data-state="error"] { color: var(--danger); }
         .stack {
             display: flex;
             flex-direction: column;
@@ -2227,7 +2302,38 @@ _PAGE_TEMPLATE = """
         <section class=\"panel\" id=\"settings-panel\">
             <div class=\"section-title\">
                 <h2><span class=\"color-chip idle\"></span>Settings & Controls</h2>
-                <span class=\"muted\">{{ settings.controls | length }} controls</span>
+                <span class=\"muted\">{{ settings.toggles | length }} flags · {{ settings.controls | length }} controls</span>
+            </div>
+            <div class=\"settings-flags\">
+                {% for toggle in settings.toggles %}
+                <div class=\"flag-card status-{{ toggle.status | default('idle') }}\">
+                    <span class=\"flag-title\">{{ toggle.label }}</span>
+                    <span class=\"flag-detail\">{{ toggle.detail }}</span>
+                    <span class=\"flag-age\">{{ toggle.age_label }}</span>
+                </div>
+                {% else %}
+                <div class=\"muted\">No feature flags detected.</div>
+                {% endfor %}
+            </div>
+            <div class=\"safety-grid\">
+                {% for action in settings.safety %}
+                <div class=\"safety-card status-{{ action.status | default('idle') }}\">
+                    <div>
+                        <strong>{{ action.label }}</strong>
+                        <div class=\"muted\">{{ action.detail }}</div>
+                    </div>
+                    <button class=\"safety-trigger\"
+                        data-safety-endpoint=\"{{ action.endpoint }}\"
+                        data-safety-topic=\"{{ action.topic }}\"
+                        data-safety-payload='{{ action.payload | tojson }}'
+                        data-safety-status-id=\"safety-status-{{ loop.index0 }}\">
+                        {{ action.button_label }}
+                    </button>
+                    <span class=\"safety-status\" id=\"safety-status-{{ loop.index0 }}\">{{ action.state_label }}</span>
+                </div>
+                {% else %}
+                <div class=\"muted\">No safety actions registered.</div>
+                {% endfor %}
             </div>
             <div class=\"control-grid\">
                 {% for control in settings.controls %}
@@ -2820,6 +2926,69 @@ _PAGE_TEMPLATE = """
                     });
                 }
 
+                const safetyButtons = document.querySelectorAll('.safety-trigger');
+                safetyButtons.forEach((button) => {
+                    button.addEventListener('click', (event) => {
+                        event.preventDefault();
+                        const endpoint = button.dataset.safetyEndpoint;
+                        if (!endpoint) {
+                            return;
+                        }
+                        const statusId = button.dataset.safetyStatusId || '';
+                        const statusEl = statusId ? document.getElementById(statusId) : null;
+                        const payloadText = button.dataset.safetyPayload || '{}';
+                        let payload = {};
+                        try {
+                            payload = JSON.parse(payloadText);
+                        } catch (err) {
+                            payload = {};
+                        }
+                        payload.source = payload.source || 'ui';
+                        if (!payload.timestamp) {
+                            payload.timestamp = Date.now() / 1000;
+                        }
+                        button.disabled = true;
+                        const originalText = button.textContent;
+                        button.textContent = 'Sending…';
+                        if (statusEl) {
+                            statusEl.dataset.state = 'pending';
+                            statusEl.textContent = 'Pending…';
+                        }
+                        fetch(endpoint, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(payload),
+                        })
+                            .then((response) => response.json().catch(() => ({})))
+                            .then((data) => {
+                                if (!statusEl) {
+                                    return;
+                                }
+                                if (data && data.ok) {
+                                    const token = data.ack && data.ack.token ? data.ack.token : '';
+                                    statusEl.dataset.state = 'ack';
+                                    statusEl.textContent = token ? `Ack ${token}` : 'Acked';
+                                } else if (data && data.error) {
+                                    statusEl.dataset.state = 'error';
+                                    statusEl.textContent = data.error;
+                                } else {
+                                    statusEl.dataset.state = 'ack';
+                                    statusEl.textContent = 'Sent';
+                                }
+                            })
+                            .catch(() => {
+                                if (statusEl) {
+                                    statusEl.dataset.state = 'error';
+                                    statusEl.textContent = 'Failed';
+                                }
+                            })
+                            .finally(() => {
+                                button.disabled = false;
+                                button.textContent = originalText || 'Trigger';
+                            });
+                    });
+                });
+
                 document.addEventListener('click', function (event) {
                     const btn = event.target.closest('.flatten-btn');
                     if (btn) {
@@ -3379,6 +3548,41 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.get("/swarm/rl")
     def swarm_rl() -> Any:
         return jsonify(_json_ready(state.snapshot_rl_panel()))
+
+    @app.post("/api/safety/<action>")
+    def trigger_safety(action: str) -> Any:
+        action_key = (action or "").strip().lower()
+        topic_map = {
+            "stop": ("control:safety.stop", "safety_stop"),
+            "pause": ("control:execution:paused", "global_pause"),
+        }
+        if action_key not in topic_map:
+            return jsonify({"ok": False, "error": f"unknown safety action: {action}"}), 404
+        topic, default_action = topic_map[action_key]
+        payload = request.get_json(silent=True) or {}
+        message: Dict[str, Any] = dict(payload)
+        token = str(message.get("token") or f"ui-{int(time.time() * 1000)}")
+        message["token"] = token
+        message.setdefault("source", "ui")
+        message.setdefault("action", default_action)
+        if "timestamp" not in message:
+            message["timestamp"] = time.time()
+        if action_key == "pause":
+            active = message.get("active")
+            if active is None:
+                active = True
+            message["active"] = bool(active)
+            message.setdefault("state", "paused" if message["active"] else "resumed")
+        else:
+            message.setdefault("state", "triggered")
+            if "active" not in message:
+                message["active"] = True
+        try:
+            publish_event(topic, message)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.exception("Failed to publish safety action", exc_info=True)
+            return jsonify({"ok": False, "error": str(exc)}), 500
+        return jsonify({"ok": True, "topic": topic, "ack": {"token": token, "state": message.get("state")}})
 
     @app.post("/actions/flatten")
     def action_flatten() -> Any:

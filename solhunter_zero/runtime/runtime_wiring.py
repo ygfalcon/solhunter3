@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..event_bus import subscribe
+from ..feature_flags import get_feature_flags
 from ..ui import UIState, get_ws_channel_metrics
 from ..util import parse_bool_env
 
@@ -205,6 +206,46 @@ def _format_countdown(seconds: float) -> str:
     return f"{secs}s"
 
 
+def _control_state_active(value: Any) -> bool:
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"", "idle", "unknown", "n/a"}:
+            return False
+        if lowered in {"off", "false", "no", "disabled"}:
+            return False
+        if lowered in {"paused", "active", "on", "true", "yes", "enabled"}:
+            return True
+        return bool(lowered)
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return bool(value)
+
+
+def _normalize_control_state(payload: Any) -> Tuple[str, bool, Any]:
+    state_value: Any = payload
+    if isinstance(payload, Mapping):
+        for key in ("state", "value", "active"):
+            if key in payload and payload[key] is not None:
+                state_value = payload[key]
+                break
+    active = _control_state_active(state_value)
+    if isinstance(state_value, str):
+        label = state_value.strip() or "idle"
+    elif isinstance(state_value, bool):
+        label = "active" if state_value else "off"
+    elif isinstance(state_value, (int, float)):
+        label = "active" if active else "off"
+    elif state_value is None:
+        label = "idle"
+    else:
+        label = str(state_value)
+    return label, active, state_value
+
+
 _EXIT_PANEL_KEYS: tuple[str, ...] = (
     "hot_watch",
     "diagnostics",
@@ -370,6 +411,37 @@ class RuntimeEventCollectors:
         self._rl_status_info: Dict[str, Any] = {
             "vote_window_ms": None,
             "updated_at": None,
+        }
+        self._stage_status: Dict[str, Dict[str, Any]] = {}
+        self._safety_topics: Dict[str, Dict[str, Any]] = {
+            "control:safety.stop": {
+                "key": "safety_stop",
+                "label": "Safety Stop",
+                "endpoint": "/api/safety/stop",
+                "button_label": "Trigger Safety Stop",
+                "payload": {"state": "triggered", "active": True},
+                "active_status": "danger",
+            },
+            "control:execution:paused": {
+                "key": "global_pause",
+                "label": "Global Pause",
+                "endpoint": "/api/safety/pause",
+                "button_label": "Pause Execution",
+                "payload": {"state": "paused", "active": True},
+                "active_status": "warn",
+            },
+        }
+        self._safety_signals: Dict[str, Dict[str, Any]] = {
+            topic: {
+                "state": "idle",
+                "active": False,
+                "value": None,
+                "detail": None,
+                "token": None,
+                "updated_at": None,
+                "payload": None,
+            }
+            for topic in self._safety_topics
         }
         pnl_limit = _int_env("UI_VIRTUAL_PNL_LIMIT", 400)
         self._virtual_pnls: Deque[Dict[str, Any]] = deque(maxlen=pnl_limit)
@@ -548,12 +620,64 @@ class RuntimeEventCollectors:
                         self._rl_status_info["vote_window_ms"] = window_ms
                 self._rl_status_info["updated_at"] = time.time()
 
+        async def _on_stage_changed(event: Any) -> None:
+            payload = _normalize_event(event)
+            stage = payload.get("stage")
+            if not stage:
+                return
+            ok_value = payload.get("ok")
+            detail = payload.get("detail")
+            serialized = _serialize(payload)
+            now_ts = time.time()
+            with self._swarm_lock:
+                self._stage_status[str(stage)] = {
+                    "stage": str(stage),
+                    "ok": bool(ok_value),
+                    "detail": detail,
+                    "updated_at": now_ts,
+                    "payload": serialized,
+                }
+
+        def _make_control_handler(topic: str) -> Callable[[Any], Any]:
+            async def _handler(event: Any) -> None:
+                payload = _normalize_event(event)
+                label, active, state_value = _normalize_control_state(payload)
+                detail: Optional[str] = None
+                token: Optional[str] = None
+                if isinstance(payload, Mapping):
+                    detail_candidate = payload.get("detail") or payload.get("reason")
+                    if isinstance(detail_candidate, str):
+                        detail = detail_candidate
+                    token_value = payload.get("token")
+                    if token_value is not None:
+                        token = str(token_value)
+                if detail is None and token:
+                    detail = f"token={token}"
+                serialized = _serialize(payload)
+                now_ts = time.time()
+                with self._swarm_lock:
+                    entry = self._safety_signals.setdefault(topic, {})
+                    entry.update(
+                        {
+                            "state": label,
+                            "active": active,
+                            "value": state_value,
+                            "detail": detail,
+                            "token": token,
+                            "payload": serialized,
+                            "updated_at": now_ts,
+                        }
+                    )
+
+            return _handler
+
         async def _on_exit_panel(event: Any) -> None:
             payload = _normalize_event(event)
             if not isinstance(payload, dict):
                 payload = {"hot_watch": payload}
             self._set_exit_summary(payload)
 
+        safety_handlers = {topic: _make_control_handler(topic) for topic in self._safety_topics}
         for topic, handler in (
             ("x:discovery.candidates", _on_discovery_candidate),
             ("x:token.snap", _on_token_snapshot),
@@ -569,7 +693,15 @@ class RuntimeEventCollectors:
             ("rl_weights", _on_rl_weights),
             ("x:swarm.exits", _on_exit_panel),
             ("x:exit.panel", _on_exit_panel),
+            ("runtime.stage_changed", _on_stage_changed),
+            ("control:safety.stop", safety_handlers.get("control:safety.stop")),
+            (
+                "control:execution:paused",
+                safety_handlers.get("control:execution:paused"),
+            ),
         ):
+            if handler is None:
+                continue
             unsub = subscribe(topic, handler)
             self._subscriptions.append(unsub)
 
@@ -901,6 +1033,8 @@ class RuntimeEventCollectors:
             )
             rl_updated = self._rl_status_info.get("updated_at")
             vote_window_ms = self._rl_status_info.get("vote_window_ms")
+            stage_status = copy.deepcopy(self._stage_status)
+            safety_signals = copy.deepcopy(self._safety_signals)
 
         def _control_entry(
             label: str,
@@ -957,10 +1091,129 @@ class RuntimeEventCollectors:
             if decision_ts is None
             else max(0.0, now - float(decision_ts)),
         }
+        flags_snapshot = get_feature_flags()
+        feature_flags = {
+            "mode": flags_snapshot.mode,
+            "micro_mode": flags_snapshot.micro_mode,
+            "new_das_discovery": flags_snapshot.new_das_discovery,
+            "exit_features_on": flags_snapshot.exit_features_on,
+            "rl_weights_disabled": flags_snapshot.rl_weights_disabled,
+        }
+
+        def _stage_toggle(stage_key: str, key: str, label: str) -> Dict[str, Any]:
+            entry = stage_status.get(stage_key) or {}
+            updated = entry.get("updated_at")
+            age = None
+            if updated is not None:
+                try:
+                    age = max(0.0, now - float(updated))
+                except Exception:
+                    age = None
+            active_flag = bool(entry.get("ok"))
+            status_value = "pending"
+            if entry:
+                status_value = "ok" if active_flag else "danger"
+            detail_text = entry.get("detail")
+            if not detail_text:
+                if entry:
+                    detail_text = "Streaming" if active_flag else "Issue reported"
+                else:
+                    detail_text = "Awaiting signal"
+            age_label = _format_age(age)
+            return {
+                "key": key,
+                "label": label,
+                "status": status_value,
+                "detail": detail_text,
+                "active": active_flag,
+                "age_label": age_label,
+                "stage": stage_key,
+            }
+
+        toggles: List[Dict[str, Any]] = [
+            {
+                "key": "das",
+                "label": "DAS Discovery",
+                "status": "ok" if flags_snapshot.new_das_discovery else "warn",
+                "detail": "Enabled" if flags_snapshot.new_das_discovery else "Disabled",
+                "active": bool(flags_snapshot.new_das_discovery),
+                "age_label": "env snapshot",
+            },
+            _stage_toggle("discovery:mint_stream", "mint_stream", "Mint Stream"),
+            _stage_toggle("discovery:mempool_stream", "mempool_stream", "Mempool Stream"),
+            _stage_toggle("discovery:seed_tokens", "seeded_tokens", "Seeded Tokens"),
+            {
+                "key": "rl_shadow",
+                "label": "RL Shadow",
+                "status": "ok" if flags_snapshot.rl_weights_disabled else "warn",
+                "detail": "Shadow mode" if flags_snapshot.rl_weights_disabled else "Applied",
+                "active": bool(flags_snapshot.rl_weights_disabled),
+                "age_label": "env snapshot",
+            },
+            {
+                "key": "mode",
+                "label": "Mode",
+                "status": "danger"
+                if flags_snapshot.mode == "live"
+                else "warn" if flags_snapshot.mode == "shadow" else "ok",
+                "detail": flags_snapshot.mode.upper(),
+                "active": flags_snapshot.mode != "paper",
+                "age_label": "env snapshot",
+            },
+        ]
+
+        safety_entries: List[Dict[str, Any]] = []
+        for topic, meta in self._safety_topics.items():
+            state_info = safety_signals.get(topic) or {}
+            updated = state_info.get("updated_at")
+            age = None
+            if updated is not None:
+                try:
+                    age = max(0.0, now - float(updated))
+                except Exception:
+                    age = None
+            age_label = _format_age(age)
+            state_label = state_info.get("state") or "idle"
+            if isinstance(state_label, str):
+                display_state = state_label.title()
+            else:
+                display_state = str(state_label)
+            active_flag = bool(state_info.get("active"))
+            status_value = meta.get("active_status", "danger") if active_flag else "idle"
+            if not active_flag and state_info.get("state") not in (None, "", "idle"):
+                status_value = "pending"
+            detail_text = state_info.get("detail")
+            if not detail_text:
+                if age is not None and state_info.get("state"):
+                    detail_text = f"{display_state} · {age_label}"
+                elif age is not None:
+                    detail_text = f"Last update {age_label}"
+                else:
+                    detail_text = "Ready"
+            safety_entries.append(
+                {
+                    "key": meta.get("key"),
+                    "label": meta.get("label"),
+                    "endpoint": meta.get("endpoint"),
+                    "status": status_value,
+                    "state_label": display_state,
+                    "detail": detail_text,
+                    "age_label": age_label,
+                    "topic": topic,
+                    "active": active_flag,
+                    "payload": meta.get("payload", {}),
+                    "button_label": meta.get("button_label", "Trigger"),
+                    "token": state_info.get("token"),
+                }
+            )
+
         return {
             "controls": controls,
             "overrides": {"vote_window_ms": vote_window_ms},
             "staleness": staleness,
+            "feature_flags": feature_flags,
+            "toggles": toggles,
+            "safety": safety_entries,
         }
 
     # Public provider accessors ------------------------------------------------
@@ -1094,13 +1347,24 @@ class RuntimeEventCollectors:
                     stale_flag = age > stale_threshold
                 else:
                     stale_flag = age > 60.0
+            px_value = _maybe_float(payload.get("px"))
+            if px_value is None and isinstance(payload.get("px"), dict):
+                px_value = _maybe_float(payload["px"].get("mid_usd"))
+            liq_value = _maybe_float(payload.get("liq"))
+            liq_payload = payload.get("liq")
+            if liq_value is None and isinstance(liq_payload, dict):
+                liq_value = _maybe_float(liq_payload.get("liquidity_usd"))
+                if liq_value is None:
+                    depth_pct = liq_payload.get("depth_pct")
+                    if isinstance(depth_pct, dict):
+                        liq_value = _maybe_float(depth_pct.get("1"))
             snapshots.append(
                 {
                     "mint": mint,
                     "hash": hash_text,
                     "hash_short": _short_hash(hash_text),
-                    "px": _maybe_float(payload.get("px")),
-                    "liq": _maybe_float(payload.get("liq")),
+                    "px": px_value,
+                    "liq": liq_value,
                     "age_seconds": age,
                     "age_label": _format_age(age),
                     "stale": stale_flag,

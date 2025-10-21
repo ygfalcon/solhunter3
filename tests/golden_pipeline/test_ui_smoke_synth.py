@@ -34,6 +34,14 @@ def test_ui_smoke_synth_values(runtime, bus, kv, synth_seed):
 
     settings = runtime.ui_state.snapshot_settings()
     assert len(settings.get("controls", [])) >= 3
+    toggles = settings.get("toggles", [])
+    toggle_keys = {entry.get("key") for entry in toggles if isinstance(entry, dict)}
+    assert {"das", "mint_stream", "mempool_stream", "seeded_tokens", "rl_shadow", "mode"}.issubset(toggle_keys)
+    safety_entries = settings.get("safety", [])
+    safety_keys = {entry.get("key") for entry in safety_entries if isinstance(entry, dict)}
+    assert {"safety_stop", "global_pause"}.issubset(safety_keys)
+    feature_flags = settings.get("feature_flags", {})
+    assert feature_flags.get("mode") in {"paper", "shadow", "live"}
 
     status = runtime.ui_state.snapshot_status()
     for key in ("bus_latency_ms", "ohlcv_lag_ms", "depth_lag_ms", "golden_lag_ms"):
@@ -152,3 +160,5 @@ def test_ui_smoke_synth_values(runtime, bus, kv, synth_seed):
     assert re.search(r'OHLCV Lag</span>\s*<strong>220\.0 ms', html)
     assert re.search(r'Depth Lag</span>\s*<strong>180\.0 ms', html)
     assert re.search(r'Golden Lag</span>\s*<strong>95\.0 ms', html)
+    assert '/api/safety/stop' in html
+    assert '/api/safety/pause' in html

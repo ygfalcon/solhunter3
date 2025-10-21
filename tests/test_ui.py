@@ -6,6 +6,8 @@ import types
 import contextlib
 import importlib.machinery
 import sys
+from typing import Any
+
 import pytest
 
 # Skip this module when running lightweight CI self-tests
@@ -271,6 +273,32 @@ def test_balances_includes_usd(monkeypatch):
     assert data["tok"]["price"] == 3.0
     assert data["tok"]["usd"] == 6.0
     assert data["tok"]["amount"] == 2
+
+
+def test_safety_actions_publish(monkeypatch):
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_publish(topic: str, payload: dict[str, Any]) -> None:
+        events.append((topic, payload))
+
+    monkeypatch.setattr(ui, "publish_event", fake_publish)
+
+    client = ui.app.test_client()
+
+    resp = client.post("/api/safety/stop", json={"state": "triggered"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert events and events[-1][0] == "control:safety.stop"
+    assert events[-1][1]["state"] == "triggered"
+    assert events[-1][1]["token"]
+
+    resp = client.post("/api/safety/pause", json={"active": False})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert events[-1][0] == "control:execution:paused"
+    assert events[-1][1]["active"] is False
 
 
 def test_trading_loop_awaits_run_iteration(monkeypatch):

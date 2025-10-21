@@ -414,6 +414,7 @@ async def _seed_runtime(
                 "5": depth_usd[symbol] * 2.2,
             },
             "asof": base_ts,
+            "schema_version": "1.0",
         }
         await bus.publish(STREAMS.market_depth, depth_snapshot)
 
@@ -437,7 +438,12 @@ async def _seed_runtime(
                 "vol_1m_usd": vol_1m,
                 "liquidity_usd": liquidity,
             },
-            "liq": liquidity,
+            "liq": {
+                "depth_pct": depth_snapshot["depth_pct"],
+                "asof": depth_snapshot["asof"],
+                "staleness_ms": 0.0,
+                "liquidity_usd": liquidity,
+            },
             "ohlcv5m": {
                 "o": latest_bar["o"],
                 "h": latest_bar["h"],
@@ -462,6 +468,7 @@ async def _seed_runtime(
                     "price": True,
                 },
             },
+            "schema_version": "1.0",
         }
         await bus.publish(STREAMS.golden_snapshot, golden_payload)
 
@@ -515,6 +522,7 @@ async def _seed_runtime(
 
     for spec in suggestions_spec:
         mint = spec["mint"]
+        sequence = len(suggestion_payloads)
         suggestion = {
             "agent": spec["agent"],
             "mint": mint,
@@ -536,6 +544,9 @@ async def _seed_runtime(
                 "expected_edge_bps": spec["edge"] * 10_000,
                 "breakeven_bps": spec["breakeven_bps"],
             },
+            "slices": [],
+            "sequence": sequence,
+            "schema_version": "1.0",
         }
         suggestion_payloads.append(suggestion)
         await bus.publish(STREAMS.trade_suggested, suggestion)
@@ -550,6 +561,12 @@ async def _seed_runtime(
 
     decisions: List[Dict[str, Any]] = []
     for mint, score in window_scores.items():
+        matching_suggestion = next(
+            (payload for payload in suggestion_payloads if payload["mint"] == mint),
+            None,
+        )
+        notional_usd = matching_suggestion["notional_usd"] if matching_suggestion else 0.0
+        agents = [matching_suggestion["agent"]] if matching_suggestion else []
         decision = {
             "mint": mint,
             "side": "buy" if mint != suggestion_payloads[2]["mint"] else "sell",
@@ -557,6 +574,10 @@ async def _seed_runtime(
             "snapshot_hash": golden_hashes[mint],
             "client_order_id": hashlib.sha1((mint + str(score)).encode("utf-8")).hexdigest(),
             "ts": base_ts + 0.5,
+            "notional_usd": notional_usd,
+            "agents": agents,
+            "sequence": len(decisions),
+            "schema_version": "1.0",
         }
         decisions.append(decision)
         await bus.publish(STREAMS.vote_decisions, decision)
@@ -572,6 +593,7 @@ async def _seed_runtime(
         "snapshot_hash": golden_hashes[token_specs[5]["mint"]],
         "route": "paper",
         "ts": base_ts + 0.75,
+        "schema_version": "1.0",
     }
     fill_payloads.append(shadow_fill)
     await bus.publish(STREAMS.virtual_fills, shadow_fill)
