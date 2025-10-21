@@ -1770,7 +1770,7 @@ async def connect_broker(urls: Sequence[str] | str) -> None:
             pubsub = conn.pubsub()
             await pubsub.subscribe(_BROKER_CHANNEL)
             logging.getLogger(__name__).info(
-                "Event bus: connected redis broker %s channel=%s", _redact(url), _BROKER_CHANNEL
+                "Event bus: connected redis broker %s channel=%s", url, _BROKER_CHANNEL
             )
             task = asyncio.create_task(_redis_listener(pubsub))
             _BROKER_TYPES.append("redis")
