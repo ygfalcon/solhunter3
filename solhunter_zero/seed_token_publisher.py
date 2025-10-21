@@ -127,8 +127,14 @@ async def run_seed_token_publisher() -> None:
     redis_error_logged = False
     try:
         redis_client = aioredis.from_url(redis_url, decode_responses=True)
-        await redis_client.ping()
-        logger.info("Seed tokens: connected to Redis broker at %s (channel=%s)", redis_url, channel)
+        ping = getattr(redis_client, "ping", None)
+        if callable(ping):
+            await ping()
+        logger.info(
+            "Seed tokens: connected to Redis broker at %s (channel=%s)",
+            redis_url,
+            channel,
+        )
     except Exception:
         redis_client = None
         if not redis_error_logged:
@@ -178,7 +184,7 @@ async def run_seed_token_publisher() -> None:
                 discovery_payload["discovery"]["pyth"] = dict(info)
             local_events.append(("token_discovered", discovery_payload))
             redis_messages.append(
-                json.dumps({"topic": "token_discovered", "payload": discovery_payload}, separators=(",", ":"))
+                json.dumps({"topic": "token_discovered", **discovery_payload}, separators=(",", ":"))
             )
 
         try:
@@ -197,7 +203,7 @@ async def run_seed_token_publisher() -> None:
                 }
                 local_events.append(("price_update", price_payload))
                 redis_messages.append(
-                    json.dumps({"topic": "price_update", "payload": price_payload}, separators=(",", ":"))
+                    json.dumps({"topic": "price_update", **price_payload}, separators=(",", ":"))
                 )
                 depth_entries[token] = {
                     "mint": token,
@@ -212,7 +218,7 @@ async def run_seed_token_publisher() -> None:
             depth_payload = {mint: data for mint, data in depth_entries.items()}
             local_events.append(("depth_update", depth_payload))
             redis_messages.append(
-                json.dumps({"topic": "depth_update", "payload": depth_payload}, separators=(",", ":"))
+                json.dumps({"topic": "depth_update", "entries": depth_payload}, separators=(",", ":"))
             )
 
         total_published = 0
@@ -228,6 +234,8 @@ async def run_seed_token_publisher() -> None:
                     redis_client = None
 
         for topic, payload in local_events:
+            if topic == "depth_update":
+                continue
             await _publish_local(topic, payload, logger=logger)
 
         if total_published:

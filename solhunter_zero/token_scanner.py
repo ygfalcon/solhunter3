@@ -24,6 +24,7 @@ from .clients.helius_das import (
     should_disable_token_type,
     should_try_next_sort_variant,
 )
+from .util import parse_bool_env
 from .util.mints import clean_candidate_mints
 
 
@@ -67,6 +68,8 @@ def _extract_helius_key() -> str:
     return ""
 
 logger = logging.getLogger(__name__)
+
+USE_DAS_DISCOVERY = parse_bool_env("USE_DAS_DISCOVERY", False)
 
 
 class BirdeyeFatalError(RuntimeError):
@@ -1255,7 +1258,7 @@ async def _collect_trending_seeds(
 
     minimum_before_das = min(desired, max(5, limit // 2))
     helius_results: List[Dict[str, Any]] = []
-    if len(seeds) < minimum_before_das:
+    if USE_DAS_DISCOVERY and len(seeds) < minimum_before_das:
         now = time.monotonic()
         if now < _DAS_CIRCUIT_OPEN_UNTIL:
             remaining = max(0.0, _DAS_CIRCUIT_OPEN_UNTIL - now)
@@ -1280,6 +1283,8 @@ async def _collect_trending_seeds(
             _append_seed(entry, "helius_search")
             if len(seeds) >= desired:
                 break
+    elif not USE_DAS_DISCOVERY and len(seeds) < minimum_before_das:
+        logger.debug("DAS discovery disabled; relying on Dexscreener/Birdeye seeds")
 
     async def _gather_sources() -> None:
         nonlocal seeds, seen
