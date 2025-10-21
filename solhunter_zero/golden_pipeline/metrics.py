@@ -98,3 +98,8 @@ class GoldenMetrics:
     def latest(self) -> Dict[str, Optional[float]]:
         return {name: metric.percentile(100.0) for name, metric in self._metrics.items()}
 
+    def record_discovery(self, counters: Mapping[str, int | float]) -> None:
+        for key, value in counters.items():
+            metric_name = f"discovery.{key}"
+            self._metric(metric_name).add(value)
+
