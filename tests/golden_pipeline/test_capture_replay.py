@@ -44,14 +44,19 @@ from scripts.replay_capture import ReplayConfig, load_capture, replay_capture
 from solhunter_zero.event_bus import BUS as RUNTIME_BUS, reset as reset_event_bus
 from solhunter_zero.golden_pipeline.contracts import STREAMS
 from solhunter_zero.golden_pipeline.service import GoldenPipelineService
-from solhunter_zero.golden_pipeline.types import TokenSnapshot
+from solhunter_zero.golden_pipeline.types import TapeEvent, TokenSnapshot
 from solhunter_zero.portfolio import Portfolio
 from solhunter_zero.schemas import to_dict
 
 
 MINT = "MintCaptureReplay1111111111111111111111111111111"
 INPUT_TOPICS = ["token_discovered", "price_update", "depth_update"]
-UI_TOPICS = [STREAMS.golden_snapshot, STREAMS.trade_suggested, STREAMS.market_depth]
+UI_TOPICS = [
+    STREAMS.golden_snapshot,
+    STREAMS.trade_suggested,
+    STREAMS.market_depth,
+    STREAMS.market_ohlcv,
+]
 EVENT_SEQUENCE: list[tuple[str, Mapping[str, Any]]] = [
     ("token_discovered", {"tokens": [MINT]}),
     ("price_update", {"token": MINT, "price": 1.052, "venue": "sim", "pool": "sim-1"}),
@@ -203,6 +208,62 @@ def _subscribe_ui() -> tuple[dict[str, list[Mapping[str, Any]]], list[Callable[[
 
         unsubscribers.append(RUNTIME_BUS.subscribe(topic, _handler))
     return store, unsubscribers
+
+
+def test_service_flushes_buffered_bars_on_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run() -> None:
+        reset_event_bus()
+        clock = DeterministicClock()
+        _patch_clock(monkeypatch, clock)
+        portfolio = Portfolio(path=None)
+        manager = DummyAgentManager()
+        service: GoldenPipelineService | None = None
+        outputs: dict[str, list[Mapping[str, Any]]]
+        unsubscribers: list[Callable[[], None]] = []
+        try:
+            service = GoldenPipelineService(
+                agent_manager=manager,
+                portfolio=portfolio,
+                enrichment_fetcher=_fake_enrichment_fetcher,
+                event_bus=RUNTIME_BUS,
+            )
+            outputs, unsubscribers = _subscribe_ui()
+
+            base_ts = clock.time()
+            event = TapeEvent(
+                mint_base=MINT,
+                mint_quote="USDC",
+                amount_base=120.0,
+                amount_quote=126.0,
+                route="sim",
+                program_id="amm",
+                pool="sim-1",
+                signer="buffered-signer",
+                signature="buffered-signature",
+                slot=42,
+                ts=base_ts - 600.0,
+                fees_base=0.0,
+                price_usd=1.05,
+                fees_usd=0.02,
+                is_self=False,
+                buyer="buffered-buyer",
+            )
+            await service.pipeline.submit_market_event(event)
+            assert outputs[STREAMS.market_ohlcv] == []
+
+            await service.start()
+
+            assert len(outputs[STREAMS.market_ohlcv]) == 1
+            emitted_bar = outputs[STREAMS.market_ohlcv][0]
+            assert emitted_bar["mint"] == MINT
+        finally:
+            for unsub in unsubscribers:
+                unsub()
+            if service is not None:
+                await service.stop()
+            reset_event_bus()
+
+    asyncio.run(_run())
 
 
 async def _drive_and_capture(path: Path) -> tuple[dict[str, list[Mapping[str, Any]]], dict[str, dict[str, Any]]]:

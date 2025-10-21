@@ -656,6 +656,7 @@ class GoldenPipelineService:
         self._subscriptions.append(
             self._event_bus.subscribe("depth_update", self._on_depth)
         )
+        await self.pipeline.flush_market()
         self._tasks.append(asyncio.create_task(self._market_flush_loop(), name="golden_market_flush"))
         if bootstrapped:
             log.info(
