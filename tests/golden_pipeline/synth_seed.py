@@ -34,6 +34,7 @@ from solhunter_zero.golden_pipeline.contracts import STREAMS
 from solhunter_zero.golden_pipeline.kv import InMemoryKeyValueStore
 from solhunter_zero.runtime.runtime_wiring import RuntimeWiring, initialise_runtime_wiring
 from solhunter_zero.ui import UIState
+import solhunter_zero.ui as ui
 
 
 class BridgedBus(InMemoryBus):
@@ -635,9 +636,126 @@ async def _seed_runtime(
     await runtime.wait_for_golden(timeout=5.0)
 
 
+async def _replay_bus_chaos(
+    runtime: SynthRuntime,
+    bus: BridgedBus,
+    *,
+    pairs: int,
+    mints: List[str],
+    queue_push_interval: int,
+    seed: int,
+) -> int:
+    base_ts = time.time()
+    rnd = random.Random(seed)
+    pushes = 0
+    for idx in range(pairs):
+        mint = mints[idx % len(mints)]
+        price = 0.5 + rnd.random() * 2.5
+        liquidity = 75_000.0 + rnd.random() * 40_000.0
+        spread_bps = 18.0 + rnd.random() * 12.0
+        vol_1m = 40_000.0 + rnd.random() * 25_000.0
+        asof = base_ts + idx * 0.0005
+        candle = {
+            "o": price * (0.98 + rnd.random() * 0.04),
+            "h": price * (1.0 + rnd.random() * 0.02),
+            "l": price * (0.98 - rnd.random() * 0.02),
+            "c": price,
+            "vol_usd": vol_1m * 5.0,
+            "buyers": int(20 + rnd.random() * 15),
+            "trades": int(35 + rnd.random() * 25),
+            "asof_close": asof,
+        }
+        golden_payload = {
+            "mint": mint,
+            "asof": asof,
+            "meta": {
+                "symbol": f"{mint[:4]}".upper(),
+                "decimals": 6,
+                "source": "chaos",
+                "asof": asof,
+            },
+            "px": {
+                "fair_price": price,
+                "mid_usd": price,
+                "spread_bps": spread_bps,
+                "vol_1m_usd": vol_1m,
+                "liquidity_usd": liquidity,
+            },
+            "liq": liquidity,
+            "ohlcv5m": candle,
+            "hash": hashlib.sha1(f"{mint}:{idx}".encode("utf-8")).hexdigest(),
+            "metrics": {
+                "latency_ms": 20.0 + rnd.random() * 15.0,
+                "depth_staleness_ms": 10.0 + rnd.random() * 8.0,
+                "candle_age_ms": 12.0 + rnd.random() * 6.0,
+                "volatility_5m_annualized": 50.0 + rnd.random() * 25.0,
+                "volume_spike": float(f"{rnd.random() * 1.5:.2f}"),
+                "integrity": {
+                    "market_data": True,
+                    "depth": True,
+                    "ohlcv": True,
+                    "price": True,
+                },
+            },
+        }
+        depth_payload = {
+            "mint": mint,
+            "venue": "chaosdex",
+            "mid_usd": price,
+            "spread_bps": spread_bps,
+            "depth_pct": {
+                "1": 900.0 + rnd.random() * 400.0,
+                "2": 1_800.0 + rnd.random() * 600.0,
+                "5": 4_500.0 + rnd.random() * 1_500.0,
+            },
+            "asof": asof,
+        }
+        await bus.publish(STREAMS.golden_snapshot, golden_payload)
+        await bus.publish(STREAMS.market_depth, depth_payload)
+        if queue_push_interval and idx % queue_push_interval == 0:
+            payload = {
+                "event": "chaos_tick",
+                "mint": mint,
+                "sequence": idx,
+                "ts": asof,
+            }
+            if ui.push_event(payload):
+                pushes += 1
+        if idx and idx % 500 == 0:
+            await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    return pushes
+
+
 @pytest.fixture
 def synth_seed(runtime: SynthRuntime, bus: BridgedBus, kv: InMemoryKeyValueStore):
     def _seed(*, now_ts: float = 1_734_768_000.0, seed: int = 42) -> None:
         asyncio.run(_seed_runtime(runtime, bus, kv, now_ts=now_ts, seed=seed))
 
     return _seed
+
+
+@pytest.fixture
+def chaos_replay(runtime: SynthRuntime, bus: BridgedBus):
+    def _run(
+        *,
+        pairs: int = 3200,
+        mint_count: int = 12,
+        queue_push_interval: int = 25,
+        seed: int = 1337,
+    ) -> Dict[str, Any]:
+        mints = [f"ChaosMint{i:04d}" for i in range(max(1, mint_count))]
+        interval = queue_push_interval if queue_push_interval > 0 else 0
+        pushes = asyncio.run(
+            _replay_bus_chaos(
+                runtime,
+                bus,
+                pairs=pairs,
+                mints=mints,
+                queue_push_interval=interval,
+                seed=seed,
+            )
+        )
+        return {"pairs": pairs, "mints": mints, "push_events": pushes}
+
+    return _run

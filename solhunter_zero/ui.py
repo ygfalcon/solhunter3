@@ -71,6 +71,7 @@ class _WebsocketState:
         "port",
         "name",
         "host",
+        "metrics",
     )
 
     def __init__(self, name: str) -> None:
@@ -83,6 +84,93 @@ class _WebsocketState:
         self.port: int = 0
         self.name = name
         self.host: str | None = None
+        self.metrics = _ChannelMetrics()
+
+
+class _ChannelMetrics:
+    __slots__ = (
+        "lock",
+        "queue_limit",
+        "queue_depth",
+        "max_queue_depth",
+        "total_enqueued",
+        "queue_drops",
+        "send_failures",
+        "backlog_depth",
+        "max_backlog_depth",
+        "close_codes",
+    )
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.queue_limit: int | None = None
+        self.queue_depth = 0
+        self.max_queue_depth = 0
+        self.total_enqueued = 0
+        self.queue_drops = 0
+        self.send_failures = 0
+        self.backlog_depth = 0
+        self.max_backlog_depth = 0
+        self.close_codes: list[int] = []
+
+    def reset(self, queue_limit: int | None = None) -> None:
+        with self.lock:
+            self.queue_limit = queue_limit
+            self.queue_depth = 0
+            self.max_queue_depth = 0
+            self.total_enqueued = 0
+            self.queue_drops = 0
+            self.send_failures = 0
+            self.backlog_depth = 0
+            self.max_backlog_depth = 0
+            self.close_codes.clear()
+
+    def record_enqueue(self, depth: int, dropped: bool) -> None:
+        with self.lock:
+            self.queue_depth = depth
+            if depth > self.max_queue_depth:
+                self.max_queue_depth = depth
+            self.total_enqueued += 1
+            if dropped:
+                self.queue_drops += 1
+
+    def record_dequeue(self, depth: int) -> None:
+        with self.lock:
+            self.queue_depth = depth
+
+    def record_backlog(self, depth: int) -> None:
+        with self.lock:
+            self.backlog_depth = depth
+            if depth > self.max_backlog_depth:
+                self.max_backlog_depth = depth
+
+    def record_send_failure(self, count: int = 1) -> None:
+        if count <= 0:
+            return
+        with self.lock:
+            self.send_failures += count
+
+    def record_close(self, code: int | None) -> None:
+        if code is None:
+            return
+        with self.lock:
+            self.close_codes.append(int(code))
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            dropped = self.queue_drops + self.send_failures
+            return {
+                "queue_limit": self.queue_limit,
+                "queue_depth": self.queue_depth,
+                "max_queue_depth": self.max_queue_depth,
+                "total_enqueued": self.total_enqueued,
+                "queue_drops": self.queue_drops,
+                "send_failures": self.send_failures,
+                "dropped_frames": dropped,
+                "backlog_depth": self.backlog_depth,
+                "max_backlog_depth": self.max_backlog_depth,
+                "close_codes": list(self.close_codes),
+            }
 
 
 _WS_CHANNELS: dict[str, _WebsocketState] = {
@@ -157,15 +245,23 @@ def _enqueue_message(channel: str, payload: Any) -> bool:
     def _put() -> None:
         if state.queue is None:
             return
+        dropped = False
         try:
             state.queue.put_nowait(message)
         except asyncio.QueueFull:
+            dropped = True
             try:
                 state.queue.get_nowait()
                 state.queue.task_done()
             except asyncio.QueueEmpty:  # pragma: no cover - race
                 pass
-            state.queue.put_nowait(message)
+            try:
+                state.queue.put_nowait(message)
+            except asyncio.QueueFull:
+                # queue is still full; drop the frame
+                pass
+        depth = state.queue.qsize()
+        state.metrics.record_enqueue(depth, dropped)
 
     state.loop.call_soon_threadsafe(_put)
     return True
@@ -278,6 +374,12 @@ def get_ws_urls() -> dict[str, str]:
     return urls
 
 
+def get_ws_metrics() -> Dict[str, Dict[str, Any]]:
+    """Return per-channel websocket queue and connection metrics."""
+
+    return {name: state.metrics.snapshot() for name, state in _WS_CHANNELS.items()}
+
+
 def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
     urls = get_ws_urls()
     scheme_hint = _infer_ws_scheme(getattr(req, "scheme", None))
@@ -385,6 +487,7 @@ def _start_channel(
 
         queue = asyncio.Queue[str](maxsize=queue_size)
         state.queue = queue
+        state.metrics.reset(queue_size)
         backlog: deque[str] = deque()
 
         async def _broadcast_loop() -> None:
@@ -398,10 +501,14 @@ def _start_channel(
                         stale_clients.append(ws)
                 for ws in stale_clients:
                     state.clients.discard(ws)
+                if stale_clients:
+                    state.metrics.record_send_failure(len(stale_clients))
                 backlog.append(message)
                 if len(backlog) > BACKLOG_MAX:
                     backlog.popleft()
+                state.metrics.record_backlog(len(backlog))
                 queue.task_done()
+                state.metrics.record_dequeue(queue.qsize())
 
         async def _handler(websocket, path) -> None:  # type: ignore[override]
             parsed = urlparse(path or "")
@@ -420,6 +527,7 @@ def _start_channel(
             }
             if req_path not in allowed_paths:
                 await websocket.close(code=1008, reason="invalid path")
+                state.metrics.record_close(getattr(websocket, "close_code", 1008))
                 return
             state.clients.add(websocket)
             hello = json.dumps({"channel": channel, "event": "hello"})
@@ -427,6 +535,7 @@ def _start_channel(
                 await websocket.send(hello)
             except Exception:
                 state.clients.discard(websocket)
+                state.metrics.record_close(getattr(websocket, "close_code", None))
                 return
             try:
                 for cached in list(backlog):
@@ -437,6 +546,7 @@ def _start_channel(
                 await websocket.wait_closed()
             finally:
                 state.clients.discard(websocket)
+                state.metrics.record_close(getattr(websocket, "close_code", None))
 
         server = None
         last_exc: Exception | None = None
@@ -726,6 +836,9 @@ class UIState:
     settings_provider: DictProvider = field(
         default=lambda: {"controls": {}, "overrides": {}, "staleness": {}}
     )
+    bus_metrics_provider: DictProvider = field(
+        default=lambda: {"streams": {}}
+    )
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -881,6 +994,15 @@ class UIState:
         except Exception:  # pragma: no cover
             log.exception("UI settings provider failed")
             return {"controls": {}, "overrides": {}, "staleness": {}}
+
+    def snapshot_bus_metrics(self) -> Dict[str, Any]:
+        try:
+            data = self.bus_metrics_provider()
+            if isinstance(data, dict):
+                return dict(data)
+        except Exception:  # pragma: no cover
+            log.exception("UI bus metrics provider failed")
+        return {"streams": {}}
 
 
 _PAGE_TEMPLATE = """

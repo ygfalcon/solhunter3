@@ -332,6 +332,75 @@ def _format_ttl(remaining: Optional[float], original: Optional[float]) -> str:
     return _format_countdown(remaining)
 
 
+class _LagAccumulator:
+    __slots__ = (
+        "events",
+        "sum_lag_ms",
+        "max_lag_ms",
+        "last_lag_ms",
+        "over_250_ms",
+        "over_500_ms",
+        "last_updated",
+    )
+
+    def __init__(self) -> None:
+        self.events = 0
+        self.sum_lag_ms = 0.0
+        self.max_lag_ms = 0.0
+        self.last_lag_ms: Optional[float] = None
+        self.over_250_ms = 0
+        self.over_500_ms = 0
+        self.last_updated: Optional[float] = None
+
+    def record(self, lag_ms: float, *, timestamp: Optional[float] = None) -> None:
+        self.events += 1
+        self.sum_lag_ms += lag_ms
+        if lag_ms > self.max_lag_ms:
+            self.max_lag_ms = lag_ms
+        self.last_lag_ms = lag_ms
+        if lag_ms > 250.0:
+            self.over_250_ms += 1
+        if lag_ms > 500.0:
+            self.over_500_ms += 1
+        self.last_updated = timestamp
+
+    def snapshot(self) -> Dict[str, Any]:
+        avg = self.sum_lag_ms / self.events if self.events else None
+        max_lag = self.max_lag_ms if self.events else None
+        return {
+            "events": self.events,
+            "avg_lag_ms": avg,
+            "max_lag_ms": max_lag,
+            "last_lag_ms": self.last_lag_ms,
+            "over_250_ms": self.over_250_ms,
+            "over_500_ms": self.over_500_ms,
+            "last_updated": self.last_updated,
+        }
+
+
+def _extract_epoch_seconds(payload: Mapping[str, Any], paths: Iterable[str]) -> Optional[float]:
+    for path in paths:
+        current: Any = payload
+        for part in path.split("."):
+            if not isinstance(current, Mapping):
+                current = None
+                break
+            current = current.get(part)
+        if current is None:
+            continue
+        if isinstance(current, datetime):
+            return current.timestamp()
+        parsed = _parse_timestamp(current)
+        if parsed is not None:
+            return parsed.timestamp()
+        if isinstance(current, (int, float)):
+            try:
+                return float(current)
+            except Exception:
+                continue
+    return None
+
+
 class RuntimeEventCollectors:
     """Mirror TradingRuntime's event subscriptions for UI hydration."""
 
@@ -372,8 +441,34 @@ class RuntimeEventCollectors:
         }
         pnl_limit = _int_env("UI_VIRTUAL_PNL_LIMIT", 400)
         self._virtual_pnls: Deque[Dict[str, Any]] = deque(maxlen=pnl_limit)
+        self._bus_metrics_lock = threading.Lock()
+        self._bus_metrics: Dict[str, _LagAccumulator] = {
+            "golden": _LagAccumulator(),
+            "depth": _LagAccumulator(),
+        }
 
     def start(self) -> None:
+        def _record_bus_event(stream: str, payload: Mapping[str, Any]) -> None:
+            if stream not in self._bus_metrics:
+                return
+            if stream == "golden":
+                paths = ("asof", "meta.asof", "px.asof_close", "_received")
+            elif stream == "depth":
+                paths = ("asof", "timestamp", "ts", "_received")
+            else:
+                paths = ("asof", "timestamp", "ts", "_received")
+            epoch = _extract_epoch_seconds(payload, paths)
+            if epoch is None:
+                return
+            now = time.time()
+            lag_ms = max(0.0, (now - epoch) * 1000.0)
+            with self._bus_metrics_lock:
+                metrics = self._bus_metrics.get(stream)
+                if metrics is None:
+                    metrics = _LagAccumulator()
+                    self._bus_metrics[stream] = metrics
+                metrics.record(lag_ms, timestamp=now)
+
         def _normalize_event(event: Any) -> Dict[str, Any]:
             payload = getattr(event, "payload", event)
             data = _serialize(payload)
@@ -431,6 +526,7 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            _record_bus_event("depth", payload)
             with self._swarm_lock:
                 self._market_depth[str(mint)] = payload
 
@@ -440,6 +536,7 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            _record_bus_event("golden", payload)
             hash_value = payload.get("hash")
             with self._swarm_lock:
                 self._golden_snapshots[str(mint)] = payload
@@ -815,6 +912,26 @@ class RuntimeEventCollectors:
         }
 
     # Public provider accessors ------------------------------------------------
+
+    def bus_metrics_snapshot(self) -> Dict[str, Any]:
+        with self._bus_metrics_lock:
+            stream_stats = {
+                name: metrics.snapshot()
+                for name, metrics in self._bus_metrics.items()
+            }
+        total_events = sum(stat.get("events", 0) for stat in stream_stats.values())
+        max_lag = None
+        for stat in stream_stats.values():
+            lag = stat.get("max_lag_ms")
+            if lag is None:
+                continue
+            if max_lag is None or lag > max_lag:
+                max_lag = lag
+        return {
+            "streams": stream_stats,
+            "total_events": total_events,
+            "max_lag_ms": max_lag,
+        }
 
     def discovery_snapshot(self) -> Dict[str, Any]:
         with self._discovery_lock:
@@ -1198,6 +1315,7 @@ class RuntimeWiring:
         ui_state.rl_provider = self.collectors.rl_snapshot
         ui_state.rl_status_provider = self.collectors.rl_status_snapshot
         ui_state.settings_provider = self.collectors.settings_snapshot
+        ui_state.bus_metrics_provider = self.collectors.bus_metrics_snapshot
 
     def close(self) -> None:
         self.collectors.stop()
