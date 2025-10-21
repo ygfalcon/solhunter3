@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from solhunter_zero.golden_pipeline.coalescer import SnapshotCoalescer
 from solhunter_zero.golden_pipeline.types import (
     DepthSnapshot,
@@ -100,5 +102,37 @@ def test_concurrent_mints_do_not_block_each_other() -> None:
 
         assert emitted.count("mint-a") == 1
         assert emitted.count("mint-b") == 1
+
+    asyncio.run(run())
+
+
+def test_hash_cache_expires_inactive_mints(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"value": 0.0}
+
+    def fake_monotonic() -> float:
+        return clock["value"]
+
+    monkeypatch.setattr("solhunter_zero.lru.time.monotonic", fake_monotonic)
+
+    async def run() -> None:
+        emitted: list[GoldenSnapshot] = []
+
+        async def emit(snapshot: GoldenSnapshot) -> None:
+            emitted.append(snapshot)
+
+        coalescer = SnapshotCoalescer(emit, hash_ttl=1.0, hash_cache_size=32)
+
+        for idx in range(64):
+            mint = f"mint-{idx}"
+            asof = float(idx)
+            await coalescer.update_metadata(_make_token_snapshot(mint, asof=asof))
+            await coalescer.update_bar(_make_bar(mint, asof=asof))
+            await coalescer.update_depth(_make_depth(mint, asof=asof))
+            clock["value"] += 0.01
+
+        assert len(coalescer._hash_cache) <= coalescer._hash_cache.maxsize
+
+        clock["value"] += 2.0
+        assert len(coalescer._hash_cache) == 0
 
     asyncio.run(run())
