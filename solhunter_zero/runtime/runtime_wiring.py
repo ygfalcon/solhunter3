@@ -128,6 +128,16 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
     return result
 
 
+def _maybe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    numeric = _maybe_float(value)
+    if numeric is None:
+        return default
+    try:
+        return int(numeric)
+    except Exception:
+        return default
+
+
 def _parse_timestamp(value: Any) -> Optional[datetime]:
     if value is None:
         return None
@@ -1111,11 +1121,43 @@ class RuntimeEventCollectors:
                 stale = True
             if age_depth is not None and age_depth > 6.0:
                 stale = True
+            close_value = _maybe_float(candle.get("close"))
+            if close_value is None:
+                close_value = _maybe_float(candle.get("c"))
+            if close_value is None:
+                close_value = _maybe_float(candle.get("mid"))
+            volume_value = _maybe_float(candle.get("volume"))
+            if volume_value is None:
+                volume_value = _maybe_float(candle.get("volume_usd"))
+            if volume_value is None:
+                volume_value = _maybe_float(candle.get("vol_usd"))
+            buyers_value = _maybe_int(depth_entry.get("buyers"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(depth_entry.get("buyer_count"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(depth_entry.get("num_buyers"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(candle.get("buyers"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(candle.get("buyer_count"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(candle.get("num_buyers"))
+            sellers_value = _maybe_int(depth_entry.get("sellers"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(depth_entry.get("seller_count"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(depth_entry.get("num_sellers"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(candle.get("sellers"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(candle.get("seller_count"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(candle.get("num_sellers"))
             markets.append(
                 {
                     "mint": mint,
-                    "close": _maybe_float(candle.get("close")),
-                    "volume": _maybe_float(candle.get("volume")),
+                    "close": close_value,
+                    "volume": volume_value,
                     "spread_bps": _maybe_float(depth_entry.get("spread_bps")),
                     "depth_pct": depth_pct,
                     "age_close": age_close,
@@ -1124,6 +1166,8 @@ class RuntimeEventCollectors:
                     "lag_depth_ms": age_depth * 1000.0 if age_depth is not None else None,
                     "stale": stale,
                     "updated_label": _format_age(combined_age),
+                    "buyers": buyers_value,
+                    "sellers": sellers_value,
                 }
             )
         summary = {
