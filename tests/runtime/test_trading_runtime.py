@@ -284,3 +284,80 @@ async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
             os.environ.pop("BROKER_WS_URLS", None)
         else:
             os.environ["BROKER_WS_URLS"] = prev_broker_ws_urls
+
+
+@pytest.mark.anyio("asyncio")
+async def test_trading_runtime_starts_golden_pipeline_by_default(monkeypatch):
+    runtime = TradingRuntime()
+    runtime.config_path = "dummy-config.toml"
+    runtime._use_new_pipeline = False
+
+    for key in ("GOLDEN_PIPELINE", "MODE", "RUNTIME_MODE", "TRADING_MODE"):
+        monkeypatch.delenv(key, raising=False)
+
+    async def fake_startup(*_args, **_kwargs):
+        cfg = {
+            "mode": "live",
+            "memory_path": "memory://",
+            "portfolio_path": "portfolio.json",
+        }
+        return cfg, {}, None
+
+    class DummyMemory:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.started = False
+
+        def start_writer(self) -> None:
+            self.started = True
+
+    class DummyPortfolio:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.path = "portfolio.json"
+
+    class DummyAgentManager:
+        def __init__(self) -> None:
+            self.agents = ["stub-agent"]
+            self._rl_window_sec = 0.4
+
+        @classmethod
+        def from_config(cls, _cfg):
+            return cls()
+
+        @classmethod
+        def from_default(cls):
+            return cls()
+
+        def set_rl_disabled(self, *_args, **_kwargs) -> None:
+            return None
+
+    golden_calls: Dict[str, object] = {}
+
+    class DummyGoldenService:
+        def __init__(self, agent_manager, portfolio) -> None:
+            golden_calls["agent_manager"] = agent_manager
+            golden_calls["portfolio"] = portfolio
+            golden_calls["started"] = False
+
+        async def start(self) -> None:
+            golden_calls["started"] = True
+
+        async def stop(self) -> None:
+            golden_calls["stopped"] = True
+
+    monkeypatch.setattr(runtime_module, "perform_startup_async", fake_startup)
+    monkeypatch.setattr(runtime_module, "set_env_from_config", lambda _cfg: None)
+    monkeypatch.setattr(runtime_module, "load_selected_config", lambda: {})
+    monkeypatch.setattr(runtime_module, "Memory", DummyMemory)
+    monkeypatch.setattr(runtime_module, "Portfolio", DummyPortfolio)
+    monkeypatch.setattr(runtime_module, "AgentManager", DummyAgentManager)
+    monkeypatch.setattr(
+        "solhunter_zero.golden_pipeline.service.GoldenPipelineService",
+        DummyGoldenService,
+    )
+
+    await runtime._prepare_configuration()
+    assert runtime._use_golden_pipeline is True
+
+    await runtime._start_agents()
+    assert golden_calls.get("started") is True
+    assert isinstance(runtime._golden_service, DummyGoldenService)

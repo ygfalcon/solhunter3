@@ -50,6 +50,7 @@ from ..paths import ROOT
 from ..redis_util import ensure_local_redis_if_needed
 from ..ui import UIState, UIServer
 from ..util import parse_bool_env
+from .runtime_wiring import resolve_golden_enabled
 from .tuning import analyse_evaluation
 
 
@@ -532,13 +533,7 @@ class TradingRuntime:
         if os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is None:
             os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
-        cfg_flag = bool(
-            cfg.get("use_golden_pipeline")
-            or cfg.get("golden_pipeline")
-            or cfg.get("golden_pipeline_enabled")
-        )
-        env_flag = parse_bool_env("GOLDEN_PIPELINE", False)
-        self._use_golden_pipeline = bool(cfg_flag or env_flag)
+        self._use_golden_pipeline = bool(resolve_golden_enabled(cfg))
 
     async def _start_event_bus(self) -> None:
         broker_urls = get_broker_urls(self.cfg) if self.cfg else []
