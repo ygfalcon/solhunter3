@@ -1647,12 +1647,31 @@ async def _redis_listener(pubsub) -> None:
                 continue
             data = msg.get("data")
             if isinstance(data, memoryview):
-                data = bytes(data)
+                data = data.tobytes()
+            if isinstance(data, str):
+                data = data.encode()
+            if not isinstance(data, (bytes, bytearray)):
+                logging.warning("Dropping redis event with unexpected payload type %r", type(data))
+                continue
+            raw = _maybe_decompress(bytes(data))
             ev = pb.Event()
             try:
-                ev.ParseFromString(_maybe_decompress(data))
+                ev.ParseFromString(raw)
             except _ProtoDecodeError:
-                logging.warning("Dropping redis event with incompatible protobuf schema")
+                try:
+                    decoded = _loads(raw)
+                except Exception:
+                    logging.warning("Dropping redis event with incompatible protobuf schema")
+                    continue
+                if not isinstance(decoded, dict) or not decoded.get("topic"):
+                    logging.warning("Dropping redis event missing topic after fallback decode")
+                    continue
+                publish(
+                    str(decoded["topic"]),
+                    decoded.get("payload"),
+                    dedupe_key=_normalize_dedupe_key(decoded.get("dedupe_key")),
+                    _broadcast=False,
+                )
                 continue
             dedupe = getattr(ev, "dedupe_key", None) or None
             publish(
