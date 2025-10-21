@@ -265,6 +265,50 @@ def test_voting_stage_rl_staleness_gate():
     asyncio.run(runner())
 
 
+def test_voting_stage_lock_cleanup_under_pressure():
+    async def runner() -> None:
+        decisions: list[Decision] = []
+
+        async def collect(decision: Decision) -> None:
+            decisions.append(decision)
+
+        stage = VotingStage(collect, window_ms=200, quorum=1)
+        now = time.time()
+        total = 250
+        template = dict(
+            mint="LOCK-CLEANUP",
+            side="buy",
+            notional_usd=250.0,
+            max_slippage_bps=25.0,
+            risk={},
+            ttl_sec=2.0,
+        )
+
+        peak_locks = 0
+        for idx in range(total):
+            suggestion = TradeSuggestion(
+                agent=f"agent-{idx % 5}",
+                confidence=0.55,
+                generated_at=now,
+                inputs_hash=f"hash-{idx}",
+                **template,
+            )
+            await stage.submit(suggestion)
+            peak_locks = max(peak_locks, len(stage._locks))
+
+        # Sanity check that we actually stressed the structure before cleanup kicks in.
+        assert peak_locks > 10
+
+        await asyncio.sleep(stage.window_sec + stage._transient_ttl + 0.2)
+
+        assert len(decisions) == total
+        assert len(stage._locks) == 0
+        assert len(stage._timers) == 0
+        assert sum(len(bucket) for bucket in stage._pending.values()) == 0
+
+    asyncio.run(runner())
+
+
 def test_voting_stage_rl_disabled_override():
     async def runner() -> None:
         decisions: deque[Decision] = deque()
