@@ -84,6 +84,32 @@ class DepthSnapshot:
 
 
 @dataclass(slots=True)
+class PriceQuoteUpdate:
+    """Raw price observation emitted by upstream providers."""
+
+    mint: str
+    source: str
+    bid_usd: float
+    ask_usd: float
+    mid_usd: float
+    liquidity: float
+    asof: Timestamp
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class PriceSnapshot:
+    """Aggregated price blend derived from provider quotes."""
+
+    mint: str
+    mid_usd: Optional[float]
+    spread_bps: Optional[float]
+    asof: Timestamp
+    providers: List[Dict[str, Any]] = field(default_factory=list)
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class GoldenSnapshot:
     """Canonical input consumed by agents."""
 

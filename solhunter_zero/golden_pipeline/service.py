@@ -24,7 +24,7 @@ from .types import (
     DepthSnapshot,
     DiscoveryCandidate,
     GoldenSnapshot,
-    TapeEvent,
+    PriceQuoteUpdate,
     TokenSnapshot,
     TradeSuggestion,
     VirtualFill,
@@ -480,34 +480,39 @@ class GoldenPipelineService:
         if not self._running or not isinstance(payload, dict):
             return
         token = payload.get("token")
-        price = _coerce_float(payload.get("price"))
-        if not token or price is None or price <= 0:
+        mid = _coerce_float(
+            payload.get("mid")
+            or payload.get("mid_usd")
+            or payload.get("price")
+            or payload.get("last")
+        )
+        if not token or mid is None or mid <= 0:
             return
+        bid = _coerce_float(payload.get("bid")) or mid
+        ask = _coerce_float(payload.get("ask")) or mid
+        liquidity = _coerce_float(payload.get("liquidity")) or 0.0
         mint = canonical_mint(str(token))
-        self._last_price[mint] = price
+        self._last_price[mint] = mid
         try:
-            self.portfolio.record_prices({mint: float(price)})
+            self.portfolio.record_prices({mint: float(mid)})
         except Exception:
             pass
-        event = TapeEvent(
-            mint_base=mint,
-            mint_quote="USD",
-            amount_base=0.0,
-            amount_quote=0.0,
-            route=str(payload.get("venue") or ""),
-            program_id=str(payload.get("venue") or ""),
-            pool=str(payload.get("pool") or ""),
-            signer="",
-            signature="",
-            slot=0,
-            ts=time.time(),
-            fees_base=0.0,
-            price_usd=float(price),
-            fees_usd=0.0,
-            is_self=False,
-            buyer=None,
+        asof = time.time()
+        extras: Dict[str, Any] = {}
+        for key in ("source", "venue", "pool"):
+            if key in payload:
+                extras[key] = payload[key]
+        quote = PriceQuoteUpdate(
+            mint=mint,
+            source=str(payload.get("venue") or payload.get("source") or "external"),
+            bid_usd=float(bid),
+            ask_usd=float(ask),
+            mid_usd=float(mid),
+            liquidity=float(liquidity),
+            asof=asof,
+            extras=extras,
         )
-        self._spawn(self.pipeline.submit_market_event(event))
+        self._spawn(self.pipeline.submit_price(quote))
 
     def _on_depth(self, payload: Any) -> None:
         if not self._running or not isinstance(payload, dict):

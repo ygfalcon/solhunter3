@@ -169,7 +169,15 @@ def test_pricing_execution_risk_and_observability(golden_harness, fake_broker):
     venues = {event["venue"] for event in depth_events}
     assert venues == {"aggregated"}
     assert all(event["mid_usd"] > 0 for event in depth_events)
-    assert latest_snapshot.px["mid_usd"] == depth_events[-1]["mid_usd"]
+
+    price_events = fake_broker.events[STREAMS.market_price]
+    assert price_events
+    latest_price = price_events[-1]
+    assert latest_price["mid_usd"] and latest_price["mid_usd"] > 0
+    assert latest_snapshot.px["mid_usd"] == approx(latest_price["mid_usd"])
+    assert latest_snapshot.px["spread_bps"] == approx(latest_price["spread_bps"])
+    assert not set(latest_snapshot.px["diagnostics"].get("alerts", []))
+    assert latest_snapshot.px["sources"]
 
     ohlcv_events = fake_broker.events[STREAMS.market_ohlcv]
     assert ohlcv_events and ohlcv_events[0]["vol_usd"] == approx(

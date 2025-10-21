@@ -16,6 +16,7 @@ from .enrichment import EnrichmentStage, EnrichmentFetcher
 from .execution import ExecutionContext, LiveExecutor, ShadowExecutor
 from .kv import InMemoryKeyValueStore, KeyValueStore
 from .market import MarketDataStage
+from .pricing import PriceStage
 from .metrics import GoldenMetrics
 from .types import (
     Decision,
@@ -24,6 +25,8 @@ from .types import (
     GoldenSnapshot,
     LiveFill,
     OHLCVBar,
+    PriceQuoteUpdate,
+    PriceSnapshot,
     TapeEvent,
     TokenSnapshot,
     TradeSuggestion,
@@ -85,6 +88,7 @@ class GoldenPipeline:
         on_golden: Callable[[GoldenSnapshot], Awaitable[None]] | None = None,
         on_suggestion: Callable[[TradeSuggestion], Awaitable[None]] | None = None,
         on_decision: Callable[[Decision], Awaitable[None]] | None = None,
+        on_price: Callable[[PriceSnapshot], Awaitable[None]] | None = None,
         on_virtual_fill: Callable[[VirtualFill], Awaitable[None]] | None = None,
         on_virtual_pnl: Callable[[VirtualPnL], Awaitable[None]] | None = None,
         live_fill_handler: Callable[[LiveFill], Awaitable[None]] | None = None,
@@ -268,8 +272,25 @@ class GoldenPipeline:
             )
             await self._coalescer.update_depth(depth)
 
+        async def _on_price(price: PriceSnapshot) -> None:
+            await self._publish(
+                STREAMS.market_price,
+                {
+                    "mint": price.mint,
+                    "mid_usd": price.mid_usd,
+                    "spread_bps": price.spread_bps,
+                    "providers": price.providers,
+                    "diagnostics": price.diagnostics,
+                    "asof": price.asof,
+                },
+            )
+            await self._coalescer.update_price(price)
+            if on_price:
+                await on_price(price)
+
         self._market_stage = MarketDataStage(_on_bar)
         self._depth_stage = DepthStage(_on_depth)
+        self._price_stage = PriceStage(_on_price)
         self._enrichment_stage = EnrichmentStage(
             _on_metadata,
             fetcher=enrichment_fetcher,
@@ -291,6 +312,9 @@ class GoldenPipeline:
 
     async def submit_depth(self, snapshot: DepthSnapshot) -> None:
         await self._depth_stage.submit(snapshot)
+
+    async def submit_price(self, quote: PriceQuoteUpdate) -> None:
+        await self._price_stage.submit(quote)
 
     async def flush_market(self) -> None:
         await self._market_stage.flush()

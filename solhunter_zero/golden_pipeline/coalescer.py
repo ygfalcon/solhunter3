@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from typing import Awaitable, Callable, Dict
 
 from .contracts import golden_hash_key
 from .kv import KeyValueStore
-from .types import DepthSnapshot, GoldenSnapshot, OHLCVBar, TokenSnapshot
+from .types import DepthSnapshot, GoldenSnapshot, OHLCVBar, PriceSnapshot, TokenSnapshot
 from .utils import canonical_hash, now_ts
 
 
@@ -25,10 +26,12 @@ class SnapshotCoalescer:
         self._meta: Dict[str, TokenSnapshot] = {}
         self._bars: Dict[str, OHLCVBar] = {}
         self._depth: Dict[str, DepthSnapshot] = {}
+        self._prices: Dict[str, PriceSnapshot] = {}
         self._hash_cache: Dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._kv = kv
         self._hash_ttl = hash_ttl
+        self._price_stale_threshold_ms = 2_000.0
 
     async def update_metadata(self, snapshot: TokenSnapshot) -> None:
         async with self._lock:
@@ -45,6 +48,11 @@ class SnapshotCoalescer:
             self._depth[depth.mint] = depth
             await self._maybe_emit(depth.mint)
 
+    async def update_price(self, snapshot: PriceSnapshot) -> None:
+        async with self._lock:
+            self._prices[snapshot.mint] = snapshot
+            await self._maybe_emit(snapshot.mint)
+
     async def _maybe_emit(self, mint: str) -> None:
         meta = self._meta.get(mint)
         bar = self._bars.get(mint)
@@ -52,6 +60,35 @@ class SnapshotCoalescer:
         if not (meta and bar and depth):
             return
         now = now_ts()
+        price = self._prices.get(mint)
+        px_sources: list[dict[str, object]] = []
+        px_diag: dict[str, object] | None = None
+        px_mid = depth.mid_usd
+        px_spread = depth.spread_bps
+        px_asof = depth.asof
+        if price is not None:
+            px_sources = [dict(entry) for entry in price.providers]
+            px_diag = dict(price.diagnostics or {})
+            alerts = list(px_diag.get("alerts", [])) if isinstance(px_diag.get("alerts"), list) else list()
+            staleness_ms = max(0.0, (now - float(price.asof)) * 1000.0)
+            px_diag["staleness_ms"] = staleness_ms
+            px_asof = price.asof
+            if price.mid_usd is not None:
+                px_mid = float(price.mid_usd)
+            else:
+                alerts.append("price.depth_fallback")
+                px_diag["used_depth_fallback"] = True
+            if price.spread_bps is not None:
+                px_spread = float(price.spread_bps)
+            if staleness_ms > self._price_stale_threshold_ms:
+                alerts.append("price.stale")
+            px_diag["alerts"] = sorted({str(alert) for alert in alerts if alert})
+        else:
+            px_diag = {
+                "alerts": ["price.missing", "price.depth_fallback"],
+                "used_depth_fallback": True,
+                "staleness_ms": None,
+            }
         payload = {
             "mint": mint,
             "meta": {
@@ -61,8 +98,11 @@ class SnapshotCoalescer:
                 "asof": meta.asof,
             },
             "px": {
-                "mid_usd": depth.mid_usd,
-                "spread_bps": depth.spread_bps,
+                "mid_usd": px_mid,
+                "spread_bps": px_spread,
+                "sources": px_sources,
+                "diagnostics": px_diag or {},
+                "asof": px_asof,
             },
             "liq": {
                 "depth_pct": depth.depth_pct,
@@ -81,7 +121,11 @@ class SnapshotCoalescer:
                 "asof_close": bar.asof_close,
             },
         }
-        snapshot_hash = canonical_hash(payload)
+        hash_payload = copy.deepcopy(payload)
+        diagnostics = hash_payload.get("px", {}).get("diagnostics")
+        if isinstance(diagnostics, dict):
+            diagnostics.pop("staleness_ms", None)
+        snapshot_hash = canonical_hash(hash_payload)
         if self._hash_cache.get(mint) == snapshot_hash:
             return
         self._hash_cache[mint] = snapshot_hash

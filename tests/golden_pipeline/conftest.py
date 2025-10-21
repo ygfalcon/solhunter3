@@ -1,5 +1,6 @@
 import asyncio
 import collections
+import copy
 import dataclasses
 import time
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from solhunter_zero.golden_pipeline.types import (
     DepthSnapshot,
     DiscoveryCandidate,
     GoldenSnapshot,
+    PriceQuoteUpdate,
+    PriceSnapshot,
     TapeEvent,
     TokenSnapshot,
     TradeSuggestion,
@@ -283,9 +286,16 @@ class MeanReversionAgent(BaseAgent):
 class GoldenPipelineHarness:
     """Orchestrates a synthetic end-to-end Golden pipeline run."""
 
-    def __init__(self, clock: FrozenClock, bus: FakeBroker) -> None:
+    def __init__(
+        self,
+        clock: FrozenClock,
+        bus: FakeBroker,
+        *,
+        scenario: Mapping[str, Any] | None = None,
+    ) -> None:
         self.clock = clock
         self.bus = bus
+        self._scenario = copy.deepcopy(scenario or SCENARIO_PAYLOADS)
         self.metadata_requests: list[list[str]] = []
         self.discovery_events: list[dict[str, Any]] = []
         self.golden_snapshots: list[GoldenSnapshot] = []
@@ -293,6 +303,7 @@ class GoldenPipelineHarness:
         self.decisions: list[Decision] = []
         self.virtual_fills: list[VirtualFill] = []
         self.virtual_pnls: list[VirtualPnL] = []
+        self.price_snapshots: list[PriceSnapshot] = []
         self._summary_cache: dict[str, Any] | None = None
 
         async def fetcher(mints: Iterable[str]) -> Dict[str, TokenSnapshot]:
@@ -301,7 +312,7 @@ class GoldenPipelineHarness:
             snapshots: Dict[str, TokenSnapshot] = {}
             now = self.clock.time()
             for mint in requested:
-                meta = SCENARIO_PAYLOADS["metadata"][mint]
+                meta = self._scenario["metadata"][mint]
                 snapshots[mint] = TokenSnapshot(
                     mint=mint,
                     symbol=meta["symbol"],
@@ -329,6 +340,9 @@ class GoldenPipelineHarness:
         async def on_virtual_pnl(pnl: VirtualPnL) -> None:
             self.virtual_pnls.append(pnl)
 
+        async def on_price(snapshot: PriceSnapshot) -> None:
+            self.price_snapshots.append(snapshot)
+
         agents = [MomentumAgent(), MeanReversionAgent()]
         self.pipeline = GoldenPipeline(
             enrichment_fetcher=fetcher,
@@ -336,6 +350,7 @@ class GoldenPipelineHarness:
             on_golden=on_golden,
             on_suggestion=on_suggestion,
             on_decision=on_decision,
+            on_price=on_price,
             on_virtual_fill=on_virtual_fill,
             on_virtual_pnl=on_virtual_pnl,
             bus=bus,
@@ -350,6 +365,7 @@ class GoldenPipelineHarness:
     async def run(self) -> None:
         await self._run_discovery_phase()
         await self._run_market_phase()
+        await self._run_price_phase()
         await self._run_depth_phase()
         await self._await_voting(expected_decisions=1)
         await self._mutate_metadata_and_prices()
@@ -357,7 +373,7 @@ class GoldenPipelineHarness:
         await self._exercise_resilience_checks()
 
     async def _run_discovery_phase(self) -> None:
-        plan = SCENARIO_PAYLOADS["discovery_plan"]
+        plan = self._scenario["discovery_plan"]
         stage = self.pipeline._discovery_stage  # type: ignore[attr-defined]
 
         for mint in plan["das"]:
@@ -380,7 +396,7 @@ class GoldenPipelineHarness:
 
     async def _run_market_phase(self) -> None:
         mint = BASE58_MINTS["alpha"]
-        for fixture in SCENARIO_PAYLOADS["tape_events"]:
+        for fixture in self._scenario["tape_events"]:
             self.clock.tick(fixture.ts_offset)
             event = TapeEvent(
                 mint_base=mint,
@@ -404,9 +420,29 @@ class GoldenPipelineHarness:
         self.clock.tick(320.0)
         await self.pipeline.flush_market()
 
+    async def _run_price_phase(self) -> None:
+        mint = BASE58_MINTS["alpha"]
+        fixtures = self._scenario.get("price_updates", [])
+        for fixture in fixtures:
+            self.clock.tick(fixture.ts_offset)
+            quote = PriceQuoteUpdate(
+                mint=mint,
+                source=fixture.provider,
+                bid_usd=fixture.bid,
+                ask_usd=fixture.ask,
+                mid_usd=fixture.mid,
+                liquidity=fixture.liquidity,
+                asof=self.clock.time(),
+                extras={"scenario": "synthetic"},
+            )
+            await self.pipeline.submit_price(quote)
+        idle_gap = float(self._scenario.get("price_idle_gap", 0.0) or 0.0)
+        if idle_gap:
+            self.clock.tick(idle_gap)
+
     async def _run_depth_phase(self) -> None:
         mint = BASE58_MINTS["alpha"]
-        for fixture in SCENARIO_PAYLOADS["depth_snapshots"]:
+        for fixture in self._scenario["depth_snapshots"]:
             self.clock.tick(fixture.ts_offset)
             snapshot = DepthSnapshot(
                 mint=mint,
@@ -421,7 +457,7 @@ class GoldenPipelineHarness:
     async def _mutate_metadata_and_prices(self) -> None:
         mint = BASE58_MINTS["alpha"]
         latest = self.golden_snapshots[-1]
-        meta = SCENARIO_PAYLOADS["metadata"][mint]
+        meta = self._scenario["metadata"][mint]
         self.clock.tick(0.25)
         mutated = TokenSnapshot(
             mint=mint,
@@ -437,8 +473,8 @@ class GoldenPipelineHarness:
         assert self.golden_snapshots[-1].hash == latest.hash
 
         depth_fixture = dataclasses.replace(
-            SCENARIO_PAYLOADS["depth_snapshots"][0],
-            mid=SCENARIO_PAYLOADS["depth_snapshots"][0].mid + 0.008,
+            self._scenario["depth_snapshots"][0],
+            mid=self._scenario["depth_snapshots"][0].mid + 0.008,
             ts_offset=0.05,
         )
         self.clock.tick(depth_fixture.ts_offset)
@@ -464,7 +500,7 @@ class GoldenPipelineHarness:
         deduped = await self.pipeline.submit_discovery(candidate)
         self.discovery_events.append({"source": "replay", "mint": mint, "accepted": deduped})
 
-        depth_fixture = SCENARIO_PAYLOADS["depth_snapshots"][1]
+        depth_fixture = self._scenario["depth_snapshots"][1]
         self.clock.tick(0.2)
         latest_snapshot = self.golden_snapshots[-1]
         replay_depth = DepthSnapshot(
@@ -522,6 +558,7 @@ def golden_harness() -> Iterable[GoldenPipelineHarness]:
         "solhunter_zero.golden_pipeline.coalescer.now_ts",
         "solhunter_zero.golden_pipeline.execution.now_ts",
         "solhunter_zero.golden_pipeline.agents.now_ts",
+        "solhunter_zero.golden_pipeline.pricing.now_ts",
         "solhunter_zero.golden_pipeline.voting.now_ts",
     ):
         monkeypatch.setattr(target, clock.time, raising=False)

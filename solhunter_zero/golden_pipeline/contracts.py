@@ -12,6 +12,7 @@ class StreamNames:
     discovery_candidates: str = "x:discovery.candidates"
     token_snapshot: str = "x:token.snap"
     market_ohlcv: str = "x:market.ohlcv.5m"
+    market_price: str = "x:market.price"
     market_depth: str = "x:market.depth"
     golden_snapshot: str = "x:mint.golden"
     trade_suggested: str = "x:trade.suggested"
