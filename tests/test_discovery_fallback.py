@@ -175,6 +175,40 @@ def test_collect_trending_invokes_multiple_network_sources(monkeypatch):
     assert flags["pump"] == 1
 
 
+def test_static_fallback_defaults_to_usdc(monkeypatch):
+    monkeypatch.setenv("DEXSCREENER_DISABLED", "1")
+    monkeypatch.setenv("USE_DAS_DISCOVERY", "0")
+    monkeypatch.setenv("STATIC_SEED_TOKENS", "")
+    monkeypatch.setenv("PUMP_FUN_TOKENS", "")
+    monkeypatch.setenv("PUMP_LEADERBOARD_URL", "")
+    monkeypatch.delenv("SOLSCAN_API_KEY", raising=False)
+
+    import solhunter_zero.token_scanner as token_scanner
+
+    token_scanner = importlib.reload(token_scanner)
+    _reset_state(token_scanner)
+
+    async def empty(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(token_scanner, "_collect_trending_seeds", empty)
+    monkeypatch.setattr(token_scanner, "_pump_trending", empty)
+    monkeypatch.setattr(token_scanner, "_pyth_seed_entries", lambda: [])
+
+    async def runner():
+        result = await token_scanner._scan_tokens_async_locked(
+            limit=3,
+            rpc_url="http://localhost",
+            enrich=False,
+            api_key=None,
+        )
+        assert result == ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
+        entry = token_scanner.TRENDING_METADATA["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
+        assert entry["source"] == "static"
+
+    asyncio.run(runner())
+
+
 def test_collect_trending_runs_das_alongside(monkeypatch):
     monkeypatch.setenv("DEXSCREENER_DISABLED", "0")
     monkeypatch.setenv("USE_DAS_DISCOVERY", "1")
