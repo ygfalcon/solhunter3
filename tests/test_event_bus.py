@@ -716,27 +716,30 @@ def test_event_bus_fallback_json(monkeypatch):
 async def test_redis_listener_json_fallback():
     import importlib
 
-    import solhunter_zero.event_bus as ev
+    import solhunter_zero.event_bus as ev_module
 
-    ev = importlib.reload(ev)
-    ev.reset()
-    payload = {"foo": "bar"}
-    encoded = ev._encode_event("x:mint.golden", payload)
+    ev = importlib.reload(ev_module)
+    try:
+        ev.reset()
+        payload = {"foo": "bar"}
+        encoded = ev._encode_event("x:mint.golden", payload)
 
-    class DummyPubSub:
-        def __init__(self, messages):
-            self._messages = messages
+        class DummyPubSub:
+            def __init__(self, messages):
+                self._messages = messages
 
-        async def listen(self):
-            for message in self._messages:
-                yield message
+            async def listen(self):
+                for message in self._messages:
+                    yield message
 
-    seen: list[dict[str, str]] = []
-    with ev.subscription("x:mint.golden", lambda p: seen.append(p)):
-        await ev._redis_listener(DummyPubSub([{"type": "message", "data": encoded}]))
+        seen: list[dict[str, str]] = []
+        with ev.subscription("x:mint.golden", lambda p: seen.append(p)):
+            await ev._redis_listener(DummyPubSub([{"type": "message", "data": encoded}]))
 
-    assert seen == [payload]
-    ev.reset()
+        assert seen == [payload]
+    finally:
+        ev.reset()
+        importlib.reload(ev)
 
 
 def test_event_bus_msgpack(monkeypatch):
