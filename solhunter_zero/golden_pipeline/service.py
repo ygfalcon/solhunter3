@@ -646,6 +646,7 @@ class GoldenPipelineService:
         await self._ensure_bus_visible()
         self._running = True
         self._log_bus_configuration()
+        bootstrapped = await self._bootstrap_trending_metadata()
         self._subscriptions.append(
             self._event_bus.subscribe("token_discovered", self._on_discovery)
         )
@@ -656,7 +657,15 @@ class GoldenPipelineService:
             self._event_bus.subscribe("depth_update", self._on_depth)
         )
         self._tasks.append(asyncio.create_task(self._market_flush_loop(), name="golden_market_flush"))
-        log.info("GoldenPipelineService started (subscriptions=token_discovered, price_update, depth_update)")
+        if bootstrapped:
+            log.info(
+                "GoldenPipelineService started (subscriptions=token_discovered, price_update, depth_update; bootstrapped=%d)",
+                bootstrapped,
+            )
+        else:
+            log.info(
+                "GoldenPipelineService started (subscriptions=token_discovered, price_update, depth_update)"
+            )
 
     async def stop(self) -> None:
         if not self._running:
@@ -765,6 +774,58 @@ class GoldenPipelineService:
             channel,
             url or "n/a",
         )
+
+    async def _bootstrap_trending_metadata(self) -> int:
+        """Seed cached trending metadata into the discovery pipeline."""
+
+        snapshot = list(TRENDING_METADATA.items())
+        if not snapshot:
+            return 0
+
+        seen: set[str] = set()
+        bootstrapped = 0
+        now = time.time()
+
+        for key, meta in snapshot:
+            candidates: list[str] = []
+            if isinstance(meta, Mapping):
+                for field in ("address", "mint"):
+                    raw = meta.get(field)
+                    if isinstance(raw, str) and raw.strip():
+                        candidates.append(raw)
+            candidates.append(key)
+
+            canonical = ""
+            for raw in candidates:
+                try:
+                    candidate = canonical_mint(str(raw))
+                except Exception:
+                    continue
+                if not candidate:
+                    continue
+                if candidate in seen:
+                    continue
+                canonical = candidate
+                break
+
+            if not canonical:
+                continue
+
+            seen.add(canonical)
+            try:
+                accepted = await self.pipeline.submit_discovery(
+                    DiscoveryCandidate(mint=canonical, asof=now)
+                )
+            except Exception:
+                log.exception(
+                    "Failed to bootstrap cached trending mint %s", canonical
+                )
+                continue
+
+            if accepted:
+                bootstrapped += 1
+
+        return bootstrapped
 
     def _on_discovery(self, payload: Any) -> None:
         if not self._running:
