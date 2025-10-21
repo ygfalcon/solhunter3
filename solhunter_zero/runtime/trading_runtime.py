@@ -28,13 +28,20 @@ from ..event_bus import (
     verify_broker_connection,
 )
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
-from ..loop import FirstTradeTimeoutError, run_iteration, _init_rl_training
+from ..loop import (
+    FirstTradeTimeoutError,
+    ResourceBudgetExceeded,
+    run_iteration,
+    _init_rl_training,
+)
+from .. import resource_monitor
 from ..pipeline import PipelineCoordinator
 from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory
 from ..portfolio import Portfolio
 from ..exit_management import ExitManager
+from ..schemas import RuntimeLog
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..golden_pipeline.service import GoldenPipelineService
@@ -320,6 +327,10 @@ class TradingRuntime:
         self._rl_gate_active: bool = False
         self._rl_gate_reason: Optional[str] = "boot"
         self._last_heartbeat_perf: Optional[float] = None
+        self._loop_delay: float = 30.0
+        self._loop_min_delay: float = 5.0
+        self._loop_max_delay: float = 120.0
+        self._heartbeat_budget: float = 60.0
         self._rl_status_info: Dict[str, Any] = {
             "enabled": False,
             "running": False,
@@ -332,6 +343,8 @@ class TradingRuntime:
             "heartbeat_age": None,
             "heartbeat_ts": None,
         }
+        self._resource_snapshot: Dict[str, Any] = {}
+        self._resource_alerts: Dict[str, Any] = {}
         self._exit_manager = ExitManager()
         self._exit_summary: Dict[str, Any] = _sanitize_exit_payload(None)
         self._exit_lock = threading.Lock()
@@ -554,6 +567,11 @@ class TradingRuntime:
         else:
             self.activity.add("broker", "verified")
 
+        try:
+            resource_monitor.start_monitor()
+        except Exception:  # pragma: no cover - best effort
+            log.debug("Resource monitor start failed", exc_info=True)
+
         self._subscribe_to_events()
 
     def _subscribe_to_events(self) -> None:
@@ -726,6 +744,21 @@ class TradingRuntime:
                 except Exception:
                     log.exception("Failed to forward RL weights to pipeline")
 
+        async def _on_resource_update(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not payload:
+                return
+            payload["_received"] = time.time()
+            self._resource_snapshot = payload
+
+        async def _on_resource_alert(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not payload:
+                return
+            payload["_received"] = time.time()
+            resource_name = str(payload.get("resource") or payload.get("name") or "resource")
+            self._resource_alerts[resource_name] = payload
+
         self._subscriptions.append(("action_executed", _on_action))
         subscribe("action_executed", _on_action)
         self._subscriptions.append(("runtime.log", _on_log))
@@ -741,6 +774,8 @@ class TradingRuntime:
             ("x:virt.fills", _on_virtual_fill),
             ("x:live.fills", _on_live_fill),
             ("rl:weights.applied", _on_rl_weights),
+            ("resource_update", _on_resource_update),
+            ("resource_alert", _on_resource_alert),
         ):
             self._subscriptions.append((topic, handler))
             subscribe(topic, handler)
@@ -767,6 +802,7 @@ class TradingRuntime:
         self.ui_state.rl_provider = self._collect_rl_panel
         self.ui_state.settings_provider = self._collect_settings_panel
         self.ui_state.exit_provider = self._collect_exit_panel
+        self.ui_state.health_provider = self._collect_health_metrics
 
         if not self._ui_enabled:
             self.ui_server = None
@@ -1152,6 +1188,10 @@ class TradingRuntime:
                 min_delay = min(min_delay, 1.0)
             if self.explicit_max_delay is None and self.cfg.get("max_delay") is None:
                 max_delay = min(max_delay, 15.0)
+        self._loop_delay = loop_delay
+        self._loop_min_delay = min_delay
+        self._loop_max_delay = max_delay
+        self._heartbeat_budget = max(loop_delay * 2.0, 30.0)
         discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
         if discovery_method is None:
             discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
@@ -1166,6 +1206,7 @@ class TradingRuntime:
         arbitrage_amount = _maybe_float(self.cfg.get("arbitrage_amount"), 0.0)
         live_discovery = self.cfg.get("live_discovery")
 
+        throttle_logged = False
         while not self.stop_event.is_set():
             start = time.perf_counter()
             try:
@@ -1205,6 +1246,39 @@ class TradingRuntime:
 
             elapsed = time.perf_counter() - start
             sleep_for = max(min_delay, min(max_delay, loop_delay - elapsed))
+            exit_candidates = resource_monitor.active_budget("exit")
+            throttle_candidates = resource_monitor.active_budget("throttle")
+            exit_policy = exit_candidates[0] if exit_candidates else None
+            throttle_policy = throttle_candidates[0] if throttle_candidates else None
+            if exit_policy:
+                resource = str(exit_policy.get("resource") or "resource")
+                self.activity.add("loop", f"resource exit {resource}", ok=False)
+                publish(
+                    "runtime.log",
+                    RuntimeLog(stage="loop", detail=f"resource-exit:{resource}", level="ERROR"),
+                )
+                log.error(
+                    "Resource budget triggered shutdown action for %s: %s",
+                    resource,
+                    exit_policy,
+                )
+                self.stop_event.set()
+                break
+            throttled = bool(throttle_policy)
+            if throttled:
+                sleep_for = max(sleep_for, max_delay)
+                if not throttle_logged:
+                    publish(
+                        "runtime.log",
+                        RuntimeLog(stage="loop", detail="resource-throttle", level="WARN"),
+                    )
+                    log.warning(
+                        "Resource budget throttle active; sleeping for %.2fs",
+                        sleep_for,
+                    )
+                    throttle_logged = True
+            else:
+                throttle_logged = False
             await asyncio.sleep(max(0.1, sleep_for))
 
         self.status.trading_loop = False
@@ -1281,6 +1355,62 @@ class TradingRuntime:
         status["rl_gate"] = rl_snapshot.get("gate")
         status["rl_gate_reason"] = rl_snapshot.get("gate_reason")
         return status
+
+    def _collect_health_metrics(self) -> Dict[str, Any]:
+        budgets = resource_monitor.get_budget_status()
+        heartbeat_age = self._internal_heartbeat_age()
+        heartbeat_threshold = max(self._loop_delay * 2.0, 30.0)
+        heartbeat_ok = heartbeat_age is None or heartbeat_age <= heartbeat_threshold
+        exit_active = any(
+            info.get("active") and str(info.get("action")).lower() == "exit"
+            for info in budgets.values()
+        )
+        throttle_active = any(
+            info.get("active") and str(info.get("action")).lower() == "throttle"
+            for info in budgets.values()
+        )
+        queue_stats: Dict[str, Any] = {}
+        if self.pipeline is not None:
+            try:
+                queue_stats = self.pipeline.queue_snapshot()
+            except Exception:
+                queue_stats = {}
+        try:
+            from ..ui import get_ws_client_counts
+        except Exception:  # pragma: no cover - optional during CI
+            ws_clients: Dict[str, int] = {}
+        else:
+            try:
+                ws_clients = get_ws_client_counts()
+            except Exception:
+                ws_clients = {}
+        resource_snapshot = dict(self._resource_snapshot)
+        resource_alerts = {name: dict(info) for name, info in self._resource_alerts.items()}
+        ok = bool(self.status.event_bus) and heartbeat_ok and not exit_active
+        payload: Dict[str, Any] = {
+            "ok": ok,
+            "event_bus": {"connected": bool(self.status.event_bus)},
+            "heartbeat": {
+                "age": heartbeat_age,
+                "threshold": heartbeat_threshold,
+                "ok": heartbeat_ok,
+            },
+            "queues": queue_stats,
+            "loop": {
+                "delay": self._loop_delay,
+                "min_delay": self._loop_min_delay,
+                "max_delay": self._loop_max_delay,
+            },
+            "resource": {
+                "budgets": budgets,
+                "alerts": resource_alerts,
+                "latest": resource_snapshot,
+                "exit_active": exit_active,
+                "throttle_active": throttle_active,
+            },
+            "ui": {"ws_clients": ws_clients},
+        }
+        return payload
 
     def _collect_weights(self) -> Dict[str, Any]:
         if self.agent_manager is None:

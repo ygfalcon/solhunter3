@@ -41,6 +41,7 @@ from .loop import (
     place_order_async,
     trading_loop,
     FirstTradeTimeoutError,
+    ResourceBudgetExceeded,
     run_iteration as _run_iteration,
 )
 from .agents.discovery import DiscoveryAgent
@@ -600,6 +601,9 @@ def main(
                     )
                 )
                 break
+            except ResourceBudgetExceeded as exc:
+                logging.error("Resource budget triggered shutdown: %s", exc)
+                raise SystemExit(str(exc)) from exc
             except FirstTradeTimeoutError:
                 logging.error("Retrying trading loop after first trade timeout")
                 continue
