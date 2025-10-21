@@ -49,6 +49,13 @@ messages are JSON objects serialized into Redis streams unless stated otherwise.
 | `venues` | `list[DepthLevel]` | Venue level book stats. |
 | `asof` | `str` | Depth timestamp. |
 
+The `depth_pct` map uses canonicalised string percentage keys (for example `"1"`,
+`"2"`, `"5"`) to represent executable depth across slippage bands. Producers may
+emit numeric keys or include a trailing percent sign; the Golden pipeline will
+normalise those keys before publishing snapshots. When `depth_pct` is omitted the
+service synthesises the standard 1/2/5% buckets using the aggregate `depth`,
+`bids`, and `asks` values so downstream consumers always see usable depth bands.
+
 ### `x:mint.golden` — `GoldenSnapshot`
 
 | Field | Type | Description |

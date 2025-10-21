@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -59,6 +60,41 @@ def _coerce_float(value: Any) -> Optional[float]:
 
 def _default_symbol(mint: str) -> str:
     return mint[:6].upper()
+
+
+def _normalize_depth_key(raw: Any) -> Optional[str]:
+    """Normalise a depth percentage key into the canonical string form."""
+
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+    else:
+        text = str(raw).strip()
+        if not text:
+            return None
+        if text.endswith("%"):
+            text = text[:-1].strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return text
+    if not math.isfinite(value):
+        return None
+    return f"{value:g}"
+
+
+def _normalize_depth_pct_map(raw: Mapping[Any, Any]) -> Dict[str, float]:
+    normalized: Dict[str, float] = {}
+    for key, value in raw.items():
+        amount = _coerce_float(value)
+        if amount is None:
+            continue
+        normalized_key = _normalize_depth_key(key)
+        if not normalized_key:
+            continue
+        normalized[normalized_key] = float(amount)
+    return normalized
 
 
 @dataclass(slots=True)
@@ -893,11 +929,18 @@ class GoldenPipelineService:
             bids = _coerce_float(entry.get("bids")) or 0.0
             asks = _coerce_float(entry.get("asks")) or 0.0
             depth_val = _coerce_float(entry.get("depth")) or max(bids + asks, 0.0)
-            depth_pct = {
-                "1": float(depth_val),
-                "2": float(depth_val * 1.5),
-                "5": float(depth_val * 2.0),
-            }
+            depth_pct_entry = entry.get("depth_pct")
+            depth_pct: Dict[str, float]
+            if isinstance(depth_pct_entry, Mapping):
+                depth_pct = _normalize_depth_pct_map(depth_pct_entry)
+            else:
+                depth_pct = {}
+            if not depth_pct:
+                depth_pct = {
+                    "1": float(depth_val),
+                    "2": float(depth_val * 1.5),
+                    "5": float(depth_val * 2.0),
+                }
             mid = self._last_price.get(mint) or _coerce_float(entry.get("mid")) or 0.0
             spread_bps = _coerce_float(entry.get("spread_bps"))
             if spread_bps is None:
