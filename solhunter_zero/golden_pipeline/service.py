@@ -41,6 +41,9 @@ _GLOBAL_CAP_ENV = "SWARM_AGENT_GLOBAL_CAP_USD"
 _AGENT_CAPS_ENV = "SWARM_AGENT_AGENT_CAPS_USD"
 
 
+_MAX_IN_FLIGHT_SPAWN_TASKS = 32
+
+
 def _coerce_float(value: Any) -> Optional[float]:
     """Best-effort conversion of ``value`` to ``float``."""
 
@@ -639,6 +642,7 @@ class GoldenPipelineService:
         self._subscriptions: List[Callable[[], None]] = []
         self._tasks: List[asyncio.Task] = []
         self._pending: set[asyncio.Task] = set()
+        self._pending_gate = asyncio.Semaphore(_MAX_IN_FLIGHT_SPAWN_TASKS)
         self._running = False
         self._last_price: Dict[str, float] = {}
 
@@ -688,11 +692,12 @@ class GoldenPipelineService:
                 await task
         self._tasks.clear()
 
-        for task in list(self._pending):
+        pending = list(self._pending)
+        for task in pending:
             task.cancel()
-        for task in list(self._pending):
+        if pending:
             with contextlib.suppress(asyncio.CancelledError):
-                await task
+                await asyncio.gather(*pending, return_exceptions=True)
         self._pending.clear()
         log.info("GoldenPipelineService stopped")
 
@@ -707,9 +712,32 @@ class GoldenPipelineService:
     def _spawn(self, coro: Awaitable[Any]) -> None:
         if not self._running:
             return
-        task = asyncio.create_task(coro)
+        async def _runner() -> Any:
+            acquired = False
+            try:
+                await self._pending_gate.acquire()
+                acquired = True
+                return await coro
+            finally:
+                if acquired:
+                    self._pending_gate.release()
+
+        task = asyncio.create_task(_runner())
         self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
+
+        def _on_done(completed: asyncio.Task) -> None:
+            self._pending.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                exc = completed.exception()
+            except Exception:
+                log.exception("GoldenPipelineService background task failed during exception retrieval")
+                return
+            if exc:
+                log.exception("GoldenPipelineService background task failed", exc_info=exc)
+
+        task.add_done_callback(_on_done)
 
     async def _ensure_bus_visible(self) -> None:
         channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v2")
