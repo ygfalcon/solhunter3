@@ -109,6 +109,7 @@ class GoldenSnapshot:
     ohlcv5m: Dict[str, Any]
     hash: str
     content_hash: str = ""
+    idempotency_key: str = ""
     metrics: Dict[str, Any] = field(default_factory=dict)
     schema_version: str = field(default=GOLDEN_SNAPSHOT_SCHEMA_VERSION)
 

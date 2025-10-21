@@ -1,0 +1,10 @@
+bias: -2.3
+weights:
+  liquidity_usd: 0.25
+  vol_1h_z: 0.2
+  pool_age_min: -0.35
+  source_diversity: 0.35
+  oracle_present: 0.45
+  sellable: 0.4
+  mempool_pressure: 2.4
+  staleness_ms: -0.3
