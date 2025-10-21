@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import time
 import types
 from typing import Dict, List
 
@@ -147,6 +148,32 @@ def test_collect_health_metrics(monkeypatch):
     assert metrics["event_bus"]["connected"] is True
     assert metrics["resource"]["exit_active"] is True
     assert metrics["ui"]["ws_clients"]["events"] == 1
+
+
+def test_collect_market_panel_uses_pipeline_keys_for_price_and_volume():
+    runtime = TradingRuntime()
+    now = time.time()
+    with runtime._swarm_lock:
+        runtime._market_ohlcv["PIPE-MINT"] = {
+            "c": "123.45",
+            "vol_usd": "6789.0",
+            "buyers": "8",
+            "sellers": "4",
+            "asof_close": now,
+        }
+        runtime._market_depth["PIPE-MINT"] = {
+            "asof": now,
+            "depth_pct": {"1": "10.0"},
+        }
+
+    panel = runtime._collect_market_panel()
+    assert panel["markets"], "expected market entry"
+    entry = panel["markets"][0]
+    assert entry["mint"] == "PIPE-MINT"
+    assert entry["close"] == pytest.approx(123.45)
+    assert entry["volume"] == pytest.approx(6789.0)
+    assert entry["buyers"] == 8
+    assert entry["sellers"] == 4
 
 
 @pytest.mark.anyio("asyncio")

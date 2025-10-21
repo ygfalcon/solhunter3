@@ -1628,11 +1628,25 @@ class TradingRuntime:
                 stale = True
             if age_depth is not None and age_depth > 6.0:
                 stale = True
+            close_value = _maybe_float(candle.get("close"))
+            if close_value is None:
+                close_value = _maybe_float(candle.get("c"))
+            volume_value = _maybe_float(candle.get("volume"))
+            if volume_value is None:
+                volume_value = _maybe_float(candle.get("vol_usd"))
+            buyers_value = _maybe_int(candle.get("num_buyers"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(candle.get("buyers"))
+            sellers_value = _maybe_int(candle.get("num_sellers"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(candle.get("sellers"))
             markets.append(
                 {
                     "mint": mint,
-                    "close": _maybe_float(candle.get("close")),
-                    "volume": _maybe_float(candle.get("volume")),
+                    "close": close_value,
+                    "volume": volume_value,
+                    "buyers": buyers_value,
+                    "sellers": sellers_value,
                     "spread_bps": _maybe_float(depth_entry.get("spread_bps")),
                     "depth_pct": depth_pct,
                     "age_close": age_close,
@@ -2678,6 +2692,25 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
     if not math.isfinite(result):
         return default
     return result
+
+
+def _maybe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    if value in (None, "", "null"):
+        return default
+    try:
+        return int(value)
+    except Exception:
+        try:
+            numeric = float(value)
+        except Exception:
+            return default
+        if not math.isfinite(numeric):
+            return default
+        try:
+            return int(numeric)
+        except Exception:
+            return default
+    return default
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
