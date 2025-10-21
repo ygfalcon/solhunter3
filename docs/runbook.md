@@ -3,6 +3,10 @@
 This runbook is designed so that a new operator can take SolHunter Zero from zero to live in a
 controlled manner.  All commands are executed from the repository root unless noted.
 
+> **Generated chaos guidance:** Failure drills captured by the test suite are summarised in the
+> [Chaos Remediation Guide](runbook_generated.md). Refresh the guide with
+> `python scripts/generate_chaos_runbook.py` whenever new remediation artefacts are recorded.
+
 ## 0. Populate Environment Secrets
 
 Before touching any automation, ensure the production environment file is

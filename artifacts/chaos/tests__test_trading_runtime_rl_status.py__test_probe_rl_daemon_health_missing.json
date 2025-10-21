@@ -1,0 +1,30 @@
+{
+  "markers": [
+    "chaos"
+  ],
+  "module": "tests.test_trading_runtime_rl_status",
+  "records": [
+    {
+      "component": "RL daemon",
+      "detection": "`_probe_rl_daemon_health()` returns `detected: False` with no URL recorded.",
+      "failure": "The runtime cannot find `rl_daemon.health.json`",
+      "impact": "The RL watcher never enables external policy updates because no daemon is registered.",
+      "metadata": {
+        "expected_path": "/tmp/pytest-of-root/pytest-3/test_probe_rl_daemon_health_mi0/rl_daemon.health.json"
+      },
+      "remediation": [
+        "Start the RL daemon via `python scripts/run_rl_daemon.py` so it writes `rl_daemon.health.json` into the runtime root.",
+        "If the RL daemon runs remotely, mount or sync the generated health file onto the trading runtime host.",
+        "Confirm the health file exists and rerun `python scripts/healthcheck.py` or restart the runtime process."
+      ],
+      "severity": "medium",
+      "tags": [
+        "runtime",
+        "healthcheck",
+        "rl"
+      ],
+      "verification": "`ls rl_daemon.health.json` succeeds and `_probe_rl_daemon_health()` subsequently reports `detected: True`."
+    }
+  ],
+  "test": "tests/test_trading_runtime_rl_status.py::test_probe_rl_daemon_health_missing"
+}

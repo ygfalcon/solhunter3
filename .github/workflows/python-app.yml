@@ -81,6 +81,32 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev,full]'
-      - name: Run integration tests
-        run: |
-          pytest -m integration
+    - name: Run integration tests
+      run: |
+        pytest -m integration
+
+  chaos-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v3
+      with:
+        python-version: "3.11"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e '.[dev]'
+    - name: Run chaos scenarios
+      env:
+        CHAOS_REMEDIATION_DIR: artifacts/chaos
+      run: |
+        mkdir -p artifacts/chaos
+        pytest -m chaos
+    - name: Regenerate chaos runbook
+      run: |
+        python scripts/generate_chaos_runbook.py --input artifacts/chaos --output docs/runbook_generated.md
+    - name: Ensure chaos runbook is current
+      run: |
+        git diff --stat docs/runbook_generated.md
+        git diff --exit-code docs/runbook_generated.md
