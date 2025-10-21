@@ -8,7 +8,7 @@ import os
 import random
 import time
 from collections import deque
-from typing import Any, Dict, Iterable, List, Sequence, Set
+from typing import Any, Awaitable, Dict, Iterable, List, Sequence, Set
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
@@ -1264,15 +1264,6 @@ async def _collect_trending_seeds(
         seeds.append(candidate)
         seen.add(mint)
 
-    if not DEXSCREENER_DISABLED:
-        new_pairs = await _dexscreener_new_pairs(session, limit=desired)
-        if new_pairs:
-            logger.info("Dexscreener new pairs returned %d candidate(s)", len(new_pairs))
-        for entry in new_pairs:
-            _append_seed(entry, "dexscreener")
-            if len(seeds) >= desired:
-                break
-
     if len(seeds) < desired:
         for entry in _pyth_seed_entries():
             _append_seed(entry, "pyth")
@@ -1311,51 +1302,84 @@ async def _collect_trending_seeds(
 
     async def _gather_sources() -> None:
         nonlocal seeds, seen
-        if not DEXSCREENER_DISABLED and len(seeds) < desired:
-            dexscreener_candidates = await _dexscreener_trending_movers(
-                session, limit=desired
-            )
-            if logger.isEnabledFor(logging.INFO):
-                logger.info(
-                    "Dexscreener trending returned %d candidate(s)",
-                    len(dexscreener_candidates),
-                )
-            for item in dexscreener_candidates:
-                _append_seed(item, "dexscreener")
-                if len(seeds) >= desired:
-                    break
 
-        if (
-            birdeye_api_key
-            and _birdeye_trending_allowed()
-            and len(seeds) < desired
-        ):
-            birdeye_limit = max(desired - len(seeds), desired)
-            try:
-                birdeye_entries = await _birdeye_trending(
+        tasks: Dict[asyncio.Task[List[Dict[str, Any]]], str] = {}
+
+        def _schedule(name: str, coro: Awaitable[List[Dict[str, Any]]]) -> None:
+            tasks[asyncio.create_task(coro)] = name
+
+        if not DEXSCREENER_DISABLED:
+            _schedule("dex_new_pairs", _dexscreener_new_pairs(session, limit=desired))
+            _schedule("dex_trending", _dexscreener_trending_movers(session, limit=desired))
+
+        pump_limit = max(desired, 10)
+        _schedule("pump_trending", _pump_trending(session, limit=pump_limit))
+
+        if birdeye_api_key and _birdeye_trending_allowed():
+            birdeye_limit = max(desired, 10)
+            _schedule(
+                "birdeye",
+                _birdeye_trending(
                     session,
                     birdeye_api_key,
                     limit=birdeye_limit,
                     offset=0,
                     return_entries=True,
-                )
-            except BirdeyeFatalError:
-                raise
-            except BirdeyeThrottleError:
-                raise
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug("Birdeye top movers fetch failed: %s", exc)
-                birdeye_entries = []
-            if logger.isEnabledFor(logging.INFO):
-                logger.info(
-                    "Birdeye returned %d candidate(s) (offset=0, limit=%s)",
-                    len(birdeye_entries),
-                    birdeye_limit,
-                )
-            for entry in birdeye_entries:
-                _append_seed(entry, "birdeye")
-                if len(seeds) >= desired:
-                    break
+                ),
+            )
+
+        default_sources = {
+            "dex_new_pairs": "dexscreener",
+            "dex_trending": "dexscreener",
+            "pump_trending": "pumpfun",
+            "birdeye": "birdeye",
+        }
+
+        has_enough = False
+        try:
+            for task in asyncio.as_completed(list(tasks.keys())):
+                name = tasks.pop(task, "unknown")
+                try:
+                    entries = await task
+                except (BirdeyeFatalError, BirdeyeThrottleError):
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Seed source %s fetch failed: %s", name, exc)
+                    continue
+
+                if not entries:
+                    continue
+
+                if name == "dex_new_pairs" and logger.isEnabledFor(logging.INFO):
+                    logger.info("Dexscreener new pairs returned %d candidate(s)", len(entries))
+                elif name == "dex_trending" and logger.isEnabledFor(logging.INFO):
+                    logger.info("Dexscreener trending returned %d candidate(s)", len(entries))
+                elif name == "birdeye" and logger.isEnabledFor(logging.INFO):
+                    logger.info(
+                        "Birdeye returned %d candidate(s) (offset=0, limit=%s)",
+                        len(entries),
+                        birdeye_limit,
+                    )
+                elif name == "pump_trending" and logger.isEnabledFor(logging.INFO):
+                    logger.info("Pump.fun trending returned %d candidate(s)", len(entries))
+
+                if has_enough:
+                    continue
+
+                default_source = default_sources.get(name, "trend")
+                for entry in entries:
+                    _append_seed(entry, default_source)
+                    if len(seeds) >= desired:
+                        has_enough = True
+                        break
+        finally:
+            if tasks:
+                pending_tasks = list(tasks.keys())
+                for pending in pending_tasks:
+                    pending.cancel()
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     if _SEED_COLLECTION_TIMEOUT > 0:
         try:
