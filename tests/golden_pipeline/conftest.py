@@ -196,12 +196,29 @@ class PriceProviderStub:
                     if isinstance(token_spec, Mapping) and token_spec.get("source")
                     else extra.get("source") or provider
                 )
+                if isinstance(token_spec, Mapping) and token_spec.get("degraded") is not None:
+                    degraded_val = bool(token_spec.get("degraded"))
+                else:
+                    degraded_val = bool(extra.get("degraded", False))
+                staleness_val = None
+                if isinstance(token_spec, Mapping) and token_spec.get("staleness_ms") is not None:
+                    staleness_val = float(token_spec.get("staleness_ms"))
+                elif extra.get("staleness_ms") is not None:
+                    staleness_val = float(extra.get("staleness_ms"))
+                confidence_val = None
+                if isinstance(token_spec, Mapping) and token_spec.get("confidence") is not None:
+                    confidence_val = float(token_spec.get("confidence"))
+                elif extra.get("confidence") is not None:
+                    confidence_val = float(extra.get("confidence"))
                 quote = PriceQuote(
                     price_usd=price,
                     source=str(source_override),
                     asof=asof,
                     quality=str(quality),
                     liquidity_hint=liquidity_hint,
+                    degraded=degraded_val,
+                    staleness_ms=staleness_val,
+                    confidence=confidence_val,
                 )
                 results[token] = quote
                 prices[token] = price
@@ -889,8 +906,8 @@ def run_golden_harness(
         monkeypatch.setattr(target, clock.time, raising=False)
     monkeypatch.setattr(prices, "_monotonic", clock.time, raising=False)
     monkeypatch.setattr(prices, "_now_ms", lambda: int(clock.time() * 1000), raising=False)
-    monkeypatch.setenv("BIRDEYE_API_KEY", "stub-birdeye-key-000000000000000001")
-    monkeypatch.setenv("PRICE_PROVIDERS", "pyth,birdeye,jupiter,dexscreener,synthetic")
+    monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
+    monkeypatch.setenv("PRICE_PROVIDERS", "jupiter,pyth,dexscreener,synthetic")
     if env:
         for key, value in env.items():
             if value is None:
@@ -904,15 +921,6 @@ def run_golden_harness(
 
     price_stub = PriceProviderStub(clock)
     price_stub.configure(
-        "birdeye",
-        [
-            {"kind": "timeout"},
-            {"kind": "http", "status": 503},
-            {"kind": "disconnect"},
-            {"kind": "success", "price": 1.005},
-        ],
-    )
-    price_stub.configure(
         "jupiter",
         [
             {"kind": "disconnect"},
@@ -921,31 +929,43 @@ def run_golden_harness(
         ],
     )
     price_stub.configure(
+        "pyth",
+        [
+            {"kind": "timeout"},
+            {
+                "kind": "success",
+                "price": 1.005,
+                "degraded": True,
+                "staleness_ms": 500.0,
+                "confidence": 0.01,
+            },
+        ],
+    )
+    price_stub.configure(
         "dexscreener",
         [
-            {"kind": "success", "price": 1.002},
-            {"kind": "success", "price": 1.002},
-            {"kind": "success", "price": 1.002},
-            {"kind": "success", "price": 1.002},
+            {"kind": "success", "price": 1.002, "degraded": True},
+            {"kind": "success", "price": 1.002, "degraded": True},
+            {"kind": "success", "price": 1.002, "degraded": True},
+            {"kind": "success", "price": 1.002, "degraded": True},
         ],
     )
 
     if configure_prices is not None:
         configure_prices(price_stub)
 
-    async def stubbed_birdeye(session, tokens):
-        return await price_stub.execute("birdeye", tokens)
-
     async def stubbed_jupiter(session, tokens):
         return await price_stub.execute("jupiter", tokens)
+
+    async def stubbed_pyth(session, tokens):
+        return await price_stub.execute("pyth", tokens)
 
     async def stubbed_dexscreener(session, tokens):
         return await price_stub.execute("dexscreener", tokens)
 
-    monkeypatch.setattr(prices, "_fetch_quotes_birdeye", stubbed_birdeye)
     monkeypatch.setattr(prices, "_fetch_quotes_jupiter", stubbed_jupiter)
+    monkeypatch.setattr(prices, "_fetch_quotes_pyth", stubbed_pyth)
     monkeypatch.setattr(prices, "_fetch_quotes_dexscreener", stubbed_dexscreener)
-    monkeypatch.setattr(prices, "_fetch_quotes_pyth", _empty_provider)
     monkeypatch.setattr(prices, "_fetch_quotes_synthetic", _empty_provider)
     monkeypatch.setattr(prices, "_fetch_quotes_helius", _empty_provider, raising=False)
 
