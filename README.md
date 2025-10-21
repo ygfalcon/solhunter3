@@ -346,7 +346,13 @@ profit calculation so routes are ranked based on the borrowed size.
    export NEWS_FEEDS=https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml,https://www.coindesk.com/arc/outboundfeeds/rss/
    export TWITTER_FEEDS=https://nitter.net/solana/rss
    export DISCORD_FEEDS=https://discord.com/api/guilds/613425648685547541/widget.json
+   # optional: require multiple mentions before a token is considered
+   export DISCOVERY_SOCIAL_MIN_MENTIONS=2
+   export DISCOVERY_SOCIAL_LIMIT=12
    ```
+   The discovery pipeline merges these feeds to prioritize tokens that are
+   repeatedly mentioned. Increase `DISCOVERY_SOCIAL_MIN_MENTIONS` to demand a
+   stronger signal or lower it to surface newer chatter more quickly.
 9. **Provide a keypair for signing**
     Generate a keypair with `solana-keygen new` if you don't already have one and
     point the bot to it using `KEYPAIR_PATH`, `SOLANA_KEYPAIR` or the `--keypair`
