@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import shutil
@@ -619,6 +620,99 @@ def test_ensure_keypair_from_json(tmp_path, monkeypatch):
     # Mnemonic file should not be created when KEYPAIR_JSON provided
     assert not (Path(wallet.KEYPAIR_DIR) / "default.mnemonic").exists()
 
+
+def test_perform_startup_live_bootstraps_keypair(tmp_path, monkeypatch):
+    import types
+
+    base58_mod = types.ModuleType("base58")
+    base58_mod.b58decode = lambda *a, **k: b""
+    base58_mod.b58encode = lambda *a, **k: b""
+    monkeypatch.setitem(sys.modules, "base58", base58_mod)
+
+    from solhunter_zero import main as main_module
+
+    monkeypatch.setenv("MODE", "live")
+    monkeypatch.delenv("KEYPAIR_PATH", raising=False)
+    monkeypatch.delenv("SOLANA_KEYPAIR", raising=False)
+    monkeypatch.setenv("DEPTH_SERVICE", "0")
+
+    key_dir = tmp_path / "keys"
+    key_dir.mkdir()
+    key_path = key_dir / "default.json"
+
+    # Ensure wallet globals point to the temporary directory
+    monkeypatch.setattr(main_module.wallet, "KEYPAIR_DIR", str(key_dir))
+    monkeypatch.setattr(
+        main_module.wallet,
+        "ACTIVE_KEYPAIR_FILE",
+        os.path.join(str(key_dir), "active"),
+    )
+
+    load_calls: list[Path] = []
+    state = {"exists": False}
+
+    def fake_load_keypair(path: str):
+        load_calls.append(Path(path))
+        if not state["exists"]:
+            raise FileNotFoundError(path)
+        return object()
+
+    def fake_setup_default_keypair():
+        state["exists"] = True
+        key_path.write_text("[]", encoding="utf-8")
+        return main_module.wallet.KeypairInfo("default", None)
+
+    monkeypatch.setattr(main_module.wallet, "load_keypair", fake_load_keypair)
+    monkeypatch.setattr(main_module.wallet, "setup_default_keypair", fake_setup_default_keypair)
+    monkeypatch.setattr(main_module.metrics_aggregator, "publish", lambda *a, **k: None)
+    monkeypatch.setattr(main_module, "initialize_event_bus", lambda: None)
+
+    async def fake_connectivity(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(main_module, "ensure_connectivity_async", fake_connectivity)
+    monkeypatch.setattr(main_module, "_start_depth_service", lambda _cfg: None)
+    monkeypatch.setattr(
+        main_module.prices,
+        "validate_pyth_overrides_on_boot",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "load_config",
+        lambda _path: {
+            "solana_rpc_url": "https://rpc.example",
+            "dex_base_url": "https://dex.example",
+            "agents": ["dummy"],
+            "agent_weights": {"dummy": 1.0},
+            "solana_keypair": str(key_path),
+        },
+    )
+    monkeypatch.setattr(
+        main_module.Config,
+        "from_env",
+        classmethod(lambda cls, _cfg: _cfg),
+    )
+
+    config_path = tmp_path / "live.toml"
+    config_path.write_text(
+        "solana_rpc_url = \"https://rpc.example\"\n"
+        "dex_base_url = \"https://dex.example\"\n"
+        f"solana_keypair = \"{key_path}\"\n",
+        encoding="utf-8",
+    )
+
+    asyncio.run(
+        main_module.perform_startup_async(
+            str(config_path), offline=True, dry_run=True
+        )
+    )
+
+    assert state["exists"] is True
+    assert load_calls
+    assert load_calls[-1] == key_path
+    assert os.environ["KEYPAIR_PATH"] == str(key_path)
+    assert os.environ["SOLANA_KEYPAIR"] == str(key_path)
 
 def test_ensure_deps_installs_optional(monkeypatch):
     from scripts import startup
