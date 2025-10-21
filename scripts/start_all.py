@@ -45,6 +45,11 @@ from solhunter_zero.production import (
     ConnectivityChecker,
 )
 from solhunter_zero.cache_paths import RUNTIME_LOCK_PATH
+from solhunter_zero.health_runtime import (
+    http_ok,
+    resolve_rl_health_url,
+    wait_for,
+)
 
 
 log = logging.getLogger(__name__)
@@ -194,6 +199,60 @@ def ensure_environment(cfg_path: str | None) -> dict:
     ensure_local_redis_if_needed(broker_urls)
     log_config_overview(cfg)
     return {"config_path": cfg_path, "config": cfg}
+
+
+def _parse_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except Exception:
+        log.warning("Invalid %s=%r; using default %s", name, raw, default)
+        return default
+    return max(1, value)
+
+
+def _parse_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except Exception:
+        log.warning("Invalid %s=%r; using default %.2f", name, raw, default)
+        return default
+    return max(0.1, value)
+
+
+def _resolve_rl_health_url_for_gate() -> str:
+    try:
+        url = resolve_rl_health_url(require_health_file=True)
+    except Exception as exc:
+        raise RuntimeError(f"RL daemon gate failed: {exc}") from exc
+    os.environ["RL_HEALTH_URL"] = url
+    return url
+
+
+def rl_health_gate() -> str:
+    """Block startup until the external RL daemon reports healthy."""
+
+    url = _resolve_rl_health_url_for_gate()
+    retries = _parse_int_env("RL_HEALTH_RETRIES", 30)
+    interval = _parse_float_env("RL_HEALTH_INTERVAL", 1.0)
+    log.info(
+        "Waiting for RL daemon health endpoint %s (retries=%s, interval=%.2fs)",
+        url,
+        retries,
+        interval,
+    )
+
+    ok, msg = wait_for(lambda: http_ok(url), retries=retries, sleep=interval)
+    if not ok:
+        raise RuntimeError(f"RL daemon gate failed: {msg}")
+
+    log.info("RL daemon health confirmed: %s — %s", url, msg)
+    return url
 
 
 def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
@@ -374,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
             run_stage("write-env-manifest", lambda: _write_manifest(loaded_env), stage_results)
             run_stage("connectivity-check", _connectivity_check, stage_results)
             run_stage("connectivity-soak", _connectivity_soak, stage_results)
+            run_stage("rl-health-gate", rl_health_gate, stage_results)
 
             if args.foreground:
                 run_stage("launch-foreground", lambda: launch_foreground(args, cfg_path), stage_results)

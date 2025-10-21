@@ -10,13 +10,63 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Callable, Tuple
 
+from .paths import ROOT
+
 CheckResult = Tuple[bool, str]
+
+
+_RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
+
+
+def _format_rl_url(host: str | None, port: int) -> str:
+    host = (host or "127.0.0.1").strip() or "127.0.0.1"
+    return f"http://{host}:{int(port)}/health"
+
+
+def resolve_rl_health_url(*, require_health_file: bool = False) -> str:
+    """Return the RL daemon health URL from environment or the health file."""
+
+    env_url = (os.getenv("RL_HEALTH_URL") or "").strip()
+    if env_url:
+        return env_url
+
+    path: Path = _RL_HEALTH_PATH
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # pragma: no cover - defensive guard
+            raise RuntimeError(f"invalid RL health file at {path}: {exc}") from exc
+
+        url = payload.get("url")
+        if url:
+            return str(url)
+
+        host = payload.get("host")
+        port = payload.get("port")
+        if host is not None and port is not None:
+            try:
+                return _format_rl_url(str(host), int(port))
+            except Exception as exc:  # pragma: no cover - malformed file
+                raise RuntimeError(f"invalid RL health file at {path}: {exc}") from exc
+
+    if require_health_file:
+        raise RuntimeError(f"RL health file missing at {path}")
+
+    host = os.getenv("RL_HEALTH_HOST", "127.0.0.1")
+    raw_port = os.getenv("RL_HEALTH_PORT", "7070")
+    try:
+        port = int(str(raw_port))
+    except Exception as exc:  # pragma: no cover - configuration error
+        raise RuntimeError(f"invalid RL_HEALTH_PORT={raw_port!r}") from exc
+    return _format_rl_url(host, port)
 
 
 def check_redis(url: str) -> CheckResult:
@@ -184,6 +234,21 @@ def http_ok(url: str) -> CheckResult:
         return False, str(exc)
 
 
+def check_rl_daemon_health(
+    url: str | None = None, *, require_health_file: bool = False
+) -> CheckResult:
+    """Probe the RL daemon health endpoint and report ``(ok, message)``."""
+
+    try:
+        target = url or resolve_rl_health_url(require_health_file=require_health_file)
+    except Exception as exc:  # pragma: no cover - configuration error paths
+        return False, str(exc)
+
+    ok, msg = http_ok(target)
+    suffix = f" ({target})"
+    return ok, msg + suffix
+
+
 def wait_for(
     func: Callable[[], CheckResult],
     *,
@@ -203,6 +268,8 @@ def wait_for(
 
 
 __all__ = [
+    "resolve_rl_health_url",
+    "check_rl_daemon_health",
     "check_redis",
     "check_event_bus",
     "check_ui_websockets",
