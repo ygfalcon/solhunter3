@@ -1,6 +1,8 @@
 import asyncio
+import os
 import sys
 import types
+from typing import Dict, List
 
 import pytest
 
@@ -41,11 +43,47 @@ def _install_base58_stub() -> None:
 
 _install_base58_stub()
 
+
+def _install_jsonschema_stub() -> None:
+    if "jsonschema" in sys.modules:
+        return
+
+    module = types.ModuleType("jsonschema")
+
+    class _ValidationError(Exception):
+        def __init__(self, message: str = "", *, instance=None, schema=None) -> None:
+            super().__init__(message)
+            self.message = message
+            self.instance = instance
+            self.schema = schema
+
+    class _Validator:
+        def __init__(self, schema):
+            self.schema = schema
+
+        def validate(self, _payload):
+            return True
+
+    module.Draft202012Validator = _Validator
+    module.ValidationError = _ValidationError
+
+    exceptions = types.ModuleType("jsonschema.exceptions")
+    exceptions.ValidationError = _ValidationError
+
+    module.exceptions = exceptions
+
+    sys.modules["jsonschema"] = module
+    sys.modules["jsonschema.exceptions"] = exceptions
+
+
+_install_jsonschema_stub()
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
 
-from solhunter_zero import resource_monitor
+from solhunter_zero import event_bus, resource_monitor
 import solhunter_zero.runtime.trading_runtime as runtime_module
 from solhunter_zero.runtime.trading_runtime import TradingRuntime
 from solhunter_zero.ui import create_app
@@ -137,3 +175,112 @@ async def test_trading_runtime_sets_stop_on_resource_exit(monkeypatch):
     task = asyncio.create_task(runtime._trading_loop())
     await asyncio.wait_for(task, timeout=0.5)
     assert runtime.stop_event.is_set()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
+    monkeypatch.setenv("EVENT_BUS_WS_PORT", "0")
+    monkeypatch.setenv("UI_ENABLED", "0")
+    monkeypatch.setenv("EVENT_BUS_HEALTH_DISABLE", "1")
+
+    runtime = TradingRuntime()
+
+    monkeypatch.setattr(runtime_module, "ensure_local_redis_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(resource_monitor, "start_monitor", lambda: None)
+
+    assigned_port: Dict[str, int] = {"value": 0}
+    connection_urls: List[str] = []
+
+    class _DummySocket:
+        def __init__(self, host: str, port: int) -> None:
+            self._host = host
+            self._port = port
+
+        def getsockname(self) -> tuple[str, int]:
+            return self._host, self._port
+
+    class _DummyServer:
+        def __init__(self, host: str, port: int) -> None:
+            self.sockets = [_DummySocket(host, port)]
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    async def _fake_serve(handler, host: str, port: int, **_kwargs):
+        actual_port = 43210 if not port else port
+        assigned_port["value"] = actual_port
+        return _DummyServer(host, actual_port)
+
+    class _DummyConnection:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_connect(url: str, **_kwargs):
+        connection_urls.append(url)
+        return _DummyConnection(url)
+
+    monkeypatch.setattr(
+        event_bus,
+        "websockets",
+        types.SimpleNamespace(serve=_fake_serve, connect=_fake_connect),
+    )
+
+    async def _fake_verify(*_a, **_k) -> bool:
+        return True
+
+    monkeypatch.setattr(runtime_module, "verify_broker_connection", _fake_verify)
+
+    prev_event_bus_url = os.environ.get("EVENT_BUS_URL")
+    prev_broker_ws_urls = os.environ.get("BROKER_WS_URLS")
+    original_url = event_bus.DEFAULT_WS_URL
+    original_host, original_port = event_bus.get_ws_address()
+
+    try:
+        await asyncio.shield(runtime._start_event_bus())
+
+        listen_host, listen_port = event_bus.get_ws_address()
+        assert listen_port != 0, "expected auto-assigned port"
+
+        expected_url = f"ws://{listen_host}:{listen_port}"
+        assert os.environ["EVENT_BUS_URL"] == expected_url
+        assert os.environ["BROKER_WS_URLS"] == expected_url
+
+        entries = [e for e in runtime.activity.snapshot() if e["stage"] == "event_bus"]
+        assert entries, "expected event bus activity entry"
+        assert expected_url in entries[-1]["detail"]
+        assert runtime.status.event_bus is True
+        conn = await event_bus.websockets.connect(expected_url)
+        await conn.close()
+        assert connection_urls[-1] == expected_url
+        assert assigned_port["value"] == listen_port
+    finally:
+        try:
+            await event_bus.disconnect_ws()
+        except Exception:
+            pass
+        try:
+            await event_bus.stop_ws_server()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+        event_bus.DEFAULT_WS_URL = original_url
+        event_bus._WS_LISTEN_HOST = original_host
+        event_bus._WS_LISTEN_PORT = original_port
+
+        if prev_event_bus_url is None:
+            os.environ.pop("EVENT_BUS_URL", None)
+        else:
+            os.environ["EVENT_BUS_URL"] = prev_event_bus_url
+
+        if prev_broker_ws_urls is None:
+            os.environ.pop("BROKER_WS_URLS", None)
+        else:
+            os.environ["BROKER_WS_URLS"] = prev_broker_ws_urls
