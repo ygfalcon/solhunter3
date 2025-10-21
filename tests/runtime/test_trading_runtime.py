@@ -134,6 +134,7 @@ async def test_market_panel_renders_pipeline_keys(monkeypatch):
             "mint": "PIPE",
             "c": 1.23,
             "vol_usd": 456.0,
+            "vol_base": 12.0,
             "buyers": 7,
             "sellers": 4,
             "asof_close": now,
@@ -151,6 +152,7 @@ async def test_market_panel_renders_pipeline_keys(monkeypatch):
     entry = market_panel["markets"][0]
     assert entry["close"] == pytest.approx(1.23)
     assert entry["volume"] == pytest.approx(456.0)
+    assert entry["volume_base"] == pytest.approx(12.0)
     assert entry["buyers"] == 7
     assert entry["sellers"] == 4
 

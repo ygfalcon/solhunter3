@@ -13,6 +13,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 
 from ..event_bus import subscribe
 from ..ui import UIState, get_ws_channel_metrics
+from .schema_adapters import read_golden, read_ohlcv
 from ..util import parse_bool_env
 
 
@@ -151,21 +152,6 @@ def _extract_nested_float(
     return _maybe_float(value)
 
 
-def _extract_golden_mid(snapshot: Mapping[str, Any]) -> Optional[float]:
-    return _extract_nested_float(
-        snapshot.get("px"),
-        (
-            "mid_usd",
-            "midUsd",
-            "mid",
-            "mid_price_usd",
-            "price_usd",
-            "fair_price",
-            "price",
-        ),
-    )
-
-
 def _extract_golden_spread(snapshot: Mapping[str, Any]) -> Optional[float]:
     return _extract_nested_float(
         snapshot.get("px"),
@@ -177,29 +163,6 @@ def _extract_golden_spread(snapshot: Mapping[str, Any]) -> Optional[float]:
             "spreadPct",
         ),
     )
-
-
-def _extract_golden_liquidity(snapshot: Mapping[str, Any]) -> Optional[float]:
-    liq = snapshot.get("liq")
-    if isinstance(liq, Mapping):
-        depth = liq.get("depth_pct") or liq.get("depth")
-        depth_value = _extract_nested_float(
-            depth,
-            ("1", "1.0", "100", "100bps"),
-        )
-        if depth_value is not None:
-            return depth_value
-        return _extract_nested_float(
-            liq,
-            (
-                "liquidity_usd",
-                "usd_total",
-                "usd",
-                "notional_usd",
-                "notional",
-            ),
-        )
-    return _maybe_float(liq)
 
 
 def _extract_golden_depths(snapshot: Mapping[str, Any]) -> Dict[str, float]:
@@ -566,6 +529,7 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            read_ohlcv(payload, reader="runtime_wiring")
             with self._swarm_lock:
                 self._market_ohlcv[str(mint)] = payload
 
@@ -584,6 +548,7 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            read_golden(payload, reader="runtime_wiring")
             hash_value = payload.get("hash")
             with self._swarm_lock:
                 self._golden_snapshots[str(mint)] = payload
@@ -1214,38 +1179,24 @@ class RuntimeEventCollectors:
                 stale = True
             if age_depth is not None and age_depth > 6.0:
                 stale = True
-            close_value = _maybe_float(candle.get("close"))
-            if close_value is None:
-                close_value = _maybe_float(candle.get("c"))
-            if close_value is None:
-                close_value = _maybe_float(candle.get("mid"))
-            volume_value = _maybe_float(candle.get("volume"))
-            if volume_value is None:
-                volume_value = _maybe_float(candle.get("volume_usd"))
-            if volume_value is None:
-                volume_value = _maybe_float(candle.get("vol_usd"))
-            buyers_value = _maybe_int(depth_entry.get("buyers"))
+            normalized_candle = read_ohlcv(candle, reader="runtime_wiring")
+            close_value = normalized_candle.get("close")
+            volume_value = normalized_candle.get("volume_usd")
+            volume_base_value = normalized_candle.get("volume_base")
+            buyers_value = normalized_candle.get("buyers")
+            if buyers_value is None:
+                buyers_value = _maybe_int(depth_entry.get("buyers"))
             if buyers_value is None:
                 buyers_value = _maybe_int(depth_entry.get("buyer_count"))
             if buyers_value is None:
                 buyers_value = _maybe_int(depth_entry.get("num_buyers"))
-            if buyers_value is None:
-                buyers_value = _maybe_int(candle.get("buyers"))
-            if buyers_value is None:
-                buyers_value = _maybe_int(candle.get("buyer_count"))
-            if buyers_value is None:
-                buyers_value = _maybe_int(candle.get("num_buyers"))
-            sellers_value = _maybe_int(depth_entry.get("sellers"))
+            sellers_value = normalized_candle.get("sellers")
+            if sellers_value is None:
+                sellers_value = _maybe_int(depth_entry.get("sellers"))
             if sellers_value is None:
                 sellers_value = _maybe_int(depth_entry.get("seller_count"))
             if sellers_value is None:
                 sellers_value = _maybe_int(depth_entry.get("num_sellers"))
-            if sellers_value is None:
-                sellers_value = _maybe_int(candle.get("sellers"))
-            if sellers_value is None:
-                sellers_value = _maybe_int(candle.get("seller_count"))
-            if sellers_value is None:
-                sellers_value = _maybe_int(candle.get("num_sellers"))
             markets.append(
                 {
                     "mint": mint,
@@ -1261,6 +1212,7 @@ class RuntimeEventCollectors:
                     "updated_label": _format_age(combined_age),
                     "buyers": buyers_value,
                     "sellers": sellers_value,
+                    "volume_base": volume_base_value,
                 }
             )
         summary = {
@@ -1278,6 +1230,7 @@ class RuntimeEventCollectors:
         lag_samples: List[float] = []
         for mint in sorted(golden.keys()):
             payload = dict(golden[mint])
+            normalized_golden = read_golden(payload, reader="runtime_wiring")
             timestamp = _entry_timestamp(payload, "asof")
             age = _age_seconds(timestamp, now)
             if age is None and payload.get("_received") is not None:
@@ -1318,7 +1271,7 @@ class RuntimeEventCollectors:
                     stale_flag = age > stale_threshold
                 else:
                     stale_flag = age > 60.0
-            px_mid = _extract_golden_mid(payload)
+            px_mid = normalized_golden.get("mid_usd")
             spread_bps = _extract_golden_spread(payload)
             px_payload = payload.get("px")
             px_detail = _serialize(px_payload) if isinstance(px_payload, Mapping) else None
@@ -1338,7 +1291,7 @@ class RuntimeEventCollectors:
                 )
             if liq_total_usd is None:
                 liq_total_usd = _maybe_float(liq_payload)
-            primary_liq = _extract_golden_liquidity(payload)
+            primary_liq = normalized_golden.get("depth_1pct_usd")
             if primary_liq is None:
                 primary_liq = liq_total_usd
             depth_pct = _extract_golden_depths(payload)

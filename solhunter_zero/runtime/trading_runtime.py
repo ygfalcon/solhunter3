@@ -51,6 +51,7 @@ from ..redis_util import ensure_local_redis_if_needed
 from ..ui import UIState, UIServer
 from ..util import parse_bool_env
 from .runtime_wiring import resolve_golden_enabled
+from .schema_adapters import read_golden, read_ohlcv
 from .tuning import analyse_evaluation
 
 
@@ -629,6 +630,7 @@ class TradingRuntime:
             if not mint:
                 return
             payload["_received"] = time.time()
+            read_ohlcv(payload, reader="runtime")
             with self._swarm_lock:
                 self._market_ohlcv[str(mint)] = payload
 
@@ -647,6 +649,7 @@ class TradingRuntime:
             if not mint:
                 return
             payload["_received"] = time.time()
+            read_golden(payload, reader="runtime")
             hash_value = payload.get("hash")
             with self._swarm_lock:
                 self._golden_snapshots[str(mint)] = payload
@@ -1623,18 +1626,16 @@ class TradingRuntime:
                 stale = True
             if age_depth is not None and age_depth > 6.0:
                 stale = True
-            close_value = _maybe_float(candle.get("close"))
-            if close_value is None:
-                close_value = _maybe_float(candle.get("c"))
-            volume_value = _maybe_float(candle.get("volume"))
-            if volume_value is None:
-                volume_value = _maybe_float(candle.get("vol_usd"))
-            buyers_value = _maybe_int(candle.get("buyer_count"))
-            if buyers_value is None:
-                buyers_value = _maybe_int(candle.get("buyers"))
+            normalized_candle = read_ohlcv(candle, reader="runtime")
+            close_value = normalized_candle.get("close")
+            volume_value = normalized_candle.get("volume_usd")
+            volume_base_value = normalized_candle.get("volume_base")
+            buyers_value = normalized_candle.get("buyers")
             if buyers_value is None:
                 buyers_value = _maybe_int(depth_entry.get("buyers"))
-            sellers_value = _maybe_int(candle.get("seller_count"))
+            sellers_value = normalized_candle.get("sellers")
+            if sellers_value is None:
+                sellers_value = _maybe_int(candle.get("seller_count"))
             if sellers_value is None:
                 sellers_value = _maybe_int(candle.get("sellers"))
             if sellers_value is None:
@@ -1654,6 +1655,7 @@ class TradingRuntime:
                     "updated_label": _format_age(combined_age),
                     "buyers": buyers_value,
                     "sellers": sellers_value,
+                    "volume_base": volume_base_value,
                 }
             )
         summary = {
@@ -1671,6 +1673,7 @@ class TradingRuntime:
         lag_samples: List[float] = []
         for mint in sorted(golden.keys()):
             payload = dict(golden[mint])
+            normalized_golden = read_golden(payload, reader="runtime")
             timestamp = _entry_timestamp(payload, "asof")
             age = _age_seconds(timestamp, now)
             if age is None and payload.get("_received") is not None:
@@ -1716,8 +1719,8 @@ class TradingRuntime:
                     "mint": mint,
                     "hash": hash_text,
                     "hash_short": _short_hash(hash_text),
-                    "px": _extract_golden_mid(payload),
-                    "liq": _extract_golden_liquidity(payload),
+                    "px": normalized_golden.get("mid_usd"),
+                    "liq": normalized_golden.get("depth_1pct_usd"),
                     "age_seconds": age,
                     "age_label": _format_age(age),
                     "stale": stale_flag,
@@ -2036,10 +2039,10 @@ class TradingRuntime:
         with self._swarm_lock:
             fills = list(self._virtual_fills)
             golden_hashes = dict(self._latest_golden_hash)
-            golden_prices = {
-                mint: _extract_golden_mid(payload)
-                for mint, payload in self._golden_snapshots.items()
-            }
+            golden_prices = {}
+            for mint, payload in self._golden_snapshots.items():
+                normalized = read_golden(payload, reader="runtime.shadow")
+                golden_prices[mint] = normalized.get("mid_usd")
         items: List[Dict[str, Any]] = []
         for payload in fills:
             mint = payload.get("mint")
@@ -2704,64 +2707,6 @@ def _maybe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     if result < 0:
         return default
     return result
-
-
-def _extract_nested_float(value: Any, preferred_keys: Iterable[str] = ()) -> Optional[float]:
-    if isinstance(value, Mapping):
-        for key in preferred_keys:
-            if key in value:
-                numeric = _maybe_float(value.get(key))
-                if numeric is not None:
-                    return numeric
-        for candidate in value.values():
-            numeric = _extract_nested_float(candidate)
-            if numeric is not None:
-                return numeric
-        return None
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            numeric = _extract_nested_float(item)
-            if numeric is not None:
-                return numeric
-        return None
-    return _maybe_float(value)
-
-
-def _extract_golden_mid(snapshot: Mapping[str, Any]) -> Optional[float]:
-    return _extract_nested_float(
-        snapshot.get("px"),
-        (
-            "mid_usd",
-            "midUsd",
-            "mid",
-            "mid_price_usd",
-            "price_usd",
-            "fair_price",
-            "price",
-        ),
-    )
-
-
-def _extract_golden_liquidity(snapshot: Mapping[str, Any]) -> Optional[float]:
-    liq = snapshot.get("liq")
-    if isinstance(liq, Mapping):
-        depth = _extract_nested_float(
-            liq.get("depth_pct") or liq.get("depth"),
-            ("1", "1.0", "100", "100bps"),
-        )
-        if depth is not None:
-            return depth
-        return _extract_nested_float(
-            liq,
-            (
-                "liquidity_usd",
-                "usd_total",
-                "usd",
-                "notional_usd",
-                "notional",
-            ),
-        )
-    return _maybe_float(liq)
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:

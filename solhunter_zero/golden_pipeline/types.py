@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 Timestamp = float
 
-GOLDEN_SNAPSHOT_SCHEMA_VERSION = "1.0"
+OHLCV_BAR_SCHEMA_VERSION = "2.0"
+GOLDEN_SNAPSHOT_SCHEMA_VERSION = "2.0"
 TOKEN_SNAPSHOT_SCHEMA_VERSION = "1.0"
 DEPTH_SNAPSHOT_SCHEMA_VERSION = "1.0"
 TRADE_SUGGESTION_SCHEMA_VERSION = "1.0"
@@ -73,12 +74,14 @@ class OHLCVBar:
     low: float
     close: float
     vol_usd: float
+    vol_base: float
     trades: int
     buyers: int
     flow_usd: float
     zret: float
     zvol: float
     asof_close: Timestamp
+    schema_version: str = field(default=OHLCV_BAR_SCHEMA_VERSION)
 
 
 @dataclass(slots=True)
@@ -105,6 +108,7 @@ class GoldenSnapshot:
     liq: Dict[str, Any]
     ohlcv5m: Dict[str, Any]
     hash: str
+    content_hash: str = ""
     metrics: Dict[str, Any] = field(default_factory=dict)
     schema_version: str = field(default=GOLDEN_SNAPSHOT_SCHEMA_VERSION)
 

@@ -34,8 +34,12 @@ messages are JSON objects serialized into Redis streams unless stated otherwise.
 | `open` | `float` | Opening price (USD). |
 | `high` | `float` | High price (USD). |
 | `low` | `float` | Low price (USD). |
-| `close` | `float` | Close price (USD). |
-| `volume` | `float` | Base asset volume. |
+| `close` | `float` | Close price (USD). (`c` alias) |
+| `volume` | `float` | USD notional volume (legacy alias for `vol_usd`). |
+| `volume_usd` | `float` | USD notional volume. |
+| `volume_base` | `float` | Base asset volume. |
+| `schema_version` | `str` | Contract version identifier (`x:market.ohlcv.5m@v2`). |
+| `content_hash` | `str` | Canonical hash of the published payload. |
 | `asof_open` | `str` | Opening timestamp. |
 | `asof_close` | `str` | Close timestamp. |
 
@@ -66,6 +70,15 @@ service synthesises the standard 1/2/5% buckets using the aggregate `depth`,
 | `ohlcv5m` | `OhlcvBar` | Last 5m bar used for the snapshot. |
 | `meta` | `TokenSnapshot` | Token metadata reference. |
 | `asof` | `str` | Publication timestamp. |
+| `px_mid_usd` | `float` | Flattened mid price (`px.mid_usd`). |
+| `liq_depth_1pct_usd` | `float` | Flattened 1% depth (`liq.depth_usd_by_pct["1"]`). |
+| `schema_version` | `str` | Contract version identifier (`x:mint.golden@v2`). |
+| `content_hash` | `str` | Canonical hash of the payload contents. |
+
+### Field alias map
+
+- `x:market.ohlcv.5m`: `close` mirrors `c`; `volume` and `volume_usd` mirror `vol_usd`; `volume_base` mirrors `vol_base`.
+- `x:mint.golden`: `px_mid_usd` mirrors `px.mid_usd`; `liq_depth_1pct_usd` mirrors `liq.depth_usd_by_pct["1"]`.
 
 ### `x:trade.suggested` — `TradeSuggestion`
 
