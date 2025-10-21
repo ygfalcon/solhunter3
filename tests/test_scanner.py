@@ -1,5 +1,6 @@
 import asyncio
 from solhunter_zero import token_scanner as scanner
+from solhunter_zero import token_discovery as td
 from solhunter_zero import dynamic_limit
 from solhunter_zero import scanner_common
 from solhunter_zero import resource_monitor as rm
@@ -55,11 +56,14 @@ def test_scan_tokens_websocket(monkeypatch):
     async def fo():
         return ['orca']
 
-    async def fake_discover(_rpc, limit=None, mempool_threshold=None):
-        return [
-            {"address": "abc", "sources": ["birdeye"], "score": 3.0},
-            {"address": "xyz", "sources": ["mempool"], "score": 2.0},
-        ]
+    def fake_discover(_rpc, limit=None, mempool_threshold=None):
+        async def _gen():
+            yield [
+                {"address": "abc", "sources": ["birdeye"], "score": 3.0},
+                {"address": "xyz", "sources": ["mempool"], "score": 2.0},
+            ]
+
+        return td._DiscoveryResult(_gen())
 
     monkeypatch.setattr(scanner, "discover_candidates", fake_discover)
     monkeypatch.setattr(scanner, "get_session", fake_session)
@@ -173,11 +177,14 @@ def test_scan_tokens_async(monkeypatch):
         return ['orca']
     monkeypatch.setattr(async_scanner_mod, 'fetch_raydium_listings_async', fr_func)
     monkeypatch.setattr(async_scanner_mod, 'fetch_orca_listings_async', fo_func)
-    async def fake_discover(_rpc, limit=None, mempool_threshold=None):
-        return [
-            {"address": "abc", "sources": ["birdeye"], "score": 3.0},
-            {"address": "zxy", "sources": ["mempool"], "score": 1.0},
-        ]
+    def fake_discover(_rpc, limit=None, mempool_threshold=None):
+        async def _gen():
+            yield [
+                {"address": "abc", "sources": ["birdeye"], "score": 3.0},
+                {"address": "zxy", "sources": ["mempool"], "score": 1.0},
+            ]
+
+        return td._DiscoveryResult(_gen())
 
     monkeypatch.setattr(scanner, "discover_candidates", fake_discover)
 

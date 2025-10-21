@@ -10,7 +10,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, AsyncIterator
 
 from aiohttp import ClientTimeout
 import aiohttp
@@ -1087,13 +1087,46 @@ async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, 
     return scores
 
 
-async def discover_candidates(
+class _DiscoveryResult:
+    """Wrapper that is both awaitable and async iterable."""
+
+    def __init__(self, agen: AsyncIterator[List[TokenEntry]]) -> None:
+        self._agen = agen
+        self._final: List[TokenEntry] | None = None
+        self._consumed = False
+
+    def __aiter__(self) -> AsyncIterator[List[TokenEntry]]:
+        async def _iterate() -> AsyncIterator[List[TokenEntry]]:
+            if self._consumed:
+                return
+            self._consumed = True
+            async for batch in self._agen:
+                self._final = batch
+                yield batch
+
+        return _iterate()
+
+    def __await__(self):
+        return self._consume().__await__()
+
+    async def _consume(self) -> List[TokenEntry]:
+        if not self._consumed:
+            self._consumed = True
+            final: List[TokenEntry] | None = None
+            async for batch in self._agen:
+                final = batch
+            self._final = final
+        return list(self._final or [])
+
+
+def discover_candidates(
     rpc_url: str,
     *,
     limit: int | None = None,
     mempool_threshold: float | None = None,
-) -> List[TokenEntry]:
+) -> _DiscoveryResult:
     """Combine BirdEye numeric candidates with mempool signals and rank."""
+
     if limit is None or limit <= 0:
         limit = _MAX_TOKENS
     if mempool_threshold is None:
@@ -1107,170 +1140,10 @@ async def discover_candidates(
         )
     )
 
-    shared_session_obj: aiohttp.ClientSession | None = None
-    if shared_http_sources:
-        try:
-            shared_session_obj = await get_session()
-        except TypeError:
-            shared_session_obj = await get_session()
-
-    async def _run(
-        shared_session: aiohttp.ClientSession | None,
-    ) -> List[TokenEntry]:
-        bird_task = asyncio.create_task(_fetch_birdeye_tokens())
-        mempool_task = (
-            asyncio.create_task(_collect_mempool_signals(rpc_url, mempool_threshold))
-            if _ENABLE_MEMPOOL and rpc_url
-            else None
-        )
-        if _ENABLE_MEMPOOL and rpc_url:
-            logger.debug("Discovery mempool threshold=%.3f", mempool_threshold)
-
-        source_tasks: List[tuple[str, asyncio.Task[Any]]] = [("bird", bird_task)]
-        if mempool_task is not None:
-            source_tasks.append(("mempool", mempool_task))
-        if _ENABLE_DEXSCREENER and _DEXSCREENER_URL:
-            source_tasks.append(
-                (
-                    "dexscreener",
-                    asyncio.create_task(
-                        _fetch_dexscreener_tokens(session=shared_session)
-                    ),
-                )
-            )
-        if _ENABLE_METEORA and _METEORA_POOLS_URL:
-            source_tasks.append(
-                (
-                    "meteora",
-                    asyncio.create_task(
-                        _fetch_meteora_tokens(session=shared_session)
-                    ),
-                )
-            )
-        if _ENABLE_DEXLAB and _DEXLAB_LIST_URL:
-            source_tasks.append(
-                (
-                    "dexlab",
-                    asyncio.create_task(
-                        _fetch_dexlab_tokens(session=shared_session)
-                    ),
-                )
-            )
-
-        tasks = [task for _, task in source_tasks]
-        task_labels = [label for label, _ in source_tasks]
-
-        overall_timeout_raw = os.getenv("DISCOVERY_OVERALL_TIMEOUT", "0")
-        try:
-            overall_timeout = float(overall_timeout_raw or 0.0)
-        except Exception:
-            overall_timeout = 0.0
-
-        results: List[Any] = []
-        if overall_timeout > 0:
-            done, pending = await asyncio.wait(tasks, timeout=overall_timeout)
-            if pending:
-                logger.warning(
-                    "Discovery overall timeout after %.2fs; pending_tasks=%s",
-                    overall_timeout,
-                    len(pending),
-                )
-            for task in tasks:
-                if task in done:
-                    try:
-                        results.append(task.result())
-                    except Exception as exc:  # pragma: no cover - defensive
-                        results.append(exc)
-                else:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-                    results.append(
-                        asyncio.TimeoutError(
-                            f"Discovery timed out after {overall_timeout}s"
-                        )
-                    )
-        else:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        bird_tokens: List[TokenEntry] = []
-        mempool: Dict[str, Dict[str, float]] = {}
-        dexscreener_tokens: List[TokenEntry] = []
-        meteora_tokens: List[TokenEntry] = []
-        dexlab_tokens: List[TokenEntry] = []
-
-        for label, res in zip(task_labels, results):
-            if label == "bird":
-                if isinstance(res, Exception):
-                    logger.warning("BirdEye discovery failed: %s", res)
-                else:
-                    bird_tokens = list(res or [])
-            elif label == "mempool":
-                if isinstance(res, Exception):
-                    logger.debug("Mempool signals unavailable: %s", res)
-                else:
-                    mempool = dict(res or {})
-            elif label == "dexscreener":
-                if isinstance(res, Exception):
-                    logger.debug("DexScreener discovery unavailable: %s", res)
-                else:
-                    dexscreener_tokens = list(res or [])
-            elif label == "meteora":
-                if isinstance(res, Exception):
-                    logger.debug("Meteora discovery unavailable: %s", res)
-                else:
-                    meteora_tokens = list(res or [])
-            elif label == "dexlab":
-                if isinstance(res, Exception):
-                    logger.debug("DexLab discovery unavailable: %s", res)
-                else:
-                    dexlab_tokens = list(res or [])
-
-        candidates: Dict[str, Dict[str, Any]] = {}
-
-        for token in bird_tokens:
-            _merge_candidate_entry(candidates, dict(token), "birdeye")
-
-        for token in dexscreener_tokens:
-            _merge_candidate_entry(candidates, dict(token), "dexscreener")
-
-        for token in meteora_tokens:
-            _merge_candidate_entry(candidates, dict(token), "meteora")
-
-        for token in dexlab_tokens:
-            _merge_candidate_entry(candidates, dict(token), "dexlab")
-
-        for addr, mp in mempool.items():
-            mp_token: Dict[str, Any] = {
-                "address": str(addr),
-                "symbol": mp.get("symbol"),
-                "name": mp.get("name") or str(addr),
-                "liquidity": mp.get("liquidity"),
-                "volume": mp.get("volume"),
-                "price": mp.get("price"),
-            }
-            entry = _merge_candidate_entry(candidates, mp_token, "mempool")
-            if entry is None:
-                continue
-            for key in (
-                "score",
-                "momentum",
-                "anomaly",
-                "wallet_concentration",
-                "avg_swap_size",
-            ):
-                val = mp.get(key)
-                if val is not None:
-                    try:
-                        entry[key] = float(val)
-                    except Exception:
-                        pass
-
-        try:
-            await _enrich_with_solscan(candidates)
-        except Exception as exc:
-            logger.debug("Solscan enrichment unavailable: %s", exc)
-
+    def _score_candidates(
+        candidates: Dict[str, Dict[str, Any]],
+        mempool: Dict[str, Dict[str, float]],
+    ) -> None:
         for addr, entry in candidates.items():
             entry.setdefault("sources", set())
 
@@ -1295,7 +1168,6 @@ async def discover_candidates(
                 change = float(entry.get("price_change", 0.0) or 0.0)
             except Exception:
                 change = 0.0
-            # price_change soft multiplier = clamp between 0.5 and 1.25
             mult = max(0.5, min(1.25, 1.0 + (change / 100.0) * 0.1))
 
             base = (liq_comp + vol_comp + mp_comp) * mult
@@ -1310,6 +1182,11 @@ async def discover_candidates(
                 }
             )
 
+    def _snapshot(
+        candidates: Dict[str, Dict[str, Any]],
+        *,
+        limit: int,
+    ) -> List[TokenEntry]:
         ordered = sorted(
             candidates.values(),
             key=lambda c: (c.get("score", 0.0), c.get("address", "")),
@@ -1318,28 +1195,241 @@ async def discover_candidates(
 
         final: List[TokenEntry] = []
         for entry in ordered[:limit]:
-            entry["sources"] = sorted(entry.get("sources", []))
-            final.append(entry)
-
-        top_score = final[0]["score"] if final and "score" in final[0] else None
-        logger.debug(
-            "Discovery combine summary bird=%s mempool=%s dexscreener=%s meteora=%s dexlab=%s final=%s top_score=%s",
-            len(bird_tokens),
-            len(mempool),
-            len(dexscreener_tokens),
-            len(meteora_tokens),
-            len(dexlab_tokens),
-            len(final),
-            f"{top_score:.4f}" if isinstance(top_score, (int, float)) else "n/a",
-        )
-
+            sources = entry.get("sources", [])
+            if isinstance(sources, set):
+                src_list = sorted(sources)
+            else:
+                src_list = sorted(list(sources or []))
+            copy = dict(entry)
+            copy["sources"] = src_list
+            final.append(copy)
         return final
 
-    if shared_session_obj is not None:
-        async with shared_session_obj as shared_session:
-            return await _run(shared_session)
+    async def _generator() -> AsyncIterator[List[TokenEntry]]:
+        shared_session_obj: aiohttp.ClientSession | None = None
+        if shared_http_sources:
+            try:
+                shared_session_obj = await get_session()
+            except TypeError:
+                shared_session_obj = await get_session()
 
-    return await _run(None)
+        async def _run(
+            shared_session: aiohttp.ClientSession | None,
+        ) -> AsyncIterator[List[TokenEntry]]:
+            bird_task = asyncio.create_task(_fetch_birdeye_tokens())
+            mempool_task = (
+                asyncio.create_task(
+                    _collect_mempool_signals(rpc_url, mempool_threshold)
+                )
+                if _ENABLE_MEMPOOL and rpc_url
+                else None
+            )
+            if _ENABLE_MEMPOOL and rpc_url:
+                logger.debug("Discovery mempool threshold=%.3f", mempool_threshold)
+
+            task_map: Dict[asyncio.Task[Any], str] = {bird_task: "bird"}
+            if mempool_task is not None:
+                task_map[mempool_task] = "mempool"
+            if _ENABLE_DEXSCREENER and _DEXSCREENER_URL:
+                task_map[
+                    asyncio.create_task(
+                        _fetch_dexscreener_tokens(session=shared_session)
+                    )
+                ] = "dexscreener"
+            if _ENABLE_METEORA and _METEORA_POOLS_URL:
+                task_map[
+                    asyncio.create_task(
+                        _fetch_meteora_tokens(session=shared_session)
+                    )
+                ] = "meteora"
+            if _ENABLE_DEXLAB and _DEXLAB_LIST_URL:
+                task_map[
+                    asyncio.create_task(
+                        _fetch_dexlab_tokens(session=shared_session)
+                    )
+                ] = "dexlab"
+
+            merge_locks: Dict[str, asyncio.Lock] = {
+                label: asyncio.Lock() for label in set(task_map.values())
+            }
+
+            candidates: Dict[str, Dict[str, Any]] = {}
+            mempool: Dict[str, Dict[str, float]] = {}
+
+            bird_tokens: List[TokenEntry] = []
+            dexscreener_tokens: List[TokenEntry] = []
+            meteora_tokens: List[TokenEntry] = []
+            dexlab_tokens: List[TokenEntry] = []
+
+            last_snapshot: List[TokenEntry] | None = None
+            emitted = False
+
+            overall_timeout_raw = os.getenv("DISCOVERY_OVERALL_TIMEOUT", "0")
+            try:
+                overall_timeout = float(overall_timeout_raw or 0.0)
+            except Exception:
+                overall_timeout = 0.0
+
+            completed: set[asyncio.Task[Any]] = set()
+
+            async def _merge_result(label: str, result: Any) -> bool:
+                nonlocal mempool, bird_tokens, dexscreener_tokens, meteora_tokens, dexlab_tokens
+                lock = merge_locks[label]
+                async with lock:
+                    changed = False
+                    if label == "bird":
+                        if isinstance(result, Exception):
+                            logger.warning("BirdEye discovery failed: %s", result)
+                            return False
+                        bird_tokens = list(result or [])
+                        for token in bird_tokens:
+                            entry = _merge_candidate_entry(candidates, dict(token), "birdeye")
+                            if entry is not None:
+                                changed = True
+                        return changed
+                    if label == "mempool":
+                        if isinstance(result, Exception):
+                            logger.debug("Mempool signals unavailable: %s", result)
+                            return False
+                        mempool = dict(result or {})
+                        changed = bool(mempool)
+                        for addr, mp in mempool.items():
+                            mp_token: Dict[str, Any] = {
+                                "address": str(addr),
+                                "symbol": mp.get("symbol"),
+                                "name": mp.get("name") or str(addr),
+                                "liquidity": mp.get("liquidity"),
+                                "volume": mp.get("volume"),
+                                "price": mp.get("price"),
+                            }
+                            entry = _merge_candidate_entry(
+                                candidates, mp_token, "mempool"
+                            )
+                            if entry is None:
+                                continue
+                            changed = True
+                            for key in (
+                                "score",
+                                "momentum",
+                                "anomaly",
+                                "wallet_concentration",
+                                "avg_swap_size",
+                            ):
+                                val = mp.get(key)
+                                if val is not None:
+                                    try:
+                                        entry[key] = float(val)
+                                    except Exception:
+                                        pass
+                        return changed
+                    if label == "dexscreener":
+                        if isinstance(result, Exception):
+                            logger.debug(
+                                "DexScreener discovery unavailable: %s", result
+                            )
+                            return False
+                        dexscreener_tokens = list(result or [])
+                        for token in dexscreener_tokens:
+                            entry = _merge_candidate_entry(
+                                candidates, dict(token), "dexscreener"
+                            )
+                            if entry is not None:
+                                changed = True
+                        return changed
+                    if label == "meteora":
+                        if isinstance(result, Exception):
+                            logger.debug("Meteora discovery unavailable: %s", result)
+                            return False
+                        meteora_tokens = list(result or [])
+                        for token in meteora_tokens:
+                            entry = _merge_candidate_entry(
+                                candidates, dict(token), "meteora"
+                            )
+                            if entry is not None:
+                                changed = True
+                        return changed
+                    if label == "dexlab":
+                        if isinstance(result, Exception):
+                            logger.debug("DexLab discovery unavailable: %s", result)
+                            return False
+                        dexlab_tokens = list(result or [])
+                        for token in dexlab_tokens:
+                            entry = _merge_candidate_entry(
+                                candidates, dict(token), "dexlab"
+                            )
+                            if entry is not None:
+                                changed = True
+                        return changed
+                    return False
+
+            task_list = list(task_map.keys())
+
+            try:
+                iterator = asyncio.as_completed(
+                    task_list,
+                    timeout=overall_timeout if overall_timeout > 0 else None,
+                )
+                for fut in iterator:
+                    label = task_map[fut]
+                    try:
+                        result = await fut
+                    except Exception as exc:
+                        result = exc
+                    completed.add(fut)
+                    changed = await _merge_result(label, result)
+                    if not candidates or not changed:
+                        continue
+                    _score_candidates(candidates, mempool)
+                    snapshot = _snapshot(candidates, limit=limit)
+                    last_snapshot = snapshot
+                    emitted = True
+                    yield snapshot
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Discovery overall timeout after %.2fs; pending_tasks=%s",
+                    overall_timeout,
+                    len(task_list) - len(completed),
+                )
+            finally:
+                pending = [task for task in task_list if task not in completed]
+                for task in pending:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+
+            try:
+                await _enrich_with_solscan(candidates)
+            except Exception as exc:
+                logger.debug("Solscan enrichment unavailable: %s", exc)
+
+            if candidates:
+                _score_candidates(candidates, mempool)
+            final = _snapshot(candidates, limit=limit)
+
+            top_score = final[0]["score"] if final and "score" in final[0] else None
+            logger.debug(
+                "Discovery combine summary bird=%s mempool=%s dexscreener=%s meteora=%s dexlab=%s final=%s top_score=%s",
+                len(bird_tokens),
+                len(mempool),
+                len(dexscreener_tokens),
+                len(meteora_tokens),
+                len(dexlab_tokens),
+                len(final),
+                f"{top_score:.4f}" if isinstance(top_score, (int, float)) else "n/a",
+            )
+
+            if not emitted or final != last_snapshot:
+                yield final
+
+        if shared_session_obj is not None:
+            async with shared_session_obj as shared_session:
+                async for batch in _run(shared_session):
+                    yield batch
+        else:
+            async for batch in _run(None):
+                yield batch
+
+    return _DiscoveryResult(_generator())
 
 
 def warm_cache(rpc_url: str, *, limit: int | None = None) -> None:
@@ -1353,10 +1443,13 @@ def warm_cache(rpc_url: str, *, limit: int | None = None) -> None:
 
     def _worker() -> None:
         try:
-            coro = discover_candidates(
-                rpc_url, limit=limit, mempool_threshold=mempool_threshold
-            )
-            asyncio.run(asyncio.wait_for(coro, timeout=_WARM_TIMEOUT))
+            async def _consume() -> None:
+                async for _ in discover_candidates(
+                    rpc_url, limit=limit, mempool_threshold=mempool_threshold
+                ):
+                    pass
+
+            asyncio.run(asyncio.wait_for(_consume(), timeout=_WARM_TIMEOUT))
         except Exception as exc:
             logger.debug("Discovery warm cache failed: %s", exc)
 
