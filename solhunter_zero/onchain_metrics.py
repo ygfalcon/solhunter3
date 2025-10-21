@@ -23,6 +23,7 @@ from .scanner_onchain import (
 from .http import get_session
 from .lru import TTLCache
 from .token_aliases import canonical_mint, validate_mint
+from .synthetic_depth import compute_depth_change as _compute_depth_change
 
 FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 
@@ -719,9 +720,12 @@ async def _order_book_depth_change_async(
     canonical = _validated_mint(mint)
     if canonical is None:
         return 0.0
-    # depth not yet available; returns 0.0.
-    _ = (canonical, rpc_url, base_url)
-    return 0.0
+    _ = base_url  # retained for backward compatibility with older callers
+    try:
+        delta = await _compute_depth_change(canonical, rpc_url=rpc_url)
+    except Exception:
+        return 0.0
+    return float(delta)
 
 
 def order_book_depth_change(
@@ -730,10 +734,9 @@ def order_book_depth_change(
     base_url: str | None = None,
     rpc_url: str | None = None,
 ) -> float:
-    """Return the stubbed order book depth delta; ``base_url`` is deprecated.
+    """Return the blended synthetic order book depth delta.
 
-    The metric currently returns ``0.0`` until depth_service integration lands,
-    so the first and subsequent invocations behave identically.
+    ``base_url`` is retained for backwards compatibility but ignored.
     """
 
     canonical = _validated_mint(mint)
