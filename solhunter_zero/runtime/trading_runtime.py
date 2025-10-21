@@ -1623,11 +1623,27 @@ class TradingRuntime:
                 stale = True
             if age_depth is not None and age_depth > 6.0:
                 stale = True
+            close_value = _maybe_float(candle.get("close"))
+            if close_value is None:
+                close_value = _maybe_float(candle.get("c"))
+            volume_value = _maybe_float(candle.get("volume"))
+            if volume_value is None:
+                volume_value = _maybe_float(candle.get("vol_usd"))
+            buyers_value = _maybe_int(candle.get("buyer_count"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(candle.get("buyers"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(depth_entry.get("buyers"))
+            sellers_value = _maybe_int(candle.get("seller_count"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(candle.get("sellers"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(depth_entry.get("sellers"))
             markets.append(
                 {
                     "mint": mint,
-                    "close": _maybe_float(candle.get("close")),
-                    "volume": _maybe_float(candle.get("volume")),
+                    "close": close_value,
+                    "volume": volume_value,
                     "spread_bps": _maybe_float(depth_entry.get("spread_bps")),
                     "depth_pct": depth_pct,
                     "age_close": age_close,
@@ -1636,6 +1652,8 @@ class TradingRuntime:
                     "lag_depth_ms": age_depth * 1000.0 if age_depth is not None else None,
                     "stale": stale,
                     "updated_label": _format_age(combined_age),
+                    "buyers": buyers_value,
+                    "sellers": sellers_value,
                 }
             )
         summary = {
@@ -2671,6 +2689,19 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
     except Exception:
         return default
     if not math.isfinite(result):
+        return default
+    return result
+
+
+def _maybe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    numeric = _maybe_float(value)
+    if numeric is None:
+        return default
+    try:
+        result = int(numeric)
+    except Exception:
+        return default
+    if result < 0:
         return default
     return result
 
