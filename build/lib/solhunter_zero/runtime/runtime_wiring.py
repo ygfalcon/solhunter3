@@ -373,6 +373,29 @@ class RuntimeEventCollectors:
         }
         pnl_limit = _int_env("UI_VIRTUAL_PNL_LIMIT", 400)
         self._virtual_pnls: Deque[Dict[str, Any]] = deque(maxlen=pnl_limit)
+        self._status_lock = threading.Lock()
+        self._status_info: Dict[str, Any] = {
+            "event_bus": False,
+            "trading_loop": False,
+            "heartbeat_ts": None,
+            "last_stage": None,
+            "last_stage_ok": None,
+            "last_stage_detail": None,
+            "last_stage_ts": None,
+        }
+        self._environment = (
+            os.getenv("SOLHUNTER_ENV")
+            or os.getenv("DEPLOY_ENV")
+            or os.getenv("RUNTIME_ENV")
+            or os.getenv("APP_ENV")
+            or os.getenv("ENVIRONMENT")
+            or os.getenv("ENV")
+        )
+        self._control_status: Dict[str, Any] = {
+            "paused": False,
+            "paper_mode": parse_bool_env("PAPER_TRADING", False),
+            "rl_mode": "shadow" if parse_bool_env("RL_WEIGHTS_DISABLED", True) else "applied",
+        }
 
     def _parse_sequence(self, value: Any) -> Optional[int]:
         if value in (None, "", False):
@@ -554,6 +577,41 @@ class RuntimeEventCollectors:
                 payload = {"hot_watch": payload}
             self._set_exit_summary(payload)
 
+        async def _on_stage(event: Any) -> None:
+            payload = _normalize_event(event)
+            stage = str(payload.get("stage") or "")
+            ok = bool(payload.get("ok"))
+            detail = payload.get("detail")
+            now = time.time()
+            with self._status_lock:
+                info = self._status_info
+                info["last_stage"] = stage or None
+                info["last_stage_ok"] = ok
+                info["last_stage_detail"] = detail
+                info["last_stage_ts"] = now
+                if stage.startswith("bus:"):
+                    if ok:
+                        info["event_bus"] = True
+                    elif stage in {"bus:ws", "bus:verify"}:
+                        info["event_bus"] = False
+                if stage in {"agents:loop", "agents:event_runtime", "runtime:ready"}:
+                    if ok:
+                        info["trading_loop"] = True
+                if stage in {"runtime:stopping", "runtime:stopped"}:
+                    info["trading_loop"] = False
+                if stage in {"agents:loop", "agents:event_runtime"} and not ok:
+                    info["trading_loop"] = False
+
+        async def _on_heartbeat(event: Any) -> None:
+            payload = _normalize_event(event)
+            service = str(payload.get("service") or "")
+            now = time.time()
+            with self._status_lock:
+                info = self._status_info
+                info["heartbeat_ts"] = now
+                if service == "trading_loop":
+                    info["trading_loop"] = True
+
         for topic, handler in (
             ("x:discovery.candidates", _on_discovery_candidate),
             ("x:token.snap", _on_token_snapshot),
@@ -569,6 +627,8 @@ class RuntimeEventCollectors:
             ("rl_weights", _on_rl_weights),
             ("x:swarm.exits", _on_exit_panel),
             ("x:exit.panel", _on_exit_panel),
+            ("runtime.stage_changed", _on_stage),
+            ("heartbeat", _on_heartbeat),
         ):
             unsub = subscribe(topic, handler)
             self._subscriptions.append(unsub)
@@ -963,6 +1023,33 @@ class RuntimeEventCollectors:
             "staleness": staleness,
         }
 
+    def status_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._status_lock:
+            info = dict(self._status_info)
+            control = dict(self._control_status)
+        heartbeat_ts = info.get("heartbeat_ts")
+        latency_ms: Optional[float] = None
+        if heartbeat_ts is not None:
+            try:
+                latency_ms = max(0.0, (now - float(heartbeat_ts)) * 1000.0)
+            except Exception:
+                latency_ms = None
+        return {
+            "event_bus": bool(info.get("event_bus")),
+            "trading_loop": bool(info.get("trading_loop")),
+            "heartbeat": heartbeat_ts,
+            "bus_latency_ms": latency_ms,
+            "last_stage": info.get("last_stage"),
+            "last_stage_ok": info.get("last_stage_ok"),
+            "last_stage_detail": info.get("last_stage_detail"),
+            "last_stage_ts": info.get("last_stage_ts"),
+            "environment": (self._environment or "dev"),
+            "paused": bool(control.get("paused")),
+            "paper_mode": bool(control.get("paper_mode")),
+            "rl_mode": control.get("rl_mode", "shadow"),
+        }
+
     # Public provider accessors ------------------------------------------------
 
     def discovery_snapshot(self) -> Dict[str, Any]:
@@ -1334,6 +1421,7 @@ class RuntimeWiring:
     collectors: RuntimeEventCollectors
 
     def wire_ui_state(self, ui_state: UIState) -> None:
+        ui_state.status_provider = self.collectors.status_snapshot
         ui_state.golden_snapshot_provider = self.collectors.golden_snapshot
         ui_state.discovery_provider = self.collectors.discovery_snapshot
         ui_state.discovery_console_provider = self.collectors.discovery_console_snapshot
