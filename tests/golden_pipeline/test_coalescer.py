@@ -33,6 +33,7 @@ def _make_bar(mint: str, *, asof: float) -> OHLCVBar:
         low=0.9,
         close=1.05,
         vol_usd=123.0,
+        vol_base=123.0,
         trades=10,
         buyers=5,
         flow_usd=12.0,

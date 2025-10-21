@@ -115,6 +115,7 @@ def test_agents_receive_bootstrapped_snapshot() -> None:
                 low=0.95,
                 close=1.05,
                 vol_usd=25_000.0,
+                vol_base=25_000.0,
                 trades=12,
                 buyers=6,
                 flow_usd=8_000.0,

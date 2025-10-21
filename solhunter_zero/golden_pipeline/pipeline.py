@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 from dataclasses import asdict
-from typing import Awaitable, Callable, Dict, Iterable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 
 from .agents import AgentStage, BaseAgent
 from .bus import InMemoryBus, MessageBus
@@ -32,7 +33,49 @@ from .types import (
     VirtualPnL,
 )
 from .voting import VotingStage
-from .utils import now_ts
+from .utils import canonical_hash, now_ts
+
+
+def _maybe_float(value: Any) -> Optional[float]:
+    if value in (None, "", "null"):
+        return None
+    try:
+        result = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
+def _extract_mid_usd(px: Mapping[str, Any] | None) -> Optional[float]:
+    if not isinstance(px, Mapping):
+        return None
+    for key in ("mid_usd", "midUsd", "mid", "mid_price_usd", "price_usd", "fair_price", "price"):
+        numeric = _maybe_float(px.get(key))
+        if numeric is not None:
+            return numeric
+    for value in px.values():
+        numeric = _maybe_float(value)
+        if numeric is not None:
+            return numeric
+    return None
+
+
+def _extract_depth_1pct_usd(liq: Mapping[str, Any] | None) -> Optional[float]:
+    if not isinstance(liq, Mapping):
+        return None
+    depth = liq.get("depth_pct") or liq.get("depth") or liq.get("depth_usd_by_pct")
+    if isinstance(depth, Mapping):
+        for key in ("1", "1.0", "100", "100bps", "1pct"):
+            numeric = _maybe_float(depth.get(key))
+            if numeric is not None:
+                return numeric
+    for key in ("depth_1pct_usd", "liq_depth_1pct_usd", "depth_usd_1pct"):
+        numeric = _maybe_float(liq.get(key))
+        if numeric is not None:
+            return numeric
+    return _maybe_float(liq.get("notional_usd"))
 
 
 class _PaperPositionState:
@@ -131,7 +174,18 @@ class GoldenPipeline:
             self._context.record(snapshot)
             self._latest_snapshots[snapshot.mint] = snapshot
             self.metrics.record(snapshot)
-            await self._publish(STREAMS.golden_snapshot, asdict(snapshot))
+            payload = asdict(snapshot)
+            payload["schema_version"] = snapshot.schema_version
+            mid_usd = _extract_mid_usd(snapshot.px)
+            if mid_usd is not None:
+                payload["px_mid_usd"] = mid_usd
+            depth_1pct_usd = _extract_depth_1pct_usd(snapshot.liq)
+            if depth_1pct_usd is not None:
+                payload["liq_depth_1pct_usd"] = depth_1pct_usd
+            payload_for_hash = dict(payload)
+            payload["content_hash"] = canonical_hash(payload_for_hash)
+            await self._publish(STREAMS.golden_snapshot_v2, payload)
+            await self._publish(STREAMS.golden_snapshot, dict(payload))
             await self._publish_metrics(snapshot)
             if self._on_golden:
                 await self._on_golden(snapshot)
@@ -265,22 +319,29 @@ class GoldenPipeline:
             await self._coalescer.update_metadata(snapshot)
 
         async def _on_bar(bar: OHLCVBar) -> None:
-            await self._publish(
-                STREAMS.market_ohlcv,
-                {
-                    "mint": bar.mint,
-                    "o": bar.open,
-                    "h": bar.high,
-                    "l": bar.low,
-                    "c": bar.close,
-                    "vol_usd": bar.vol_usd,
-                    "trades": bar.trades,
-                    "buyers": bar.buyers,
-                    "zret": bar.zret,
-                    "zvol": bar.zvol,
-                    "asof_close": bar.asof_close,
-                },
-            )
+            payload = {
+                "mint": bar.mint,
+                "o": bar.open,
+                "h": bar.high,
+                "l": bar.low,
+                "c": bar.close,
+                "vol_usd": bar.vol_usd,
+                "vol_base": bar.vol_base,
+                "trades": bar.trades,
+                "buyers": bar.buyers,
+                "flow_usd": bar.flow_usd,
+                "zret": bar.zret,
+                "zvol": bar.zvol,
+                "asof_close": bar.asof_close,
+                "close": bar.close,
+                "volume": bar.vol_usd,
+                "volume_usd": bar.vol_usd,
+                "volume_base": bar.vol_base,
+                "schema_version": bar.schema_version,
+            }
+            payload["content_hash"] = canonical_hash(dict(payload))
+            await self._publish(STREAMS.market_ohlcv_v2, payload)
+            await self._publish(STREAMS.market_ohlcv, dict(payload))
             await self._coalescer.update_bar(bar)
 
         async def _on_depth(depth: DepthSnapshot) -> None:

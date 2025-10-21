@@ -22,8 +22,10 @@ from solhunter_zero.golden_pipeline.types import (
     DepthSnapshot,
     DiscoveryCandidate,
     GoldenSnapshot,
+    GOLDEN_SNAPSHOT_SCHEMA_VERSION,
     LiveFill,
     OHLCVBar,
+    OHLCV_BAR_SCHEMA_VERSION,
     TapeEvent,
     TokenSnapshot,
     TradeSuggestion,
@@ -46,7 +48,8 @@ sys.modules.setdefault("solhunter_zero.token_scanner", _token_scanner_stub)
 _portfolio_stub = types.ModuleType("solhunter_zero.portfolio")
 if "solhunter_zero.portfolio" not in sys.modules:
     class _PortfolioStub:
-        pass
+        def __init__(self, *args, **kwargs) -> None:
+            return None
 
     _portfolio_stub.Portfolio = _PortfolioStub
     sys.modules["solhunter_zero.portfolio"] = _portfolio_stub
@@ -606,6 +609,18 @@ def test_pipeline_end_to_end_flow():
         assert market_event["buyers"] == 2
         assert market_event["vol_usd"] == pytest.approx(803.0, rel=1e-6)
         assert market_event["asof_close"] == pytest.approx(expected_close, rel=1e-6)
+        assert market_event["close"] == market_event["c"]
+        assert market_event["volume"] == market_event["vol_usd"]
+        assert market_event["schema_version"] == OHLCV_BAR_SCHEMA_VERSION
+        assert isinstance(market_event.get("content_hash"), str)
+        assert market_event.get("content_hash")
+
+        assert STREAMS.market_ohlcv_v2 in bus.events
+        market_events_v2 = bus.events[STREAMS.market_ohlcv_v2]
+        assert market_events_v2
+        market_event_v2 = market_events_v2[0]
+        assert market_event_v2["content_hash"] == market_event["content_hash"]
+        assert market_event_v2["schema_version"] == OHLCV_BAR_SCHEMA_VERSION
 
         assert STREAMS.market_depth in bus.events
         depth_events = bus.events[STREAMS.market_depth]
@@ -621,11 +636,24 @@ def test_pipeline_end_to_end_flow():
         latest_snapshot = goldens[-1]
         assert golden_event["mint"] == mint
         assert golden_event["hash"] == latest_snapshot.hash
+        assert golden_event["schema_version"] == GOLDEN_SNAPSHOT_SCHEMA_VERSION
+        assert isinstance(golden_event.get("content_hash"), str)
+        assert golden_event.get("content_hash")
+        assert golden_event["px_mid_usd"] == golden_event["px"]["mid_usd"]
+        assert golden_event["liq_depth_1pct_usd"] == pytest.approx(20_000.0, rel=1e-6)
         ohlcv_payload = golden_event["ohlcv5m"]
         assert ohlcv_payload["vol_usd"] == pytest.approx(803.0, rel=1e-6)
         assert ohlcv_payload["buyers"] == 2
         assert ohlcv_payload["flow_usd"] == pytest.approx(803.0, rel=1e-6)
         assert golden_event["liq"]["depth_pct"]["1"] == pytest.approx(20_000.0, rel=1e-6)
+
+        assert STREAMS.golden_snapshot_v2 in bus.events
+        golden_events_v2 = bus.events[STREAMS.golden_snapshot_v2]
+        assert golden_events_v2
+        golden_event_v2 = golden_events_v2[-1]
+        assert golden_event_v2["content_hash"] == golden_event["content_hash"]
+        assert golden_event_v2["px_mid_usd"] == golden_event["px"]["mid_usd"]
+        assert golden_event_v2["liq_depth_1pct_usd"] == pytest.approx(20_000.0, rel=1e-6)
 
         stored_hash = await kv.get(golden_hash_key(mint))
         assert stored_hash == golden_event["hash"]
@@ -735,6 +763,7 @@ def test_golden_snapshot_metrics_and_determinism():
             low=0.9,
             close=1.1,
             vol_usd=500.0,
+            vol_base=500.0,
             trades=10,
             buyers=5,
             flow_usd=100.0,

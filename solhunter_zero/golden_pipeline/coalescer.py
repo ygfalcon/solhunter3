@@ -171,11 +171,13 @@ class SnapshotCoalescer:
                 "l": bar.low,
                 "c": bar.close,
                 "vol_usd": bar.vol_usd,
+                "vol_base": bar.vol_base,
                 "buyers": bar.buyers,
                 "flow_usd": bar.flow_usd,
                 "zret": bar.zret,
                 "zvol": bar.zvol,
                 "asof_close": bar.asof_close,
+                "schema_version": bar.schema_version,
             },
         }
         snapshot_hash = canonical_hash(payload)

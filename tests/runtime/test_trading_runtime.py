@@ -172,6 +172,31 @@ async def test_market_panel_renders_pipeline_keys(monkeypatch):
     assert cells[2] != "—", "volume cell should show a value"
 
 
+@pytest.mark.anyio("asyncio")
+async def test_golden_panel_renders_flattened_fields(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "0")
+    runtime = TradingRuntime()
+
+    now = time.time()
+    with runtime._swarm_lock:
+        runtime._golden_snapshots["MINT"] = {
+            "mint": "MINT",
+            "hash": "hash",
+            "px_mid_usd": 1.23,
+            "liq_depth_1pct_usd": 456.0,
+            "asof": now,
+            "schema_version": "2.0",
+            "content_hash": "abc",
+        }
+        runtime._latest_golden_hash["MINT"] = "hash"
+
+    panel = runtime._collect_golden_panel()
+    assert panel["snapshots"], "expected snapshots in panel"
+    entry = panel["snapshots"][0]
+    assert entry["px"] == pytest.approx(1.23)
+    assert entry["liq"] == pytest.approx(456.0)
+
+
 def test_collect_health_metrics(monkeypatch):
     runtime = TradingRuntime()
     runtime.status.event_bus = True

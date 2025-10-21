@@ -14,6 +14,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 from ..event_bus import subscribe
 from ..ui import UIState, get_ws_channel_metrics
 from ..util import parse_bool_env
+from .golden_adapters import normalize_golden_snapshot, normalize_ohlcv_payload
 
 
 log = __import__("logging").getLogger(__name__)
@@ -626,8 +627,10 @@ class RuntimeEventCollectors:
             ("x:discovery.candidates", _on_discovery_candidate),
             ("x:token.snap", _on_token_snapshot),
             ("x:market.ohlcv.5m", _on_market_ohlcv),
+            ("x:market.ohlcv.5m@v2", _on_market_ohlcv),
             ("x:market.depth", _on_market_depth),
             ("x:mint.golden", _on_golden_snapshot),
+            ("x:mint.golden@v2", _on_golden_snapshot),
             ("x:trade.suggested", _on_suggestion),
             ("x:vote.decisions", _on_vote_decision),
             ("x:virt.fills", _on_virtual_fill),
@@ -1121,38 +1124,19 @@ class RuntimeEventCollectors:
                 stale = True
             if age_depth is not None and age_depth > 6.0:
                 stale = True
-            close_value = _maybe_float(candle.get("close"))
+            normalized_bar = normalize_ohlcv_payload(candle, reader="runtime_wiring")
+            close_value = normalized_bar.close
             if close_value is None:
-                close_value = _maybe_float(candle.get("c"))
-            if close_value is None:
-                close_value = _maybe_float(candle.get("mid"))
-            volume_value = _maybe_float(candle.get("volume"))
+                close_value = _maybe_float(depth_entry.get("mid_usd"))
+            volume_value = normalized_bar.volume_usd
             if volume_value is None:
-                volume_value = _maybe_float(candle.get("volume_usd"))
-            if volume_value is None:
-                volume_value = _maybe_float(candle.get("vol_usd"))
+                volume_value = _maybe_float(depth_entry.get("volume_usd"))
             buyers_value = _maybe_int(depth_entry.get("buyers"))
             if buyers_value is None:
-                buyers_value = _maybe_int(depth_entry.get("buyer_count"))
-            if buyers_value is None:
-                buyers_value = _maybe_int(depth_entry.get("num_buyers"))
-            if buyers_value is None:
-                buyers_value = _maybe_int(candle.get("buyers"))
-            if buyers_value is None:
-                buyers_value = _maybe_int(candle.get("buyer_count"))
-            if buyers_value is None:
-                buyers_value = _maybe_int(candle.get("num_buyers"))
-            sellers_value = _maybe_int(depth_entry.get("sellers"))
+                buyers_value = normalized_bar.buyers
+            sellers_value = normalized_bar.sellers
             if sellers_value is None:
-                sellers_value = _maybe_int(depth_entry.get("seller_count"))
-            if sellers_value is None:
-                sellers_value = _maybe_int(depth_entry.get("num_sellers"))
-            if sellers_value is None:
-                sellers_value = _maybe_int(candle.get("sellers"))
-            if sellers_value is None:
-                sellers_value = _maybe_int(candle.get("seller_count"))
-            if sellers_value is None:
-                sellers_value = _maybe_int(candle.get("num_sellers"))
+                sellers_value = _maybe_int(depth_entry.get("sellers"))
             markets.append(
                 {
                     "mint": mint,
@@ -1185,6 +1169,7 @@ class RuntimeEventCollectors:
         lag_samples: List[float] = []
         for mint in sorted(golden.keys()):
             payload = dict(golden[mint])
+            normalized_snapshot = normalize_golden_snapshot(payload, reader="runtime_wiring")
             timestamp = _entry_timestamp(payload, "asof")
             age = _age_seconds(timestamp, now)
             if age is None and payload.get("_received") is not None:
@@ -1230,8 +1215,8 @@ class RuntimeEventCollectors:
                     "mint": mint,
                     "hash": hash_text,
                     "hash_short": _short_hash(hash_text),
-                    "px": _maybe_float(payload.get("px")),
-                    "liq": _maybe_float(payload.get("liq")),
+                    "px": normalized_snapshot.mid_usd,
+                    "liq": normalized_snapshot.depth_1pct_usd,
                     "age_seconds": age,
                     "age_label": _format_age(age),
                     "stale": stale_flag,

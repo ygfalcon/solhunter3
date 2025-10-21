@@ -108,3 +108,45 @@ def test_market_snapshot_falls_back_to_pipeline_fields(monkeypatch):
     assert market["sellers"] == 7
 
     collectors.stop()
+
+
+def test_golden_snapshot_flat_fields(monkeypatch):
+    handlers: dict[str, list] = {}
+
+    def fake_subscribe(topic, handler):
+        handlers.setdefault(topic, []).append(handler)
+        return lambda: None
+
+    monkeypatch.setattr(runtime_wiring, "subscribe", fake_subscribe)
+
+    collectors = runtime_wiring.RuntimeEventCollectors()
+    collectors.start()
+
+    async def emit(topic: str, payload):
+        for handler in handlers.get(topic, []):
+            await handler(payload)
+
+    async def drive() -> None:
+        now = time.time()
+        await emit(
+            "x:mint.golden@v2",
+            {
+                "mint": "MINT",
+                "hash": "hash",
+                "px_mid_usd": "1.23",
+                "liq_depth_1pct_usd": "456.0",
+                "asof": now,
+                "schema_version": "2.0",
+                "content_hash": "abc",
+            },
+        )
+
+    asyncio.run(drive())
+
+    snapshot = collectors.golden_snapshot()
+    assert snapshot["snapshots"], "expected golden snapshot entries"
+    entry = snapshot["snapshots"][0]
+    assert entry["px"] == pytest.approx(1.23)
+    assert entry["liq"] == pytest.approx(456.0)
+
+    collectors.stop()
