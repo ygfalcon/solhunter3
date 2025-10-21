@@ -116,7 +116,7 @@ class GoldenPipeline:
         self._bus = bus
         self._kv = kv or InMemoryKeyValueStore()
         self._sequence_cache: Dict[str, int] = {}
-        self._sequence_lock = asyncio.Lock()
+        self._sequence_locks: Dict[str, asyncio.Lock] = {}
         self._context = ExecutionContext()
         self._latest_snapshots: Dict[str, GoldenSnapshot] = {}
         self._paper_positions: Dict[str, _PaperPositionState] = {}
@@ -365,31 +365,46 @@ class GoldenPipeline:
     def _sequence_kv_key(self, mint: str) -> str:
         return f"golden:sequence:{mint}"
 
+    def _sequence_lock_for(self, mint_key: str) -> asyncio.Lock:
+        lock = self._sequence_locks.get(mint_key)
+        if lock is None:
+            new_lock = asyncio.Lock()
+            existing = self._sequence_locks.setdefault(mint_key, new_lock)
+            lock = existing if existing is not new_lock else new_lock
+        return lock
+
+    async def _load_sequence(self, mint_key: str) -> int:
+        if self._kv is None:
+            return 0
+        try:
+            stored = await self._kv.get(self._sequence_kv_key(mint_key))
+        except Exception:
+            return 0
+        if stored is None:
+            return 0
+        try:
+            return int(stored)
+        except Exception:
+            return 0
+
+    async def _persist_sequence(self, mint_key: str, sequence: int) -> None:
+        if self._kv is None:
+            return
+        try:
+            await self._kv.set(self._sequence_kv_key(mint_key), str(sequence))
+        except Exception:
+            pass
+
     async def _next_sequence(self, mint: str) -> int:
         mint_key = str(mint)
-        async with self._sequence_lock:
+        lock = self._sequence_lock_for(mint_key)
+        async with lock:
             current = self._sequence_cache.get(mint_key)
-            if current is None and self._kv is not None:
-                try:
-                    stored = await self._kv.get(self._sequence_kv_key(mint_key))
-                except Exception:
-                    stored = None
-                if stored is not None:
-                    try:
-                        current = int(stored)
-                    except Exception:
-                        current = 0
-                else:
-                    current = 0
             if current is None:
-                current = 0
+                current = await self._load_sequence(mint_key)
             next_seq = current + 1
             self._sequence_cache[mint_key] = next_seq
-            if self._kv is not None:
-                try:
-                    await self._kv.set(self._sequence_kv_key(mint_key), str(next_seq))
-                except Exception:
-                    pass
+            await self._persist_sequence(mint_key, next_seq)
             return next_seq
 
     async def _publish(
