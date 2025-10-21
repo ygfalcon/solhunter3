@@ -11,8 +11,17 @@ from __future__ import annotations
 from typing import Iterable, List, Tuple, Callable
 
 from scripts import preflight
+from solhunter_zero.health_runtime import check_rl_daemon_health
 
 CheckFunc = Tuple[str, Callable[[], preflight.Check]]
+
+
+def _default_checks() -> List[CheckFunc]:
+    checks = list(preflight.CHECKS)
+    names = {name for name, _ in checks}
+    if "RL daemon" not in names:
+        checks.append(("RL daemon", lambda: check_rl_daemon_health(require_health_file=True)))
+    return checks
 
 
 def _run_checks(checks: Iterable[CheckFunc]) -> List[Tuple[str, bool, str]]:
@@ -51,7 +60,7 @@ def main(
         Iterable of check names considered critical.  When ``None`` all provided
         checks are treated as critical.
     """
-    selected = list(preflight.CHECKS if checks is None else checks)
+    selected = list(_default_checks() if checks is None else checks)
     results = _run_checks(selected)
     _print_table(results)
     crit = set(name for name, _ in selected) if critical is None else set(critical)
