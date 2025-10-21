@@ -8,7 +8,7 @@ import json
 import time
 from collections import deque
 from dataclasses import asdict
-from typing import Any, Callable, Deque, Dict, Iterable
+from typing import Any, Callable, Deque, Dict, Iterable, Sized
 
 
 def now_ts() -> float:
@@ -137,11 +137,17 @@ async def gather_in_batches(
 ) -> list[Any]:
     """Run ``worker`` over ``items`` in batches and gather results."""
 
+    source_items: Iterable[Any] = items
     if batch_size <= 0:
-        batch_size = len(list(items)) or 1
+        if isinstance(source_items, Sized):
+            computed_batch_size = len(source_items)
+        else:
+            source_items = list(source_items)
+            computed_batch_size = len(source_items)
+        batch_size = computed_batch_size or 1
     results: list[Any] = []
     batch: list[Any] = []
-    for item in items:
+    for item in source_items:
         batch.append(item)
         if len(batch) >= batch_size:
             result = worker(batch)
