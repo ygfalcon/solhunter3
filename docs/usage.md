@@ -41,6 +41,43 @@ python demo.py --full-system --reports reports
 
 All modes emit the same report files along with console summaries.
 
+## Event capture and replay
+
+Operators can archive the runtime event bus and rehydrate the Golden UI
+offline using the bundled CLIs. Capture sessions stream ordered JSONL
+records with sequence numbers, wall-clock timestamps, and the elapsed
+monotonic offset used for deterministic playback.
+
+Record a focused session (token discovery, price, and depth topics only)
+for five minutes:
+
+```bash
+solhunter-capture \
+  --topic token_discovered \
+  --topic price_update \
+  --topic depth_update \
+  --duration 300 \
+  --output artifacts/golden-session.jsonl
+```
+
+The resulting file begins with a metadata line describing topics, limits,
+and optional labels (add context with repeated `--label key=value`).
+
+Rehydrate the stream against a local runtime, preserving the original
+timing by default. Use `--speed` to accelerate playback (0 disables
+delays entirely) or restrict to specific topics/sequences:
+
+```bash
+solhunter-replay \
+  artifacts/golden-session.jsonl \
+  --speed 4.0 \
+  --topic token_discovered --topic price_update --topic depth_update
+```
+
+During replay the messages are published to the shared event bus, so the
+Golden pipeline, UI, and downstream analytics receive the same payloads
+observed during the capture window.
+
 ### Paper Trading
 
 Mirror the investor demo while optionally fetching live price data:

@@ -74,6 +74,8 @@ solhunter-train = "solhunter_zero.train_cli:main"
 solhunter-demo = "scripts.investor_demo:main"
 solhunter-start = "solhunter_zero.launcher:main"
 solhunter-one-click = "scripts.setup_one_click:main"
+solhunter-capture = "scripts.capture_daemon:main"
+solhunter-replay = "scripts.replay_capture:main"
 
 [build-system]
 requires = [
