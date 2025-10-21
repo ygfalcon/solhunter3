@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from . import resource_monitor
 from .event_bus import publish
 from .schemas import Heartbeat, RuntimeLog, WeightsUpdated
 from .agents.execution import ExecutionAgent
@@ -17,6 +18,23 @@ from .swarm_pipeline import SwarmPipeline
 from .util import parse_bool_env
 
 log = logging.getLogger(__name__)
+
+
+class ResourceBudgetExceeded(RuntimeError):
+    """Raised when a configured resource budget requests shutdown."""
+
+    def __init__(self, resource: str, info: Dict[str, object]) -> None:
+        self.resource = resource
+        self.info = dict(info)
+        ceiling = info.get("ceiling")
+        value = info.get("value")
+        action = info.get("action")
+        message = (
+            f"{resource} budget exceeded: usage={value:.2f} ceiling={ceiling} action={action}"
+            if isinstance(value, (int, float)) and isinstance(ceiling, (int, float))
+            else f"{resource} budget exceeded (action={action})"
+        )
+        super().__init__(message)
 
 
 # ---------------------------------------------------------------------
@@ -424,6 +442,7 @@ async def trading_loop(
     loop_start = time.time() if first_trade_deadline else 0.0
     first_trade_ts: float | None = None
 
+    throttle_logged = False
     while iterations is None or count < iterations:
         start = time.perf_counter()
         try:
@@ -462,6 +481,27 @@ async def trading_loop(
             {"cpu": 0.0, "memory": 0.0, "iter_ms": elapsed * 1000.0},
         )
 
+        exit_candidates = resource_monitor.active_budget("exit")
+        throttle_candidates = resource_monitor.active_budget("throttle")
+        exit_policy = exit_candidates[0] if exit_candidates else None
+        throttle_policy = throttle_candidates[0] if throttle_candidates else None
+        if exit_policy:
+            resource = str(exit_policy.get("resource") or "resource")
+            detail = f"resource-exit:{resource}"
+            publish(
+                "runtime.log",
+                RuntimeLog(
+                    stage="loop",
+                    detail=detail,
+                    level="ERROR",
+                ),
+            )
+            log.error(
+                "Resource budget triggered shutdown action for %s: %s", resource, exit_policy
+            )
+            raise ResourceBudgetExceeded(resource, exit_policy)
+        throttled = bool(throttle_policy)
+
         if first_trade_deadline and first_trade_ts is None:
             if _result_has_trade(result):
                 first_trade_ts = time.time()
@@ -483,4 +523,17 @@ async def trading_loop(
         if iterations is not None and count >= iterations:
             break
         delay = max(min_delay, min(max_delay, loop_delay - elapsed))
+        if throttled:
+            delay = max(delay, max_delay)
+            if not throttle_logged:
+                publish(
+                    "runtime.log",
+                    RuntimeLog(stage="loop", detail="resource-throttle", level="WARN"),
+                )
+                log.warning(
+                    "Resource budget throttle active; sleeping for %.2fs", delay
+                )
+                throttle_logged = True
+        else:
+            throttle_logged = False
         await asyncio.sleep(max(0.0, delay))

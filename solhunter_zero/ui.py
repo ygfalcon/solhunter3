@@ -190,6 +190,16 @@ def push_log(payload: Any) -> bool:
     return _enqueue_message("logs", payload)
 
 
+def get_ws_client_counts() -> Dict[str, int]:
+    """Return the number of connected websocket clients per channel."""
+
+    counts: Dict[str, int] = {}
+    for name, state in _WS_CHANNELS.items():
+        clients = getattr(state, "clients", set())
+        counts[name] = len(clients)
+    return counts
+
+
 def _normalize_ws_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -727,6 +737,7 @@ class UIState:
     settings_provider: DictProvider = field(
         default=lambda: {"controls": {}, "overrides": {}, "staleness": {}}
     )
+    health_provider: DictProvider = field(default=lambda: {})
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -882,6 +893,13 @@ class UIState:
         except Exception:  # pragma: no cover
             log.exception("UI settings provider failed")
             return {"controls": {}, "overrides": {}, "staleness": {}}
+
+    def snapshot_health(self) -> Dict[str, Any]:
+        try:
+            return dict(self.health_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI health provider failed")
+            return {"ok": False}
 
 
 _PAGE_TEMPLATE = """
@@ -3165,6 +3183,16 @@ def create_app(state: UIState | None = None) -> Flask:
         status = state.snapshot_status()
         ok = bool(status.get("event_bus")) and bool(status.get("trading_loop"))
         return jsonify({"ok": ok, "status": status})
+
+    @app.get("/health/runtime")
+    def health_runtime_view() -> Any:
+        payload = state.snapshot_health()
+        if "ok" not in payload:
+            event_bus_ok = bool(payload.get("event_bus", {}).get("connected"))
+            heartbeat_ok = bool(payload.get("heartbeat", {}).get("ok", True))
+            resource_ok = not bool(payload.get("resource", {}).get("exit_active"))
+            payload["ok"] = event_bus_ok and heartbeat_ok and resource_ok
+        return jsonify(_json_ready(payload))
 
     @app.get("/status")
     def status_view() -> Any:

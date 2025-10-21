@@ -94,6 +94,11 @@ DEFAULTS: dict[str, str] = {
     "CONCURRENCY_EWM_SMOOTHING": "0.15",
     "CPU_HIGH_THRESHOLD": "80",
     "CPU_LOW_THRESHOLD": "40",
+    "RESOURCE_CPU_CEILING": "",
+    "RESOURCE_MEMORY_CEILING": "",
+    "RESOURCE_CPU_ACTION": "throttle",
+    "RESOURCE_MEMORY_ACTION": "exit",
+    "RESOURCE_BUDGET_GRACE": "5",
 
     # Risk parameters
     "RISK_TOLERANCE": "0.1",
