@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import math
 import os
 import threading
@@ -204,6 +205,39 @@ def _format_countdown(seconds: float) -> str:
     return f"{secs}s"
 
 
+_EXIT_PANEL_KEYS: tuple[str, ...] = (
+    "hot_watch",
+    "diagnostics",
+    "queue",
+    "closed",
+    "missed_exits",
+)
+
+
+def _sanitize_exit_payload(data: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    sanitized: Dict[str, Any] = {}
+    if isinstance(data, Mapping):
+        for key, value in data.items():
+            try:
+                sanitized[key] = copy.deepcopy(value)
+            except Exception:
+                sanitized[key] = value
+    for key in _EXIT_PANEL_KEYS:
+        value = sanitized.get(key)
+        if isinstance(value, list):
+            try:
+                sanitized[key] = copy.deepcopy(value)
+            except Exception:
+                sanitized[key] = list(value)
+        elif value is None:
+            sanitized[key] = []
+        else:
+            sanitized[key] = [value]
+    for key in _EXIT_PANEL_KEYS:
+        sanitized.setdefault(key, [])
+    return sanitized
+
+
 def _short_hash(value: Any) -> Optional[str]:
     if value in (None, ""):
         return None
@@ -258,6 +292,8 @@ class RuntimeEventCollectors:
         self._virtual_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
         self._live_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
         self._subscriptions: List[Callable[[], None]] = []
+        self._exit_summary: Dict[str, Any] = _sanitize_exit_payload(None)
+        self._exit_lock = threading.Lock()
 
     def start(self) -> None:
         def _normalize_event(event: Any) -> Dict[str, Any]:
@@ -387,6 +423,12 @@ class RuntimeEventCollectors:
             with self._swarm_lock:
                 self._live_fills.appendleft(payload)
 
+        async def _on_exit_panel(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not isinstance(payload, dict):
+                payload = {"hot_watch": payload}
+            self._set_exit_summary(payload)
+
         for topic, handler in (
             ("x:discovery.candidates", _on_discovery_candidate),
             ("x:token.snap", _on_token_snapshot),
@@ -397,6 +439,8 @@ class RuntimeEventCollectors:
             ("x:vote.decisions", _on_vote_decision),
             ("x:virt.fills", _on_virtual_fill),
             ("x:live.fills", _on_live_fill),
+            ("x:swarm.exits", _on_exit_panel),
+            ("x:exit.panel", _on_exit_panel),
         ):
             unsub = subscribe(topic, handler)
             self._subscriptions.append(unsub)
@@ -423,9 +467,18 @@ class RuntimeEventCollectors:
                     continue
                 self._recent_tokens.appendleft(token_str)
                 self._discovery_seen.add(token_str)
-            while len(self._recent_tokens) > self._recent_tokens_limit:
-                removed = self._recent_tokens.pop()
-                self._discovery_seen.discard(removed)
+                while len(self._recent_tokens) > self._recent_tokens_limit:
+                    removed = self._recent_tokens.pop()
+                    self._discovery_seen.discard(removed)
+
+    def _set_exit_summary(self, payload: Optional[Mapping[str, Any]]) -> None:
+        sanitized = _sanitize_exit_payload(payload)
+        with self._exit_lock:
+            self._exit_summary = sanitized
+
+    def exit_snapshot(self) -> Dict[str, Any]:
+        with self._exit_lock:
+            return copy.deepcopy(self._exit_summary)
 
     # Public provider accessors ------------------------------------------------
 
@@ -805,6 +858,7 @@ class RuntimeWiring:
         ui_state.suggestions_provider = self.collectors.suggestions_snapshot
         ui_state.vote_windows_provider = self.collectors.vote_snapshot
         ui_state.shadow_provider = self.collectors.shadow_snapshot
+        ui_state.exit_provider = self.collectors.exit_snapshot
 
     def close(self) -> None:
         self.collectors.stop()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import math
@@ -14,7 +15,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ..agent_manager import AgentManager
 from ..config import get_broker_urls, load_selected_config, set_env_from_config
@@ -33,6 +34,7 @@ from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory
 from ..portfolio import Portfolio
+from ..exit_management import ExitManager
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..golden_pipeline.service import GoldenPipelineService
@@ -147,6 +149,41 @@ def _probe_rl_daemon_health(timeout: float = 0.5) -> Dict[str, Any]:
                 result["last_error"] = payload.get("last_error")
 
     return result
+
+
+_EXIT_PANEL_KEYS: tuple[str, ...] = (
+    "hot_watch",
+    "diagnostics",
+    "queue",
+    "closed",
+    "missed_exits",
+)
+
+
+def _sanitize_exit_payload(data: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Return a defensive copy of *data* with required keys present."""
+
+    sanitized: Dict[str, Any] = {}
+    if isinstance(data, Mapping):
+        for key, value in data.items():
+            try:
+                sanitized[key] = copy.deepcopy(value)
+            except Exception:
+                sanitized[key] = value
+    for key in _EXIT_PANEL_KEYS:
+        value = sanitized.get(key)
+        if isinstance(value, list):
+            try:
+                sanitized[key] = copy.deepcopy(value)
+            except Exception:
+                sanitized[key] = list(value)
+        elif value is None:
+            sanitized[key] = []
+        else:
+            sanitized[key] = [value]
+    for key in _EXIT_PANEL_KEYS:
+        sanitized.setdefault(key, [])
+    return sanitized
 
 
 @dataclass
@@ -295,6 +332,9 @@ class TradingRuntime:
             "heartbeat_age": None,
             "heartbeat_ts": None,
         }
+        self._exit_manager = ExitManager()
+        self._exit_summary: Dict[str, Any] = _sanitize_exit_payload(None)
+        self._exit_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -726,6 +766,7 @@ class TradingRuntime:
         self.ui_state.shadow_provider = self._collect_shadow_panel
         self.ui_state.rl_provider = self._collect_rl_panel
         self.ui_state.settings_provider = self._collect_settings_panel
+        self.ui_state.exit_provider = self._collect_exit_panel
 
         if not self._ui_enabled:
             self.ui_server = None
@@ -1745,6 +1786,35 @@ class TradingRuntime:
             )
         return {"windows": windows[:60], "decisions": tape[:60]}
 
+    def _refresh_exit_summary(self, summary: Optional[Mapping[str, Any]] = None) -> None:
+        data: Optional[Mapping[str, Any]] = None
+        if summary and isinstance(summary, Mapping):
+            for key in (
+                "exit_summary",
+                "exit_panel",
+                "exit_state",
+                "exit_manager",
+                "exit_manager_summary",
+            ):
+                candidate = summary.get(key)
+                if isinstance(candidate, Mapping):
+                    data = candidate
+                    break
+        if data is None and self._exit_manager is not None:
+            try:
+                data = self._exit_manager.summary()
+            except Exception:  # pragma: no cover - defensive
+                log.debug("Exit manager summary failed", exc_info=True)
+                data = None
+        sanitized = _sanitize_exit_payload(data)
+        with self._exit_lock:
+            self._exit_summary = sanitized
+
+    def _collect_exit_panel(self) -> Dict[str, Any]:
+        self._refresh_exit_summary()
+        with self._exit_lock:
+            return copy.deepcopy(self._exit_summary)
+
     def _collect_shadow_panel(self) -> Dict[str, Any]:
         now = time.time()
         with self._swarm_lock:
@@ -2165,6 +2235,7 @@ class TradingRuntime:
                 "actions": summary.get("actions_count") or 0,
             },
         )
+        self._refresh_exit_summary(summary)
 
     async def _pipeline_on_evaluation(self, result) -> None:
         if result is None:
