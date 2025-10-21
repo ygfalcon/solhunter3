@@ -16,6 +16,7 @@ if "base58" not in sys.modules:
     sys.modules["base58"] = base58_mod
 
 from solhunter_zero.golden_pipeline.service import GoldenPipelineService
+from solhunter_zero.golden_pipeline.types import DepthSnapshot
 
 
 @pytest.fixture
@@ -48,6 +49,17 @@ class FlakyEventBus:
             result = handler(payload)
             if asyncio.iscoroutine(result):
                 asyncio.create_task(result)
+
+
+class RecordingPipeline:
+    def __init__(self) -> None:
+        self.depth_snapshots: list[DepthSnapshot] = []
+
+    async def submit_depth(self, snapshot: DepthSnapshot) -> None:
+        self.depth_snapshots.append(snapshot)
+
+
+MINT = "MintAphex1111111111111111111111111111111"
 
 
 @pytest.mark.anyio("asyncio")
@@ -96,3 +108,60 @@ async def test_ensure_bus_visible_exhausts_retries(monkeypatch: pytest.MonkeyPat
     assert len(warnings) == 4
     errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
     assert errors
+
+
+@pytest.mark.anyio("asyncio")
+async def test_on_depth_prefers_existing_buckets() -> None:
+    service = GoldenPipelineService.__new__(GoldenPipelineService)
+    service._running = True  # type: ignore[attr-defined]
+    service._pending = set()  # type: ignore[attr-defined]
+    service._last_price = {}  # type: ignore[attr-defined]
+    pipeline = RecordingPipeline()
+    service.pipeline = pipeline  # type: ignore[attr-defined]
+
+    payload = {
+        MINT: {
+            "venue": "test_venue",
+            "depth": 37.5,
+            "bids": 12.0,
+            "asks": 9.0,
+            "depth_pct": {"1%": "1234", 2: 5678, "5.0": 9012},
+            "spread_bps": 22.0,
+        }
+    }
+
+    service._on_depth(payload)  # type: ignore[attr-defined]
+    await asyncio.gather(*list(service._pending))  # type: ignore[attr-defined]
+
+    assert len(pipeline.depth_snapshots) == 1
+    snapshot = pipeline.depth_snapshots[0]
+    assert snapshot.mint == MINT
+    assert snapshot.depth_pct == {"1": 1234.0, "2": 5678.0, "5": 9012.0}
+
+
+@pytest.mark.anyio("asyncio")
+async def test_on_depth_generates_synthetic_buckets() -> None:
+    service = GoldenPipelineService.__new__(GoldenPipelineService)
+    service._running = True  # type: ignore[attr-defined]
+    service._pending = set()  # type: ignore[attr-defined]
+    service._last_price = {}  # type: ignore[attr-defined]
+    pipeline = RecordingPipeline()
+    service.pipeline = pipeline  # type: ignore[attr-defined]
+
+    payload = {
+        MINT: {
+            "venue": "test_venue",
+            "depth": 2_000.0,
+            "bids": 1_200.0,
+            "asks": 800.0,
+        }
+    }
+
+    service._on_depth(payload)  # type: ignore[attr-defined]
+    await asyncio.gather(*list(service._pending))  # type: ignore[attr-defined]
+
+    assert len(pipeline.depth_snapshots) == 1
+    snapshot = pipeline.depth_snapshots[0]
+    assert snapshot.depth_pct["1"] == pytest.approx(2_000.0)
+    assert snapshot.depth_pct["2"] == pytest.approx(3_000.0)
+    assert snapshot.depth_pct["5"] == pytest.approx(4_000.0)
