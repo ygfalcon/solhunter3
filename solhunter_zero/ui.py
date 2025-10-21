@@ -852,7 +852,7 @@ class UIState:
             return dict(self.suggestions_provider())
         except Exception:  # pragma: no cover
             log.exception("UI suggestions provider failed")
-            return {"suggestions": [], "metrics": {}}
+            return {"suggestions": [], "rejections": [], "metrics": {}}
 
     def snapshot_exit(self) -> Dict[str, Any]:
         try:

@@ -297,6 +297,9 @@ class TradingRuntime:
         self._agent_suggestions: Deque[Dict[str, Any]] = deque(
             maxlen=_int_env("UI_SUGGESTIONS_LIMIT", 600)
         )
+        self._agent_rejections: Deque[Dict[str, Any]] = deque(
+            maxlen=_int_env("UI_REJECTIONS_LIMIT", 600)
+        )
         self._vote_decisions: Deque[Dict[str, Any]] = deque(
             maxlen=_int_env("UI_VOTE_LIMIT", 400)
         )
@@ -659,6 +662,15 @@ class TradingRuntime:
             with self._swarm_lock:
                 self._agent_suggestions.appendleft(payload)
 
+        async def _on_suggestion_rejected(event: Any) -> None:
+            payload = _normalize_event(event)
+            mint = payload.get("mint")
+            if not mint:
+                return
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._agent_rejections.appendleft(payload)
+
         async def _on_vote_decision(event: Any) -> None:
             payload = _normalize_event(event)
             mint = payload.get("mint")
@@ -770,6 +782,7 @@ class TradingRuntime:
             ("x:market.depth", _on_market_depth),
             ("x:mint.golden", _on_golden_snapshot),
             ("x:trade.suggested", _on_suggestion),
+            ("x:trade.rejected", _on_suggestion_rejected),
             ("x:vote.decisions", _on_vote_decision),
             ("x:virt.fills", _on_virtual_fill),
             ("x:live.fills", _on_live_fill),
@@ -1708,6 +1721,7 @@ class TradingRuntime:
             suggestions = list(self._agent_suggestions)
             golden_hashes = dict(self._latest_golden_hash)
             decisions = list(self._vote_decisions)
+            rejections = list(self._agent_rejections)
         items: List[Dict[str, Any]] = []
         recent_count = 0
         for payload in suggestions:
@@ -1768,6 +1782,54 @@ class TradingRuntime:
             )
             if age is not None and age <= window:
                 recent_count += 1
+        rejection_items: List[Dict[str, Any]] = []
+        recent_rejections = 0
+        for payload in rejections:
+            mint = payload.get("mint")
+            if not mint:
+                continue
+            ts = _entry_timestamp(payload, "detected_at")
+            if ts is None:
+                ts = _entry_timestamp(payload, "asof")
+            age = _age_seconds(ts, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            if age is not None and age <= window:
+                recent_rejections += 1
+            rejection_items.append(
+                {
+                    "agent": payload.get("agent"),
+                    "source_agent": payload.get("source_agent"),
+                    "mint": mint,
+                    "side": (payload.get("side") or "").lower() or None,
+                    "notional_usd": _maybe_float(payload.get("notional_usd")),
+                    "requested_notional_usd": _maybe_float(
+                        payload.get("requested_notional_usd")
+                    ),
+                    "reason": payload.get("reason"),
+                    "reason_code": payload.get("reason_code"),
+                    "guard": payload.get("guard"),
+                    "scope": payload.get("scope"),
+                    "cap_usd": _maybe_float(payload.get("cap_usd")),
+                    "available_notional_usd": _maybe_float(
+                        payload.get("available_notional_usd")
+                    ),
+                    "max_slippage_bps": _maybe_float(payload.get("max_slippage_bps")),
+                    "guard_slippage_bps": _maybe_float(
+                        payload.get("guard_slippage_bps")
+                    ),
+                    "snapshot_hash": payload.get("snapshot_hash"),
+                    "snapshot_hash_short": _short_hash(payload.get("snapshot_hash")),
+                    "age_label": _format_age(age),
+                    "age_seconds": age,
+                    "detected_at": payload.get("detected_at"),
+                    "gating": payload.get("gating") or {},
+                    "depth_points": payload.get("depth_points") or [],
+                }
+            )
         latest_age = None
         for item in items:
             age = item.get("age_seconds")
@@ -1796,8 +1858,14 @@ class TradingRuntime:
             "updated_label": _format_age(latest_age),
             "stale": latest_age is not None and latest_age > window,
             "golden_tracked": len(golden_hashes),
+            "rejections": len(rejection_items),
+            "rejections_rate_per_min": recent_rejections / max(window / 60.0, 1e-6),
         }
-        return {"suggestions": items[:200], "metrics": metrics}
+        return {
+            "suggestions": items[:200],
+            "rejections": rejection_items[:200],
+            "metrics": metrics,
+        }
 
     def _collect_vote_panel(self) -> Dict[str, Any]:
         now = time.time()

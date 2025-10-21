@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from ..agent_manager import AgentManager
 from ..event_bus import BUS as RUNTIME_EVENT_BUS, EventBus
@@ -17,7 +18,8 @@ from ..token_aliases import canonical_mint
 from ..token_scanner import TRENDING_METADATA
 
 from .agents import BaseAgent
-from .bus import EventBusAdapter
+from .bus import EventBusAdapter, MessageBus
+from .contracts import STREAMS
 from .pipeline import GoldenPipeline
 from .types import (
     Decision,
@@ -32,6 +34,10 @@ from .types import (
 )
 
 log = logging.getLogger(__name__)
+
+
+_GLOBAL_CAP_ENV = "SWARM_AGENT_GLOBAL_CAP_USD"
+_AGENT_CAPS_ENV = "SWARM_AGENT_AGENT_CAPS_USD"
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -82,6 +88,10 @@ class AgentManagerAgent(BaseAgent):
         max_micro_spread_bps: float = 40.0,
         min_depth_usd: float = 15_000.0,
         buffer_bps: float = 20.0,
+        agent_notional_caps: Mapping[str, float] | None = None,
+        global_notional_cap: float | None = None,
+        bus: MessageBus | None = None,
+        rejection_stream: str | None = None,
     ) -> None:
         super().__init__(name)
         self.manager = manager
@@ -100,6 +110,97 @@ class AgentManagerAgent(BaseAgent):
         self._max_micro_spread_bps = float(max_micro_spread_bps)
         self._min_depth_usd = float(min_depth_usd)
         self._edge_buffer_bps = float(buffer_bps)
+        self._bus = bus
+        self._rejection_stream = rejection_stream or STREAMS.trade_rejected
+        self._global_notional_cap = self._resolve_global_cap(global_notional_cap)
+        self._agent_caps = self._resolve_agent_caps(agent_notional_caps)
+
+    def _resolve_global_cap(self, override: float | None) -> float | None:
+        value = _coerce_float(override)
+        if value is not None and value > 0:
+            return float(value)
+        env_value = _coerce_float(os.getenv(_GLOBAL_CAP_ENV))
+        if env_value is not None and env_value > 0:
+            return float(env_value)
+        return None
+
+    def _resolve_agent_caps(
+        self, provided: Mapping[str, float] | None
+    ) -> Dict[str, float]:
+        caps: Dict[str, float] = {}
+        env_raw = os.getenv(_AGENT_CAPS_ENV)
+        if env_raw:
+            caps.update(self._parse_agent_caps(env_raw))
+        if provided:
+            for key, value in provided.items():
+                amount = _coerce_float(value)
+                if amount is None or amount <= 0:
+                    continue
+                name = str(key).strip().lower()
+                if not name:
+                    continue
+                caps[name] = float(amount)
+        return caps
+
+    @staticmethod
+    def _parse_agent_caps(raw: str) -> Dict[str, float]:
+        caps: Dict[str, float] = {}
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = None
+        if isinstance(payload, Mapping):
+            for key, value in payload.items():
+                amount = _coerce_float(value)
+                if amount is None or amount <= 0:
+                    continue
+                name = str(key).strip().lower()
+                if not name:
+                    continue
+                caps[name] = float(amount)
+            if caps:
+                return caps
+        entries = raw.replace(";", ",").split(",") if raw else []
+        for entry in entries:
+            if not entry.strip():
+                continue
+            if "=" in entry:
+                key, value = entry.split("=", 1)
+            elif ":" in entry:
+                key, value = entry.split(":", 1)
+            else:
+                continue
+            amount = _coerce_float(value)
+            if amount is None or amount <= 0:
+                continue
+            name = key.strip().lower()
+            if not name:
+                continue
+            caps[name] = float(amount)
+        return caps
+
+    def _resolve_actor(self, raw_action: Mapping[str, Any]) -> str:
+        keys = (
+            "agent",
+            "agent_name",
+            "strategy",
+            "source",
+            "name",
+            "family",
+            "lane",
+        )
+        for key in keys:
+            value = raw_action.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for nested_key in ("metadata", "meta"):
+            nested = raw_action.get(nested_key)
+            if isinstance(nested, Mapping):
+                for key in keys:
+                    value = nested.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+        return self.name
 
     async def generate(self, snapshot: GoldenSnapshot) -> List[TradeSuggestion]:
         try:
@@ -120,6 +221,8 @@ class AgentManagerAgent(BaseAgent):
             if not gating_report.get("ruthless_filter", {}).get("passed"):
                 continue
             if not gating_report.get("edge_pass"):
+                continue
+            if not await self._guard_suggestion(snapshot, raw, action, gating_report):
                 continue
             suggestion = self.build_suggestion(
                 snapshot=snapshot,
@@ -221,6 +324,180 @@ class AgentManagerAgent(BaseAgent):
         if isinstance(breakeven, (int, float)) and breakeven > 0:
             risk.setdefault("breakeven_bps", float(breakeven))
         return risk
+
+    async def _guard_suggestion(
+        self,
+        snapshot: GoldenSnapshot,
+        raw_action: Mapping[str, Any],
+        action: _AgentAction,
+        gating: Mapping[str, Any],
+    ) -> bool:
+        reason = self._budget_guard(raw_action, action)
+        if reason:
+            await self._emit_rejection(snapshot, action, raw_action, gating, reason)
+            return False
+        reason = self._slippage_guard(snapshot, raw_action, action)
+        if reason:
+            await self._emit_rejection(snapshot, action, raw_action, gating, reason)
+            return False
+        return True
+
+    def _budget_guard(
+        self, raw_action: Mapping[str, Any], action: _AgentAction
+    ) -> Dict[str, Any] | None:
+        notional = float(action.notional)
+        actor = self._resolve_actor(raw_action)
+        actor_key = actor.strip().lower()
+        if self._global_notional_cap is not None and notional > self._global_notional_cap:
+            return {
+                "guard": "budget",
+                "code": "budget_cap",
+                "message": (
+                    f"Requested notional {notional:.2f} USD exceeds global cap "
+                    f"{self._global_notional_cap:.2f} USD"
+                ),
+                "scope": "global",
+                "cap_usd": float(self._global_notional_cap),
+                "requested_usd": notional,
+                "actor": actor,
+            }
+        if actor_key and actor_key in self._agent_caps:
+            cap = self._agent_caps[actor_key]
+            if notional > cap:
+                return {
+                    "guard": "budget",
+                    "code": "budget_cap",
+                    "message": (
+                        f"Requested notional {notional:.2f} USD exceeds cap {cap:.2f} USD"
+                        f" for agent {actor}"
+                    ),
+                    "scope": "agent",
+                    "cap_usd": float(cap),
+                    "requested_usd": notional,
+                    "actor": actor,
+                }
+        return None
+
+    def _slippage_guard(
+        self,
+        snapshot: GoldenSnapshot,
+        raw_action: Mapping[str, Any],
+        action: _AgentAction,
+    ) -> Dict[str, Any] | None:
+        depth = snapshot.liq or {}
+        depth_map = depth.get("depth_pct") if isinstance(depth.get("depth_pct"), Mapping) else {}
+        max_slippage = max(float(action.max_slippage_bps), 0.0)
+        capacity, depth_points = self._synthetic_capacity(depth_map, max_slippage)
+        if capacity is None:
+            return None
+        if action.notional <= capacity:
+            return None
+        actor = self._resolve_actor(raw_action)
+        return {
+            "guard": "slippage",
+            "code": "slippage_cap",
+            "message": (
+                f"Max slippage {max_slippage:.1f} bps supports {capacity:.2f} USD "
+                f"but {action.notional:.2f} USD was requested"
+            ),
+            "available_notional_usd": float(capacity),
+            "requested_usd": float(action.notional),
+            "max_slippage_bps": max_slippage,
+            "actor": actor,
+            "depth_points": depth_points,
+        }
+
+    def _synthetic_capacity(
+        self, depth_map: Mapping[str, Any], max_slippage_bps: float
+    ) -> tuple[float | None, List[Dict[str, float]]]:
+        points: List[tuple[float, float]] = []
+        for bucket, value in (depth_map or {}).items():
+            pct = _coerce_float(bucket)
+            notional = _coerce_float(value)
+            if pct is None or pct <= 0:
+                continue
+            if notional is None or notional <= 0:
+                continue
+            bps = float(pct) * 100.0
+            points.append((bps, float(notional)))
+        points.sort(key=lambda entry: entry[0])
+        depth_points = [
+            {"slippage_bps": bps, "notional_usd": cap} for bps, cap in points
+        ]
+        if not points:
+            return None, depth_points
+        limit = max(float(max_slippage_bps), 0.0)
+        if limit <= 0:
+            return None, depth_points
+        prev_bps = 0.0
+        prev_cap = 0.0
+        for bps, cap in points:
+            if limit <= bps:
+                span = bps - prev_bps
+                if span <= 0:
+                    return max(prev_cap, 0.0), depth_points
+                ratio = (limit - prev_bps) / span
+                capacity = prev_cap + ratio * (cap - prev_cap)
+                return max(capacity, 0.0), depth_points
+            prev_bps = bps
+            prev_cap = cap
+        return max(prev_cap, 0.0), depth_points
+
+    async def _emit_rejection(
+        self,
+        snapshot: GoldenSnapshot,
+        action: _AgentAction,
+        raw_action: Mapping[str, Any],
+        gating: Mapping[str, Any],
+        reason: Mapping[str, Any],
+    ) -> None:
+        actor = str(reason.get("actor") or self._resolve_actor(raw_action))
+        payload: Dict[str, Any] = {
+            "agent": self.name,
+            "source_agent": actor,
+            "mint": snapshot.mint,
+            "side": action.side,
+            "notional_usd": float(action.notional),
+            "max_slippage_bps": float(action.max_slippage_bps),
+            "confidence": float(action.confidence),
+            "ttl_sec": float(action.ttl_sec),
+            "snapshot_hash": snapshot.hash,
+            "asof": snapshot.asof,
+            "reason": reason.get("message"),
+            "reason_code": reason.get("code"),
+            "guard": reason.get("guard"),
+            "scope": reason.get("scope"),
+            "requested_notional_usd": reason.get(
+                "requested_usd", float(action.notional)
+            ),
+            "detected_at": time.time(),
+            "gating": dict(gating or {}),
+        }
+        cap = reason.get("cap_usd")
+        if cap is not None:
+            payload["cap_usd"] = float(cap)
+        available = reason.get("available_notional_usd")
+        if available is not None:
+            payload["available_notional_usd"] = float(available)
+        slippage = reason.get("max_slippage_bps")
+        if slippage is not None:
+            payload["guard_slippage_bps"] = float(slippage)
+        depth_points = reason.get("depth_points")
+        if isinstance(depth_points, list):
+            payload["depth_points"] = depth_points
+        if self._bus and self._rejection_stream:
+            await self._bus.publish(self._rejection_stream, payload)
+        log.info(
+            "Agent suggestion rejected",
+            extra={
+                "guard": reason.get("guard"),
+                "scope": reason.get("scope"),
+                "reason": reason.get("message"),
+                "mint": snapshot.mint,
+                "notional_usd": action.notional,
+                "source_agent": actor,
+            },
+        )
 
     def _apply_entry_gates(
         self,
@@ -340,9 +617,15 @@ class GoldenPipelineService:
         if enrichment_fetcher is None:
             enrichment_fetcher = self._default_enrichment_fetcher
         shared_bus = EventBusAdapter(self._event_bus)
+        manager_agent = AgentManagerAgent(
+            agent_manager,
+            portfolio,
+            bus=shared_bus,
+            rejection_stream=STREAMS.trade_rejected,
+        )
         self.pipeline = GoldenPipeline(
             enrichment_fetcher=enrichment_fetcher,
-            agents=[AgentManagerAgent(agent_manager, portfolio)],
+            agents=[manager_agent],
             on_decision=self._handle_decision,
             on_golden=self._handle_snapshot,
             on_suggestion=self._handle_suggestion,
