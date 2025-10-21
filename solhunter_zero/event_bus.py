@@ -2007,8 +2007,8 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
     _WS_LISTEN_HOST = listen_host
     _WS_LISTEN_PORT = current_port
     DEFAULT_WS_URL = f"ws://{listen_host}:{current_port}"
-    os.environ.setdefault("EVENT_BUS_URL", DEFAULT_WS_URL)
-    os.environ.setdefault("BROKER_WS_URLS", DEFAULT_WS_URL)
+    os.environ["EVENT_BUS_URL"] = DEFAULT_WS_URL
+    os.environ["BROKER_WS_URLS"] = DEFAULT_WS_URL
 
     await _start_ws_health_server(_WS_LISTEN_HOST, _WS_LISTEN_PORT)
 
