@@ -1,9 +1,10 @@
 import asyncio
 import collections
+import contextlib
 import dataclasses
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Sequence
 
 import pytest
 
@@ -512,18 +513,23 @@ class GoldenPipelineHarness:
         return self._summary_cache
 
 
-@pytest.fixture(scope="module")
-def golden_harness() -> Iterable[GoldenPipelineHarness]:
-    clock = FrozenClock()
+_PATCH_TARGETS: tuple[str, ...] = (
+    "solhunter_zero.golden_pipeline.utils.now_ts",
+    "solhunter_zero.golden_pipeline.market.now_ts",
+    "solhunter_zero.golden_pipeline.coalescer.now_ts",
+    "solhunter_zero.golden_pipeline.execution.now_ts",
+    "solhunter_zero.golden_pipeline.agents.now_ts",
+    "solhunter_zero.golden_pipeline.voting.now_ts",
+)
+
+
+@contextlib.contextmanager
+def run_golden_harness(*, clock_seed: float | None = None) -> Iterator[GoldenPipelineHarness]:
+    """Execute a complete Golden pipeline run with isolated state."""
+
+    clock = FrozenClock(start=clock_seed) if clock_seed is not None else FrozenClock()
     monkeypatch = pytest.MonkeyPatch()
-    for target in (
-        "solhunter_zero.golden_pipeline.utils.now_ts",
-        "solhunter_zero.golden_pipeline.market.now_ts",
-        "solhunter_zero.golden_pipeline.coalescer.now_ts",
-        "solhunter_zero.golden_pipeline.execution.now_ts",
-        "solhunter_zero.golden_pipeline.agents.now_ts",
-        "solhunter_zero.golden_pipeline.voting.now_ts",
-    ):
+    for target in _PATCH_TARGETS:
         monkeypatch.setattr(target, clock.time, raising=False)
     bus = FakeBroker()
     harness = GoldenPipelineHarness(clock=clock, bus=bus)
@@ -532,6 +538,12 @@ def golden_harness() -> Iterable[GoldenPipelineHarness]:
         yield harness
     finally:
         monkeypatch.undo()
+
+
+@pytest.fixture(scope="module")
+def golden_harness() -> Iterable[GoldenPipelineHarness]:
+    with run_golden_harness() as harness:
+        yield harness
 
 
 @pytest.fixture(scope="module")
