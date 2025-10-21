@@ -26,6 +26,7 @@ from ..event_bus import (
     start_ws_server,
     stop_ws_server,
     verify_broker_connection,
+    get_ws_address,
 )
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
 from ..loop import (
@@ -549,11 +550,15 @@ class TradingRuntime:
         ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
         event_bus_url = f"ws://127.0.0.1:{ws_port}"
         os.environ["EVENT_BUS_URL"] = event_bus_url
-        os.environ.setdefault("BROKER_WS_URLS", event_bus_url)
+        os.environ["BROKER_WS_URLS"] = event_bus_url
 
         try:
             await start_ws_server("127.0.0.1", ws_port)
             self.bus_started = True
+            listen_host, listen_port = get_ws_address()
+            event_bus_url = f"ws://{listen_host}:{listen_port}"
+            os.environ["EVENT_BUS_URL"] = event_bus_url
+            os.environ["BROKER_WS_URLS"] = event_bus_url
             self.activity.add("event_bus", f"listening on {event_bus_url}")
         except Exception as exc:
             self.activity.add("event_bus", f"failed: {exc}", ok=False)
