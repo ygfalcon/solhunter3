@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable, Dict
+import logging
+from typing import Any, Awaitable, Callable, Dict
 
 from .contracts import golden_hash_key
 from .kv import KeyValueStore
 from .types import DepthSnapshot, GoldenSnapshot, OHLCVBar, TokenSnapshot
 from .utils import canonical_hash, now_ts
 from ..lru import TTLCache
+
+
+logger = logging.getLogger(__name__)
+
+
+_GOLDEN_PREFIX = golden_hash_key("")
 
 
 class SnapshotCoalescer:
@@ -36,6 +43,51 @@ class SnapshotCoalescer:
         self._mint_locks: Dict[str, asyncio.Lock] = {}
         self._kv = kv
         self._hash_ttl = hash_ttl
+        self._prewarm_task: asyncio.Task[None] | None = None
+        self._schedule_hash_prewarm()
+
+    def _schedule_hash_prewarm(self) -> None:
+        if not self._kv:
+            return
+        scan = getattr(self._kv, "scan_prefix", None)
+        if not callable(scan):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        self._prewarm_task = loop.create_task(self._prewarm_hash_cache(scan))
+        self._prewarm_task.add_done_callback(self._handle_prewarm_result)
+
+    def _handle_prewarm_result(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except Exception:  # pragma: no cover - logging safeguard
+            logger.exception("failed prewarming golden hash cache")
+
+    async def _prewarm_hash_cache(self, scan: Callable[[str], Awaitable[Any]]) -> None:
+        try:
+            result = await scan(_GOLDEN_PREFIX)
+        except Exception:  # pragma: no cover - defensive guard
+            logger.exception("error scanning persisted golden hashes")
+            return
+
+        if not result:
+            return
+
+        for key, value in result:  # type: ignore[type-var]
+            self._store_hash_from_kv(key, value)
+
+    def _store_hash_from_kv(self, key: str, value: str | None) -> None:
+        if not key.startswith(_GOLDEN_PREFIX):
+            return
+        if not value:
+            return
+        mint = key[len(_GOLDEN_PREFIX) :]
+        if not mint:
+            return
+        self._hash_cache.set(mint, value)
 
     async def update_metadata(self, snapshot: TokenSnapshot) -> None:
         await self._update_and_maybe_emit(snapshot.mint, meta=snapshot)

@@ -25,6 +25,9 @@ class KeyValueStore(Protocol):
     async def delete(self, key: str) -> None:
         ...
 
+    async def scan_prefix(self, prefix: str) -> list[tuple[str, str]]:
+        ...
+
 
 @dataclass
 class _Entry:
@@ -67,6 +70,18 @@ class InMemoryKeyValueStore(KeyValueStore):
     async def delete(self, key: str) -> None:
         async with self._lock:
             self._data.pop(key, None)
+
+    async def scan_prefix(self, prefix: str) -> list[tuple[str, str]]:
+        async with self._lock:
+            now = time.time()
+            items: list[tuple[str, str]] = []
+            for key, entry in list(self._data.items()):
+                if entry.expires_at is not None and entry.expires_at <= now:
+                    self._data.pop(key, None)
+                    continue
+                if key.startswith(prefix):
+                    items.append((key, entry.value))
+            return items
 
     async def purge_expired(self) -> None:
         async with self._lock:
