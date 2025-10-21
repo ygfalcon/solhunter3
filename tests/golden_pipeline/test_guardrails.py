@@ -169,6 +169,7 @@ def test_discovery_fallback_and_source_coverage(golden_harness):
     expected_batches = {
         (SCENARIO_PAYLOADS["discovery_plan"]["das"][0],),
         (SCENARIO_PAYLOADS["discovery_plan"]["das"][1],),
+        (BASE58_MINTS["breaker"],),
     }
     assert batches == expected_batches
 

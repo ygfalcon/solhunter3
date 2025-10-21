@@ -107,6 +107,23 @@ class DiscoveryStage:
     def circuit_open(self) -> bool:
         return self._breaker.is_open
 
+    @property
+    def failure_count(self) -> int:
+        """Return the number of recent DAS failures observed by the breaker."""
+
+        return self._breaker.failure_count()
+
+    def breaker_state(self) -> dict[str, float | int | bool]:
+        """Expose breaker telemetry for monitoring and tests."""
+
+        state = self._breaker.snapshot()
+        state.update(
+            threshold=self._breaker.threshold,
+            window_sec=self._breaker.window_sec,
+            cooldown_sec=self._breaker.cooldown_sec,
+        )
+        return state
+
     def seen_recently(self, mint: str) -> bool:
         """Return ``True`` if ``mint`` has been observed within the TTL."""
 

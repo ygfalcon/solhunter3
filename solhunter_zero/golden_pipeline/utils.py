@@ -64,6 +64,13 @@ class CircuitBreaker:
         self._failures: Deque[float] = deque()
         self._opened_until: float = 0.0
 
+    def _prune(self) -> None:
+        """Discard failures that fall outside the rolling window."""
+
+        now = now_ts()
+        while self._failures and now - self._failures[0] > self.window_sec:
+            self._failures.popleft()
+
     def record_success(self) -> None:
         self._failures.clear()
         if self._opened_until and self._opened_until <= now_ts():
@@ -72,13 +79,13 @@ class CircuitBreaker:
     def record_failure(self) -> None:
         now = now_ts()
         self._failures.append(now)
-        while self._failures and now - self._failures[0] > self.window_sec:
-            self._failures.popleft()
+        self._prune()
         if len(self._failures) >= self.threshold:
             self._opened_until = now + self.cooldown_sec
 
     @property
     def is_open(self) -> bool:
+        self._prune()
         if self._opened_until <= 0:
             return False
         if self._opened_until <= now_ts():
@@ -86,6 +93,26 @@ class CircuitBreaker:
             self._failures.clear()
             return False
         return True
+
+    def failure_count(self) -> int:
+        """Return the number of recent failures within the breaker window."""
+
+        self._prune()
+        return len(self._failures)
+
+    def snapshot(self) -> Dict[str, float | int | bool]:
+        """Return a serialisable view of the breaker state for telemetry."""
+
+        open_flag = self.is_open
+        self._prune()
+        now = now_ts()
+        remaining = max(0.0, self._opened_until - now)
+        return {
+            "open": open_flag,
+            "failure_count": len(self._failures),
+            "opened_until": self._opened_until,
+            "cooldown_remaining": remaining,
+        }
 
 
 def canonical_hash(payload: Any) -> str:
