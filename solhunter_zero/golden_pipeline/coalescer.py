@@ -26,29 +26,69 @@ class SnapshotCoalescer:
         self._bars: Dict[str, OHLCVBar] = {}
         self._depth: Dict[str, DepthSnapshot] = {}
         self._hash_cache: Dict[str, str] = {}
-        self._lock = asyncio.Lock()
+        self._versions: Dict[str, int] = {}
+        self._locks_guard = asyncio.Lock()
+        self._mint_locks: Dict[str, asyncio.Lock] = {}
         self._kv = kv
         self._hash_ttl = hash_ttl
 
     async def update_metadata(self, snapshot: TokenSnapshot) -> None:
-        async with self._lock:
-            self._meta[snapshot.mint] = snapshot
-            await self._maybe_emit(snapshot.mint)
+        await self._update_and_maybe_emit(snapshot.mint, meta=snapshot)
 
     async def update_bar(self, bar: OHLCVBar) -> None:
-        async with self._lock:
-            self._bars[bar.mint] = bar
-            await self._maybe_emit(bar.mint)
+        await self._update_and_maybe_emit(bar.mint, bar=bar)
 
     async def update_depth(self, depth: DepthSnapshot) -> None:
-        async with self._lock:
-            self._depth[depth.mint] = depth
-            await self._maybe_emit(depth.mint)
+        await self._update_and_maybe_emit(depth.mint, depth=depth)
 
-    async def _maybe_emit(self, mint: str) -> None:
-        meta = self._meta.get(mint)
-        bar = self._bars.get(mint)
-        depth = self._depth.get(mint)
+    async def _get_mint_lock(self, mint: str) -> asyncio.Lock:
+        async with self._locks_guard:
+            lock = self._mint_locks.get(mint)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._mint_locks[mint] = lock
+                self._versions.setdefault(mint, 0)
+            return lock
+
+    async def _update_and_maybe_emit(
+        self,
+        mint: str,
+        *,
+        meta: TokenSnapshot | None = None,
+        bar: OHLCVBar | None = None,
+        depth: DepthSnapshot | None = None,
+    ) -> None:
+        lock = await self._get_mint_lock(mint)
+        async with lock:
+            if meta is not None:
+                self._meta[mint] = meta
+            if bar is not None:
+                self._bars[mint] = bar
+            if depth is not None:
+                self._depth[mint] = depth
+            current_meta = self._meta.get(mint)
+            current_bar = self._bars.get(mint)
+            current_depth = self._depth.get(mint)
+            version = self._versions.get(mint, 0) + 1
+            self._versions[mint] = version
+        await self._maybe_emit(
+            mint,
+            current_meta,
+            current_bar,
+            current_depth,
+            version,
+            lock,
+        )
+
+    async def _maybe_emit(
+        self,
+        mint: str,
+        meta: TokenSnapshot | None,
+        bar: OHLCVBar | None,
+        depth: DepthSnapshot | None,
+        version: int,
+        lock: asyncio.Lock,
+    ) -> None:
         if not (meta and bar and depth):
             return
         now = now_ts()
@@ -82,9 +122,12 @@ class SnapshotCoalescer:
             },
         }
         snapshot_hash = canonical_hash(payload)
-        if self._hash_cache.get(mint) == snapshot_hash:
-            return
-        self._hash_cache[mint] = snapshot_hash
+        async with lock:
+            if self._versions.get(mint, 0) != version:
+                return
+            if self._hash_cache.get(mint) == snapshot_hash:
+                return
+            self._hash_cache[mint] = snapshot_hash
         if self._kv:
             key = golden_hash_key(mint)
             cached = await self._kv.get(key)
