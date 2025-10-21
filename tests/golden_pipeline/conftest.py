@@ -1,7 +1,9 @@
 import asyncio
 import collections
+import asyncio
 import contextlib
 import dataclasses
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Sequence
@@ -887,3 +889,144 @@ def das_failure_stub(golden_harness: GoldenPipelineHarness) -> DiscoveryFailureS
 @pytest.fixture(scope="module")
 def price_provider_stub(golden_harness: GoldenPipelineHarness) -> PriceProviderStub:
     return golden_harness.price_stub
+
+
+@pytest.fixture
+def chaos_replay(runtime, monkeypatch: pytest.MonkeyPatch):
+    from solhunter_zero import event_bus, ui
+
+    if ui.websockets is None:
+        pytest.skip("websockets dependency required for chaos replay")
+
+    import inspect
+
+    serve_callable = getattr(ui.websockets, "serve", None)
+    if serve_callable is None:
+        pytest.skip("websockets serve API unavailable")
+    try:
+        serve_params = inspect.signature(serve_callable).parameters
+    except (TypeError, ValueError):
+        serve_params = {}
+    if "ping_interval" not in serve_params:
+        async def _compat_serve(handler, host, port, *args, **kwargs):
+            return await serve_callable(handler, host, port)
+
+        monkeypatch.setattr(ui.websockets, "serve", _compat_serve)
+
+    monkeypatch.setenv("UI_WS_QUEUE_SIZE", "8192")
+    monkeypatch.setenv("UI_WS_READY_TIMEOUT", "10")
+    monkeypatch.setenv("UI_RL_WS_PORT", "8911")
+    monkeypatch.setenv("UI_EVENT_WS_PORT", "8912")
+    monkeypatch.setenv("UI_LOG_WS_PORT", "8913")
+
+    ui.start_websockets()
+    time.sleep(0.05)
+    now_ts = time.time()
+    for channel in ("rl", "events", "logs"):
+        runtime.websocket_state[channel]["connected"] = True
+        runtime.websocket_state[channel]["last_heartbeat"] = now_ts
+
+    original_summary_provider = runtime.ui_state.summary_provider
+    runtime.ui_state.summary_provider = runtime.wiring.collectors.summary_snapshot
+
+    def _mint_id(index: int) -> str:
+        base = f"ChaosMint{index:05d}"
+        return (base + "A" * 44)[:44]
+
+    async def _drive_payloads(
+        mint_count: int,
+        depth_updates: int,
+        base_ts: float,
+    ) -> int:
+        total = 0
+        for mint_index in range(mint_count):
+            mint = _mint_id(mint_index)
+            symbol = f"CHS{mint_index:02d}"
+            asof = base_ts + mint_index * 0.002
+            token_payload = {
+                "mint": mint,
+                "symbol": symbol,
+                "name": f"Chaos Token {mint_index}",
+                "decimals": 6,
+                "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                "venues": ["sim"],
+                "asof": asof,
+            }
+            event_bus.publish("x:token.snap", token_payload, _broadcast=False)
+            total += 1
+            golden_payload = {
+                "mint": mint,
+                "hash": f"chaos-hash-{mint_index:05d}",
+                "liq": 1_000_000.0 + mint_index,
+                "asof": asof,
+            }
+            event_bus.publish("x:mint.golden", golden_payload, _broadcast=False)
+            total += 1
+            ohlcv_payload = {
+                "mint": mint,
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume": 10_000.0,
+                "asof_close": asof,
+            }
+            event_bus.publish("x:market.ohlcv.5m", ohlcv_payload, _broadcast=False)
+            total += 1
+            await asyncio.sleep(0)
+            for depth_index in range(depth_updates):
+                depth_asof = asof + depth_index * 0.00025
+                depth_payload = {
+                    "mint": mint,
+                    "venue": "sim",
+                    "bids": 1000.0 + depth_index,
+                    "asks": 1000.5 + depth_index,
+                    "spread_bps": 12.0 + (depth_index % 7),
+                    "depth": 50_000.0 + depth_index,
+                    "asof": depth_asof,
+                }
+                event_bus.publish("x:market.depth", depth_payload, _broadcast=False)
+                total += 1
+                ui.push_event({"channel": "events", "mint": mint, "seq": depth_index})
+                if depth_index % 8 == 0:
+                    ui.push_log(
+                        {
+                            "channel": "logs",
+                            "mint": mint,
+                            "seq": depth_index,
+                            "message": "depth_update",
+                        }
+                    )
+                    ui.push_rl({"mint": mint, "seq": depth_index, "ts": depth_asof})
+                if depth_index % 40 == 0:
+                    await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.25)
+        return total
+
+    def _run(
+        *,
+        mint_count: int = 80,
+        depth_updates: int = 80,
+        base_ts: float | None = None,
+    ) -> Dict[str, Any]:
+        start_ts = base_ts if base_ts is not None else time.time()
+        total_messages = asyncio.run(
+            _drive_payloads(mint_count, depth_updates, start_ts)
+        )
+        time.sleep(0.1)
+        summary = runtime.ui_state.snapshot_summary()
+        channel_metrics = ui.get_ws_channel_metrics()
+        return {
+            "summary": summary,
+            "channels": channel_metrics,
+            "mint_count": mint_count,
+            "depth_updates": depth_updates,
+            "payloads": total_messages,
+        }
+
+    try:
+        yield _run
+    finally:
+        runtime.ui_state.summary_provider = original_summary_provider
+        ui.stop_websockets()

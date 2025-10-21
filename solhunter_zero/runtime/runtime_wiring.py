@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..event_bus import subscribe
-from ..ui import UIState
+from ..ui import UIState, get_ws_channel_metrics
 from ..util import parse_bool_env
 
 
@@ -714,6 +714,75 @@ class RuntimeEventCollectors:
             "age_label": _format_age(age),
         }
 
+    def _max_age_ms(
+        self,
+        entries: Iterable[Mapping[str, Any]],
+        *,
+        fields: Sequence[str],
+        now: float,
+    ) -> Optional[float]:
+        max_age: Optional[float] = None
+        for entry in entries:
+            timestamp = None
+            for field in fields:
+                timestamp = _entry_timestamp(entry, field)
+                if timestamp is not None:
+                    break
+            age = _age_seconds(timestamp, now)
+            if age is None and entry.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(entry["_received"]))
+                except Exception:
+                    age = None
+            if age is not None:
+                if max_age is None or age > max_age:
+                    max_age = age
+        if max_age is None:
+            return None
+        return max_age * 1000.0
+
+    def lag_snapshot(self) -> Dict[str, Optional[float]]:
+        now = time.time()
+        with self._swarm_lock:
+            depth_entries = list(self._market_depth.values())
+            ohlcv_entries = list(self._market_ohlcv.values())
+            golden_entries = list(self._golden_snapshots.values())
+            suggestion_entries = list(self._agent_suggestions)
+            decision_entries = list(self._vote_decisions)
+        depth_ms = self._max_age_ms(depth_entries, fields=("asof", "ts"), now=now)
+        ohlcv_ms = self._max_age_ms(
+            ohlcv_entries,
+            fields=("asof_close", "asof", "ts"),
+            now=now,
+        )
+        golden_ms = self._max_age_ms(golden_entries, fields=("asof", "ts"), now=now)
+        suggestion_ms = self._max_age_ms(
+            suggestion_entries,
+            fields=("asof", "timestamp", "ts"),
+            now=now,
+        )
+        decision_ms = self._max_age_ms(decision_entries, fields=("ts",), now=now)
+        candidates = [
+            value
+            for value in (
+                depth_ms,
+                ohlcv_ms,
+                golden_ms,
+                suggestion_ms,
+                decision_ms,
+            )
+            if value is not None
+        ]
+        bus_ms = max(candidates) if candidates else None
+        return {
+            "bus_ms": bus_ms,
+            "depth_ms": depth_ms,
+            "ohlcv_ms": ohlcv_ms,
+            "golden_ms": golden_ms,
+            "suggestion_ms": suggestion_ms,
+            "decision_ms": decision_ms,
+        }
+
     def summary_snapshot(self) -> Dict[str, Any]:
         suggestions = self.suggestions_snapshot()
         votes = self.vote_snapshot()
@@ -752,6 +821,8 @@ class RuntimeEventCollectors:
             "latest_unrealized": latest_unrealized,
             "turnover_usd": turnover,
         }
+        lag_snapshot = self.lag_snapshot()
+        websocket_metrics = get_ws_channel_metrics()
         seeded_summary: Dict[str, Any] = {
             "count": 0,
             "mapped": 0,
@@ -809,6 +880,8 @@ class RuntimeEventCollectors:
                 "count": len(golden.get("snapshots", [])),
                 "lag_ms": golden.get("lag_ms"),
             },
+            "lag": lag_snapshot,
+            "backpressure": {"websockets": websocket_metrics},
             "seeded": seeded_summary,
         }
 
