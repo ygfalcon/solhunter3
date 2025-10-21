@@ -16,6 +16,7 @@ def test_ui_smoke_synth_values(runtime, bus, kv, synth_seed):
     golden_snapshot = runtime.ui_state.snapshot_golden_snapshots()
     snapshots = golden_snapshot.get("snapshots", [])
     assert len(snapshots) == 7
+    assert all((entry.get("px") or 0.0) > 0.0 for entry in snapshots)
     assert all((entry.get("liq") or 0.0) > 0.0 for entry in snapshots)
 
     suggestions = runtime.ui_state.snapshot_suggestions()
@@ -152,3 +153,15 @@ def test_ui_smoke_synth_values(runtime, bus, kv, synth_seed):
     assert re.search(r'OHLCV Lag</span>\s*<strong>220\.0 ms', html)
     assert re.search(r'Depth Lag</span>\s*<strong>180\.0 ms', html)
     assert re.search(r'Golden Lag</span>\s*<strong>95\.0 ms', html)
+
+    golden_panel = re.search(r'<article class="panel" id="golden-panel">(.*?)</article>', html, re.DOTALL)
+    assert golden_panel, "expected golden panel in UI"
+    golden_rows = re.findall(r'<tr[^>]*data-mint="[^"]+"[^>]*>(.*?)</tr>', golden_panel.group(1), re.DOTALL)
+    assert golden_rows, "expected golden snapshot rows"
+    for row in golden_rows:
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
+        assert len(cells) >= 4
+        price_text = re.sub(r'<[^>]+>', '', cells[2]).strip()
+        liq_text = re.sub(r'<[^>]+>', '', cells[3]).strip()
+        assert price_text and price_text != '—'
+        assert liq_text and liq_text != '—'
