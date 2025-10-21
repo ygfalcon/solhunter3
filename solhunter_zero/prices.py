@@ -145,12 +145,24 @@ def refresh_price_blend_config() -> None:
     except (TypeError, ValueError):
         PRICE_BLEND_SKEW_ALERT_BPS = float(PRICE_BLEND_SKEW_ALERT_BPS)
 
-JUPITER_PRICE_URL = os.getenv("JUPITER_PRICE_URL", "https://price.jup.ag/v4/price")
+JUPITER_PRICE_URL = os.getenv("JUPITER_PRICE_URL", "https://lite-api.jup.ag/price/v3")
 JUPITER_BATCH_SIZE = max(1, int(os.getenv("JUPITER_BATCH_SIZE", "64") or 64))
+JUPITER_CONNECT_TIMEOUT = float(os.getenv("JUPITER_CONNECT_TIMEOUT", "0.3") or 0.3)
+JUPITER_READ_TIMEOUT = float(os.getenv("JUPITER_READ_TIMEOUT", "0.7") or 0.7)
+JUPITER_TOTAL_TIMEOUT = float(os.getenv("JUPITER_TOTAL_TIMEOUT", "1.2") or 1.2)
 
 DEXSCREENER_PRICE_URL = os.getenv(
     "DEXSCREENER_PRICE_URL", "https://api.dexscreener.com/latest/dex/tokens"
 )
+DEXSCREENER_MIN_LIQUIDITY = float(
+    os.getenv("DEXSCREENER_MIN_LIQUIDITY_USD", "5000") or 5000
+)
+DEXSCREENER_MIN_VOLUME = float(os.getenv("DEXSCREENER_MIN_VOLUME_USD", "20000") or 20000)
+DEXSCREENER_CONNECT_TIMEOUT = float(
+    os.getenv("DEXSCREENER_CONNECT_TIMEOUT", "0.3") or 0.3
+)
+DEXSCREENER_READ_TIMEOUT = float(os.getenv("DEXSCREENER_READ_TIMEOUT", "0.7") or 0.7)
+DEXSCREENER_TOTAL_TIMEOUT = float(os.getenv("DEXSCREENER_TOTAL_TIMEOUT", "1.2") or 1.2)
 
 BIRDEYE_PRICE_URL = os.getenv("BIRDEYE_PRICE_URL", "https://api.birdeye.so")
 BIRDEYE_CHAIN = os.getenv("BIRDEYE_CHAIN", "solana")
@@ -159,7 +171,12 @@ BIRDEYE_MAX_BATCH = max(1, int(os.getenv("BIRDEYE_BATCH_SIZE", "20") or 20))
 if not os.getenv("HTTP_FORCE_IPV4"):
     os.environ.setdefault("HTTP_FORCE_IPV4", "1")
 
-PYTH_PRICE_URL = os.getenv("PYTH_PRICE_URL", "https://hermes.pyth.network/v2/price_feeds")
+PYTH_PRICE_URL = os.getenv(
+    "PYTH_PRICE_URL", "https://hermes.pyth.network/v2/updates/price/latest"
+)
+PYTH_CONNECT_TIMEOUT = float(os.getenv("PYTH_CONNECT_TIMEOUT", "0.3") or 0.3)
+PYTH_READ_TIMEOUT = float(os.getenv("PYTH_READ_TIMEOUT", "0.7") or 0.7)
+PYTH_TOTAL_TIMEOUT = float(os.getenv("PYTH_TOTAL_TIMEOUT", "1.2") or 1.2)
 
 SYNTHETIC_HINTS_ENV = "SYNTHETIC_PRICE_HINTS"
 LEGACY_SYNTHETIC_HINTS_ENV = "SYNTHETIC_HINTS"
@@ -335,6 +352,18 @@ def _chunked(tokens: Sequence[str], size: int) -> List[Sequence[str]]:
     return [tokens[i : i + size] for i in range(0, len(tokens), size)]
 
 
+def _make_timeout(
+    connect: float | None = None,
+    read: float | None = None,
+    total: float | None = None,
+) -> aiohttp.ClientTimeout:
+    return aiohttp.ClientTimeout(
+        total=total,
+        sock_connect=connect,
+        sock_read=read,
+    )
+
+
 @dataclass(slots=True)
 class PriceQuote:
     price_usd: float
@@ -342,6 +371,9 @@ class PriceQuote:
     asof: int
     quality: str
     liquidity_hint: float | None = None
+    degraded: bool = False
+    staleness_ms: float | None = None
+    confidence: float | None = None
 
 
 @dataclass(slots=True)
@@ -410,7 +442,7 @@ class ProviderConfig:
     requires_key: Callable[[], str | None] | None = None
 
 
-_DEFAULT_PROVIDER_ORDER = ["pyth", "helius", "birdeye", "jupiter", "dexscreener", "synthetic"]
+_DEFAULT_PROVIDER_ORDER = ["jupiter", "pyth", "dexscreener", "synthetic"]
 
 
 def _parse_provider_roster(raw: str | None) -> List[str]:
@@ -467,7 +499,7 @@ _ALL_PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
         name="pyth",
         fetcher="_fetch_quotes_pyth",
         label="Pyth",
-        overrides=True,
+        overrides=False,
     ),
     "synthetic": ProviderConfig(
         name="synthetic",
@@ -658,20 +690,36 @@ async def _request_json(
     headers: Dict[str, str] | None = None,
     json: Any | None = None,
     method: str = "GET",
+    timeout: aiohttp.ClientTimeout | float | None = None,
 ) -> Any:
     last_error: BaseException | None = None
     for attempt in range(PRICE_RETRY_ATTEMPTS):
         try:
+            if isinstance(timeout, (int, float)):
+                request_timeout: aiohttp.ClientTimeout | float | None = aiohttp.ClientTimeout(
+                    total=float(timeout)
+                )
+            else:
+                request_timeout = timeout
             async with session.request(
                 method,
                 url,
                 params=params,
                 headers=headers,
                 json=json,
-                timeout=10,
+                timeout=request_timeout,
             ) as resp:
                 resp.raise_for_status()
                 return await resp.json()
+        except aiohttp.ClientResponseError as exc:
+            last_error = exc
+            if exc.status is not None and exc.status >= 400:
+                break
+            if attempt == PRICE_RETRY_ATTEMPTS - 1:
+                break
+            delay = PRICE_RETRY_BACKOFF * (2 ** attempt)
+            jitter = random.uniform(0.05, 0.25)
+            await asyncio.sleep(delay + jitter)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             last_error = exc
             if attempt == PRICE_RETRY_ATTEMPTS - 1:
@@ -804,26 +852,36 @@ async def _fetch_quotes_jupiter(
     if not url:
         return {}
     quotes: Dict[str, PriceQuote] = {}
+    timeout = _make_timeout(
+        connect=JUPITER_CONNECT_TIMEOUT,
+        read=JUPITER_READ_TIMEOUT,
+        total=JUPITER_TOTAL_TIMEOUT,
+    )
     for chunk in _chunked(tokens, JUPITER_BATCH_SIZE):
         params = {"ids": ",".join(chunk)}
-        payload = await _request_json(session, url, "Jupiter", params=params)
+        payload = await _request_json(
+            session,
+            url,
+            "Jupiter",
+            params=params,
+            timeout=timeout,
+        )
         if not isinstance(payload, MutableMapping):
             continue
-        data = payload.get("data") if isinstance(payload.get("data"), MutableMapping) else payload
-        if not isinstance(data, MutableMapping):
-            continue
-        timestamp = int(payload.get("timestamp", _now_ms()))
-        asof = timestamp if timestamp > 1e12 else _now_ms()
+        asof = _now_ms()
         for token in chunk:
-            entry = data.get(token)
+            entry = payload.get(token)
             price = _extract_price(entry)
-            if price is not None:
-                quotes[token] = PriceQuote(
-                    price_usd=price,
-                    source="jupiter",
-                    asof=asof,
-                    quality="aggregate",
-                )
+            if price is None:
+                continue
+            quotes[token] = PriceQuote(
+                price_usd=price,
+                source="jupiter",
+                asof=asof,
+                quality="aggregate",
+                degraded=False,
+                staleness_ms=0.0,
+            )
     return quotes
 
 
@@ -831,9 +889,19 @@ async def _fetch_quotes_dexscreener(
     session: aiohttp.ClientSession, tokens: Sequence[str]
 ) -> Dict[str, PriceQuote]:
     quotes: Dict[str, PriceQuote] = {}
+    timeout = _make_timeout(
+        connect=DEXSCREENER_CONNECT_TIMEOUT,
+        read=DEXSCREENER_READ_TIMEOUT,
+        total=DEXSCREENER_TOTAL_TIMEOUT,
+    )
     for token in tokens:
         url = f"{DEXSCREENER_PRICE_URL.rstrip('/')}/{token}"
-        payload = await _request_json(session, url, "Dexscreener")
+        payload = await _request_json(
+            session,
+            url,
+            "Dexscreener",
+            timeout=timeout,
+        )
         if not isinstance(payload, MutableMapping):
             continue
         pairs = payload.get("pairs")
@@ -846,6 +914,7 @@ async def _fetch_quotes_dexscreener(
                 if isinstance(candidate, MutableMapping) and best_pair is None:
                     best_pair = candidate
         liquidity_hint = None
+        volume_hint = None
         if isinstance(best_pair, MutableMapping):
             price = _extract_price(best_pair.get("priceUsd")) or _extract_price(
                 best_pair.get("price")
@@ -853,9 +922,19 @@ async def _fetch_quotes_dexscreener(
             liquidity = best_pair.get("liquidity")
             if isinstance(liquidity, MutableMapping):
                 liquidity_hint = _extract_price(liquidity.get("usd"))
+            volume = best_pair.get("volume")
+            if isinstance(volume, MutableMapping):
+                volume_hint = _extract_price(volume.get("h24"))
         else:
             price = _extract_price(payload)
         if price is None:
+            continue
+        if volume_hint is not None and volume_hint < DEXSCREENER_MIN_VOLUME:
+            continue
+        if (
+            liquidity_hint is not None
+            and liquidity_hint < DEXSCREENER_MIN_LIQUIDITY
+        ):
             continue
         quotes[token] = PriceQuote(
             price_usd=price,
@@ -863,6 +942,8 @@ async def _fetch_quotes_dexscreener(
             asof=_now_ms(),
             quality="aggregate",
             liquidity_hint=liquidity_hint,
+            degraded=True,
+            staleness_ms=0.0,
         )
     return quotes
 
@@ -1102,102 +1183,73 @@ async def _fetch_quotes_pyth(
 ) -> Dict[str, PriceQuote]:
     mapping, extras = _parse_pyth_mapping()
     reverse: Dict[str, str] = {}
-    account_reverse: Dict[str, str] = {}
     for mint, identifier in mapping.items():
-        reverse[identifier.feed_id] = mint
-        if identifier.account:
-            account_reverse[identifier.account] = mint
+        reverse[identifier.feed_id.lower()] = mint
+        reverse[identifier.feed_id.lower().removeprefix("0x")] = mint
     requested_tokens = set(tokens)
     feed_ids = {mapping[token].feed_id for token in tokens if token in mapping}
     feed_ids.update(identifier.feed_id for identifier in extras)
-    account_ids = {
-        mapping[token].account
-        for token in tokens
-        if token in mapping and mapping[token].account
-    }
-    account_ids.update(identifier.account for identifier in extras if identifier.account)
     feed_ids = {fid for fid in feed_ids if fid}
-    account_ids = {acc for acc in account_ids if acc}
-    if not feed_ids and not account_ids:
+    if not feed_ids:
         return {}
-    sorted_feeds = sorted(feed_ids)
-    sorted_accounts = sorted(account_ids)
-    params: List[Tuple[str, str]] = []
-    params.extend(("ids[]", value) for value in sorted_feeds)
-    params.extend(("accounts[]", value) for value in sorted_accounts)
+    params: List[Tuple[str, str]] = [("ids[]", fid) for fid in sorted(feed_ids)]
     headers = {"Accept": "application/json"}
-    request_url = _build_pyth_boot_url(
-        PYTH_PRICE_URL, feed_ids=sorted_feeds, accounts=sorted_accounts
+    timeout = _make_timeout(
+        connect=PYTH_CONNECT_TIMEOUT,
+        read=PYTH_READ_TIMEOUT,
+        total=PYTH_TOTAL_TIMEOUT,
     )
-    try:
-        payload = await _request_json(
-            session, PYTH_PRICE_URL, "Pyth", params=params, headers=headers
-        )
-    except aiohttp.ClientResponseError as exc:
-        if exc.status == 400:
-            logger.error(
-                "Pyth price request returned HTTP 400 via %s (tokens=%s)",
-                request_url,
-                ",".join(sorted(requested_tokens)),
-            )
-        raise
+    payload = await _request_json(
+        session,
+        PYTH_PRICE_URL,
+        "Pyth",
+        params=params,
+        headers=headers,
+        timeout=timeout,
+    )
     records: List[MutableMapping[str, Any]] = []
+    if isinstance(payload, MutableMapping) and isinstance(payload.get("parsed"), list):
+        records.extend([item for item in payload["parsed"] if isinstance(item, MutableMapping)])
     if isinstance(payload, list):
         records.extend([item for item in payload if isinstance(item, MutableMapping)])
-    if isinstance(payload, MutableMapping):
-        if isinstance(payload.get("parsed"), list):
-            records.extend([item for item in payload["parsed"] if isinstance(item, MutableMapping)])
-        if isinstance(payload.get("data"), list):
-            records.extend([item for item in payload["data"] if isinstance(item, MutableMapping)])
-        if isinstance(payload.get("prices"), list):
-            records.extend([item for item in payload["prices"] if isinstance(item, MutableMapping)])
-        if not records and isinstance(payload.get("result"), list):
-            records.extend([item for item in payload["result"] if isinstance(item, MutableMapping)])
     if not records:
         return {}
+    now_ms = _now_ms()
     quotes: Dict[str, PriceQuote] = {}
     for entry in records:
-        price = _pyth_price_from_info(entry.get("price"))
-        if price is None and isinstance(entry.get("ema_price"), MutableMapping):
-            price = _pyth_price_from_info(entry.get("ema_price"))
-        if price is None and isinstance(entry.get("aggregate_price"), MutableMapping):
-            price = _pyth_price_from_info(entry.get("aggregate_price"))
+        price_info = entry.get("price")
+        if not isinstance(price_info, MutableMapping):
+            continue
+        price = _pyth_price_from_info(price_info)
         if price is None:
             continue
-        token_id = (
-            entry.get("id")
-            or entry.get("price_id")
-            or entry.get("priceAccount")
-            or entry.get("price_account")
-        )
+        token_id = entry.get("id") or entry.get("price_id")
         if not isinstance(token_id, str):
             continue
-        try:
-            normalized_id = _normalize_pyth_id(token_id)
-        except ValueError:
-            normalized_id = str(token_id)
-        token = reverse.get(normalized_id)
-        if not token:
-            token = account_reverse.get(token_id)
+        normalized_id = token_id.lower()
+        token = reverse.get(normalized_id) or reverse.get(normalized_id.removeprefix("0x"))
         if not token:
             inferred = _infer_pyth_mint(entry, str(token_id), requested_tokens)
             if inferred:
                 reverse[normalized_id] = inferred
-                if token_id:
-                    account_reverse[token_id] = inferred
                 token = inferred
         if not token or token not in requested_tokens:
             continue
-        publish_time = entry.get("publish_time") or entry.get("publishTime") or entry.get("timestamp")
+        publish_time = price_info.get("publish_time") or price_info.get("publishTime")
         if isinstance(publish_time, (int, float)):
             asof = int(publish_time * 1000 if publish_time < 1e12 else publish_time)
         else:
-            asof = _now_ms()
+            asof = now_ms
+        staleness_ms = max(0.0, float(now_ms - asof))
+        confidence = _pyth_decimal_price(price_info.get("conf"), price_info.get("expo"))
         quotes[token] = PriceQuote(
             price_usd=price,
             source="pyth",
             asof=asof,
             quality="authoritative",
+            degraded=True,
+            staleness_ms=staleness_ms,
+            confidence=confidence,
         )
     return quotes
 
@@ -1238,6 +1290,7 @@ async def _fetch_quotes_synthetic(
             source="synthetic",
             asof=now,
             quality="synthetic",
+            degraded=True,
         )
     return quotes
 
@@ -1356,6 +1409,9 @@ def _record_blend_diagnostics(
                     "liquidity_hint": getattr(quote, "liquidity_hint", None),
                     "stale": age_ms > PRICE_BLEND_STALE_MS,
                     "source": getattr(quote, "source", provider),
+                    "degraded": bool(getattr(quote, "degraded", False)),
+                    "staleness_ms": getattr(quote, "staleness_ms", None),
+                    "confidence": getattr(quote, "confidence", None),
                     "zscore": 0.0,
                     "side": "neutral",
                     "deviation_bps": 0.0,
@@ -1475,6 +1531,9 @@ def _record_blend_diagnostics(
             "token": token,
             "resolved_source": getattr(resolved_quote, "source", None),
             "resolved_price": float(resolved_quote.price_usd) if resolved_quote else None,
+            "resolved_degraded": bool(getattr(resolved_quote, "degraded", False)) if resolved_quote else None,
+            "resolved_staleness_ms": getattr(resolved_quote, "staleness_ms", None) if resolved_quote else None,
+            "resolved_confidence": getattr(resolved_quote, "confidence", None) if resolved_quote else None,
             "observations": observations,
             "missing_providers": missing,
             "failed_providers": failed,
@@ -1511,33 +1570,6 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
     per_token_sources: Dict[str, Set[str]] = {token: set() for token in tokens}
     diag_budget = PRICE_BLEND_PROVIDER_LIMIT
 
-    if "pyth" in order:
-        mapping, _ = _parse_pyth_mapping()
-        override_tokens = [token for token in tokens if token in mapping]
-        if override_tokens:
-            provider_requests["pyth"] = set(override_tokens)
-            start = _monotonic()
-            try:
-                quotes = await _fetch_quotes_pyth(session, tuple(override_tokens))
-            except Exception as exc:  # noqa: BLE001 - deliberate broad catch
-                latency_ms = (_monotonic() - start) * 1000.0
-                _record_provider_failure("pyth", exc, latency_ms)
-                provider_failures["pyth"] = exc.__class__.__name__
-                provider_results["pyth"] = {}
-            else:
-                latency_ms = (_monotonic() - start) * 1000.0
-                if quotes:
-                    _record_provider_success("pyth", latency_ms)
-                    resolved.update(quotes)
-                    provider_results["pyth"] = dict(quotes)
-                    for token in quotes:
-                        per_token_sources.setdefault(token, set()).add("pyth")
-                else:
-                    error = RuntimeError("no quotes returned")
-                    _record_provider_failure("pyth", error, latency_ms)
-                    provider_failures["pyth"] = error.__class__.__name__
-                    provider_results["pyth"] = {}
-        order = [name for name in order if name != "pyth"]
     for idx, provider_name in enumerate(order):
         config = PROVIDER_CONFIGS[provider_name]
         state = PROVIDER_HEALTH[provider_name]
