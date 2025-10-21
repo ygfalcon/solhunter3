@@ -12,7 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from queue import Queue
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 from urllib.parse import urlparse, urlunparse
 
 from flask import Flask, Request, Response, jsonify, render_template_string, request
@@ -72,6 +72,12 @@ class _WebsocketState:
         "port",
         "name",
         "host",
+        "queue_max",
+        "queue_depth",
+        "queue_high",
+        "drop_count",
+        "recent_close_codes",
+        "lock",
     )
 
     def __init__(self, name: str) -> None:
@@ -84,6 +90,12 @@ class _WebsocketState:
         self.port: int = 0
         self.name = name
         self.host: str | None = None
+        self.queue_max: int = 0
+        self.queue_depth: int = 0
+        self.queue_high: int = 0
+        self.drop_count: int = 0
+        self.recent_close_codes: Deque[int | None] = deque(maxlen=10)
+        self.lock = threading.Lock()
 
 
 _WS_CHANNELS: dict[str, _WebsocketState] = {
@@ -167,6 +179,18 @@ def _enqueue_message(channel: str, payload: Any) -> bool:
             except asyncio.QueueEmpty:  # pragma: no cover - race
                 pass
             state.queue.put_nowait(message)
+            with state.lock:
+                state.drop_count += 1
+                depth = state.queue.qsize()
+                state.queue_depth = depth
+                if depth > state.queue_high:
+                    state.queue_high = depth
+        else:
+            with state.lock:
+                depth = state.queue.qsize()
+                state.queue_depth = depth
+                if depth > state.queue_high:
+                    state.queue_high = depth
 
     state.loop.call_soon_threadsafe(_put)
     return True
@@ -195,9 +219,26 @@ def get_ws_client_counts() -> Dict[str, int]:
 
     counts: Dict[str, int] = {}
     for name, state in _WS_CHANNELS.items():
-        clients = getattr(state, "clients", set())
-        counts[name] = len(clients)
+        with state.lock:
+            counts[name] = len(state.clients)
     return counts
+
+
+def get_ws_channel_metrics() -> Dict[str, Dict[str, Any]]:
+    """Return queue depth/backpressure metrics for each websocket channel."""
+
+    metrics: Dict[str, Dict[str, Any]] = {}
+    for name, state in _WS_CHANNELS.items():
+        with state.lock:
+            metrics[name] = {
+                "queue_max": state.queue_max,
+                "queue_depth": state.queue_depth,
+                "queue_high": state.queue_high,
+                "drops": state.drop_count,
+                "clients": len(state.clients),
+                "recent_close_codes": list(state.recent_close_codes),
+            }
+    return metrics
 
 
 def _normalize_ws_url(value: str | None) -> str | None:
@@ -340,10 +381,13 @@ def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> No
             loop.run_until_complete(server.wait_closed())
     state.server = None
 
-    for ws in list(state.clients):
+    with state.lock:
+        clients_snapshot = list(state.clients)
+    for ws in clients_snapshot:
         with contextlib.suppress(Exception):
             loop.run_until_complete(ws.close(code=1012, reason="server shutdown"))
-    state.clients.clear()
+    with state.lock:
+        state.clients.clear()
 
     if state.task is not None:
         state.task.cancel()
@@ -363,6 +407,13 @@ def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> No
     state.thread = None
     state.port = 0
     state.host = None
+    with state.lock:
+        state.queue = None
+        state.queue_max = 0
+        state.queue_depth = 0
+        state.queue_high = 0
+        state.drop_count = 0
+        state.recent_close_codes.clear()
 
 
 def _start_channel(
@@ -397,22 +448,35 @@ def _start_channel(
         queue = asyncio.Queue[str](maxsize=queue_size)
         state.queue = queue
         backlog: deque[str] = deque()
+        with state.lock:
+            state.queue_max = queue_size
+            state.queue_depth = 0
+            state.queue_high = 0
+            state.drop_count = 0
+            state.recent_close_codes = deque(maxlen=10)
 
         async def _broadcast_loop() -> None:
             while True:
                 message = await queue.get()
                 stale_clients: list[Any] = []
-                for ws in list(state.clients):
+                with state.lock:
+                    clients_snapshot = list(state.clients)
+                for ws in clients_snapshot:
                     try:
                         await ws.send(message)
                     except Exception:
                         stale_clients.append(ws)
-                for ws in stale_clients:
-                    state.clients.discard(ws)
+                if stale_clients:
+                    with state.lock:
+                        for ws in stale_clients:
+                            state.clients.discard(ws)
                 backlog.append(message)
                 if len(backlog) > BACKLOG_MAX:
                     backlog.popleft()
                 queue.task_done()
+                with state.lock:
+                    depth = queue.qsize()
+                    state.queue_depth = depth
 
         async def _handler(websocket, path) -> None:  # type: ignore[override]
             parsed = urlparse(path or "")
@@ -432,12 +496,14 @@ def _start_channel(
             if req_path not in allowed_paths:
                 await websocket.close(code=1008, reason="invalid path")
                 return
-            state.clients.add(websocket)
+            with state.lock:
+                state.clients.add(websocket)
             hello = json.dumps({"channel": channel, "event": "hello"})
             try:
                 await websocket.send(hello)
             except Exception:
-                state.clients.discard(websocket)
+                with state.lock:
+                    state.clients.discard(websocket)
                 return
             try:
                 for cached in list(backlog):
@@ -447,7 +513,9 @@ def _start_channel(
                         break
                 await websocket.wait_closed()
             finally:
-                state.clients.discard(websocket)
+                with state.lock:
+                    state.clients.discard(websocket)
+                    state.recent_close_codes.append(getattr(websocket, "close_code", None))
 
         server = None
         last_exc: Exception | None = None
