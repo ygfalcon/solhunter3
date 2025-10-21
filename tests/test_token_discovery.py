@@ -112,8 +112,16 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
     monkeypatch.setattr(td, "stream_ranked_mempool_tokens_with_depth", mempool_gen)
 
-    results = await td.discover_candidates("https://rpc", limit=3, mempool_threshold=0.0)
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates(
+        "https://rpc", limit=3, mempool_threshold=0.0
+    ):
+        batches.append(batch)
+
+    results = batches[-1] if batches else []
     addresses = [r["address"] for r in results]
+
+    assert batches, "expected at least one incremental batch"
 
     assert len(results) <= 3
     assert addresses[0] == mem_mint
@@ -194,7 +202,15 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
     monkeypatch.setattr(td, "_fetch_dexlab_tokens", fake_dexlab)
     monkeypatch.setattr(td, "_enrich_with_solscan", fake_enrich)
 
-    results = await td.discover_candidates("https://rpc", limit=5, mempool_threshold=0.0)
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates(
+        "https://rpc", limit=5, mempool_threshold=0.0
+    ):
+        batches.append(batch)
+
+    assert batches, "expected partial discovery batches"
+
+    results = batches[-1] if batches else []
 
     addresses = {r["address"]: r for r in results}
 
@@ -342,7 +358,15 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
 
     monkeypatch.setattr(td, "get_session", fake_get_session)
 
-    results = await td.discover_candidates("https://rpc", limit=5, mempool_threshold=0.0)
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates(
+        "https://rpc", limit=5, mempool_threshold=0.0
+    ):
+        batches.append(batch)
+
+    assert batches, "expected staged discovery batches"
+
+    results = batches[-1] if batches else []
 
     assert len(fake_session.calls) == 3
 
