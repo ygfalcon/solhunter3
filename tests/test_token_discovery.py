@@ -3,6 +3,8 @@ import types
 
 import pytest
 
+from aiohttp import ClientTimeout
+
 from solhunter_zero import token_discovery as td
 
 
@@ -78,7 +80,8 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     monkeypatch.setattr(td, "get_session", get_session)
     monkeypatch.setattr(td, "fetch_trending_tokens_async", lambda: [bird2, "trend_only"])
 
-    async def _no_tokens():
+    async def _no_tokens(*, session=None):
+        _ = session
         return []
 
     async def _noop_enrich(_candidates, *, addresses=None):
@@ -125,6 +128,9 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
     monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", True)
+    monkeypatch.setattr(td, "_ENABLE_METEORA", True)
+    monkeypatch.setattr(td, "_ENABLE_DEXLAB", True)
 
     async def fake_bird():
         return []
@@ -135,7 +141,8 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
     dex_mint = "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU"
     lab_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
-    async def fake_dexscreener():
+    async def fake_dexscreener(*, session=None):
+        _ = session
         return [
             {
                 "address": dex_mint,
@@ -148,7 +155,8 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
             }
         ]
 
-    async def fake_meteora():
+    async def fake_meteora(*, session=None):
+        _ = session
         return [
             {
                 "address": dex_mint,
@@ -159,7 +167,8 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
             }
         ]
 
-    async def fake_dexlab():
+    async def fake_dexlab(*, session=None):
+        _ = session
         return [
             {
                 "address": lab_mint,
@@ -221,3 +230,136 @@ def test_warm_cache_skips_without_birdeye_key(monkeypatch):
 
     assert thread_called["created"] is False
     assert thread_called["started"] is False
+
+
+@pytest.mark.asyncio
+async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", True)
+    monkeypatch.setattr(td, "_ENABLE_METEORA", True)
+    monkeypatch.setattr(td, "_ENABLE_DEXLAB", True)
+
+    async def fake_bird():
+        return []
+
+    async def fake_enrich(_candidates, *, addresses=None):
+        _ = addresses
+        return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "_enrich_with_solscan", fake_enrich)
+
+    dex_mint = "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU"
+    meteora_mint = "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av"
+    dexlab_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+    payloads = {
+        td._DEXSCREENER_URL: {
+            "pairs": [
+                {
+                    "baseToken": {
+                        "address": dex_mint,
+                        "symbol": "DEX",
+                        "name": "Dex Token",
+                    },
+                    "liquidity": {"usd": 12000},
+                    "volume": {"h24": 18000},
+                    "priceUsd": 1.23,
+                }
+            ]
+        },
+        td._METEORA_POOLS_URL: {
+            "pools": [
+                {
+                    "tokenMint": meteora_mint,
+                    "tokenSymbol": "MT",
+                    "tokenName": "Meteora Token",
+                    "liquidity": {"usd": 9000},
+                    "volume24h": {"usd": 7000},
+                }
+            ]
+        },
+        td._DEXLAB_LIST_URL: [
+            {
+                "mint": dexlab_mint,
+                "symbol": "DL",
+                "name": "DexLab Token",
+                "liquidity": 5000,
+                "volume24h": 4000,
+            }
+        ],
+    }
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self, content_type=None):
+            _ = content_type
+            return self._payload
+
+    class FakeSession:
+        def __init__(self, mapping):
+            self._mapping = mapping
+            self.calls = []
+            self.enter_count = 0
+            self.exit_count = 0
+            self.closed = False
+
+        async def __aenter__(self):
+            self.enter_count += 1
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self.exit_count += 1
+            self.closed = True
+            return False
+
+        def get(self, url, *, params=None, headers=None, timeout=None):
+            _ = params, headers
+            self.calls.append({"url": url, "timeout": timeout})
+            payload = self._mapping.get(url, {})
+            return FakeResponse(payload)
+
+    fake_session = FakeSession(payloads)
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return fake_session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    results = await td.discover_candidates("https://rpc", limit=5, mempool_threshold=0.0)
+
+    assert len(fake_session.calls) == 3
+
+    urls_seen = {call["url"] for call in fake_session.calls}
+    assert {td._DEXSCREENER_URL, td._METEORA_POOLS_URL, td._DEXLAB_LIST_URL} <= urls_seen
+
+    timeouts = {call["url"]: call["timeout"] for call in fake_session.calls}
+    assert isinstance(timeouts[td._DEXSCREENER_URL], ClientTimeout)
+    assert isinstance(timeouts[td._METEORA_POOLS_URL], ClientTimeout)
+    assert isinstance(timeouts[td._DEXLAB_LIST_URL], ClientTimeout)
+    assert timeouts[td._DEXSCREENER_URL].total == td._DEXSCREENER_TIMEOUT
+    assert timeouts[td._METEORA_POOLS_URL].total == td._METEORA_TIMEOUT
+    assert timeouts[td._DEXLAB_LIST_URL].total == td._DEXLAB_TIMEOUT
+
+    assert fake_session.enter_count == 1
+    assert fake_session.exit_count == 1
+    assert fake_session.closed is True
+
+    addresses = {entry["address"] for entry in results}
+    assert {dex_mint, meteora_mint, dexlab_mint} <= addresses
