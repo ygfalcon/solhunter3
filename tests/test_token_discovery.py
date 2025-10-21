@@ -1,14 +1,43 @@
-import asyncio
+import sys
 import types
 
 import pytest
 
 from aiohttp import ClientTimeout
 
+if "base58" not in sys.modules:
+    base58_mod = types.ModuleType("base58")
+    base58_mod.b58decode = lambda *args, **kwargs: b"\x00" * 32
+    base58_mod.b58encode = lambda *args, **kwargs: b""
+    sys.modules["base58"] = base58_mod
+
 from solhunter_zero import token_discovery as td
+import solhunter_zero.lru as lru_mod
 
 
-@pytest.mark.asyncio
+@pytest.fixture
+def ttl_time_controller(monkeypatch):
+    class _TimeController:
+        def __init__(self) -> None:
+            self.value = 1_000.0
+
+        def monotonic(self) -> float:
+            return self.value
+
+        def advance(self, delta: float) -> None:
+            self.value += float(delta)
+
+    controller = _TimeController()
+    monkeypatch.setattr(lru_mod, "time", controller)
+    return controller
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
@@ -123,7 +152,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     assert len(fake_session.calls) == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_merges_new_sources(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
@@ -232,7 +261,7 @@ def test_warm_cache_skips_without_birdeye_key(monkeypatch):
     assert thread_called["started"] is False
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
@@ -363,3 +392,241 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
 
     addresses = {entry["address"] for entry in results}
     assert {dex_mint, meteora_mint, dexlab_mint} <= addresses
+
+
+@pytest.mark.anyio("asyncio")
+@pytest.mark.parametrize(
+    (
+        "source",
+        "cache_attr",
+        "lock_attr",
+        "env_name",
+        "fetch_name",
+        "payloads",
+        "expected_sequences",
+    ),
+    [
+        (
+            "dexscreener",
+            "_DEXSCREENER_CACHE",
+            "_DEXSCREENER_CACHE_LOCK",
+            "DISCOVERY_ENABLE_DEXSCREENER",
+            "_fetch_dexscreener_tokens",
+            [
+                {
+                    "pairs": [
+                        {
+                            "baseToken": {
+                                "address": "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU",
+                                "symbol": "DX1",
+                                "name": "Dex Token 1",
+                            },
+                            "liquidity": {"usd": 12000},
+                            "volume": {"h24": 18000},
+                            "priceUsd": 1.1,
+                            "priceChange": {"h24": 2.0},
+                        }
+                    ]
+                },
+                {
+                    "pairs": [
+                        {
+                            "baseToken": {
+                                "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                                "symbol": "DX2",
+                                "name": "Dex Token 2",
+                            },
+                            "liquidity": {"usd": 15000},
+                            "volume": {"h24": 22000},
+                            "priceUsd": 1.2,
+                            "priceChange": {"h24": 3.0},
+                        }
+                    ]
+                },
+                {
+                    "pairs": [
+                        {
+                            "baseToken": {
+                                "address": "So11111111111111111111111111111111111111112",
+                                "symbol": "DX3",
+                                "name": "Dex Token 3",
+                            },
+                            "liquidity": {"usd": 18000},
+                            "volume": {"h24": 26000},
+                            "priceUsd": 1.3,
+                            "priceChange": {"h24": 4.0},
+                        }
+                    ]
+                },
+            ],
+            [
+                {"GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU"},
+                {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+                {"So11111111111111111111111111111111111111112"},
+            ],
+        ),
+        (
+            "meteora",
+            "_METEORA_CACHE",
+            "_METEORA_CACHE_LOCK",
+            "DISCOVERY_ENABLE_METEORA",
+            "_fetch_meteora_tokens",
+            [
+                {
+                    "pools": [
+                        {
+                            "tokenMint": "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av",
+                            "tokenSymbol": "MT1",
+                            "tokenName": "Meteora Token 1",
+                            "liquidity": {"usd": 9000},
+                            "volume24h": {"usd": 7000},
+                        }
+                    ]
+                },
+                {
+                    "pools": [
+                        {
+                            "tokenMint": "4k3Dyjzvzp8e4Darsh6NHrLk14p6NuebS6yr6tY9ZzxF",
+                            "tokenSymbol": "MT2",
+                            "tokenName": "Meteora Token 2",
+                            "liquidity": {"usd": 11000},
+                            "volume24h": {"usd": 8200},
+                        }
+                    ]
+                },
+                {
+                    "pools": [
+                        {
+                            "tokenMint": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+                            "tokenSymbol": "MT3",
+                            "tokenName": "Meteora Token 3",
+                            "liquidity": {"usd": 14000},
+                            "volume24h": {"usd": 9600},
+                        }
+                    ]
+                },
+            ],
+            [
+                {"E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av"},
+                {"4k3Dyjzvzp8e4Darsh6NHrLk14p6NuebS6yr6tY9ZzxF"},
+                {"9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E"},
+            ],
+        ),
+        (
+            "dexlab",
+            "_DEXLAB_CACHE",
+            "_DEXLAB_CACHE_LOCK",
+            "DISCOVERY_ENABLE_DEXLAB",
+            "_fetch_dexlab_tokens",
+            [
+                [
+                    {
+                        "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                        "symbol": "DL1",
+                        "name": "DexLab Token 1",
+                        "liquidity": 5000,
+                        "volume24h": 4000,
+                    }
+                ],
+                [
+                    {
+                        "mint": "So11111111111111111111111111111111111111112",
+                        "symbol": "DL2",
+                        "name": "DexLab Token 2",
+                        "liquidity": 6200,
+                        "volume24h": 5400,
+                    }
+                ],
+                [
+                    {
+                        "mint": "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU",
+                        "symbol": "DL3",
+                        "name": "DexLab Token 3",
+                        "liquidity": 7100,
+                        "volume24h": 6300,
+                    }
+                ],
+            ],
+            [
+                {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+                {"So11111111111111111111111111111111111111112"},
+                {"GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU"},
+            ],
+        ),
+    ],
+)
+async def test_http_source_caches_respect_env_and_expiry(
+    monkeypatch,
+    ttl_time_controller,
+    source,
+    cache_attr,
+    lock_attr,
+    env_name,
+    fetch_name,
+    payloads,
+    expected_sequences,
+):
+    cache = getattr(td, cache_attr)
+    lock = getattr(td, lock_attr)
+    with lock:
+        cache.clear()
+
+    monkeypatch.setenv(env_name, "1")
+    td._refresh_optional_source_flags()
+    monkeypatch.setattr(cache, "ttl", 5.0, raising=False)
+
+    enable_attr = {
+        "dexscreener": "_ENABLE_DEXSCREENER",
+        "meteora": "_ENABLE_METEORA",
+        "dexlab": "_ENABLE_DEXLAB",
+    }[source]
+    monkeypatch.setattr(td, enable_attr, True)
+
+    calls: list[str] = []
+    expected_calls: list[set[str]] = []
+    payload_iter = iter(payloads)
+    expected_iter = iter(expected_sequences)
+
+    async def fake_http_get_json(url, **kwargs):
+        calls.append(url)
+        try:
+            payload = next(payload_iter)
+        except StopIteration as exc:  # pragma: no cover - defensive
+            raise AssertionError(f"Unexpected additional fetch for {source}") from exc
+        expected_calls.append(set(next(expected_iter)))
+        return payload
+
+    monkeypatch.setattr(td, "_http_get_json", fake_http_get_json)
+
+    fetch = getattr(td, fetch_name)
+
+    result1 = await fetch()
+    assert len(calls) == 1
+    assert {entry["address"] for entry in result1} == expected_calls[-1]
+
+    result2 = await fetch()
+    assert len(calls) == 1
+    assert {entry["address"] for entry in result2} == expected_calls[-1]
+
+    monkeypatch.setenv(env_name, "0")
+    disabled = await fetch()
+    assert disabled == []
+    assert len(calls) == 1
+
+    monkeypatch.setenv(env_name, "1")
+    result3 = await fetch()
+    assert len(calls) == 2
+    assert {entry["address"] for entry in result3} == expected_calls[-1]
+
+    result4 = await fetch()
+    assert len(calls) == 2
+    assert {entry["address"] for entry in result4} == expected_calls[-1]
+
+    ttl_time_controller.advance(cache.ttl + 0.5)
+    result5 = await fetch()
+    assert len(calls) == 3
+    assert {entry["address"] for entry in result5} == expected_calls[-1]
+
+    result6 = await fetch()
+    assert len(calls) == 3
+    assert {entry["address"] for entry in result6} == expected_calls[-1]

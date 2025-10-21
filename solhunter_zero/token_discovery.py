@@ -25,6 +25,18 @@ logger = logging.getLogger(__name__)
 _FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 
 
+def _env_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_flag(name: str, default: str = "1") -> tuple[str, bool]:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        raw = default
+    raw = str(raw).strip()
+    return raw, _env_truthy(raw)
+
+
 def _env_float(name: str, default: str, *, fast_default: float | None = None) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -62,9 +74,8 @@ _BIRDEYE_THROTTLE_MARKERS = (
     "throttle",
 )
 
-_ENABLE_DEXSCREENER = (
-    os.getenv("DISCOVERY_ENABLE_DEXSCREENER", "1").lower() in {"1", "true", "yes", "on"}
-)
+_DEXSCREENER_ENV_NAME = "DISCOVERY_ENABLE_DEXSCREENER"
+_DEXSCREENER_ENV_RAW, _ENABLE_DEXSCREENER = _env_flag(_DEXSCREENER_ENV_NAME, "1")
 _DEXSCREENER_URL = (
     os.getenv("DEXSCREENER_TOKENS_URL")
     or "https://api.dexscreener.com/latest/dex/tokens?chainId=solana"
@@ -74,9 +85,8 @@ _DEXSCREENER_MAX_AGE_SECONDS = float(
     os.getenv("DEXSCREENER_MAX_AGE_SECONDS", "3600") or 3600.0
 )
 
-_ENABLE_METEORA = (
-    os.getenv("DISCOVERY_ENABLE_METEORA", "1").lower() in {"1", "true", "yes", "on"}
-)
+_METEORA_ENV_NAME = "DISCOVERY_ENABLE_METEORA"
+_METEORA_ENV_RAW, _ENABLE_METEORA = _env_flag(_METEORA_ENV_NAME, "1")
 _METEORA_POOLS_URL = (
     os.getenv("METEORA_POOLS_URL")
     or os.getenv("METEORA_DISCOVERY_URL")
@@ -84,9 +94,8 @@ _METEORA_POOLS_URL = (
 ).strip()
 _METEORA_TIMEOUT = float(os.getenv("METEORA_TIMEOUT", "8.0") or 8.0)
 
-_ENABLE_DEXLAB = (
-    os.getenv("DISCOVERY_ENABLE_DEXLAB", "1").lower() in {"1", "true", "yes", "on"}
-)
+_DEXLAB_ENV_NAME = "DISCOVERY_ENABLE_DEXLAB"
+_DEXLAB_ENV_RAW, _ENABLE_DEXLAB = _env_flag(_DEXLAB_ENV_NAME, "1")
 _DEXLAB_LIST_URL = (
     os.getenv("DEXLAB_LIST_URL") or "https://api.dexlab.space/v1/token/list"
 ).strip()
@@ -108,6 +117,14 @@ TokenEntry = Dict[str, Any]
 
 _BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
 _CACHE_LOCK = Lock()
+
+_DEXSCREENER_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=8, ttl=_CACHE_TTL)
+_DEXSCREENER_CACHE_LOCK = Lock()
+_METEORA_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=8, ttl=_CACHE_TTL)
+_METEORA_CACHE_LOCK = Lock()
+_DEXLAB_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=8, ttl=_CACHE_TTL)
+_DEXLAB_CACHE_LOCK = Lock()
+
 _BIRDEYE_DISABLED_INFO = False
 
 _BIRDEYE_TOKENLIST_URL = (
@@ -143,8 +160,89 @@ def _cache_clear() -> None:
         _BIRDEYE_CACHE.clear()
 
 
+def _dexscreener_cache_get(key: str) -> List[TokenEntry] | None:
+    with _DEXSCREENER_CACHE_LOCK:
+        return _DEXSCREENER_CACHE.get(key)
+
+
+def _dexscreener_cache_set(key: str, value: List[TokenEntry]) -> None:
+    with _DEXSCREENER_CACHE_LOCK:
+        _DEXSCREENER_CACHE.set(key, value)
+
+
+def _dexscreener_cache_clear() -> None:
+    with _DEXSCREENER_CACHE_LOCK:
+        _DEXSCREENER_CACHE.clear()
+
+
+def _meteora_cache_get(key: str) -> List[TokenEntry] | None:
+    with _METEORA_CACHE_LOCK:
+        return _METEORA_CACHE.get(key)
+
+
+def _meteora_cache_set(key: str, value: List[TokenEntry]) -> None:
+    with _METEORA_CACHE_LOCK:
+        _METEORA_CACHE.set(key, value)
+
+
+def _meteora_cache_clear() -> None:
+    with _METEORA_CACHE_LOCK:
+        _METEORA_CACHE.clear()
+
+
+def _dexlab_cache_get(key: str) -> List[TokenEntry] | None:
+    with _DEXLAB_CACHE_LOCK:
+        return _DEXLAB_CACHE.get(key)
+
+
+def _dexlab_cache_set(key: str, value: List[TokenEntry]) -> None:
+    with _DEXLAB_CACHE_LOCK:
+        _DEXLAB_CACHE.set(key, value)
+
+
+def _dexlab_cache_clear() -> None:
+    with _DEXLAB_CACHE_LOCK:
+        _DEXLAB_CACHE.clear()
+
+
 def _current_cache_key() -> str:
     return f"tokens:{int(_MIN_VOLUME)}:{int(_MIN_LIQUIDITY)}:{_PAGE_LIMIT}"
+
+
+def _refresh_dexscreener_flag() -> None:
+    global _DEXSCREENER_ENV_RAW, _ENABLE_DEXSCREENER
+
+    raw, enabled = _env_flag(_DEXSCREENER_ENV_NAME, "1")
+    if raw != _DEXSCREENER_ENV_RAW:
+        _DEXSCREENER_ENV_RAW = raw
+        _ENABLE_DEXSCREENER = enabled
+        _dexscreener_cache_clear()
+
+
+def _refresh_meteora_flag() -> None:
+    global _METEORA_ENV_RAW, _ENABLE_METEORA
+
+    raw, enabled = _env_flag(_METEORA_ENV_NAME, "1")
+    if raw != _METEORA_ENV_RAW:
+        _METEORA_ENV_RAW = raw
+        _ENABLE_METEORA = enabled
+        _meteora_cache_clear()
+
+
+def _refresh_dexlab_flag() -> None:
+    global _DEXLAB_ENV_RAW, _ENABLE_DEXLAB
+
+    raw, enabled = _env_flag(_DEXLAB_ENV_NAME, "1")
+    if raw != _DEXLAB_ENV_RAW:
+        _DEXLAB_ENV_RAW = raw
+        _ENABLE_DEXLAB = enabled
+        _dexlab_cache_clear()
+
+
+def _refresh_optional_source_flags() -> None:
+    _refresh_dexscreener_flag()
+    _refresh_meteora_flag()
+    _refresh_dexlab_flag()
 
 
 def _make_timeout(value: Any) -> ClientTimeout | None:
@@ -633,8 +731,14 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
 async def _fetch_dexscreener_tokens(
     *, session: aiohttp.ClientSession | None = None
 ) -> List[TokenEntry]:
+    _refresh_dexscreener_flag()
     if not _ENABLE_DEXSCREENER or not _DEXSCREENER_URL:
         return []
+
+    cache_key = f"{_DEXSCREENER_URL}:{_DEXSCREENER_MAX_AGE_SECONDS}"
+    cached = _dexscreener_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         payload = await _http_get_json(
@@ -653,6 +757,7 @@ async def _fetch_dexscreener_tokens(
         candidates = payload
 
     if not isinstance(candidates, list):
+        _dexscreener_cache_set(cache_key, [])
         return []
 
     now = time.time()
@@ -750,14 +855,22 @@ async def _fetch_dexscreener_tokens(
 
         _merge_candidate_entry(tokens, payload_token, "dexscreener")
 
-    return list(tokens.values())
+    result = list(tokens.values())
+    _dexscreener_cache_set(cache_key, result)
+    return result
 
 
 async def _fetch_meteora_tokens(
     *, session: aiohttp.ClientSession | None = None
 ) -> List[TokenEntry]:
+    _refresh_meteora_flag()
     if not _ENABLE_METEORA or not _METEORA_POOLS_URL:
         return []
+
+    cache_key = _METEORA_POOLS_URL
+    cached = _meteora_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         payload = await _http_get_json(
@@ -782,6 +895,7 @@ async def _fetch_meteora_tokens(
         pools = payload
 
     if not isinstance(pools, list):
+        _meteora_cache_set(cache_key, [])
         return []
 
     tokens: Dict[str, Dict[str, Any]] = {}
@@ -866,14 +980,22 @@ async def _fetch_meteora_tokens(
 
         _merge_candidate_entry(tokens, payload_token, "meteora")
 
-    return list(tokens.values())
+    result = list(tokens.values())
+    _meteora_cache_set(cache_key, result)
+    return result
 
 
 async def _fetch_dexlab_tokens(
     *, session: aiohttp.ClientSession | None = None
 ) -> List[TokenEntry]:
+    _refresh_dexlab_flag()
     if not _ENABLE_DEXLAB or not _DEXLAB_LIST_URL:
         return []
+
+    cache_key = _DEXLAB_LIST_URL
+    cached = _dexlab_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     try:
         payload = await _http_get_json(
@@ -897,6 +1019,7 @@ async def _fetch_dexlab_tokens(
         items = payload
 
     if not isinstance(items, list):
+        _dexlab_cache_set(cache_key, [])
         return []
 
     tokens: Dict[str, Dict[str, Any]] = {}
@@ -946,7 +1069,9 @@ async def _fetch_dexlab_tokens(
 
         _merge_candidate_entry(tokens, payload_token, "dexlab")
 
-    return list(tokens.values())
+    result = list(tokens.values())
+    _dexlab_cache_set(cache_key, result)
+    return result
 
 
 def _apply_solscan_enrichment(
@@ -1094,6 +1219,7 @@ async def discover_candidates(
     mempool_threshold: float | None = None,
 ) -> List[TokenEntry]:
     """Combine BirdEye numeric candidates with mempool signals and rank."""
+    _refresh_optional_source_flags()
     if limit is None or limit <= 0:
         limit = _MAX_TOKENS
     if mempool_threshold is None:
