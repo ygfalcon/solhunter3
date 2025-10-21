@@ -140,3 +140,17 @@ Caches the most recent golden snapshot hash per mint.  TTL: 90s.
 
 ### `vote:dupe:{clientOrderId}`
 Deduplication flag for votes.  TTL: 5 minutes.
+
+## Pipeline Metrics
+
+The `GoldenPipeline.metrics_snapshot()` helper exposes rolling summaries for
+published snapshots and stage health. Discovery counters are tracked as
+monotonic totals and surface under the following metric names (retrieve the
+current total via the `max` field in the snapshot output):
+
+| Metric | Description |
+| ------ | ----------- |
+| `discovery.success_total` | Number of discovery candidates accepted and emitted. |
+| `discovery.failure_total` | Upstream discovery failures recorded via `mark_failure`. |
+| `discovery.dedupe_drops` | Candidates dropped because they were recently seen. |
+| `discovery.breaker_openings` | Count of circuit-breaker open events triggered by failures. |

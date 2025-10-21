@@ -127,6 +127,9 @@ class GoldenPipeline:
         self._on_virtual_pnl = on_virtual_pnl
         self.metrics = GoldenMetrics()
 
+        def _capture_discovery_metrics(snapshot: Mapping[str, int]) -> None:
+            self.metrics.record_discovery(snapshot)
+
         async def _emit_golden(snapshot: GoldenSnapshot) -> None:
             self._context.record(snapshot)
             self._latest_snapshots[snapshot.mint] = snapshot
@@ -339,7 +342,11 @@ class GoldenPipeline:
             await self._publish(STREAMS.discovery_candidates, asdict(candidate))
             await self._enrichment_stage.submit([candidate])
 
-        self._discovery_stage = DiscoveryStage(_on_discovery, kv=self._kv)
+        self._discovery_stage = DiscoveryStage(
+            _on_discovery,
+            kv=self._kv,
+            on_metrics=_capture_discovery_metrics,
+        )
 
     async def submit_discovery(self, candidate: DiscoveryCandidate) -> bool:
         """Submit a discovery candidate."""

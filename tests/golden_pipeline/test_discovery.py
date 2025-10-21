@@ -27,3 +27,14 @@ def test_discovery_sources_deduplicate(golden_harness):
     stage = golden_harness.pipeline._discovery_stage  # type: ignore[attr-defined]
     assert stage.seen_recently(BASE58_MINTS["alpha"]) is True
     assert stage.seen_recently(BASE58_MINTS["beta"]) is True
+
+    metrics = golden_harness.pipeline.metrics_snapshot()
+    success_stats = metrics.get("discovery.success_total", {})
+    failure_stats = metrics.get("discovery.failure_total", {})
+    dedupe_stats = metrics.get("discovery.dedupe_drops", {})
+    breaker_stats = metrics.get("discovery.breaker_openings", {})
+
+    assert (success_stats.get("max") or 0.0) >= 2.0
+    assert (failure_stats.get("max") or 0.0) >= 3.0
+    assert (dedupe_stats.get("max") or 0.0) >= 1.0
+    assert (breaker_stats.get("max") or 0.0) >= 1.0
