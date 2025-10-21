@@ -100,10 +100,13 @@ staleness rules.
 
 ## Kill Switch Controls
 
-Each control issues a POST to `/api/control/*` and persists to Redis.
+Each control issues a POST to `/api/control/*` and persists to Redis. The Swarm UI
+exposes these as buttons in the **Settings & Controls** panel alongside the
+feature-flag snapshot.
 
 | Control | Endpoint | Backing Key | Expected Propagation |
 | ------- | -------- | ----------- | -------------------- |
+| Safety Stop | `/api/control/safety-stop` | `control:execution:safety_stop` | Immediate |
 | Global Pause | `/api/control/pause` | `control:execution:paused` | < 1 vote window |
 | Paper-only | `/api/control/paper` | `control:execution:paper_only` | Immediate |
 | Family Budget | `/api/control/budget/{family}` | `control:budget:{family}` | < 1 window |

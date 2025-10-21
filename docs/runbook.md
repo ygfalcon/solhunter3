@@ -89,12 +89,17 @@ the topic map in `docs/ui_topic_map.md` to cross-reference stream subscriptions.
 
 Kill switches are exposed in the UI and backed by persisted configuration flags:
 
+- **Safety Stop:** publishes `control:execution:safety_stop` and emits a `control` stop command for the runtime orchestrator.
+  Use this to halt the swarm immediately.
 - **Global Pause:** stops vote to execution propagation.
 - **Paper Mode:** keeps the live executor offline.
 - **Family Budgets:** slider per agent family that propagates within a vote window.
 - **Spread/Depth Gates:** updates `MAX_SPREAD_BPS` and `MIN_DEPTH1PCT_USD` live.
 - **RL Toggle:** flips between shadow and applied weights (`RL_WEIGHTS_DISABLED`).
 - **Blacklist / Cooldown:** edit list of paused mints; persists to Redis and config storage.
+
+The **Settings & Controls** panel also shows the feature-flag snapshot so ops can confirm that DAS,
+mint/mempool streams, and paper/live toggles match the deployment checklist.
 
 All toggles must apply within a single vote window (<400ms) or the deployment is rolled back.
 

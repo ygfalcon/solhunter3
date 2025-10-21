@@ -35,6 +35,7 @@ from ..main_state import TradingState
 from ..memory import Memory
 from ..portfolio import Portfolio
 from ..exit_management import ExitManager
+from ..feature_flags import FeatureFlags
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..golden_pipeline.service import GoldenPipelineService
@@ -745,6 +746,28 @@ class TradingRuntime:
             self._subscriptions.append((topic, handler))
             subscribe(topic, handler)
 
+        control_topics = (
+            "control:execution:paused",
+            "control:execution:paper_only",
+            "control:execution:safety_stop",
+            "control:blacklist",
+            "control:budget",
+            "MAX_SPREAD_BPS",
+            "MIN_DEPTH1PCT_USD",
+            "RL_WEIGHTS_DISABLED",
+        )
+
+        for topic in control_topics:
+            async def _on_control_event(event: Any, _topic: str = topic) -> None:
+                payload = _normalize_event(event)
+                if not payload:
+                    return
+                payload.setdefault("updated_at", time.time())
+                self._record_control_state(_topic, payload)
+
+            self._subscriptions.append((topic, _on_control_event))
+            subscribe(topic, _on_control_event)
+
     async def _start_ui(self) -> None:
         self.ui_state.status_provider = self._collect_status
         self.ui_state.activity_provider = self.activity.snapshot
@@ -767,6 +790,7 @@ class TradingRuntime:
         self.ui_state.rl_provider = self._collect_rl_panel
         self.ui_state.settings_provider = self._collect_settings_panel
         self.ui_state.exit_provider = self._collect_exit_panel
+        self.ui_state.control_executor = self._execute_control_action
 
         if not self._ui_enabled:
             self.ui_server = None
@@ -1213,11 +1237,89 @@ class TradingRuntime:
     # UI data helpers
     # ------------------------------------------------------------------
 
+    def _control_default_ttl(self) -> float | None:
+        try:
+            ttl = float(self._rl_window_sec)
+        except Exception:
+            return None
+        if ttl <= 0:
+            return None
+        return ttl
+
+    def _record_control_state(self, topic: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        entry: Dict[str, Any] = {str(k): v for k, v in dict(payload).items()}
+        entry.setdefault("topic", topic)
+        entry.setdefault("updated_at", time.time())
+        with self._swarm_lock:
+            self._control_states[topic] = entry
+        return entry
+
+    def _apply_control_topic(
+        self,
+        topic: str,
+        *,
+        active: bool,
+        reason: str | None = None,
+        ttl: float | None = None,
+    ) -> Dict[str, Any]:
+        now = time.time()
+        payload: Dict[str, Any] = {
+            "state": "on" if active else "off",
+            "value": bool(active),
+            "source": "ui",
+            "updated_at": now,
+        }
+        ttl_value = ttl if ttl is not None else self._control_default_ttl()
+        if ttl_value is not None and ttl_value > 0:
+            payload["ttl"] = ttl_value
+        if reason:
+            payload["reason"] = reason
+        entry = self._record_control_state(topic, payload)
+        publish(topic, entry)
+        return entry
+
+    def _trigger_safety_stop(self, *, reason: str | None = None) -> Dict[str, Any]:
+        entry = self._apply_control_topic(
+            "control:execution:safety_stop", active=True, reason=reason
+        )
+        publish(
+            "control",
+            {
+                "cmd": "stop",
+                "source": "ui",
+                "reason": reason,
+                "ts": entry.get("updated_at", time.time()),
+            },
+        )
+        return entry
+
+    def _set_global_pause(self, *, active: bool, reason: str | None = None) -> Dict[str, Any]:
+        return self._apply_control_topic(
+            "control:execution:paused", active=active, reason=reason
+        )
+
+    def _execute_control_action(
+        self, action: str, payload: Mapping[str, Any] | None = None
+    ) -> Dict[str, Any]:
+        data = dict(payload or {})
+        action_key = (action or "").strip().lower()
+        reason = data.get("reason")
+        if action_key == "pause":
+            active = data.get("active")
+            if active is None:
+                active = True
+            active_bool = bool(active)
+            return self._set_global_pause(active=active_bool, reason=reason)
+        if action_key == "safety-stop":
+            return self._trigger_safety_stop(reason=reason)
+        raise ValueError(f"Unknown control action: {action}")
+
     def _collect_status(self) -> Dict[str, Any]:
         depth_ok = bool(self.depth_proc and self.depth_proc.poll() is None)
         rl_snapshot = self._collect_rl_status()
         rl_running = bool(rl_snapshot.get("running")) if rl_snapshot else False
         self.status.rl_daemon = rl_running
+        flags = FeatureFlags.from_env()
         activity_entries = self.activity.snapshot()
         status = {
             "event_bus": self.status.event_bus,
@@ -1229,7 +1331,9 @@ class TradingRuntime:
             "iterations_completed": self._iteration_count,
             "trade_count": len(self._trades),
             "activity_count": len(activity_entries),
+            "feature_flags": flags.for_ui(),
         }
+        status.setdefault("mode", flags.mode)
         heartbeat_ts = self.status.heartbeat_ts
         latency_ms: Optional[float] = None
         if self._last_heartbeat_perf is not None:
@@ -1262,6 +1366,11 @@ class TradingRuntime:
         status["paused"] = _control_active(pause_state)
         status["paper_mode"] = _control_active(paper_state)
         status["rl_mode"] = "shadow" if _control_active(rl_toggle) else "applied"
+        safety_state = self._control_states.get("control:execution:safety_stop", {})
+        status["safety_stop"] = _control_active(safety_state)
+        status.setdefault("paper_trading_flag", flags.paper_trading)
+        status.setdefault("live_trading_disabled_flag", flags.live_trading_disabled)
+        status.setdefault("rl_shadow_flag", flags.rl_shadow_mode)
         if hasattr(self.state, "last_tokens"):
             tokens = list(getattr(self.state, "last_tokens", []) or [])
             status["pipeline_tokens"] = tokens[:10]
@@ -2000,7 +2109,54 @@ class TradingRuntime:
             "MIN_DEPTH1PCT_USD": os.getenv("MIN_DEPTH1PCT_USD"),
             "RL_WEIGHTS_DISABLED": os.getenv("RL_WEIGHTS_DISABLED"),
         }
-        return {"controls": controls, "overrides": overrides, "staleness": {}}
+        actions = [
+            {
+                "label": "Global Pause",
+                "endpoint": "/api/control/pause",
+                "payload": {"active": True},
+                "confirm": "Pause vote propagation to execution?",
+            },
+            {
+                "label": "Resume Trading",
+                "endpoint": "/api/control/pause",
+                "payload": {"active": False},
+                "confirm": None,
+            },
+            {
+                "label": "Safety Stop",
+                "endpoint": "/api/control/safety-stop",
+                "payload": {},
+                "confirm": "Trigger the safety stop and halt the runtime?",
+                "prompt": "Enter an ops log reason (optional):",
+                "style": "danger",
+            },
+        ]
+        flags = FeatureFlags.from_env()
+        flag_entries: List[Dict[str, Any]] = []
+        for name, value in flags.for_ui().items():
+            if isinstance(value, bool):
+                flag_entries.append(
+                    {
+                        "name": name,
+                        "value": "on" if value else "off",
+                        "enabled": value,
+                    }
+                )
+            else:
+                flag_entries.append(
+                    {
+                        "name": name,
+                        "value": str(value),
+                        "enabled": None,
+                    }
+                )
+        return {
+            "controls": controls,
+            "overrides": overrides,
+            "staleness": {},
+            "actions": actions,
+            "feature_flags": flag_entries,
+        }
 
     def _collect_discovery(self) -> Dict[str, Any]:
         with self._discovery_lock:

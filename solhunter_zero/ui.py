@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from queue import Queue
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 from flask import Flask, Request, Response, jsonify, render_template_string, request
@@ -90,6 +90,10 @@ _WS_CHANNELS: dict[str, _WebsocketState] = {
     "events": _WebsocketState("events"),
     "logs": _WebsocketState("logs"),
 }
+
+
+def _missing_control_executor(action: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    raise RuntimeError("control executor unavailable")
 
 
 def _resolve_host() -> str:
@@ -726,6 +730,9 @@ class UIState:
     settings_provider: DictProvider = field(
         default=lambda: {"controls": {}, "overrides": {}, "staleness": {}}
     )
+    control_executor: Callable[[str, Mapping[str, Any]], Dict[str, Any]] = field(
+        default=_missing_control_executor
+    )
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -882,6 +889,11 @@ class UIState:
             log.exception("UI settings provider failed")
             return {"controls": {}, "overrides": {}, "staleness": {}}
 
+    def execute_control(
+        self, action: str, payload: Mapping[str, Any] | None = None
+    ) -> Dict[str, Any]:
+        return self.control_executor(action, payload or {})
+
 
 _PAGE_TEMPLATE = """
 <!doctype html>
@@ -1008,6 +1020,8 @@ _PAGE_TEMPLATE = """
         .signal-pill.toggle-on { border-color: rgba(63,185,80,0.5); color: var(--success); }
         .signal-pill.toggle-off { border-color: rgba(88,166,255,0.2); color: var(--muted); }
         .signal-pill.toggle-paused { border-color: rgba(255,123,114,0.55); color: var(--danger); }
+        .signal-pill.toggle-danger { border-color: rgba(255,123,114,0.75); color: var(--danger); }
+        .signal-pill.mode-pill { border-color: rgba(88,166,255,0.35); color: #58a6ff; }
         .header-actions {
             display: flex;
             align-items: center;
@@ -1200,6 +1214,79 @@ _PAGE_TEMPLATE = """
             border: 1px solid rgba(88,166,255,0.12);
         }
         .control-card strong { display: block; margin-bottom: 6px; }
+        .control-actions {
+            margin-top: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .control-actions h3 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: rgba(255,255,255,0.6);
+            margin: 0;
+        }
+        .action-buttons {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .control-action {
+            background: rgba(88,166,255,0.12);
+            color: #e6edf3;
+            border: 1px solid rgba(88,166,255,0.35);
+            border-radius: 10px;
+            padding: 8px 16px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s ease, border 0.2s ease, box-shadow 0.2s ease;
+        }
+        .control-action:hover { background: rgba(88,166,255,0.22); }
+        .control-action.danger {
+            background: rgba(255,123,114,0.16);
+            border-color: rgba(255,123,114,0.45);
+            color: var(--danger);
+        }
+        .control-action.danger:hover { background: rgba(255,123,114,0.26); }
+        .control-action--pending {
+            opacity: 0.65;
+            cursor: wait;
+        }
+        .control-action--success {
+            box-shadow: 0 0 0 1px rgba(88,166,255,0.45);
+        }
+        .control-action--error {
+            box-shadow: 0 0 0 1px rgba(255,123,114,0.6);
+        }
+        .flag-grid {
+            margin-top: 18px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+        }
+        .flag-card {
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: rgba(13,17,23,0.7);
+            border: 1px solid rgba(88,166,255,0.12);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .flag-card.flag-on { border-color: rgba(63,185,80,0.45); }
+        .flag-card.flag-off { border-color: rgba(255,123,114,0.35); }
+        .flag-card strong {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: rgba(255,255,255,0.62);
+        }
+        .flag-card span {
+            font-size: 0.95rem;
+            color: rgba(255,255,255,0.88);
+        }
         .stack {
             display: flex;
             flex-direction: column;
@@ -1253,8 +1340,10 @@ _PAGE_TEMPLATE = """
             </div>
             <div class=\"header-signals\">
                 <span class=\"signal-pill env-{{ header_signals.environment|lower() }}\">🌎 Env {{ header_signals.environment }}</span>
+                <span class=\"signal-pill mode-pill\">🎯 Mode {{ header_signals.mode_label }}</span>
                 <span class=\"signal-pill {{ 'toggle-on' if header_signals.paper_mode else 'toggle-off' }}\">📝 Paper {{ 'ON' if header_signals.paper_mode else 'OFF' }}</span>
                 <span class=\"signal-pill {{ 'toggle-paused' if header_signals.paused else 'toggle-on' }}\">⏸ Pause {{ 'ON' if header_signals.paused else 'OFF' }}</span>
+                <span class=\"signal-pill {{ 'toggle-danger' if header_signals.safety_stop else 'toggle-off' }}\">🛑 Safety {{ 'ON' if header_signals.safety_stop else 'OFF' }}</span>
                 <span class=\"signal-pill {{ 'toggle-on' if header_signals.rl_mode == 'applied' else 'toggle-off' }}\">🤖 RL {{ header_signals.rl_mode|title }}</span>
             </div>
             <div class=\"signal-metrics\">
@@ -1953,7 +2042,7 @@ _PAGE_TEMPLATE = """
         <section class=\"panel\" id=\"settings-panel\">
             <div class=\"section-title\">
                 <h2><span class=\"color-chip idle\"></span>Settings & Controls</h2>
-                <span class=\"muted\">{{ settings.controls | length }} controls</span>
+                <span class=\"muted\">{{ settings.controls | length }} controls · {{ settings.actions | length }} actions</span>
             </div>
             <div class=\"control-grid\">
                 {% for control in settings.controls %}
@@ -1965,6 +2054,31 @@ _PAGE_TEMPLATE = """
                 </div>
                 {% else %}
                 <div class=\"muted\">No controls available.</div>
+                {% endfor %}
+            </div>
+            <div class=\"control-actions\">
+                <h3>Runbook Controls</h3>
+                <div class=\"action-buttons\">
+                    {% for action in settings.actions %}
+                    <button class=\"control-action{% if action.style %} {{ action.style }}{% endif %}\"
+                        data-endpoint=\"{{ action.endpoint }}\"
+                        data-payload='{{ action.payload | tojson }}'
+                        {% if action.confirm %}data-confirm=\"{{ action.confirm }}\"{% endif %}
+                        {% if action.prompt %}data-prompt=\"{{ action.prompt }}\"{% endif %}
+                    >{{ action.label }}</button>
+                    {% else %}
+                    <div class=\"muted\">No actionable toggles configured.</div>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class=\"flag-grid\">
+                {% for flag in settings.feature_flags %}
+                <div class=\"flag-card {% if flag.enabled is true %}flag-on{% elif flag.enabled is false %}flag-off{% else %}flag-neutral{% endif %}\">
+                    <strong>{{ flag.name }}</strong>
+                    <span>{{ flag.value }}</span>
+                </div>
+                {% else %}
+                <div class=\"muted\">Feature flags unavailable.</div>
                 {% endfor %}
             </div>
         </section>
@@ -1981,6 +2095,67 @@ _PAGE_TEMPLATE = """
                     rl: {status: 'idle', detail: 'Waiting for metadata…', socket: null, retryTimer: null, retries: 0, url: ''},
                     logs: {status: 'idle', detail: 'Waiting for metadata…', socket: null, retryTimer: null, retries: 0, url: ''}
                 };
+
+                const controlButtons = document.querySelectorAll('.control-action');
+                controlButtons.forEach((button) => {
+                    button.addEventListener('click', async (event) => {
+                        event.preventDefault();
+                        const endpoint = button.dataset.endpoint;
+                        if (!endpoint) {
+                            return;
+                        }
+                        if (button.dataset.confirm && !window.confirm(button.dataset.confirm)) {
+                            return;
+                        }
+                        let payload = {};
+                        if (button.dataset.payload) {
+                            try {
+                                payload = JSON.parse(button.dataset.payload);
+                            } catch (err) {
+                                console.warn('Invalid control payload for', endpoint, err);
+                                payload = {};
+                            }
+                        }
+                        if (button.dataset.prompt) {
+                            const response = window.prompt(button.dataset.prompt);
+                            if (response === null) {
+                                return;
+                            }
+                            if (response.trim()) {
+                                payload.reason = response.trim();
+                            }
+                        }
+                        button.disabled = true;
+                        button.classList.add('control-action--pending');
+                        try {
+                            const response = await fetch(endpoint, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(payload)
+                            });
+                            let data = {};
+                            try {
+                                data = await response.json();
+                            } catch (jsonErr) {
+                                data = {ok: response.ok};
+                            }
+                            if (!response.ok || data.ok === false) {
+                                const message = data.error || response.statusText || 'request failed';
+                                throw new Error(message);
+                            }
+                            button.classList.add('control-action--success');
+                            window.setTimeout(() => button.classList.remove('control-action--success'), 1500);
+                        } catch (error) {
+                            console.error('Control action failed', error);
+                            window.alert('Control request failed: ' + (error && error.message ? error.message : error));
+                            button.classList.add('control-action--error');
+                            window.setTimeout(() => button.classList.remove('control-action--error'), 2000);
+                        } finally {
+                            button.classList.remove('control-action--pending');
+                            button.disabled = false;
+                        }
+                    });
+                });
 
                 function renderConnectionSummary() {
                     if (!connectionBanner || !connectionLabel || !connectionDetail) {
@@ -2578,10 +2753,13 @@ def create_app(state: UIState | None = None) -> Flask:
             "depth": (market_state.get("lag_ms") or {}).get("depth_ms"),
             "golden": golden_detail.get("lag_ms"),
         }
+        feature_flags = status.get("feature_flags", {})
         header_signals = {
             "environment": (status.get("environment") or "dev").upper(),
-            "paper_mode": bool(status.get("paper_mode")),
+            "mode_label": str(feature_flags.get("mode", status.get("mode", "paper"))).upper(),
+            "paper_mode": bool(feature_flags.get("paper_trading", status.get("paper_mode"))),
             "paused": bool(status.get("paused")),
+            "safety_stop": bool(status.get("safety_stop")),
             "rl_mode": status.get("rl_mode", "shadow"),
             "bus_latency_ms": status.get("bus_latency_ms"),
             "stream_lag": stream_lag,
@@ -2664,6 +2842,49 @@ def create_app(state: UIState | None = None) -> Flask:
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("UI websocket probe crashed for %s: %s", url, exc)
             return "fail", f"{type(exc).__name__}: {exc}"
+
+    def _bool_from_payload(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+        if value is None:
+            return default
+        try:
+            return bool(int(value))
+        except Exception:
+            return bool(value)
+
+    def _dispatch_control(action: str, payload: Mapping[str, Any]) -> Any:
+        try:
+            result = state.execute_control(action, payload)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            log.exception("Control action %s failed", action)
+            return jsonify({"ok": False, "error": str(exc)}), 500
+        return jsonify({"ok": True, "result": _json_ready(result)})
+
+    @app.post("/api/control/pause")
+    def api_control_pause() -> Any:
+        body = request.get_json(silent=True) or {}
+        active = _bool_from_payload(body.get("active"), True)
+        reason = body.get("reason")
+        payload: Dict[str, Any] = {"active": active}
+        if isinstance(reason, str) and reason.strip():
+            payload["reason"] = reason.strip()
+        return _dispatch_control("pause", payload)
+
+    @app.post("/api/control/safety-stop")
+    def api_control_safety_stop() -> Any:
+        body = request.get_json(silent=True) or {}
+        reason = body.get("reason")
+        payload: Dict[str, Any] = {}
+        if isinstance(reason, str) and reason.strip():
+            payload["reason"] = reason.strip()
+        return _dispatch_control("safety-stop", payload)
 
     @app.get("/api/manifest")
     def api_manifest() -> Any:

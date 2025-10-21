@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import re
 
 from .logging_utils import log_startup
 from .paths import ROOT
@@ -12,6 +13,22 @@ from .console_utils import console_print, console_warning
 TEMPLATE_PATH = ROOT / "solhunter_zero" / "static" / "env.template"
 
 __all__ = ["load_env_file"]
+
+
+_PLACEHOLDER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\$\{[^}]+\}$"),
+    re.compile(r"REDACTED", re.IGNORECASE),
+)
+
+
+def _is_placeholder(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return True
+    for pattern in _PLACEHOLDER_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
 
 
 def load_env_file(path: Path) -> None:
@@ -42,6 +59,7 @@ def load_env_file(path: Path) -> None:
             console_warning(msg)
         log_startup(msg)
         return
+    invalid: list[str] = []
     for raw_line in path.read_text().splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -49,4 +67,13 @@ def load_env_file(path: Path) -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip("'\"")
-        os.environ.setdefault(key, value)
+        if key not in os.environ and _is_placeholder(value):
+            invalid.append(key)
+            continue
+        if key not in os.environ:
+            os.environ[key] = value
+    if invalid:
+        formatted = ", ".join(sorted(invalid))
+        raise RuntimeError(
+            f"Environment file {path} contains placeholder values for: {formatted}"
+        )
