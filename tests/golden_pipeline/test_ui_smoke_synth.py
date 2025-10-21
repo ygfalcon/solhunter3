@@ -13,7 +13,19 @@ def test_ui_smoke_synth_values(runtime, bus, kv, synth_seed):
     golden_snapshot = runtime.ui_state.snapshot_golden_snapshots()
     snapshots = golden_snapshot.get("snapshots", [])
     assert len(snapshots) == 7
-    assert all((entry.get("liq") or 0.0) > 0.0 for entry in snapshots)
+    def _depth(entry):
+        liq = entry.get("liq")
+        if isinstance(liq, (int, float)):
+            return float(liq)
+        if isinstance(liq, dict):
+            depth_pct = liq.get("depth_pct")
+            if isinstance(depth_pct, dict):
+                depth1 = depth_pct.get("1")
+                if isinstance(depth1, (int, float)):
+                    return float(depth1)
+        return 0.0
+
+    assert all(_depth(entry) > 0.0 for entry in snapshots)
 
     suggestions = runtime.ui_state.snapshot_suggestions()
     assert len(suggestions.get("suggestions", [])) >= 2

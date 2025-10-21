@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 
+GOLDEN_SNAPSHOT_SCHEMA_VERSION = "1.0"
+TRADE_SUGGESTION_SCHEMA_VERSION = "1.0"
+VOTE_DECISION_SCHEMA_VERSION = "1.0"
+VIRTUAL_FILL_SCHEMA_VERSION = "1.0"
+LIVE_FILL_SCHEMA_VERSION = "1.0"
+
+
 Timestamp = float
 
 
@@ -95,6 +102,7 @@ class GoldenSnapshot:
     ohlcv5m: Dict[str, Any]
     hash: str
     metrics: Dict[str, Any] = field(default_factory=dict)
+    schema_version: str = GOLDEN_SNAPSHOT_SCHEMA_VERSION
 
 
 @dataclass(slots=True)
@@ -116,6 +124,7 @@ class TradeSuggestion:
     must_exit: bool = False
     hot_watch: bool = False
     exit_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    schema_version: str = TRADE_SUGGESTION_SCHEMA_VERSION
 
 
 @dataclass(slots=True)
@@ -130,6 +139,7 @@ class Decision:
     client_order_id: str
     agents: List[str]
     ts: Timestamp
+    schema_version: str = VOTE_DECISION_SCHEMA_VERSION
 
 
 @dataclass(slots=True)
@@ -146,6 +156,7 @@ class VirtualFill:
     snapshot_hash: str
     route: str
     ts: Timestamp
+    schema_version: str = VIRTUAL_FILL_SCHEMA_VERSION
 
 
 @dataclass(slots=True)
@@ -161,6 +172,7 @@ class LiveFill:
     slippage_bps: float
     route: str
     snapshot_hash: str
+    schema_version: str = LIVE_FILL_SCHEMA_VERSION
 
 
 @dataclass(slots=True)

@@ -29,6 +29,11 @@ from solhunter_zero.golden_pipeline.types import (
     TradeSuggestion,
     VirtualFill,
     VirtualPnL,
+    GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    TRADE_SUGGESTION_SCHEMA_VERSION,
+    VIRTUAL_FILL_SCHEMA_VERSION,
+    VOTE_DECISION_SCHEMA_VERSION,
+    LIVE_FILL_SCHEMA_VERSION,
 )
 
 _datasets_pkg = types.ModuleType("solhunter_zero.datasets")
@@ -575,6 +580,7 @@ def test_pipeline_end_to_end_flow():
         assert STREAMS.golden_snapshot in bus.events
         golden_event = bus.events[STREAMS.golden_snapshot][-1]
         latest_snapshot = goldens[-1]
+        assert golden_event["schema_version"] == GOLDEN_SNAPSHOT_SCHEMA_VERSION
         assert golden_event["mint"] == mint
         assert golden_event["hash"] == latest_snapshot.hash
         ohlcv_payload = golden_event["ohlcv5m"]
@@ -589,6 +595,10 @@ def test_pipeline_end_to_end_flow():
         assert STREAMS.trade_suggested in bus.events
         suggestion_events = bus.events[STREAMS.trade_suggested]
         assert len(suggestion_events) == 2
+        assert all(
+            event["schema_version"] == TRADE_SUGGESTION_SCHEMA_VERSION
+            for event in suggestion_events
+        )
         assert sorted(event["agent"] for event in suggestion_events) == [
             "alpha_agent",
             "beta_agent",
@@ -598,6 +608,7 @@ def test_pipeline_end_to_end_flow():
         decision_events = bus.events[STREAMS.vote_decisions]
         assert len(decision_events) == 1
         decision_event = decision_events[0]
+        assert decision_event["schema_version"] == VOTE_DECISION_SCHEMA_VERSION
         assert decision_event["mint"] == mint
         assert decision_event["snapshot_hash"] == golden_event["hash"]
         assert decision_event["agents"] == ["alpha_agent", "beta_agent"]
@@ -606,6 +617,7 @@ def test_pipeline_end_to_end_flow():
 
         assert STREAMS.virtual_fills in bus.events
         virtual_event = bus.events[STREAMS.virtual_fills][0]
+        assert virtual_event["schema_version"] == VIRTUAL_FILL_SCHEMA_VERSION
         assert virtual_event["mint"] == mint
         assert virtual_event["snapshot_hash"] == golden_event["hash"]
         assert virtual_event["qty_base"] == pytest.approx(
@@ -614,6 +626,7 @@ def test_pipeline_end_to_end_flow():
 
         assert STREAMS.live_fills in bus.events
         live_event = bus.events[STREAMS.live_fills][0]
+        assert live_event["schema_version"] == LIVE_FILL_SCHEMA_VERSION
         assert live_event["mint"] == mint
         assert live_event["snapshot_hash"] == golden_event["hash"]
 

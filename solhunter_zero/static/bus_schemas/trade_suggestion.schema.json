@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TradeSuggestion",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "agent",
+    "mint",
+    "side",
+    "notional_usd",
+    "max_slippage_bps",
+    "risk",
+    "confidence",
+    "inputs_hash",
+    "ttl_sec",
+    "generated_at"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "minLength": 1},
+    "agent": {"type": "string", "minLength": 1},
+    "mint": {"type": "string", "minLength": 1},
+    "side": {"type": "string", "minLength": 1},
+    "notional_usd": {"type": "number"},
+    "max_slippage_bps": {"type": "number"},
+    "risk": {"type": "object", "additionalProperties": true},
+    "confidence": {"type": "number"},
+    "inputs_hash": {"type": "string", "minLength": 1},
+    "ttl_sec": {"type": "number"},
+    "generated_at": {"type": "number"},
+    "gating": {"type": "object", "additionalProperties": true},
+    "slices": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "must_exit": {"type": "boolean"},
+    "hot_watch": {"type": "boolean"},
+    "exit_diagnostics": {"type": "object", "additionalProperties": true}
+  }
+}

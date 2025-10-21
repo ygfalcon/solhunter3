@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..event_bus import subscribe
+from ..golden_pipeline.validation import validate_stream_payload
 from ..ui import UIState
 from ..util import parse_bool_env
 
@@ -436,6 +437,8 @@ class RuntimeEventCollectors:
 
         async def _on_golden_snapshot(event: Any) -> None:
             payload = _normalize_event(event)
+            if not validate_stream_payload("x:mint.golden", payload):
+                return
             mint = payload.get("mint")
             if not mint:
                 return
@@ -449,6 +452,8 @@ class RuntimeEventCollectors:
 
         async def _on_suggestion(event: Any) -> None:
             payload = _normalize_event(event)
+            if not validate_stream_payload("x:trade.suggested", payload):
+                return
             mint = payload.get("mint")
             if not mint:
                 return
@@ -458,6 +463,8 @@ class RuntimeEventCollectors:
 
         async def _on_vote_decision(event: Any) -> None:
             payload = _normalize_event(event)
+            if not validate_stream_payload("x:vote.decisions", payload):
+                return
             mint = payload.get("mint")
             if not mint:
                 return
@@ -487,6 +494,8 @@ class RuntimeEventCollectors:
 
         async def _on_virtual_fill(event: Any) -> None:
             payload = _normalize_event(event)
+            if not validate_stream_payload("x:virt.fills", payload):
+                return
             if not payload.get("mint"):
                 return
             payload["_received"] = time.time()
@@ -495,6 +504,8 @@ class RuntimeEventCollectors:
 
         async def _on_live_fill(event: Any) -> None:
             payload = _normalize_event(event)
+            if not validate_stream_payload("x:live.fills", payload):
+                return
             if not payload.get("mint"):
                 return
             payload["_received"] = time.time()

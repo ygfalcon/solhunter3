@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LiveFill",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "sig",
+    "mint",
+    "side",
+    "qty_base",
+    "price_usd",
+    "fees_usd",
+    "slippage_bps",
+    "route",
+    "snapshot_hash"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "minLength": 1},
+    "sig": {"type": "string", "minLength": 1},
+    "mint": {"type": "string", "minLength": 1},
+    "side": {"type": "string", "minLength": 1},
+    "qty_base": {"type": "number"},
+    "price_usd": {"type": "number"},
+    "fees_usd": {"type": "number"},
+    "slippage_bps": {"type": "number"},
+    "route": {"type": "string"},
+    "snapshot_hash": {"type": "string", "minLength": 1}
+  }
+}

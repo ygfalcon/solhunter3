@@ -1,12 +1,14 @@
 import asyncio
 import json
 from collections import defaultdict
+from dataclasses import asdict
 from typing import Mapping
 
 import pytest
 
 from solhunter_zero.golden_pipeline.bus import EventBusAdapter, InMemoryBus, MessageBus
 from solhunter_zero.golden_pipeline.pipeline import GoldenPipeline
+from solhunter_zero.golden_pipeline.types import GoldenSnapshot
 from solhunter_zero.event_bus import BUS as RUNTIME_EVENT_BUS
 from solhunter_zero.production.env import (
     Provider,
@@ -256,8 +258,38 @@ def test_pipeline_uses_injected_bus_in_live_mode(monkeypatch):
 
     pipeline = GoldenPipeline(enrichment_fetcher=_fetcher, bus=spy_bus)
     asyncio.run(pipeline._publish(STREAMS.golden_snapshot, {"mint": "MintLive"}))
+    assert spy_bus.sent == []
+
+    valid_snapshot = GoldenSnapshot(
+        mint="MintLive",
+        asof=1.0,
+        meta={
+            "symbol": "LIVE",
+            "decimals": 6,
+            "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "asof": 1.0,
+        },
+        px={"mid_usd": 1.0, "spread_bps": 12.5},
+        liq={"depth_pct": {"1": 1_000.0}, "asof": 1.0},
+        ohlcv5m={
+            "o": 1.0,
+            "h": 1.01,
+            "l": 0.99,
+            "c": 1.0,
+            "vol_usd": 100.0,
+            "buyers": 2,
+            "trades": 2,
+            "flow_usd": 100.0,
+            "zret": 0.0,
+            "zvol": 0.0,
+            "asof_close": 1.0,
+        },
+        hash="mintlivehash",
+    )
+    asyncio.run(pipeline._publish(STREAMS.golden_snapshot, asdict(valid_snapshot)))
 
     assert spy_bus.sent and spy_bus.sent[0][0] == STREAMS.golden_snapshot
+    assert spy_bus.sent[0][1]["schema_version"] == valid_snapshot.schema_version
     assert created_inmemory["count"] == 0
 
 

@@ -31,6 +31,12 @@ if "base58" not in sys.modules:
 from solhunter_zero import event_bus
 from solhunter_zero.golden_pipeline.bus import InMemoryBus
 from solhunter_zero.golden_pipeline.contracts import STREAMS
+from solhunter_zero.golden_pipeline.types import (
+    GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    TRADE_SUGGESTION_SCHEMA_VERSION,
+    VOTE_DECISION_SCHEMA_VERSION,
+    VIRTUAL_FILL_SCHEMA_VERSION,
+)
 from solhunter_zero.golden_pipeline.kv import InMemoryKeyValueStore
 from solhunter_zero.runtime.runtime_wiring import RuntimeWiring, initialise_runtime_wiring
 from solhunter_zero.ui import UIState
@@ -399,11 +405,14 @@ async def _seed_runtime(
         golden_hashes[mint] = golden_hash
         volume_spike = vol_1m / volume_baselines[symbol]
         golden_payload = {
+            "schema_version": GOLDEN_SNAPSHOT_SCHEMA_VERSION,
             "mint": mint,
             "asof": base_ts,
             "meta": {
                 "symbol": symbol,
                 "decimals": decimals_map[symbol],
+                "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                "venues": ["synthetic"],
                 "source": source,
                 "asof": base_ts,
             },
@@ -414,7 +423,11 @@ async def _seed_runtime(
                 "vol_1m_usd": vol_1m,
                 "liquidity_usd": liquidity,
             },
-            "liq": liquidity,
+            "liq": {
+                "depth_pct": dict(depth_snapshot["depth_pct"]),
+                "asof": base_ts,
+                "staleness_ms": 0.0,
+            },
             "ohlcv5m": {
                 "o": latest_bar["o"],
                 "h": latest_bar["h"],
@@ -493,6 +506,7 @@ async def _seed_runtime(
     for spec in suggestions_spec:
         mint = spec["mint"]
         suggestion = {
+            "schema_version": TRADE_SUGGESTION_SCHEMA_VERSION,
             "agent": spec["agent"],
             "mint": mint,
             "side": spec["side"],
@@ -527,18 +541,31 @@ async def _seed_runtime(
 
     decisions: List[Dict[str, Any]] = []
     for mint, score in window_scores.items():
+        related_suggestions = [
+            entry for entry in suggestion_payloads if entry["mint"] == mint
+        ]
+        if related_suggestions:
+            notional_usd = sum(entry["notional_usd"] for entry in related_suggestions)
+            agents = [entry["agent"] for entry in related_suggestions]
+        else:
+            notional_usd = 0.0
+            agents = ["SyntheticAgent"]
         decision = {
+            "schema_version": VOTE_DECISION_SCHEMA_VERSION,
             "mint": mint,
             "side": "buy" if mint != suggestion_payloads[2]["mint"] else "sell",
             "score": score,
             "snapshot_hash": golden_hashes[mint],
             "client_order_id": hashlib.sha1((mint + str(score)).encode("utf-8")).hexdigest(),
+            "notional_usd": notional_usd,
+            "agents": agents,
             "ts": base_ts + 0.5,
         }
         decisions.append(decision)
         await bus.publish(STREAMS.vote_decisions, decision)
 
     shadow_fill = {
+        "schema_version": VIRTUAL_FILL_SCHEMA_VERSION,
         "order_id": "PUMP1-shadow-fill",
         "mint": token_specs[5]["mint"],
         "side": "buy",

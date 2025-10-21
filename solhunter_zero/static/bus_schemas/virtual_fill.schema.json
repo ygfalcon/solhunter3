@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VirtualFill",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "order_id",
+    "mint",
+    "side",
+    "qty_base",
+    "price_usd",
+    "fees_usd",
+    "slippage_bps",
+    "snapshot_hash",
+    "route",
+    "ts"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "minLength": 1},
+    "order_id": {"type": "string", "minLength": 1},
+    "mint": {"type": "string", "minLength": 1},
+    "side": {"type": "string", "minLength": 1},
+    "qty_base": {"type": "number"},
+    "price_usd": {"type": "number"},
+    "fees_usd": {"type": "number"},
+    "slippage_bps": {"type": "number"},
+    "snapshot_hash": {"type": "string", "minLength": 1},
+    "route": {"type": "string"},
+    "ts": {"type": "number"}
+  }
+}

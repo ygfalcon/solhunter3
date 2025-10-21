@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import asdict
 from typing import Awaitable, Callable, Dict, Iterable, Mapping, Optional
@@ -32,6 +33,10 @@ from .types import (
 )
 from .voting import VotingStage
 from .utils import now_ts
+from .validation import validate_stream_payload
+
+
+log = logging.getLogger(__name__)
 
 
 class _PaperPositionState:
@@ -335,6 +340,9 @@ class GoldenPipeline:
 
     async def _publish(self, stream: str, payload: Mapping[str, object]) -> None:
         if not self._bus:
+            return
+        if not validate_stream_payload(stream, payload):
+            log.warning("Skipped publishing invalid payload", extra={"stream": stream})
             return
         await self._bus.publish(stream, payload)
 

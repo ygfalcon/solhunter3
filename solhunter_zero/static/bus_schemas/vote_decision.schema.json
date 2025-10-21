@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VoteDecision",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "mint",
+    "side",
+    "notional_usd",
+    "score",
+    "snapshot_hash",
+    "client_order_id",
+    "agents",
+    "ts"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "minLength": 1},
+    "mint": {"type": "string", "minLength": 1},
+    "side": {"type": "string", "minLength": 1},
+    "notional_usd": {"type": "number"},
+    "score": {"type": "number"},
+    "snapshot_hash": {"type": "string", "minLength": 1},
+    "client_order_id": {"type": "string", "minLength": 1},
+    "agents": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "ts": {"type": "number"}
+  }
+}

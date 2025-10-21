@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GoldenSnapshot",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "mint",
+    "asof",
+    "meta",
+    "px",
+    "liq",
+    "ohlcv5m",
+    "hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "asof": {
+      "type": "number"
+    },
+    "meta": {
+      "type": "object",
+      "required": ["symbol", "decimals", "token_program", "asof"],
+      "properties": {
+        "symbol": {"type": "string"},
+        "name": {"type": "string"},
+        "decimals": {"type": "number"},
+        "token_program": {"type": "string"},
+        "venues": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "flags": {
+          "type": "object"
+        },
+        "asof": {"type": "number"}
+      },
+      "additionalProperties": true
+    },
+    "px": {
+      "type": "object",
+      "required": ["mid_usd", "spread_bps"],
+      "properties": {
+        "mid_usd": {"type": "number"},
+        "spread_bps": {"type": "number"}
+      },
+      "additionalProperties": true
+    },
+    "liq": {
+      "type": "object",
+      "required": ["depth_pct", "asof"],
+      "properties": {
+        "depth_pct": {
+          "type": "object",
+          "additionalProperties": {"type": "number"}
+        },
+        "asof": {"type": "number"},
+        "staleness_ms": {"type": "number"}
+      },
+      "additionalProperties": true
+    },
+    "ohlcv5m": {
+      "type": "object",
+      "required": [
+        "o",
+        "h",
+        "l",
+        "c",
+        "vol_usd",
+        "asof_close"
+      ],
+      "properties": {
+        "o": {"type": "number"},
+        "h": {"type": "number"},
+        "l": {"type": "number"},
+        "c": {"type": "number"},
+        "vol_usd": {"type": "number"},
+        "buyers": {"type": "number"},
+        "trades": {"type": "number"},
+        "flow_usd": {"type": "number"},
+        "zret": {"type": "number"},
+        "zvol": {"type": "number"},
+        "asof_close": {"type": "number"}
+      },
+      "additionalProperties": true
+    },
+    "hash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}
