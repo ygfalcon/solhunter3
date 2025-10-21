@@ -10,6 +10,11 @@ from __future__ import annotations
 
 DEFAULTS: dict[str, str] = {
     "BIRDEYE_API_KEY": "b1e60d72780940d1bd929b9b2e9225e6",
+    "BIRDEYE_ENABLED": "1",
+    "HELIUS_API_KEY": "af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "USE_DAS_DISCOVERY": "1",
+    "DEXSCREENER_DISABLED": "0",
+    "SYNTHETIC_PRICE_HINTS": '{"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 1.0}',
     # Core service toggles
     "DEPTH_SERVICE": "true",
     "USE_DEPTH_STREAM": "1",
@@ -18,8 +23,11 @@ DEFAULTS: dict[str, str] = {
     "USE_SERVICE_EXEC": "True",
 
     # Solana RPC endpoints
-    "SOLANA_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
-    "SOLANA_TESTNET_RPC_URL": "https://devnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+    "SOLANA_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "SOLANA_TESTNET_RPC_URL": "https://devnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "SOLANA_WS_URL": "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "HELIUS_WS_URL": "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "HELIUS_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
     "DEX_BASE_URL": "https://swap.helius.dev",
     "AGENTS": "['sim']",
     "AGENT_WEIGHTS": "{'sim': 1.0}",
@@ -41,7 +49,7 @@ DEFAULTS: dict[str, str] = {
     "RAYDIUM_WS_URL": "",
     "PHOENIX_WS_URL": "",
     "METEORA_WS_URL": "",
-    "JUPITER_WS_URL": "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
+    "JUPITER_WS_URL": "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
     "ORCA_DEX_URL": "https://www.orca.so",
     "RAYDIUM_DEX_URL": "https://raydium.io",
     "PHOENIX_DEX_URL": "https://app.phoenix.trade",

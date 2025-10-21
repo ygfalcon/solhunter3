@@ -160,7 +160,7 @@ def test_collect_trending_invokes_multiple_network_sources(monkeypatch):
     async def runner():
         result = await token_scanner._collect_trending_seeds(
             DummySession(),
-            limit=5,
+            limit=8,
             birdeye_api_key=None,
             rpc_url="http://localhost",
         )
@@ -172,4 +172,86 @@ def test_collect_trending_invokes_multiple_network_sources(monkeypatch):
     asyncio.run(runner())
     assert flags["dex_new"] == 1
     assert flags["dex_trend"] == 1
+    assert flags["pump"] == 1
+
+
+def test_collect_trending_runs_das_alongside(monkeypatch):
+    monkeypatch.setenv("DEXSCREENER_DISABLED", "0")
+    monkeypatch.setenv("USE_DAS_DISCOVERY", "1")
+    monkeypatch.setenv("STATIC_SEED_TOKENS", "")
+    monkeypatch.setenv("PUMP_FUN_TOKENS", "")
+    monkeypatch.setenv("PUMP_LEADERBOARD_URL", "https://example.com/pump")
+    monkeypatch.setenv("HELIUS_API_KEY", "af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+    monkeypatch.setenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+    monkeypatch.delenv("SOLSCAN_API_KEY", raising=False)
+
+    import solhunter_zero.token_scanner as token_scanner
+
+    token_scanner = importlib.reload(token_scanner)
+    _reset_state(token_scanner)
+    token_scanner._DAS_CIRCUIT_OPEN_UNTIL = 0.0
+
+    flags = {"helius": 0, "pump": 0}
+
+    helius_mint = "7XSswsRHEPTNYw2XBaLJR5Ret2Rk1ztwP1VhRwX5tNTK"
+    pump_mint = "H6yn7A6PRQT83wXWx3YpGHTKp21HBFA2wNrMESeiD7rq"
+
+    async def fake_new_pairs(session, *, limit):
+        return []
+
+    async def fake_trending(session, *, limit):
+        return []
+
+    async def fake_pump(session, *, limit):
+        flags["pump"] += 1
+        return [
+            {
+                "address": pump_mint,
+                "source": "pumpfun",
+                "sources": ["pumpfun"],
+                "rank": 0,
+            }
+        ]
+
+    async def fake_birdeye(*args, **kwargs):
+        return []
+
+    async def fake_helius(session, *, limit, rpc_url):
+        flags["helius"] += 1
+        return [
+            {
+                "address": helius_mint,
+                "source": "helius_search",
+                "sources": ["helius_search"],
+                "rank": 0,
+            }
+        ]
+
+    async def fake_enrich(session, addresses):
+        return {}
+
+    monkeypatch.setattr(token_scanner, "_dexscreener_new_pairs", fake_new_pairs)
+    monkeypatch.setattr(token_scanner, "_dexscreener_trending_movers", fake_trending)
+    monkeypatch.setattr(token_scanner, "_pump_trending", fake_pump)
+    monkeypatch.setattr(token_scanner, "_birdeye_trending", fake_birdeye)
+    monkeypatch.setattr(token_scanner, "_helius_search_assets", fake_helius)
+    monkeypatch.setattr(token_scanner, "_pyth_seed_entries", lambda: [])
+    monkeypatch.setattr(token_scanner, "_das_enrich_candidates", fake_enrich)
+
+    class DummySession:
+        post = object()
+
+    async def runner():
+        result = await token_scanner._collect_trending_seeds(
+            DummySession(),
+            limit=6,
+            birdeye_api_key=None,
+            rpc_url="https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+        )
+        addresses = [entry["address"] for entry in result]
+        assert helius_mint in addresses
+        assert pump_mint in addresses
+
+    asyncio.run(runner())
+    assert flags["helius"] == 1
     assert flags["pump"] == 1

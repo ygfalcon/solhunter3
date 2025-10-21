@@ -1270,9 +1270,8 @@ async def _collect_trending_seeds(
             if len(seeds) >= desired:
                 break
 
-    minimum_before_das = min(desired, max(5, limit // 2))
-    helius_results: List[Dict[str, Any]] = []
-    if USE_DAS_DISCOVERY and len(seeds) < minimum_before_das:
+    helius_allowed = False
+    if USE_DAS_DISCOVERY:
         now = time.monotonic()
         if now < _DAS_CIRCUIT_OPEN_UNTIL:
             remaining = max(0.0, _DAS_CIRCUIT_OPEN_UNTIL - now)
@@ -1281,24 +1280,9 @@ async def _collect_trending_seeds(
                 remaining,
             )
         else:
-            helius_results = await _helius_search_assets(
-                session,
-                limit=desired,
-                rpc_url=rpc_url,
-            )
-        if helius_results and logger.isEnabledFor(logging.INFO):
-            logger.info("Helius searchAssets provided %d candidate(s)", len(helius_results))
-        for item in helius_results:
-            if not isinstance(item, dict):
-                continue
-            entry = dict(item)
-            entry.setdefault("source", "helius_search")
-            entry.setdefault("sources", [entry.get("source") or "helius_search"])
-            _append_seed(entry, "helius_search")
-            if len(seeds) >= desired:
-                break
-    elif not USE_DAS_DISCOVERY and len(seeds) < minimum_before_das:
-        logger.debug("DAS discovery disabled; relying on Dexscreener/Birdeye seeds")
+            helius_allowed = True
+    else:
+        logger.debug("DAS discovery disabled; relying on non-DAS seed providers")
 
     async def _gather_sources() -> None:
         nonlocal seeds, seen
@@ -1327,12 +1311,25 @@ async def _collect_trending_seeds(
                     return_entries=True,
                 ),
             )
+        else:
+            birdeye_limit = None
+
+        if helius_allowed:
+            _schedule(
+                "helius_search",
+                _helius_search_assets(
+                    session,
+                    limit=desired,
+                    rpc_url=rpc_url,
+                ),
+            )
 
         default_sources = {
             "dex_new_pairs": "dexscreener",
             "dex_trending": "dexscreener",
             "pump_trending": "pumpfun",
             "birdeye": "birdeye",
+            "helius_search": "helius_search",
         }
 
         has_enough = False
@@ -1360,10 +1357,12 @@ async def _collect_trending_seeds(
                     logger.info(
                         "Birdeye returned %d candidate(s) (offset=0, limit=%s)",
                         len(entries),
-                        birdeye_limit,
+                        birdeye_limit if birdeye_limit is not None else "n/a",
                     )
                 elif name == "pump_trending" and logger.isEnabledFor(logging.INFO):
                     logger.info("Pump.fun trending returned %d candidate(s)", len(entries))
+                elif name == "helius_search" and logger.isEnabledFor(logging.INFO):
+                    logger.info("Helius searchAssets provided %d candidate(s)", len(entries))
 
                 if has_enough:
                     continue
@@ -2141,10 +2140,7 @@ async def _scan_tokens_async_locked(
     def _apply_static() -> List[str]:
         TRENDING_METADATA.clear()
         defaults = [
-            "So11111111111111111111111111111111111111112",  # SOL
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
-            "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",  # JUP
         ]
         candidates: List[str] = list(STATIC_SEED_TOKENS)
         candidates.extend(defaults)
