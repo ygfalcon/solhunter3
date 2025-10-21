@@ -6,7 +6,7 @@ import dataclasses
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Sequence
 
 import pytest
 from aiohttp import ClientConnectorError, ClientResponseError, RequestInfo
@@ -147,14 +147,66 @@ class PriceProviderStub:
         outcome = queue.popleft() if queue else {"kind": "success"}
         kind = outcome.get("kind", "success")
         extra = {k: v for k, v in outcome.items() if k != "kind"}
-        self._record(provider, kind, tokens, extra)
         if kind == "success":
-            price = float(outcome.get("price", 1.0))
-            quality = outcome.get("quality", "aggregate")
-            asof = int(self.clock.time() * 1000)
-            quote = PriceQuote(price_usd=price, source=provider, asof=asof, quality=quality)
-            return {token: quote for token in tokens}
+            now_ms = int(self.clock.time() * 1000)
+            results: Dict[str, PriceQuote] = {}
+            prices: Dict[str, float] = {}
+            quotes_spec = extra.get("quotes")
+            if not isinstance(quotes_spec, Mapping):
+                quotes_spec = {}
+            for token in tokens:
+                token_spec = quotes_spec.get(token) if isinstance(quotes_spec, Mapping) else {}
+                if extra.get("omit") or (isinstance(token_spec, Mapping) and token_spec.get("omit")):
+                    continue
+                if isinstance(token_spec, Mapping) and token_spec.get("price") is not None:
+                    price_value = token_spec.get("price")
+                else:
+                    price_value = extra.get("price", 1.0)
+                try:
+                    price = float(price_value)
+                except (TypeError, ValueError):
+                    price = 0.0
+                quality = (
+                    token_spec.get("quality")
+                    if isinstance(token_spec, Mapping) and token_spec.get("quality") is not None
+                    else extra.get("quality", "aggregate")
+                )
+                if isinstance(token_spec, Mapping) and token_spec.get("asof_delta_ms") is not None:
+                    asof_delta = token_spec.get("asof_delta_ms")
+                else:
+                    asof_delta = extra.get("asof_delta_ms", 0)
+                try:
+                    asof = now_ms + int(asof_delta)
+                except (TypeError, ValueError):
+                    asof = now_ms
+                liquidity_val = None
+                if isinstance(token_spec, Mapping) and token_spec.get("liquidity") is not None:
+                    liquidity_val = token_spec.get("liquidity")
+                elif extra.get("liquidity") is not None:
+                    liquidity_val = extra.get("liquidity")
+                liquidity_hint = (
+                    float(liquidity_val) if isinstance(liquidity_val, (int, float)) else None
+                )
+                source_override = (
+                    token_spec.get("source")
+                    if isinstance(token_spec, Mapping) and token_spec.get("source")
+                    else extra.get("source") or provider
+                )
+                quote = PriceQuote(
+                    price_usd=price,
+                    source=str(source_override),
+                    asof=asof,
+                    quality=str(quality),
+                    liquidity_hint=liquidity_hint,
+                )
+                results[token] = quote
+                prices[token] = price
+            extra_summary = dict(extra)
+            extra_summary.setdefault("prices", prices)
+            self._record(provider, kind, tokens, extra_summary)
+            return results
         if kind == "timeout":
+            self._record(provider, kind, tokens, extra)
             raise asyncio.TimeoutError(f"{provider} timeout")
         if kind == "http":
             status = int(outcome.get("status", 503))
@@ -164,6 +216,7 @@ class PriceProviderStub:
                 headers={},
                 real_url=URL(f"https://stub/{provider}"),
             )
+            self._record(provider, kind, tokens, extra)
             raise ClientResponseError(
                 request_info,
                 (),
@@ -181,7 +234,9 @@ class PriceProviderStub:
                 proxy_auth=None,
                 proxy_headers_hash=None,
             )
+            self._record(provider, kind, tokens, extra)
             raise ClientConnectorError(conn_key, OSError(f"{provider} disconnect"))
+        self._record(provider, kind, tokens, extra)
         raise RuntimeError(f"unknown outcome {kind}")
 
 SCENARIO_PAYLOADS: Mapping[str, Any] = {
@@ -442,6 +497,8 @@ class GoldenPipelineHarness:
         self.price_health_snapshots: list[dict[str, Any]] = []
         self.price_quotes: list[Dict[str, PriceQuote]] = []
         self.price_quote_sources: list[dict[str, str]] = []
+        self.price_blend_diagnostics: list[Dict[str, Any]] = []
+        self.price_blend_metrics: list[Dict[str, Any]] = []
         self.price_probe_token = "So11111111111111111111111111111111111111112"
 
         async def fetcher(mints: Iterable[str]) -> Dict[str, TokenSnapshot]:
@@ -730,22 +787,38 @@ class GoldenPipelineHarness:
             self.price_quote_sources.append({token: quote.source for token, quote in quotes.items()})
             snapshot = prices.get_provider_health_snapshot()
             self.price_health_snapshots.append(snapshot)
-            await self._publish_price_metrics(idx, snapshot)
+            blend_snapshot = prices.get_price_blend_diagnostics(tokens)
+            self.price_blend_diagnostics.append(blend_snapshot)
+            await self._publish_price_metrics(idx, snapshot, blend_snapshot)
             if delay > 0:
                 self.clock.tick(delay)
 
-    async def _publish_price_metrics(self, sequence: int, snapshot: Mapping[str, Mapping[str, Any]]) -> None:
-        payload = {
+    async def _publish_price_metrics(
+        self,
+        sequence: int,
+        snapshot: Mapping[str, Mapping[str, Any]],
+        blend: Mapping[str, Any],
+    ) -> None:
+        provider_payload = {
             "sequence": sequence,
             "providers": snapshot,
             "ts": self.clock.time(),
         }
-        await self.pipeline._publish("metrics.prices.providers", payload)
+        await self.pipeline._publish("metrics.prices.providers", provider_payload)
+        if blend:
+            blend_payload = {
+                "sequence": sequence,
+                "diagnostics": blend,
+                "ts": self.clock.time(),
+            }
+            self.price_blend_metrics.append(blend_payload)
+            await self.pipeline._publish("metrics.prices.blend", blend_payload)
 
     def _reset_price_caches(self) -> None:
         prices.PRICE_CACHE = PriceTTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
         prices.QUOTE_CACHE = PriceTTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
         prices.BATCH_CACHE = PriceTTLCache(maxsize=256, ttl=PRICE_CACHE_TTL)
+        prices.PRICE_BLEND_DIAGNOSTICS = PriceTTLCache(maxsize=256, ttl=PRICE_CACHE_TTL)
 
     async def _wait_until(self, predicate, *, timeout: float = 2.0) -> None:
         start = time.monotonic()
@@ -793,7 +866,12 @@ _PATCH_TARGETS: tuple[str, ...] = (
 
 
 @contextlib.contextmanager
-def run_golden_harness(*, clock_seed: float | None = None) -> Iterator[GoldenPipelineHarness]:
+def run_golden_harness(
+    *,
+    clock_seed: float | None = None,
+    configure_prices: Callable[[PriceProviderStub], None] | None = None,
+    env: Mapping[str, str | None] | None = None,
+) -> Iterator[GoldenPipelineHarness]:
     """Execute a complete Golden pipeline run with isolated state."""
 
     clock = FrozenClock(start=clock_seed) if clock_seed is not None else FrozenClock()
@@ -801,8 +879,16 @@ def run_golden_harness(*, clock_seed: float | None = None) -> Iterator[GoldenPip
     for target in _PATCH_TARGETS:
         monkeypatch.setattr(target, clock.time, raising=False)
     monkeypatch.setattr(prices, "_monotonic", clock.time, raising=False)
+    monkeypatch.setattr(prices, "_now_ms", lambda: int(clock.time() * 1000), raising=False)
     monkeypatch.setenv("BIRDEYE_API_KEY", "stub-birdeye-key-000000000000000001")
     monkeypatch.setenv("PRICE_PROVIDERS", "pyth,birdeye,jupiter,dexscreener,synthetic")
+    if env:
+        for key, value in env.items():
+            if value is None:
+                monkeypatch.delenv(key, raising=False)
+            else:
+                monkeypatch.setenv(key, str(value))
+    prices.refresh_price_blend_config()
 
     async def _empty_provider(*_args, **_kwargs):
         return {}
@@ -835,6 +921,9 @@ def run_golden_harness(*, clock_seed: float | None = None) -> Iterator[GoldenPip
         ],
     )
 
+    if configure_prices is not None:
+        configure_prices(price_stub)
+
     async def stubbed_birdeye(session, tokens):
         return await price_stub.execute("birdeye", tokens)
 
@@ -863,6 +952,7 @@ def run_golden_harness(*, clock_seed: float | None = None) -> Iterator[GoldenPip
         yield harness
     finally:
         monkeypatch.undo()
+        prices.refresh_price_blend_config()
 
 
 @pytest.fixture(scope="module")

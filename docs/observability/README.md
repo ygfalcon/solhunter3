@@ -44,6 +44,25 @@ kubectl apply -f docs/observability/alerts.yaml -n observability
 Make sure Alertmanager routes the labels defined in `alerts.yaml` so the `dashboard`
 label links responders back to the Grafana panels that triggered the incident.
 
+## Price blend diagnostics
+
+The pricing pipeline now emits a dedicated `metrics.prices.blend` stream that carries
+per-token quote diagnostics. Each payload includes the most recent providers that
+contributed to the blended price, their quote ages, per-venue deviation in basis points,
+computed z-scores, and any alerts that tripped (for example `stale_quote`,
+`missing_providers`, `sigma_outlier`, or the new `asymmetric_consensus`). The aggregate
+object also reports a `skew_bps` value that measures how unbalanced the quote cloud is
+around the resolved price so responders can tell the difference between symmetric noise
+and a one-sided blowout. Operators can plot these fields to spot when a venue stops
+returning data or when a single venue drifts far outside the consensus band.
+
+The UI renders the same diagnostics next to the price widgets so responders can
+correlate noisy quotes with shifts in acceptance rate or vote timing. The
+`PRICE_BLEND_*` environment variables described in
+`tests/golden_pipeline/test_price_blend_chaos.py` let you tighten or relax the alert
+thresholds without redeploying code, including `PRICE_BLEND_SKEW_ALERT_BPS` for the
+skew detector and the existing spread/sigma knobs.
+
 ## CI artifact
 
 The GitHub Actions workflow publishes the contents of `docs/observability/` as the
