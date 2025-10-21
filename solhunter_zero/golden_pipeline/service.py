@@ -925,6 +925,8 @@ class GoldenPipelineService:
         tokens: Iterable[Any]
         if isinstance(payload, dict) and "tokens" in payload:
             tokens = payload.get("tokens") or []
+        elif isinstance(payload, dict) and payload.get("mint"):
+            tokens = [payload.get("mint")]
         elif isinstance(payload, (list, tuple, set)):
             tokens = payload
         else:

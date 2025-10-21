@@ -979,6 +979,12 @@ def get_broker_urls(cfg: Mapping[str, Any] | None = None) -> list[str]:
             continue
         if url not in cleaned:
             cleaned.append(url)
+    if not cleaned:
+        bus_url = os.getenv("EVENT_BUS_URL", "")
+        if bus_url:
+            parsed = urllib.parse.urlparse(bus_url)
+            if parsed.scheme.lower() in {"redis", "rediss"}:
+                cleaned.append(bus_url)
     return cleaned
 
 
