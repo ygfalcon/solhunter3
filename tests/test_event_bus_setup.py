@@ -18,6 +18,7 @@ async def no_pending_tasks():
 
 
 @pytest.mark.asyncio
+@pytest.mark.chaos
 async def test_reload_bus_invalid_url(monkeypatch, no_pending_tasks):
     import solhunter_zero.event_bus as ev
 

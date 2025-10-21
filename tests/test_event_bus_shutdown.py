@@ -40,6 +40,7 @@ if importlib.util.find_spec("pydantic") is None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.chaos
 async def test_shutdown_event_bus_cancels_tasks(monkeypatch):
     monkeypatch.setenv("BROKER_WS_URLS", "ws://bus")
     import solhunter_zero.event_bus as ev
@@ -63,6 +64,7 @@ async def test_shutdown_event_bus_cancels_tasks(monkeypatch):
     importlib.reload(ev)
 
 
+@pytest.mark.chaos
 def test_reconnect_ws_shutdown_no_pending_tasks(monkeypatch, capsys):
     import solhunter_zero.event_bus as ev
     ev = importlib.reload(ev)

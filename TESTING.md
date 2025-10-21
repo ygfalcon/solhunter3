@@ -23,6 +23,53 @@ Then run the tests from the project root:
 pytest
 ```
 
+## Continuous integration gates
+
+Pushes and pull requests target the **Quality Gates** workflow, which fans out
+into four focused jobs so regressions are isolated quickly:
+
+| Job | Command | Focus |
+| --- | --- | --- |
+| `unit-tests` | `pytest -m "not slow and not integration"` | Mainline unit suite plus protobuf validation, flake8, and bytecode compilation. |
+| `golden-determinism` | `pytest tests/test_golden_pipeline.py::test_golden_snapshot_metrics_and_determinism` | Verifies that golden snapshots emit consistent hashes and metrics. |
+| `headless-ui-smoke` | `pytest tests/test_ui_meta_ws.py tests/golden_pipeline/test_ui_smoke_synth.py` | Exercises the websocket-driven UI stack without a browser. |
+| `chaos-suite` | `pytest -m chaos` | Short chaos drills that attack event bus failure handling. |
+
+Each job stores its junit XML plus relevant `artifacts/`, `logs/`, `health/`,
+and `metrics/` directories through `scripts/ci_bundle_artifacts.py`. The script
+copies the requested paths into `build/<job>-artifacts/`, writes a
+`manifest.json`, and emits `ending_values.json` summarizing the final pass/fail
+counts used for promotion dashboards. Invoke it locally after a run to create
+an identical bundle:
+
+```bash
+python scripts/ci_bundle_artifacts.py \
+  --job-name unit-tests \
+  --junit-path build/unit-tests.xml \
+  --include artifacts --include logs
+```
+
+## Promotion flow
+
+Before promoting a build, deploy the staging stack and run the Redis-backed
+smoke harness via the dedicated canary script. It loads `.env.staging` (or a
+file of your choice), deploys using Docker Compose by default, waits for the
+event bus to respond, and then runs `scripts/preflight/run_all.sh` (falling back
+to the pure Python bus smoke probes when the harness is unavailable). On
+failure the script exits non-zero and writes a machine readable summary to
+`artifacts/canary/staging_canary.json` so CI and release tooling can block the
+promotion:
+
+```bash
+python scripts/canary_staging.py \
+  --env-file .env.staging \
+  --redis-url redis://staging-redis:6379/0
+```
+
+Supply `--deploy-cmd` or `--smoke-cmd` to override the defaults, and
+`--skip-deploy` when staging is already running. The same artifact directory is
+picked up automatically by the bundling helper when invoked in CI.
+
 ## Demo and paper CLI
 
 `demo.py` and `paper.py` now delegate to the same
