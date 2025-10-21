@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -660,6 +661,7 @@ class GoldenPipelineService:
         )
         await self.pipeline.flush_market()
         self._tasks.append(asyncio.create_task(self._market_flush_loop(), name="golden_market_flush"))
+        self._tasks.append(asyncio.create_task(self._heartbeat_loop(), name="golden_heartbeat"))
         if bootstrapped:
             log.info(
                 "GoldenPipelineService started (subscriptions=token_discovered, price_update, depth_update; bootstrapped=%d)",
@@ -701,6 +703,29 @@ class GoldenPipelineService:
             while self._running:
                 await asyncio.sleep(5.0)
                 await self.pipeline.flush_market()
+        except asyncio.CancelledError:
+            raise
+
+    async def _heartbeat_loop(self) -> None:
+        base_interval = 5.0
+        max_interval = 60.0
+        interval = base_interval
+        try:
+            while self._running:
+                try:
+                    heartbeat = {"type": "golden_heartbeat", "ts": time.time()}
+                    self._event_bus.publish("x:mint.golden.__meta", heartbeat)
+                except Exception:
+                    interval = min(max_interval, interval * 2.0)
+                    log.warning(
+                        "GoldenPipelineService heartbeat publish failed; backing off to %.2fs",
+                        interval,
+                        exc_info=True,
+                    )
+                else:
+                    interval = base_interval
+                jitter_multiplier = random.uniform(0.8, 1.2)
+                await asyncio.sleep(interval * jitter_multiplier)
         except asyncio.CancelledError:
             raise
 
