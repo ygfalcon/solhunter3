@@ -1,6 +1,8 @@
 import asyncio
 import os
+import re
 import sys
+import time
 import types
 from typing import Dict, List
 
@@ -119,6 +121,55 @@ async def test_exit_panel_provider_exposes_manager_summary(monkeypatch):
     payload = response.get_json()
     assert payload["hot_watch"], "API should expose hot_watch data"
     assert payload["diagnostics"], "API should expose diagnostics data"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_market_panel_renders_pipeline_keys(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "0")
+    runtime = TradingRuntime()
+
+    now = time.time()
+    with runtime._swarm_lock:
+        runtime._market_ohlcv["PIPE"] = {
+            "mint": "PIPE",
+            "c": 1.23,
+            "vol_usd": 456.0,
+            "buyers": 7,
+            "sellers": 4,
+            "asof_close": now,
+            "_received": now,
+        }
+        runtime._market_depth["PIPE"] = {
+            "mint": "PIPE",
+            "spread_bps": 12.0,
+            "asof": now,
+            "_received": now,
+        }
+
+    market_panel = runtime._collect_market_panel()
+    assert market_panel["markets"], "expected market snapshot"
+    entry = market_panel["markets"][0]
+    assert entry["close"] == pytest.approx(1.23)
+    assert entry["volume"] == pytest.approx(456.0)
+    assert entry["buyers"] == 7
+    assert entry["sellers"] == 4
+
+    await runtime._start_ui()
+
+    app = create_app(runtime.ui_state)
+    client = app.test_client()
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    row_match = re.search(r"<tr[^>]*data-mint=\"PIPE\"[^>]*>(.*?)</tr>", html, re.DOTALL)
+    assert row_match, "expected market row to render"
+    cells = [
+        re.sub(r"<[^>]+>", "", cell).strip()
+        for cell in re.findall(r"<td[^>]*>(.*?)</td>", row_match.group(1), re.DOTALL)
+    ]
+    assert len(cells) >= 3
+    assert cells[1] != "—", "close cell should show a price"
+    assert cells[2] != "—", "volume cell should show a value"
 
 
 def test_collect_health_metrics(monkeypatch):
