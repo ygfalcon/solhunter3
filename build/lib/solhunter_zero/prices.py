@@ -9,10 +9,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import random
+import statistics
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
-from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, MutableMapping, Sequence, Set, Tuple, Union
 
 import aiohttp
 try:
@@ -51,6 +52,98 @@ PRICE_CACHE_TTL = float(os.getenv("PRICE_CACHE_TTL", "30") or 30)
 PRICE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
 QUOTE_CACHE: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
 BATCH_CACHE: TTLCache = TTLCache(maxsize=256, ttl=PRICE_CACHE_TTL)
+PRICE_BLEND_DIAGNOSTICS: TTLCache = TTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
+
+_DEFAULT_PRICE_BLEND_MIN_SOURCES = 1
+_DEFAULT_PRICE_BLEND_PROVIDER_LIMIT = 3
+_DEFAULT_PRICE_BLEND_STALE_MS = 15000.0
+_DEFAULT_PRICE_BLEND_SIGMA_ALERT = 2.5
+_DEFAULT_PRICE_BLEND_SPREAD_ALERT_BPS = 120.0
+_DEFAULT_PRICE_BLEND_SKEW_ALERT_BPS = 80.0
+
+PRICE_BLEND_MIN_SOURCES = max(
+    1, int(os.getenv("PRICE_BLEND_MIN_SOURCES", str(_DEFAULT_PRICE_BLEND_MIN_SOURCES)) or _DEFAULT_PRICE_BLEND_MIN_SOURCES)
+)
+PRICE_BLEND_PROVIDER_LIMIT = max(
+    1,
+    int(
+        os.getenv("PRICE_BLEND_PROVIDER_LIMIT", str(_DEFAULT_PRICE_BLEND_PROVIDER_LIMIT))
+        or _DEFAULT_PRICE_BLEND_PROVIDER_LIMIT
+    ),
+)
+PRICE_BLEND_STALE_MS = float(
+    os.getenv("PRICE_BLEND_STALE_MS", str(_DEFAULT_PRICE_BLEND_STALE_MS))
+    or _DEFAULT_PRICE_BLEND_STALE_MS
+)
+PRICE_BLEND_SIGMA_ALERT = float(
+    os.getenv("PRICE_BLEND_SIGMA_ALERT", str(_DEFAULT_PRICE_BLEND_SIGMA_ALERT))
+    or _DEFAULT_PRICE_BLEND_SIGMA_ALERT
+)
+PRICE_BLEND_SPREAD_ALERT_BPS = float(
+    os.getenv("PRICE_BLEND_SPREAD_ALERT_BPS", str(_DEFAULT_PRICE_BLEND_SPREAD_ALERT_BPS))
+    or _DEFAULT_PRICE_BLEND_SPREAD_ALERT_BPS
+)
+PRICE_BLEND_SKEW_ALERT_BPS = float(
+    os.getenv("PRICE_BLEND_SKEW_ALERT_BPS", str(_DEFAULT_PRICE_BLEND_SKEW_ALERT_BPS))
+    or _DEFAULT_PRICE_BLEND_SKEW_ALERT_BPS
+)
+
+
+def refresh_price_blend_config() -> None:
+    """Refresh blend diagnostics configuration from the current environment."""
+
+    global PRICE_BLEND_MIN_SOURCES, PRICE_BLEND_PROVIDER_LIMIT
+    global PRICE_BLEND_STALE_MS, PRICE_BLEND_SIGMA_ALERT, PRICE_BLEND_SPREAD_ALERT_BPS
+    global PRICE_BLEND_SKEW_ALERT_BPS
+
+    try:
+        PRICE_BLEND_MIN_SOURCES = max(
+            1,
+            int(
+                os.getenv("PRICE_BLEND_MIN_SOURCES", str(_DEFAULT_PRICE_BLEND_MIN_SOURCES))
+                or _DEFAULT_PRICE_BLEND_MIN_SOURCES
+            ),
+        )
+    except (TypeError, ValueError):
+        PRICE_BLEND_MIN_SOURCES = max(1, PRICE_BLEND_MIN_SOURCES)
+    try:
+        PRICE_BLEND_PROVIDER_LIMIT = max(
+            1,
+            int(
+                os.getenv("PRICE_BLEND_PROVIDER_LIMIT", str(_DEFAULT_PRICE_BLEND_PROVIDER_LIMIT))
+                or _DEFAULT_PRICE_BLEND_PROVIDER_LIMIT
+            ),
+        )
+    except (TypeError, ValueError):
+        PRICE_BLEND_PROVIDER_LIMIT = max(1, PRICE_BLEND_PROVIDER_LIMIT)
+    try:
+        PRICE_BLEND_STALE_MS = float(
+            os.getenv("PRICE_BLEND_STALE_MS", str(_DEFAULT_PRICE_BLEND_STALE_MS))
+            or _DEFAULT_PRICE_BLEND_STALE_MS
+        )
+    except (TypeError, ValueError):
+        PRICE_BLEND_STALE_MS = float(PRICE_BLEND_STALE_MS)
+    try:
+        PRICE_BLEND_SIGMA_ALERT = float(
+            os.getenv("PRICE_BLEND_SIGMA_ALERT", str(_DEFAULT_PRICE_BLEND_SIGMA_ALERT))
+            or _DEFAULT_PRICE_BLEND_SIGMA_ALERT
+        )
+    except (TypeError, ValueError):
+        PRICE_BLEND_SIGMA_ALERT = float(PRICE_BLEND_SIGMA_ALERT)
+    try:
+        PRICE_BLEND_SPREAD_ALERT_BPS = float(
+            os.getenv("PRICE_BLEND_SPREAD_ALERT_BPS", str(_DEFAULT_PRICE_BLEND_SPREAD_ALERT_BPS))
+            or _DEFAULT_PRICE_BLEND_SPREAD_ALERT_BPS
+        )
+    except (TypeError, ValueError):
+        PRICE_BLEND_SPREAD_ALERT_BPS = float(PRICE_BLEND_SPREAD_ALERT_BPS)
+    try:
+        PRICE_BLEND_SKEW_ALERT_BPS = float(
+            os.getenv("PRICE_BLEND_SKEW_ALERT_BPS", str(_DEFAULT_PRICE_BLEND_SKEW_ALERT_BPS))
+            or _DEFAULT_PRICE_BLEND_SKEW_ALERT_BPS
+        )
+    except (TypeError, ValueError):
+        PRICE_BLEND_SKEW_ALERT_BPS = float(PRICE_BLEND_SKEW_ALERT_BPS)
 
 JUPITER_PRICE_URL = os.getenv("JUPITER_PRICE_URL", "https://price.jup.ag/v4/price")
 JUPITER_BATCH_SIZE = max(1, int(os.getenv("JUPITER_BATCH_SIZE", "64") or 64))
@@ -1223,35 +1316,223 @@ def _record_provider_failure(name: str, exc: BaseException, latency_ms: float) -
     )
 
 
+def _record_blend_diagnostics(
+    tokens: Sequence[str],
+    resolved: Mapping[str, PriceQuote],
+    provider_requests: Mapping[str, Set[str]],
+    provider_results: Mapping[str, Dict[str, PriceQuote]],
+    provider_failures: Mapping[str, str],
+) -> None:
+    now_ms = _now_ms()
+    for token in tokens:
+        observations: List[Dict[str, Any]] = []
+        missing: List[str] = []
+        failed: List[Dict[str, Any]] = []
+        for provider, requested_tokens in provider_requests.items():
+            if token not in requested_tokens:
+                continue
+            quotes = provider_results.get(provider, {})
+            quote = quotes.get(token)
+            if not isinstance(quote, PriceQuote):
+                missing.append(provider)
+                reason = provider_failures.get(provider)
+                if reason:
+                    failed.append({"provider": provider, "reason": reason})
+                continue
+            asof = int(getattr(quote, "asof", 0) or 0)
+            age_ms = max(0.0, float(now_ms - asof))
+            observations.append(
+                {
+                    "provider": provider,
+                    "price": float(getattr(quote, "price_usd", 0.0) or 0.0),
+                    "asof_ms": asof,
+                    "age_ms": age_ms,
+                    "quality": getattr(quote, "quality", ""),
+                    "liquidity_hint": getattr(quote, "liquidity_hint", None),
+                    "stale": age_ms > PRICE_BLEND_STALE_MS,
+                    "source": getattr(quote, "source", provider),
+                    "zscore": 0.0,
+                    "side": "neutral",
+                    "deviation_bps": 0.0,
+                    "outlier": False,
+                }
+            )
+
+        prices = [obs["price"] for obs in observations if obs["price"] > 0]
+        spread_bps = 0.0
+        sigma = 0.0
+        mean_price = 0.0
+        median_price = 0.0
+        outliers: List[str] = []
+        if len(prices) >= 2:
+            try:
+                sigma = float(statistics.pstdev(prices))
+            except statistics.StatisticsError:
+                sigma = 0.0
+            try:
+                mean_price = float(statistics.mean(prices))
+            except statistics.StatisticsError:
+                mean_price = 0.0
+            try:
+                median_price = float(statistics.median(prices))
+            except statistics.StatisticsError:
+                median_price = 0.0
+            if median_price > 0:
+                spread = max(prices) - min(prices)
+                spread_bps = (spread / median_price) * 10000.0
+            if sigma > 0:
+                for observation in observations:
+                    price = observation["price"]
+                    if not price:
+                        observation["zscore"] = 0.0
+                        continue
+                    zscore = (price - mean_price) / sigma
+                    observation["zscore"] = zscore
+                    observation["side"] = (
+                        "above" if zscore > 0 else "below" if zscore < 0 else "neutral"
+                    )
+                    if abs(zscore) >= PRICE_BLEND_SIGMA_ALERT:
+                        outliers.append(observation["provider"])
+            else:
+                for observation in observations:
+                    observation["zscore"] = 0.0
+                    observation["side"] = "neutral"
+        else:
+            for observation in observations:
+                observation["zscore"] = 0.0
+                observation["side"] = "neutral"
+
+        resolved_quote = resolved.get(token)
+        resolved_price = (
+            float(getattr(resolved_quote, "price_usd", 0.0) or 0.0)
+            if resolved_quote
+            else 0.0
+        )
+        baseline_price = 0.0
+        if resolved_price > 0:
+            baseline_price = resolved_price
+        elif median_price > 0:
+            baseline_price = median_price
+        elif mean_price > 0:
+            baseline_price = mean_price
+        elif prices:
+            baseline_price = float(prices[0])
+
+        if baseline_price > 0:
+            for observation in observations:
+                deviation = (observation["price"] - baseline_price) / baseline_price * 10000.0
+                observation["deviation_bps"] = float(deviation)
+                if observation["side"] == "neutral":
+                    if deviation > 0:
+                        observation["side"] = "above"
+                    elif deviation < 0:
+                        observation["side"] = "below"
+
+        alerts: List[str] = []
+        if not observations:
+            alerts.append("no_quotes")
+        if missing:
+            alerts.append("missing_providers")
+        if failed:
+            alerts.append("provider_errors")
+        if any(obs.get("stale") for obs in observations):
+            alerts.append("stale_quote")
+        if spread_bps >= PRICE_BLEND_SPREAD_ALERT_BPS and observations:
+            alerts.append("wide_spread")
+        if outliers:
+            alerts.append("sigma_outlier")
+
+        outlier_set = set(outliers)
+        for observation in observations:
+            observation["outlier"] = observation["provider"] in outlier_set
+
+        positive = sum(1 for obs in observations if obs["zscore"] > 0)
+        negative = sum(1 for obs in observations if obs["zscore"] < 0)
+
+        skew_bps = 0.0
+        if baseline_price > 0 and prices:
+            high = max(prices)
+            low = min(prices)
+            above = max(0.0, high - baseline_price)
+            below = max(0.0, baseline_price - low)
+            skew = abs(above - below)
+            if skew > 0:
+                skew_bps = (skew / baseline_price) * 10000.0
+
+        if (
+            (outliers or positive == 0 or negative == 0)
+            and skew_bps >= PRICE_BLEND_SKEW_ALERT_BPS
+            and observations
+        ):
+            alerts.append("asymmetric_consensus")
+
+        diagnostics = {
+            "token": token,
+            "resolved_source": getattr(resolved_quote, "source", None),
+            "resolved_price": float(resolved_quote.price_usd) if resolved_quote else None,
+            "observations": observations,
+            "missing_providers": missing,
+            "failed_providers": failed,
+            "outliers": outliers,
+            "spread_bps": spread_bps,
+            "sigma": sigma,
+            "skew_bps": skew_bps,
+            "alerts": alerts,
+            "updated_ms": now_ms,
+        }
+        PRICE_BLEND_DIAGNOSTICS.set(token, diagnostics)
+
+
+def get_price_blend_diagnostics(tokens: Iterable[str] | None = None) -> Dict[str, Dict[str, Any]]:
+    if tokens is None:
+        tokens = PRICE_BLEND_DIAGNOSTICS.keys()
+    result: Dict[str, Dict[str, Any]] = {}
+    for token in tokens:
+        diagnostics = PRICE_BLEND_DIAGNOSTICS.get(token)
+        if isinstance(diagnostics, Mapping):
+            result[token] = diagnostics
+    return result
+
+
 async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
     if not tokens:
         return {}
     session = await get_session()
     resolved: Dict[str, PriceQuote] = {}
     order = _provider_priority()
+    provider_requests: Dict[str, Set[str]] = {}
+    provider_results: Dict[str, Dict[str, PriceQuote]] = {}
+    provider_failures: Dict[str, str] = {}
+    per_token_sources: Dict[str, Set[str]] = {token: set() for token in tokens}
+    diag_budget = PRICE_BLEND_PROVIDER_LIMIT
 
     if "pyth" in order:
         mapping, _ = _parse_pyth_mapping()
         override_tokens = [token for token in tokens if token in mapping]
         if override_tokens:
+            provider_requests["pyth"] = set(override_tokens)
             start = _monotonic()
             try:
                 quotes = await _fetch_quotes_pyth(session, tuple(override_tokens))
             except Exception as exc:  # noqa: BLE001 - deliberate broad catch
                 latency_ms = (_monotonic() - start) * 1000.0
                 _record_provider_failure("pyth", exc, latency_ms)
+                provider_failures["pyth"] = exc.__class__.__name__
+                provider_results["pyth"] = {}
             else:
                 latency_ms = (_monotonic() - start) * 1000.0
                 if quotes:
                     _record_provider_success("pyth", latency_ms)
                     resolved.update(quotes)
+                    provider_results["pyth"] = dict(quotes)
+                    for token in quotes:
+                        per_token_sources.setdefault(token, set()).add("pyth")
                 else:
-                    _record_provider_failure(
-                        "pyth",
-                        RuntimeError("no quotes returned"),
-                        latency_ms,
-                    )
-            order = [name for name in order if name != "pyth"]
+                    error = RuntimeError("no quotes returned")
+                    _record_provider_failure("pyth", error, latency_ms)
+                    provider_failures["pyth"] = error.__class__.__name__
+                    provider_results["pyth"] = {}
+        order = [name for name in order if name != "pyth"]
     for idx, provider_name in enumerate(order):
         config = PROVIDER_CONFIGS[provider_name]
         state = PROVIDER_HEALTH[provider_name]
@@ -1262,9 +1543,34 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
         if state.in_cooldown():
             logger.debug("Prices: skipping %s provider due to cooldown", config.label)
             continue
-        pending = tokens if config.overrides else [tok for tok in tokens if tok not in resolved]
+        base_pending = (
+            list(tokens)
+            if config.overrides
+            else [tok for tok in tokens if tok not in resolved]
+        )
+        requested = provider_requests.setdefault(provider_name, set())
+        pending: List[str] = list(base_pending)
+        if PRICE_BLEND_MIN_SOURCES > 1:
+            diag_candidates: List[str] = []
+            for token in tokens:
+                if token in pending or token in requested:
+                    continue
+                if len(per_token_sources.get(token, set())) >= PRICE_BLEND_MIN_SOURCES:
+                    continue
+                diag_candidates.append(token)
+            if diag_candidates and not base_pending:
+                if diag_budget <= 0:
+                    diag_candidates = []
+                else:
+                    diag_budget -= 1
+            pending.extend(diag_candidates)
         if not pending and not config.overrides:
             continue
+        if pending:
+            pending = list(dict.fromkeys(pending))
+        if not pending:
+            continue
+        requested.update(pending)
         fetcher = globals()[config.fetcher]
         start = _monotonic()
         try:
@@ -1272,24 +1578,44 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
         except Exception as exc:  # noqa: BLE001 - deliberate broad catch
             latency_ms = (_monotonic() - start) * 1000.0
             _record_provider_failure(provider_name, exc, latency_ms)
+            provider_failures[provider_name] = exc.__class__.__name__
+            provider_results[provider_name] = {}
             continue
         latency_ms = (_monotonic() - start) * 1000.0
         if quotes:
             _record_provider_success(provider_name, latency_ms)
-        if not quotes:
+        if not isinstance(quotes, Mapping):
+            provider_results[provider_name] = {}
             continue
+        clean_quotes = {
+            token: quote for token, quote in quotes.items() if isinstance(quote, PriceQuote)
+        }
+        if not clean_quotes:
+            provider_results[provider_name] = {}
+            continue
+        provider_results[provider_name] = dict(clean_quotes)
         if config.overrides:
-            for token, quote in quotes.items():
+            for token, quote in clean_quotes.items():
                 resolved[token] = quote
         else:
-            for token, quote in quotes.items():
+            for token, quote in clean_quotes.items():
                 if token not in resolved:
                     resolved[token] = quote
+        for token in clean_quotes:
+            per_token_sources.setdefault(token, set()).add(provider_name)
         if len(resolved) == len(tokens):
             override_ahead = any(
                 PROVIDER_CONFIGS[name].overrides for name in order[idx + 1 :]
             )
-            if not override_ahead:
+            if (
+                PRICE_BLEND_MIN_SOURCES <= 1
+                or all(
+                    len(per_token_sources.get(token, set()))
+                    >= PRICE_BLEND_MIN_SOURCES
+                    for token in tokens
+                )
+                or diag_budget <= 0
+            ) and not override_ahead:
                 break
     if len(resolved) < len(tokens):
         missing = [tok for tok in tokens if tok not in resolved]
@@ -1297,6 +1623,13 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
             logger.warning(
                 "Prices: unresolved token(s) after provider loop: %s", ", ".join(missing)
             )
+    _record_blend_diagnostics(
+        tokens,
+        resolved,
+        provider_requests,
+        provider_results,
+        provider_failures,
+    )
     return {token: resolved[token] for token in tokens if token in resolved}
 
 

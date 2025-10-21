@@ -74,7 +74,11 @@ class BaseAgent:
 
 
 class AgentStage:
-    """Evaluates registered agents against Golden Snapshots."""
+    """Evaluates registered agents against Golden Snapshots.
+
+    Agents are evaluated concurrently and their suggestions are emitted in
+    completion order so slow agents cannot delay faster peers.
+    """
 
     def __init__(
         self,
@@ -85,6 +89,7 @@ class AgentStage:
         min_depth1_pct_usd: float = 15_000.0,
         blacklist: Iterable[str] | None = None,
         cooldown_sec: float = 0.0,
+        agent_timeout_sec: float | None = None,
     ) -> None:
         self._emit = emit
         self._agents: List[BaseAgent] = list(agents or [])
@@ -94,6 +99,7 @@ class AgentStage:
         self._blacklist: Set[str] = {str(m).lower() for m in (blacklist or [])}
         self._cooldown = TTLCache()
         self._cooldown_sec = max(0.0, cooldown_sec)
+        self._agent_timeout = agent_timeout_sec if agent_timeout_sec and agent_timeout_sec > 0 else None
 
     def register_agent(self, agent: BaseAgent) -> None:
         self._agents.append(agent)
@@ -110,24 +116,50 @@ class AgentStage:
         if self._cooldown_sec > 0 and not self._cooldown.add(mint_key, self._cooldown_sec):
             return
         async with self._lock:
-            for agent in self._agents:
-                try:
+            agents = list(self._agents)
+
+        async def _evaluate(agent: BaseAgent) -> tuple[BaseAgent, Sequence[TradeSuggestion]]:
+            try:
+                if self._agent_timeout is not None:
+                    suggestions = await asyncio.wait_for(
+                        agent.generate(snapshot),
+                        timeout=self._agent_timeout,
+                    )
+                else:
                     suggestions = await agent.generate(snapshot)
-                except Exception:  # pragma: no cover - defensive
-                    log.exception("Agent %s failed", agent.name)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "Agent %s timed out after %.2fs",
+                    agent.name,
+                    self._agent_timeout,
+                )
+                return agent, ()
+            except Exception:  # pragma: no cover - defensive
+                log.exception("Agent %s failed", agent.name)
+                return agent, ()
+            return agent, suggestions or ()
+
+        tasks = [asyncio.create_task(_evaluate(agent)) for agent in agents]
+        if not tasks:
+            return
+
+        # Process agents as they complete so a slow agent cannot stall the stage. This
+        # intentionally emits suggestions in completion order rather than registration
+        # order.
+        for task in asyncio.as_completed(tasks):
+            agent, suggestions = await task
+            for suggestion in suggestions:
+                if suggestion.inputs_hash != snapshot.hash:
+                    log.warning(
+                        "Agent %s emitted suggestion with mismatched hash %s != %s",
+                        agent.name,
+                        suggestion.inputs_hash,
+                        snapshot.hash,
+                    )
                     continue
-                for suggestion in suggestions or []:
-                    if suggestion.inputs_hash != snapshot.hash:
-                        log.warning(
-                            "Agent %s emitted suggestion with mismatched hash %s != %s",
-                            agent.name,
-                            suggestion.inputs_hash,
-                            snapshot.hash,
-                        )
-                        continue
-                    if not self._edge_passes(suggestion):
-                        continue
-                    await self._emit(suggestion)
+                if not self._edge_passes(suggestion):
+                    continue
+                await self._emit(suggestion)
 
     def _edge_passes(self, suggestion: TradeSuggestion) -> bool:
         gating = suggestion.gating or {}

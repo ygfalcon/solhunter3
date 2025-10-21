@@ -15,6 +15,7 @@ class StreamNames:
     market_depth: str = "x:market.depth"
     golden_snapshot: str = "x:mint.golden"
     trade_suggested: str = "x:trade.suggested"
+    trade_rejected: str = "x:trade.rejected"
     vote_decisions: str = "x:vote.decisions"
     virtual_fills: str = "x:virt.fills"
     live_fills: str = "x:live.fills"

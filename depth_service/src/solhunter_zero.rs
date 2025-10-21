@@ -379,6 +379,8 @@ pub struct VirtualPnL {
 pub struct Event {
     #[prost(string, tag = "1")]
     pub topic: ::prost::alloc::string::String,
+    #[prost(string, tag = "34")]
+    pub dedupe_key: ::prost::alloc::string::String,
     #[prost(
         oneof = "event::Kind",
         tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33"

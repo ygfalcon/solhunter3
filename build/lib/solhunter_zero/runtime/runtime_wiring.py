@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import math
 import os
 import threading
@@ -11,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..event_bus import subscribe
-from ..ui import UIState
+from ..ui import UIState, get_ws_channel_metrics
 from ..util import parse_bool_env
 
 
@@ -204,6 +205,108 @@ def _format_countdown(seconds: float) -> str:
     return f"{secs}s"
 
 
+_EXIT_PANEL_KEYS: tuple[str, ...] = (
+    "hot_watch",
+    "diagnostics",
+    "queue",
+    "closed",
+    "missed_exits",
+)
+
+
+def _sanitize_exit_payload(data: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    sanitized: Dict[str, Any] = {}
+    if isinstance(data, Mapping):
+        for key, value in data.items():
+            try:
+                sanitized[key] = copy.deepcopy(value)
+            except Exception:
+                sanitized[key] = value
+    for key in _EXIT_PANEL_KEYS:
+        value = sanitized.get(key)
+        if isinstance(value, list):
+            try:
+                sanitized[key] = copy.deepcopy(value)
+            except Exception:
+                sanitized[key] = list(value)
+        elif value is None:
+            sanitized[key] = []
+        else:
+            sanitized[key] = [value]
+    for key in _EXIT_PANEL_KEYS:
+        sanitized.setdefault(key, [])
+    return sanitized
+
+
+def _compute_rl_uplift(
+    decisions: List[Dict[str, Any]],
+    suggestions: List[Dict[str, Any]],
+    now: float,
+) -> Dict[str, Any]:
+    window = 300.0
+    decision_scores: List[float] = []
+    for decision in decisions:
+        ts = _entry_timestamp(decision, "ts")
+        age = _age_seconds(ts, now)
+        if age is None and decision.get("_received") is not None:
+            try:
+                age = max(0.0, now - float(decision["_received"]))
+            except Exception:
+                age = None
+        if age is not None and age <= window:
+            score = _maybe_float(decision.get("score"))
+            if score is not None:
+                decision_scores.append(score)
+    suggestion_scores: List[float] = []
+    for suggestion in suggestions:
+        ts = _entry_timestamp(suggestion, "asof")
+        age = _age_seconds(ts, now)
+        if age is None and suggestion.get("_received") is not None:
+            try:
+                age = max(0.0, now - float(suggestion["_received"]))
+            except Exception:
+                age = None
+        if age is not None and age <= window:
+            edge = _maybe_float(suggestion.get("edge"))
+            if edge is not None:
+                suggestion_scores.append(edge)
+    rl_avg = sum(decision_scores) / len(decision_scores) if decision_scores else 0.0
+    plain_avg = (
+        sum(suggestion_scores) / len(suggestion_scores)
+        if suggestion_scores
+        else 0.0
+    )
+    rolling = rl_avg - plain_avg if decision_scores and suggestion_scores else 0.0
+    last_delta = 0.0
+    if decisions:
+        last_decision = decisions[0]
+        score_val = _maybe_float(last_decision.get("score"))
+        if score_val is not None:
+            related = [
+                _maybe_float(suggestion.get("edge"))
+                for suggestion in suggestions
+                if suggestion.get("mint") == last_decision.get("mint")
+                and (
+                    last_decision.get("snapshot_hash") is None
+                    or suggestion.get("inputs_hash")
+                    == last_decision.get("snapshot_hash")
+                )
+            ]
+            related = [value for value in related if value is not None]
+            if related:
+                last_delta = score_val - (sum(related) / len(related))
+    uplift_pct = 0.0
+    if plain_avg:
+        uplift_pct = (rl_avg - plain_avg) / abs(plain_avg) * 100.0
+    return {
+        "rolling_5m": rolling,
+        "last_decision_delta": last_delta,
+        "score_rl": rl_avg,
+        "score_plain": plain_avg,
+        "uplift_pct": uplift_pct,
+    }
+
+
 def _short_hash(value: Any) -> Optional[str]:
     if value in (None, ""):
         return None
@@ -254,10 +357,39 @@ class RuntimeEventCollectors:
         self._decision_counts: Dict[str, int] = {}
         self._decision_recent: Deque[Tuple[str, float]] = deque()
         self._decision_first_seen: Dict[str, float] = {}
+        self._mint_sequences: Dict[str, int] = {}
         fills_limit = _int_env("UI_FILLS_LIMIT", 400)
         self._virtual_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
         self._live_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
         self._subscriptions: List[Callable[[], None]] = []
+        self._exit_summary: Dict[str, Any] = _sanitize_exit_payload(None)
+        self._exit_lock = threading.Lock()
+        self._rl_weights_windows: Deque[Dict[str, Any]] = deque(
+            maxlen=_int_env("UI_RL_WEIGHTS_LIMIT", 240)
+        )
+        self._rl_status_info: Dict[str, Any] = {
+            "vote_window_ms": None,
+            "updated_at": None,
+        }
+        pnl_limit = _int_env("UI_VIRTUAL_PNL_LIMIT", 400)
+        self._virtual_pnls: Deque[Dict[str, Any]] = deque(maxlen=pnl_limit)
+
+    def _parse_sequence(self, value: Any) -> Optional[int]:
+        if value in (None, "", False):
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _accept_sequence(self, mint: str, sequence: Optional[int]) -> bool:
+        if sequence is None:
+            return True
+        last = self._mint_sequences.get(mint)
+        if last is not None and sequence <= last:
+            return False
+        self._mint_sequences[mint] = sequence
+        return True
 
     def start(self) -> None:
         def _normalize_event(event: Any) -> Dict[str, Any]:
@@ -339,7 +471,11 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            sequence = self._parse_sequence(payload.get("sequence"))
+            mint_key = str(mint)
             with self._swarm_lock:
+                if not self._accept_sequence(mint_key, sequence):
+                    return
                 self._agent_suggestions.appendleft(payload)
 
         async def _on_vote_decision(event: Any) -> None:
@@ -348,8 +484,12 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            sequence = self._parse_sequence(payload.get("sequence"))
             client_id = payload.get("clientOrderId") or payload.get("client_order_id")
+            mint_key = str(mint)
             with self._swarm_lock:
+                if not self._accept_sequence(mint_key, sequence):
+                    return
                 if client_id:
                     now_ts = time.time()
                     client_id_str = str(client_id)
@@ -387,6 +527,33 @@ class RuntimeEventCollectors:
             with self._swarm_lock:
                 self._live_fills.appendleft(payload)
 
+        async def _on_virtual_pnl(event: Any) -> None:
+            payload = _normalize_event(event)
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._virtual_pnls.appendleft(payload)
+
+        async def _on_rl_weights(event: Any) -> None:
+            payload = _normalize_event(event)
+            payload["_received"] = time.time()
+            vote_window = payload.get("vote_window_ms") or payload.get("vote_window")
+            with self._swarm_lock:
+                self._rl_weights_windows.appendleft(payload)
+                if vote_window is not None:
+                    try:
+                        window_ms = float(vote_window)
+                    except Exception:
+                        window_ms = None
+                    else:
+                        self._rl_status_info["vote_window_ms"] = window_ms
+                self._rl_status_info["updated_at"] = time.time()
+
+        async def _on_exit_panel(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not isinstance(payload, dict):
+                payload = {"hot_watch": payload}
+            self._set_exit_summary(payload)
+
         for topic, handler in (
             ("x:discovery.candidates", _on_discovery_candidate),
             ("x:token.snap", _on_token_snapshot),
@@ -397,6 +564,11 @@ class RuntimeEventCollectors:
             ("x:vote.decisions", _on_vote_decision),
             ("x:virt.fills", _on_virtual_fill),
             ("x:live.fills", _on_live_fill),
+            ("virtual_pnl", _on_virtual_pnl),
+            ("rl:weights.applied", _on_rl_weights),
+            ("rl_weights", _on_rl_weights),
+            ("x:swarm.exits", _on_exit_panel),
+            ("x:exit.panel", _on_exit_panel),
         ):
             unsub = subscribe(topic, handler)
             self._subscriptions.append(unsub)
@@ -423,9 +595,373 @@ class RuntimeEventCollectors:
                     continue
                 self._recent_tokens.appendleft(token_str)
                 self._discovery_seen.add(token_str)
-            while len(self._recent_tokens) > self._recent_tokens_limit:
-                removed = self._recent_tokens.pop()
-                self._discovery_seen.discard(removed)
+                while len(self._recent_tokens) > self._recent_tokens_limit:
+                    removed = self._recent_tokens.pop()
+                    self._discovery_seen.discard(removed)
+
+    def _set_exit_summary(self, payload: Optional[Mapping[str, Any]]) -> None:
+        sanitized = _sanitize_exit_payload(payload)
+        with self._exit_lock:
+            self._exit_summary = sanitized
+
+    def exit_snapshot(self) -> Dict[str, Any]:
+        with self._exit_lock:
+            return copy.deepcopy(self._exit_summary)
+
+    def token_facts_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            facts = dict(self._token_facts)
+        ordered: Dict[str, Dict[str, Any]] = {}
+        for mint in sorted(facts.keys()):
+            payload = dict(facts[mint] or {})
+            timestamp = _entry_timestamp(payload, "asof")
+            age = _age_seconds(timestamp, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            missing_meta = not payload.get("symbol") or not payload.get("name")
+            stale = (age is not None and age > 300.0) or missing_meta
+            ordered[mint] = {
+                "symbol": payload.get("symbol"),
+                "name": payload.get("name"),
+                "decimals": payload.get("decimals"),
+                "token_program": payload.get("token_program"),
+                "flags": payload.get("flags") or [],
+                "venues": payload.get("venues") or [],
+                "asof": payload.get("asof"),
+                "age_seconds": age,
+                "age_label": _format_age(age),
+                "stale": stale,
+            }
+        return {"tokens": ordered, "selected": None}
+
+    def rl_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            weights = list(self._rl_weights_windows)
+            decisions = list(self._vote_decisions)
+            suggestions = list(self._agent_suggestions)
+        entries: List[Dict[str, Any]] = []
+        for payload in weights:
+            mint = payload.get("mint")
+            if not mint:
+                continue
+            ts = _entry_timestamp(payload, "asof")
+            if ts is None:
+                ts = _entry_timestamp(payload, "timestamp")
+            age = _age_seconds(ts, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            multipliers = (
+                payload.get("multipliers")
+                or payload.get("weights")
+                or payload.get("agents")
+            )
+            if isinstance(multipliers, Mapping):
+                parts: List[str] = []
+                multiplier_map: Dict[str, Optional[float]] = {}
+                for key, value in multipliers.items():
+                    val = _maybe_float(value)
+                    multiplier_map[str(key)] = val
+                    if val is not None and len(parts) < 3:
+                        parts.append(f"{key}:{val:.2f}")
+                summary = ", ".join(parts)
+                if len(multipliers) > 3:
+                    summary = summary + " …" if summary else "…"
+            else:
+                val = _maybe_float(payload.get("multiplier"))
+                multiplier_map = {"value": val} if val is not None else {}
+                summary = f"{val:.2f}" if val is not None else "n/a"
+            entries.append(
+                {
+                    "mint": mint,
+                    "window_hash": payload.get("window_hash") or payload.get("hash"),
+                    "window_hash_short": _short_hash(
+                        payload.get("window_hash") or payload.get("hash")
+                    ),
+                    "multiplier": summary,
+                    "age_label": _format_age(age),
+                    "stale": age is not None and age > 600.0,
+                    "age_seconds": age,
+                    "multipliers": multiplier_map,
+                }
+            )
+        uplift = _compute_rl_uplift(decisions, suggestions, now)
+        return {"weights": entries[:120], "uplift": uplift}
+
+    def rl_status_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            updated_at = self._rl_status_info.get("updated_at")
+            vote_window_ms = self._rl_status_info.get("vote_window_ms")
+            weights_count = len(self._rl_weights_windows)
+        age = None
+        if updated_at is not None:
+            try:
+                age = max(0.0, now - float(updated_at))
+            except Exception:
+                age = None
+        return {
+            "weights_applied": weights_count,
+            "vote_window_ms": vote_window_ms,
+            "updated_at": updated_at,
+            "age_label": _format_age(age),
+        }
+
+    def _max_age_ms(
+        self,
+        entries: Iterable[Mapping[str, Any]],
+        *,
+        fields: Sequence[str],
+        now: float,
+    ) -> Optional[float]:
+        max_age: Optional[float] = None
+        for entry in entries:
+            timestamp = None
+            for field in fields:
+                timestamp = _entry_timestamp(entry, field)
+                if timestamp is not None:
+                    break
+            age = _age_seconds(timestamp, now)
+            if age is None and entry.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(entry["_received"]))
+                except Exception:
+                    age = None
+            if age is not None:
+                if max_age is None or age > max_age:
+                    max_age = age
+        if max_age is None:
+            return None
+        return max_age * 1000.0
+
+    def lag_snapshot(self) -> Dict[str, Optional[float]]:
+        now = time.time()
+        with self._swarm_lock:
+            depth_entries = list(self._market_depth.values())
+            ohlcv_entries = list(self._market_ohlcv.values())
+            golden_entries = list(self._golden_snapshots.values())
+            suggestion_entries = list(self._agent_suggestions)
+            decision_entries = list(self._vote_decisions)
+        depth_ms = self._max_age_ms(depth_entries, fields=("asof", "ts"), now=now)
+        ohlcv_ms = self._max_age_ms(
+            ohlcv_entries,
+            fields=("asof_close", "asof", "ts"),
+            now=now,
+        )
+        golden_ms = self._max_age_ms(golden_entries, fields=("asof", "ts"), now=now)
+        suggestion_ms = self._max_age_ms(
+            suggestion_entries,
+            fields=("asof", "timestamp", "ts"),
+            now=now,
+        )
+        decision_ms = self._max_age_ms(decision_entries, fields=("ts",), now=now)
+        candidates = [
+            value
+            for value in (
+                depth_ms,
+                ohlcv_ms,
+                golden_ms,
+                suggestion_ms,
+                decision_ms,
+            )
+            if value is not None
+        ]
+        bus_ms = max(candidates) if candidates else None
+        return {
+            "bus_ms": bus_ms,
+            "depth_ms": depth_ms,
+            "ohlcv_ms": ohlcv_ms,
+            "golden_ms": golden_ms,
+            "suggestion_ms": suggestion_ms,
+            "decision_ms": decision_ms,
+        }
+
+    def summary_snapshot(self) -> Dict[str, Any]:
+        suggestions = self.suggestions_snapshot()
+        votes = self.vote_snapshot()
+        golden = self.golden_snapshot()
+        with self._swarm_lock:
+            virtual_fills = list(self._virtual_fills)
+            virtual_pnls = list(self._virtual_pnls)
+        turnover = 0.0
+        for fill in virtual_fills:
+            qty = _maybe_float(fill.get("qty_base")) or 0.0
+            price = _maybe_float(fill.get("price_usd")) or 0.0
+            turnover += abs(qty * price)
+        realized = 0.0
+        latest_unrealized = None
+        if virtual_pnls:
+            latest = virtual_pnls[0]
+            latest_unrealized = _maybe_float(latest.get("unrealized_usd"))
+        for entry in virtual_pnls:
+            realized += _maybe_float(entry.get("realized_usd")) or 0.0
+        pnl_1d = realized + (latest_unrealized or 0.0)
+        evaluation = {
+            "suggestions_5m": suggestions.get("metrics", {}).get("rate_per_min", 0.0)
+            * 5.0,
+            "acceptance_rate": suggestions.get("metrics", {}).get("acceptance_rate"),
+            "open_vote_windows": len(votes.get("windows", [])),
+        }
+        execution = {
+            "turnover": turnover or 0.0,
+            "pnl_1d": pnl_1d,
+            "drawdown": None,
+            "latest_unrealized": latest_unrealized,
+            "count": len(virtual_fills),
+        }
+        paper_summary = {
+            "count": len(virtual_pnls),
+            "latest_unrealized": latest_unrealized,
+            "turnover_usd": turnover,
+        }
+        lag_snapshot = self.lag_snapshot()
+        websocket_metrics = get_ws_channel_metrics()
+        seeded_summary: Dict[str, Any] = {
+            "count": 0,
+            "mapped": 0,
+            "missing": [],
+            "tokens": [],
+        }
+        try:
+            from .. import seed_token_publisher
+        except Exception as exc:  # pragma: no cover - defensive import guard
+            seeded_summary["error"] = str(exc)
+        else:
+            try:
+                seed_tokens = seed_token_publisher.configured_seed_tokens()
+            except Exception as exc:
+                seeded_summary["error"] = str(exc)
+                seed_tokens = tuple()
+            if seed_tokens:
+                try:
+                    metadata = seed_token_publisher.build_seeded_token_metadata(seed_tokens)
+                except Exception as exc:
+                    seeded_summary["error"] = str(exc)
+                else:
+                    entries: List[Dict[str, Any]] = []
+                    missing: List[str] = []
+                    mapped = 0
+                    for token in seed_tokens:
+                        info = metadata.get(token, {})
+                        status = str(info.get("status") or "missing")
+                        entry = {
+                            "mint": token,
+                            "canonical_mint": info.get("canonical_mint", token),
+                            "status": status,
+                            "pyth_feed_id": info.get("feed_id"),
+                            "pyth_account": info.get("account"),
+                            "pyth_kind": info.get("kind"),
+                        }
+                        entries.append(entry)
+                        if status == "available":
+                            mapped += 1
+                        else:
+                            missing.append(token)
+                    seeded_summary.update(
+                        {
+                            "count": len(seed_tokens),
+                            "mapped": mapped,
+                            "tokens": entries,
+                            "missing": missing,
+                        }
+                    )
+        return {
+            "evaluation": evaluation,
+            "execution": execution,
+            "paper_pnl": paper_summary,
+            "golden": {
+                "count": len(golden.get("snapshots", [])),
+                "lag_ms": golden.get("lag_ms"),
+            },
+            "lag": lag_snapshot,
+            "backpressure": {"websockets": websocket_metrics},
+            "seeded": seeded_summary,
+        }
+
+    def settings_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._swarm_lock:
+            golden_ts = self._last_golden_update
+            suggestion_ts = (
+                self._agent_suggestions[0].get("_received")
+                if self._agent_suggestions
+                else None
+            )
+            decision_ts = (
+                self._vote_decisions[0].get("_received")
+                if self._vote_decisions
+                else None
+            )
+            rl_updated = self._rl_status_info.get("updated_at")
+            vote_window_ms = self._rl_status_info.get("vote_window_ms")
+
+        def _control_entry(
+            label: str,
+            endpoint: str,
+            timestamp: Optional[float],
+            warn_seconds: Optional[float],
+        ) -> Dict[str, Any]:
+            age = None
+            if timestamp is not None:
+                try:
+                    age = max(0.0, now - float(timestamp))
+                except Exception:
+                    age = None
+            if age is None:
+                state = "idle"
+            elif warn_seconds is not None and age > warn_seconds:
+                state = "stale"
+            else:
+                state = "active"
+            remaining = None
+            if warn_seconds is not None and age is not None:
+                remaining = max(warn_seconds - age, 0.0)
+            return {
+                "label": label,
+                "endpoint": endpoint,
+                "state": state,
+                "ttl_label": _format_ttl(remaining, warn_seconds),
+                "age_label": _format_age(age),
+            }
+
+        controls = [
+            _control_entry("Golden Stream", "x:mint.golden", golden_ts, 60.0),
+            _control_entry("Suggestions Stream", "x:trade.suggested", suggestion_ts, 15.0),
+            _control_entry("Vote Decisions", "x:vote.decisions", decision_ts, 30.0),
+        ]
+        if rl_updated is not None:
+            warn_window = None
+            if vote_window_ms is not None:
+                try:
+                    warn_window = max(float(vote_window_ms) / 1000.0 * 2.0, 30.0)
+                except Exception:
+                    warn_window = 120.0
+            controls.append(
+                _control_entry("RL Vote Window", "rl:weights.applied", rl_updated, warn_window)
+            )
+        staleness = {
+            "golden_age_s": None
+            if golden_ts is None
+            else max(0.0, now - float(golden_ts)),
+            "suggestions_age_s": None
+            if suggestion_ts is None
+            else max(0.0, now - float(suggestion_ts)),
+            "votes_age_s": None
+            if decision_ts is None
+            else max(0.0, now - float(decision_ts)),
+        }
+        return {
+            "controls": controls,
+            "overrides": {"vote_window_ms": vote_window_ms},
+            "staleness": staleness,
+        }
 
     # Public provider accessors ------------------------------------------------
 
@@ -805,6 +1341,12 @@ class RuntimeWiring:
         ui_state.suggestions_provider = self.collectors.suggestions_snapshot
         ui_state.vote_windows_provider = self.collectors.vote_snapshot
         ui_state.shadow_provider = self.collectors.shadow_snapshot
+        ui_state.exit_provider = self.collectors.exit_snapshot
+        ui_state.token_facts_provider = self.collectors.token_facts_snapshot
+        ui_state.summary_provider = self.collectors.summary_snapshot
+        ui_state.rl_provider = self.collectors.rl_snapshot
+        ui_state.rl_status_provider = self.collectors.rl_status_snapshot
+        ui_state.settings_provider = self.collectors.settings_snapshot
 
     def close(self) -> None:
         self.collectors.stop()

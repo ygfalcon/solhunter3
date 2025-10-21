@@ -615,6 +615,7 @@ async fn update_mmap(
         (
             pb::Event {
                 topic: "depth_diff".to_string(),
+                dedupe_key: token.to_string(),
                 kind: Some(pb::event::Kind::DepthDiff(pb::DepthDiff { entries: diff })),
             },
             false,
@@ -623,6 +624,7 @@ async fn update_mmap(
         (
             pb::Event {
                 topic: "depth_update".to_string(),
+                dedupe_key: token.to_string(),
                 kind: Some(pb::event::Kind::DepthUpdate(pb::DepthUpdate { entries })),
             },
             true,
@@ -1268,6 +1270,7 @@ async fn main() -> Result<()> {
                         // Notify bus that the service is online
                         let online = pb::Event {
                             topic: "depth_service_status".to_string(),
+                            dedupe_key: "depth_service_status".to_string(),
                             kind: Some(pb::event::Kind::DepthServiceStatus(
                                 pb::DepthServiceStatus {
                                     status: "online".to_string(),
@@ -1292,6 +1295,7 @@ async fn main() -> Result<()> {
                                 } else { 0.0 };
                                 let ev = pb::Event {
                                     topic: "system_metrics".to_string(),
+                                    dedupe_key: "system_metrics".to_string(),
                                     kind: Some(pb::event::Kind::SystemMetrics(pb::SystemMetrics {
                                         cpu,
                                         memory: mem,
@@ -1307,6 +1311,7 @@ async fn main() -> Result<()> {
                             loop {
                                 let ev = pb::Event {
                                     topic: "heartbeat".to_string(),
+                                    dedupe_key: "heartbeat:depth_service".to_string(),
                                     kind: Some(pb::event::Kind::Heartbeat(pb::Heartbeat {
                                         service: "depth_service".to_string(),
                                     })),
