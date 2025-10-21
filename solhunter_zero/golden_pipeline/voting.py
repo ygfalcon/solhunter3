@@ -96,12 +96,24 @@ class VotingStage:
         await self._process_key(key)
 
     async def _process_key(self, key: Tuple[str, str, str]) -> None:
-        async with self._locks[key]:
-            suggestions = self._pending.pop(key, [])
-            self._timers.pop(key, None)
+        lock = self._locks[key]
+        suggestions: List[TradeSuggestion] = []
+        try:
+            async with lock:
+                suggestions = self._pending.pop(key, [])
+                self._timers.pop(key, None)
+        finally:
+            self._cleanup_lock(key, lock)
         if not suggestions:
             return
         await self._finalise_suggestions(key, suggestions)
+
+    def _cleanup_lock(
+        self, key: Tuple[str, str, str], lock: asyncio.Lock
+    ) -> None:
+        current = self._locks.get(key)
+        if current is lock and not lock.locked():
+            self._locks.pop(key, None)
 
     async def _finalise_suggestions(
         self, key: Tuple[str, str, str], suggestions: List[TradeSuggestion]

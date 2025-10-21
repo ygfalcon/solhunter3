@@ -212,6 +212,43 @@ def test_voting_stage_applies_rl_weights():
     asyncio.run(runner())
 
 
+def test_voting_stage_prunes_locks_after_processing():
+    async def runner() -> None:
+        decisions: deque[Decision] = deque()
+
+        async def collect(decision: Decision) -> None:
+            decisions.append(decision)
+
+        stage = VotingStage(collect, window_ms=10, quorum=1)
+        now = time.time()
+
+        base_kwargs = dict(
+            mint="LOCK",
+            side="sell",
+            notional_usd=500.0,
+            max_slippage_bps=25.0,
+            risk={},
+            confidence=0.8,
+            ttl_sec=1.0,
+            generated_at=now,
+            must_exit=True,
+        )
+
+        suggestions = [
+            TradeSuggestion(agent="agent-a", inputs_hash="hash-a", **base_kwargs),
+            TradeSuggestion(agent="agent-b", inputs_hash="hash-b", **base_kwargs),
+        ]
+
+        for suggestion in suggestions:
+            await stage.submit(suggestion)
+
+        assert len(decisions) == 2
+        assert not stage._pending
+        assert not stage._locks
+
+    asyncio.run(runner())
+
+
 def test_voting_stage_rl_staleness_gate():
     async def runner() -> None:
         decisions: deque[Decision] = deque()
