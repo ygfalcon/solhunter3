@@ -100,6 +100,16 @@ def build_seeded_token_metadata(
     return metadata
 
 
+async def _publish_local(topic: str, payload: Any, *, logger: logging.Logger) -> None:
+    """Best-effort local fallback publish when Redis is unavailable."""
+    try:
+        from . import event_bus
+
+        event_bus.publish(topic, payload, _broadcast=True)
+    except Exception:
+        logger.exception("Seed tokens: local event_bus publish failed for topic %s", topic)
+
+
 async def run_seed_token_publisher() -> None:
     tokens = configured_seed_tokens()
     if not tokens:
@@ -113,7 +123,17 @@ async def run_seed_token_publisher() -> None:
     )
     interval = _parse_float_env("SEED_PUBLISH_INTERVAL", 180.0, minimum=30.0)
 
-    redis_client = aioredis.from_url(redis_url, decode_responses=True)
+    redis_client: aioredis.Redis | None = None
+    redis_error_logged = False
+    try:
+        redis_client = aioredis.from_url(redis_url, decode_responses=True)
+        await redis_client.ping()
+        logger.info("Seed tokens: connected to Redis broker at %s (channel=%s)", redis_url, channel)
+    except Exception:
+        redis_client = None
+        if not redis_error_logged:
+            logger.exception("Seed tokens: unable to connect to Redis at %s; using in-process fallback", redis_url)
+            redis_error_logged = True
 
     try:
         pyth_mapping, _ = prices._parse_pyth_mapping()
@@ -141,6 +161,7 @@ async def run_seed_token_publisher() -> None:
     while True:
         now = time.time()
         payloads = []
+        depth_payload: Dict[str, Dict[str, Any]] = {}
         for token in tokens:
             event = {
                 "topic": "token_discovered",
@@ -174,8 +195,61 @@ async def run_seed_token_publisher() -> None:
                     "ts": now,
                 }
                 price_payloads.append(json.dumps(price_event, separators=(",", ":")))
+                depth_payload[token] = {
+                    "mint": token,
+                    "bids": float(quote.price_usd) * 1000.0,
+                    "asks": float(quote.price_usd) * 1000.0,
+                    "depth": float(quote.price_usd) * 2000.0,
+                    "tx_rate": 0.0,
+                    "ts": now,
+                }
 
+        depth_event_json: str | None = None
+        if depth_payload:
+            depth_event_json = json.dumps(
+                {
+                    "topic": "depth_update",
+                    "ts": now,
+                    "entries": depth_payload,
+                },
+                separators=(",", ":"),
+            )
+
+        total_published = 0
         for payload in payloads + price_payloads:
-            await redis_client.publish(channel, payload)
+            if redis_client is not None:
+                try:
+                    await redis_client.publish(channel, payload)
+                    total_published += 1
+                except Exception:
+                    if not redis_error_logged:
+                        logger.exception("Seed tokens: redis publish failed; falling back to local bus")
+                        redis_error_logged = True
+                    redis_client = None
+            if redis_client is None:
+                try:
+                    parsed = json.loads(payload)
+                    await _publish_local(parsed.get("topic", ""), parsed, logger=logger)
+                except Exception:
+                    logger.exception("Seed tokens: local publish failed for payload %s", payload)
+        if depth_event_json:
+            if redis_client is not None:
+                try:
+                    await redis_client.publish(channel, depth_event_json)
+                    total_published += 1
+                except Exception:
+                    if not redis_error_logged:
+                        logger.exception("Seed tokens: redis publish failed for depth update; using local fallback")
+                        redis_error_logged = True
+                    redis_client = None
+            if redis_client is None:
+                try:
+                    depth_struct = json.loads(depth_event_json)
+                    await _publish_local("depth_update", depth_struct.get("entries", {}), logger=logger)
+                except Exception:
+                    logger.exception("Seed tokens: local publish failed for depth update")
+
+        if total_published:
+            logger.debug("Seed tokens: published %d payload(s) via Redis channel %s", total_published, channel)
 
         await asyncio.sleep(interval)

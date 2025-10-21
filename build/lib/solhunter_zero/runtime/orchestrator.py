@@ -441,159 +441,12 @@ class RuntimeOrchestrator:
         else:
             await self._publish_stage("bus:verify", True)
         # continue even if local ws failed (peers may still be available)
-        if parse_bool_env("MINT_STREAM_ENABLE", False):
-            try:
-                from ..rpc_mint_stream import run_rpc_mint_stream  # type: ignore
-            except Exception as exc:  # pragma: no cover - optional dependency
-                await self._publish_stage(
-                    "discovery:mint_stream",
-                    False,
-                    f"import failed ({exc})",
-                )
-            else:
-                if not any(
-                    task.get_name() == "rpc_mint_stream" and not task.done()
-                    for task in self.handles.tasks
-                ):
-                    try:
-                        task = asyncio.create_task(run_rpc_mint_stream(), name="rpc_mint_stream")
-                    except Exception as exc:  # pragma: no cover - unlikely
-                        await self._publish_stage(
-                            "discovery:mint_stream",
-                            False,
-                            f"task start failed ({exc})",
-                        )
-                    else:
-                        def _log_mint_stream_done(fut: asyncio.Task) -> None:
-                            try:
-                                fut.result()
-                            except asyncio.CancelledError:
-                                pass
-                            except Exception:
-                                log.exception("RPC mint stream terminated unexpectedly")
-
-                        task.add_done_callback(_log_mint_stream_done)
-                        self._register_task(task)
-                        ws_url = os.getenv("MINT_STREAM_WS_URL") or "-"
-                        await self._publish_stage(
-                            "discovery:mint_stream",
-                            True,
-                            f"ws={ws_url}",
-                        )
-        if parse_bool_env("MEMPOOL_STREAM_ENABLE", False):
-            try:
-                from ..jito_mempool_stream import run_jito_mempool_stream  # type: ignore
-            except Exception as exc:  # pragma: no cover - optional dependency
-                await self._publish_stage(
-                    "discovery:mempool_stream",
-                    False,
-                    f"import failed ({exc})",
-                )
-            else:
-                if not any(
-                    task.get_name() == "jito_mempool_stream" and not task.done()
-                    for task in self.handles.tasks
-                ):
-                    try:
-                        task = asyncio.create_task(run_jito_mempool_stream(), name="jito_mempool_stream")
-                    except Exception as exc:
-                        await self._publish_stage(
-                            "discovery:mempool_stream",
-                            False,
-                            f"task start failed ({exc})",
-                        )
-                    else:
-                        def _log_mempool_done(fut: asyncio.Task) -> None:
-                            try:
-                                fut.result()
-                            except asyncio.CancelledError:
-                                pass
-                            except Exception:
-                                log.exception("Jito mempool stream terminated unexpectedly")
-
-                        task.add_done_callback(_log_mempool_done)
-                        self._register_task(task)
-                        await self._publish_stage(
-                            "discovery:mempool_stream",
-                            True,
-                            "status=running",
-                        )
-        if parse_bool_env("AMM_WATCH_ENABLE", False):
-            try:
-                from ..amm_pool_watcher import run_amm_pool_watcher  # type: ignore
-            except Exception as exc:  # pragma: no cover - optional dependency
-                await self._publish_stage(
-                    "discovery:amm_watch",
-                    False,
-                    f"import failed ({exc})",
-                )
-            else:
-                if not any(
-                    task.get_name() == "amm_pool_watcher" and not task.done()
-                    for task in self.handles.tasks
-                ):
-                    try:
-                        task = asyncio.create_task(run_amm_pool_watcher(), name="amm_pool_watcher")
-                    except Exception as exc:
-                        await self._publish_stage(
-                            "discovery:amm_watch",
-                            False,
-                            f"task start failed ({exc})",
-                        )
-                    else:
-                        def _log_amm_done(fut: asyncio.Task) -> None:
-                            try:
-                                fut.result()
-                            except asyncio.CancelledError:
-                                pass
-                            except Exception:
-                                log.exception("AMM pool watcher terminated unexpectedly")
-
-                        task.add_done_callback(_log_amm_done)
-                        self._register_task(task)
-                        await self._publish_stage(
-                            "discovery:amm_watch",
-                            True,
-                            "status=running",
-                        )
-        if parse_bool_env("SEED_PUBLISH_ENABLE", False) and os.getenv("SEED_TOKENS"):
-            try:
-                from ..seed_token_publisher import run_seed_token_publisher  # type: ignore
-            except Exception as exc:  # pragma: no cover
-                await self._publish_stage(
-                    "discovery:seed_tokens",
-                    False,
-                    f"import failed ({exc})",
-                )
-            else:
-                if not any(
-                    task.get_name() == "seed_token_publisher" and not task.done()
-                    for task in self.handles.tasks
-                ):
-                    try:
-                        task = asyncio.create_task(run_seed_token_publisher(), name="seed_token_publisher")
-                    except Exception as exc:
-                        await self._publish_stage(
-                            "discovery:seed_tokens",
-                            False,
-                            f"task start failed ({exc})",
-                        )
-                    else:
-                        def _log_seed_done(fut: asyncio.Task) -> None:
-                            try:
-                                fut.result()
-                            except asyncio.CancelledError:
-                                pass
-                            except Exception:
-                                log.exception("Seed token publisher terminated unexpectedly")
-
-                        task.add_done_callback(_log_seed_done)
-                        self._register_task(task)
-                        await self._publish_stage(
-                            "discovery:seed_tokens",
-                            True,
-                            "status=running",
-                        )
+        await asyncio.gather(
+            self._maybe_start_mint_stream(),
+            self._maybe_start_mempool_stream(),
+            self._maybe_start_amm_watch(),
+            self._maybe_start_seed_tokens(),
+        )
 
     async def start_ui(self) -> None:
         await self._publish_stage("ui:init", True)
@@ -1052,6 +905,180 @@ class RuntimeOrchestrator:
         except Exception:
             pass
         await self._publish_stage("runtime:stopped", True)
+
+
+    async def _maybe_start_mint_stream(self) -> None:
+        if not parse_bool_env("MINT_STREAM_ENABLE", False):
+            return
+        try:
+            from ..rpc_mint_stream import run_rpc_mint_stream  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            await self._publish_stage(
+                "discovery:mint_stream",
+                False,
+                f"import failed ({exc})",
+            )
+            return
+        if any(
+            task.get_name() == "rpc_mint_stream" and not task.done()
+            for task in self.handles.tasks
+        ):
+            return
+        try:
+            task = asyncio.create_task(run_rpc_mint_stream(), name="rpc_mint_stream")
+        except Exception as exc:  # pragma: no cover - unlikely
+            await self._publish_stage(
+                "discovery:mint_stream",
+                False,
+                f"task start failed ({exc})",
+            )
+            return
+
+        def _log_mint_stream_done(fut: asyncio.Task) -> None:
+            try:
+                fut.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("RPC mint stream terminated unexpectedly")
+
+        task.add_done_callback(_log_mint_stream_done)
+        self._register_task(task)
+        ws_url = os.getenv("MINT_STREAM_WS_URL") or "-"
+        await self._publish_stage(
+            "discovery:mint_stream",
+            True,
+            f"ws={ws_url}",
+        )
+
+    async def _maybe_start_mempool_stream(self) -> None:
+        if not parse_bool_env("MEMPOOL_STREAM_ENABLE", False):
+            return
+        try:
+            from ..jito_mempool_stream import run_jito_mempool_stream  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            await self._publish_stage(
+                "discovery:mempool_stream",
+                False,
+                f"import failed ({exc})",
+            )
+            return
+        if any(
+            task.get_name() == "jito_mempool_stream" and not task.done()
+            for task in self.handles.tasks
+        ):
+            return
+        try:
+            task = asyncio.create_task(run_jito_mempool_stream(), name="jito_mempool_stream")
+        except Exception as exc:
+            await self._publish_stage(
+                "discovery:mempool_stream",
+                False,
+                f"task start failed ({exc})",
+            )
+            return
+
+        def _log_mempool_done(fut: asyncio.Task) -> None:
+            try:
+                fut.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("Jito mempool stream terminated unexpectedly")
+
+        task.add_done_callback(_log_mempool_done)
+        self._register_task(task)
+        await self._publish_stage(
+            "discovery:mempool_stream",
+            True,
+            "status=running",
+        )
+
+    async def _maybe_start_amm_watch(self) -> None:
+        if not parse_bool_env("AMM_WATCH_ENABLE", False):
+            return
+        try:
+            from ..amm_pool_watcher import run_amm_pool_watcher  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dependency
+            await self._publish_stage(
+                "discovery:amm_watch",
+                False,
+                f"import failed ({exc})",
+            )
+            return
+        if any(
+            task.get_name() == "amm_pool_watcher" and not task.done()
+            for task in self.handles.tasks
+        ):
+            return
+        try:
+            task = asyncio.create_task(run_amm_pool_watcher(), name="amm_pool_watcher")
+        except Exception as exc:
+            await self._publish_stage(
+                "discovery:amm_watch",
+                False,
+                f"task start failed ({exc})",
+            )
+            return
+
+        def _log_amm_done(fut: asyncio.Task) -> None:
+            try:
+                fut.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("AMM pool watcher terminated unexpectedly")
+
+        task.add_done_callback(_log_amm_done)
+        self._register_task(task)
+        await self._publish_stage(
+            "discovery:amm_watch",
+            True,
+            "status=running",
+        )
+
+    async def _maybe_start_seed_tokens(self) -> None:
+        if not (parse_bool_env("SEED_PUBLISH_ENABLE", False) and os.getenv("SEED_TOKENS")):
+            return
+        try:
+            from ..seed_token_publisher import run_seed_token_publisher  # type: ignore
+        except Exception as exc:  # pragma: no cover
+            await self._publish_stage(
+                "discovery:seed_tokens",
+                False,
+                f"import failed ({exc})",
+            )
+            return
+        if any(
+            task.get_name() == "seed_token_publisher" and not task.done()
+            for task in self.handles.tasks
+        ):
+            return
+        try:
+            task = asyncio.create_task(run_seed_token_publisher(), name="seed_token_publisher")
+        except Exception as exc:
+            await self._publish_stage(
+                "discovery:seed_tokens",
+                False,
+                f"task start failed ({exc})",
+            )
+            return
+
+        def _log_seed_done(fut: asyncio.Task) -> None:
+            try:
+                fut.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("Seed token publisher terminated unexpectedly")
+
+        task.add_done_callback(_log_seed_done)
+        self._register_task(task)
+        await self._publish_stage(
+            "discovery:seed_tokens",
+            True,
+            "status=running",
+        )
 
 
 def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:

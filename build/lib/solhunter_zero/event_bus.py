@@ -1769,6 +1769,9 @@ async def connect_broker(urls: Sequence[str] | str) -> None:
             conn = aioredis.from_url(url)
             pubsub = conn.pubsub()
             await pubsub.subscribe(_BROKER_CHANNEL)
+            logging.getLogger(__name__).info(
+                "Event bus: connected redis broker %s channel=%s", _redact(url), _BROKER_CHANNEL
+            )
             task = asyncio.create_task(_redis_listener(pubsub))
             _BROKER_TYPES.append("redis")
             _BROKER_CONNS.append(conn)
