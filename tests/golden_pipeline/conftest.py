@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 import pytest
+from aiohttp import ClientConnectorError, ClientResponseError, RequestInfo
+from types import SimpleNamespace
+from yarl import URL
 
+from solhunter_zero import prices
 from solhunter_zero.golden_pipeline.pipeline import GoldenPipeline
 from solhunter_zero.golden_pipeline.types import (
     Decision,
@@ -22,11 +26,13 @@ from solhunter_zero.golden_pipeline.types import (
 from solhunter_zero.golden_pipeline.kv import InMemoryKeyValueStore
 from solhunter_zero.golden_pipeline.agents import BaseAgent
 from solhunter_zero.golden_pipeline.contracts import STREAMS
+from solhunter_zero.prices import PriceQuote, PRICE_CACHE_TTL, TTLCache as PriceTTLCache
 
 
 BASE58_MINTS: Mapping[str, str] = {
     "alpha": "MintAphex1111111111111111111111111111111",
     "beta": "MintBeton11111111111111111111111111111111",
+    "breaker": "MintBreakr11111111111111111111111111111111",
 }
 
 
@@ -65,6 +71,116 @@ class TapeFixture:
     ts_offset: float
 
 
+class DiscoveryFailureStub:
+    """Track and reproduce DAS failure scenarios for breaker tests."""
+
+    def __init__(self, clock: "FrozenClock") -> None:
+        self.clock = clock
+        self.events: list[dict[str, Any]] = []
+
+    def fail(self, stage: Any, reason: str) -> dict[str, Any]:
+        stage.mark_failure()
+        state = stage.breaker_state()
+        record = {
+            "ts": self.clock.time(),
+            "event": reason,
+            "state": dict(state),
+        }
+        self.events.append(record)
+        return record
+
+    def success(self, stage: Any, *, mark: bool = True) -> dict[str, Any]:
+        if mark:
+            stage.mark_success()
+        state = stage.breaker_state()
+        record = {
+            "ts": self.clock.time(),
+            "event": "success",
+            "state": dict(state),
+        }
+        self.events.append(record)
+        return record
+
+
+class PriceProviderStub:
+    """Deterministic price provider stub with programmable outcomes."""
+
+    def __init__(self, clock: "FrozenClock") -> None:
+        self.clock = clock
+        self.providers: dict[str, collections.deque[dict[str, Any]]] = {}
+        self.events: list[dict[str, Any]] = []
+        self.requests: list[list[dict[str, Any]]] = []
+        self._current_request: list[dict[str, Any]] | None = None
+
+    def configure(self, provider: str, sequence: Iterable[dict[str, Any]]) -> None:
+        self.providers[provider] = collections.deque(
+            dict(item) for item in sequence
+        )
+
+    def begin_request(self) -> None:
+        if self._current_request is not None:
+            raise RuntimeError("price request already active")
+        self._current_request = []
+        self.requests.append(self._current_request)
+
+    def end_request(self) -> None:
+        self._current_request = None
+
+    def _record(self, provider: str, outcome: str, tokens: Sequence[str], extra: dict[str, Any]) -> dict[str, Any]:
+        record = {
+            "provider": provider,
+            "outcome": outcome,
+            "tokens": tuple(tokens),
+            "ts": self.clock.time(),
+        }
+        record.update(extra)
+        self.events.append(record)
+        if self._current_request is not None:
+            self._current_request.append(record)
+        return record
+
+    async def execute(self, provider: str, tokens: Sequence[str]) -> Dict[str, PriceQuote]:
+        queue = self.providers.setdefault(provider, collections.deque())
+        outcome = queue.popleft() if queue else {"kind": "success"}
+        kind = outcome.get("kind", "success")
+        extra = {k: v for k, v in outcome.items() if k != "kind"}
+        self._record(provider, kind, tokens, extra)
+        if kind == "success":
+            price = float(outcome.get("price", 1.0))
+            quality = outcome.get("quality", "aggregate")
+            asof = int(self.clock.time() * 1000)
+            quote = PriceQuote(price_usd=price, source=provider, asof=asof, quality=quality)
+            return {token: quote for token in tokens}
+        if kind == "timeout":
+            raise asyncio.TimeoutError(f"{provider} timeout")
+        if kind == "http":
+            status = int(outcome.get("status", 503))
+            request_info = RequestInfo(
+                url=URL(f"https://stub/{provider}"),
+                method="GET",
+                headers={},
+                real_url=URL(f"https://stub/{provider}"),
+            )
+            raise ClientResponseError(
+                request_info,
+                (),
+                status=status,
+                message="server error",
+                headers={},
+            )
+        if kind == "disconnect":
+            conn_key = SimpleNamespace(
+                host=f"{provider}.stub",
+                port=443,
+                is_ssl=True,
+                ssl=None,
+                proxy=None,
+                proxy_auth=None,
+                proxy_headers_hash=None,
+            )
+            raise ClientConnectorError(conn_key, OSError(f"{provider} disconnect"))
+        raise RuntimeError(f"unknown outcome {kind}")
+
 SCENARIO_PAYLOADS: Mapping[str, Any] = {
     "metadata": {
         BASE58_MINTS["alpha"]: {
@@ -83,6 +199,16 @@ SCENARIO_PAYLOADS: Mapping[str, Any] = {
         BASE58_MINTS["beta"]: {
             "symbol": "BETA",
             "name": "Synthetic Beta",
+            "decimals": 6,
+            "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "venues": ["raydium"],
+            "flags": {
+                "sources": ["das"],
+            },
+        },
+        BASE58_MINTS["breaker"]: {
+            "symbol": "BRKR",
+            "name": "Breaker Token",
             "decimals": 6,
             "program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
             "venues": ["raydium"],
@@ -283,7 +409,13 @@ class MeanReversionAgent(BaseAgent):
 class GoldenPipelineHarness:
     """Orchestrates a synthetic end-to-end Golden pipeline run."""
 
-    def __init__(self, clock: FrozenClock, bus: FakeBroker) -> None:
+    def __init__(
+        self,
+        clock: FrozenClock,
+        bus: FakeBroker,
+        *,
+        price_stub: PriceProviderStub,
+    ) -> None:
         self.clock = clock
         self.bus = bus
         self.metadata_requests: list[list[str]] = []
@@ -294,6 +426,14 @@ class GoldenPipelineHarness:
         self.virtual_fills: list[VirtualFill] = []
         self.virtual_pnls: list[VirtualPnL] = []
         self._summary_cache: dict[str, Any] | None = None
+        self.das_stub = DiscoveryFailureStub(clock)
+        self.price_stub = price_stub
+        self.discovery_breaker_states: list[dict[str, Any]] = []
+        self.discovery_breaker_journal: list[dict[str, Any]] = []
+        self.price_health_snapshots: list[dict[str, Any]] = []
+        self.price_quotes: list[Dict[str, PriceQuote]] = []
+        self.price_quote_sources: list[dict[str, str]] = []
+        self.price_probe_token = "So11111111111111111111111111111111111111112"
 
         async def fetcher(mints: Iterable[str]) -> Dict[str, TokenSnapshot]:
             requested = [str(m) for m in mints]
@@ -355,6 +495,8 @@ class GoldenPipelineHarness:
         await self._mutate_metadata_and_prices()
         await self._await_voting(expected_decisions=2)
         await self._exercise_resilience_checks()
+        await self._simulate_discovery_breaker()
+        await self._simulate_price_failures()
 
     async def _run_discovery_phase(self) -> None:
         plan = SCENARIO_PAYLOADS["discovery_plan"]
@@ -477,6 +619,125 @@ class GoldenPipelineHarness:
         )
         await self.pipeline.submit_depth(replay_depth)
 
+    async def _simulate_discovery_breaker(self) -> None:
+        stage = self.pipeline._discovery_stage  # type: ignore[attr-defined]
+        failure_events = [
+            {"event": "timeout"},
+            {"event": "timeout"},
+            {"event": "http", "status": 502},
+            {"event": "disconnect"},
+            {"event": "timeout"},
+        ]
+        for details in failure_events:
+            entry = self.das_stub.fail(stage, details["event"])
+            if "status" in details:
+                entry["status"] = details["status"]
+            self.discovery_breaker_journal.append(entry)
+            self.discovery_breaker_states.append(entry["state"])
+            await self._publish_discovery_metric(details["event"], entry["state"], status=details.get("status"))
+            self.clock.tick(0.5)
+
+        open_state = stage.breaker_state()
+        self.discovery_breaker_states.append(open_state)
+        breaker_record = {
+            "ts": self.clock.time(),
+            "event": "breaker_open",
+            "state": dict(open_state),
+        }
+        self.discovery_breaker_journal.append(breaker_record)
+        await self._publish_discovery_metric("breaker_open", open_state)
+
+        candidate = DiscoveryCandidate(mint=BASE58_MINTS["breaker"], asof=self.clock.time())
+        accepted_open = await self.pipeline.submit_discovery(candidate)
+        state_after_submit = stage.breaker_state()
+        submit_record = {
+            "ts": self.clock.time(),
+            "event": "submission_while_open",
+            "accepted": accepted_open,
+            "state": dict(state_after_submit),
+        }
+        self.discovery_breaker_journal.append(submit_record)
+        self.discovery_breaker_states.append(state_after_submit)
+        await self._publish_discovery_metric("submission_while_open", state_after_submit)
+
+        cooldown = float(state_after_submit.get("cooldown_remaining", 0.0) or state_after_submit.get("cooldown_sec", 0.0))
+        self.clock.tick(cooldown + 0.1)
+        cooled_state = stage.breaker_state()
+        cooldown_record = {
+            "ts": self.clock.time(),
+            "event": "cooldown_elapsed",
+            "state": dict(cooled_state),
+        }
+        self.discovery_breaker_journal.append(cooldown_record)
+        self.discovery_breaker_states.append(cooled_state)
+        await self._publish_discovery_metric("cooldown_elapsed", cooled_state)
+
+        candidate = DiscoveryCandidate(mint=BASE58_MINTS["breaker"], asof=self.clock.time())
+        accepted_recovered = await self.pipeline.submit_discovery(candidate)
+        recovered_state = stage.breaker_state()
+        recovered_record = {
+            "ts": self.clock.time(),
+            "event": "recovered_submission",
+            "accepted": accepted_recovered,
+            "state": dict(recovered_state),
+        }
+        self.discovery_breaker_journal.append(recovered_record)
+        self.discovery_breaker_states.append(recovered_state)
+        await self._publish_discovery_metric("recovered_submission", recovered_state)
+
+        self.das_stub.success(stage, mark=False)
+
+    async def _publish_discovery_metric(
+        self,
+        event: str,
+        state: Mapping[str, Any],
+        *,
+        status: int | None = None,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "event": event,
+            "open": bool(state.get("open", False)),
+            "failure_count": int(state.get("failure_count", 0)),
+            "threshold": int(state.get("threshold", 0)),
+            "cooldown_remaining": float(state.get("cooldown_remaining", 0.0)),
+            "ts": self.clock.time(),
+        }
+        if status is not None:
+            payload["status"] = int(status)
+        await self.pipeline._publish("metrics.discovery.breaker", payload)
+
+    async def _simulate_price_failures(self) -> None:
+        tokens = (self.price_probe_token,)
+        delays = [16.0, 16.0, 16.0, 0.0]
+        for idx, delay in enumerate(delays):
+            self.price_stub.begin_request()
+            self._reset_price_caches()
+            quotes: Dict[str, PriceQuote] = {}
+            try:
+                quotes = await prices.fetch_price_quotes_async(tokens)
+            finally:
+                self.price_stub.end_request()
+            self.price_quotes.append(quotes)
+            self.price_quote_sources.append({token: quote.source for token, quote in quotes.items()})
+            snapshot = prices.get_provider_health_snapshot()
+            self.price_health_snapshots.append(snapshot)
+            await self._publish_price_metrics(idx, snapshot)
+            if delay > 0:
+                self.clock.tick(delay)
+
+    async def _publish_price_metrics(self, sequence: int, snapshot: Mapping[str, Mapping[str, Any]]) -> None:
+        payload = {
+            "sequence": sequence,
+            "providers": snapshot,
+            "ts": self.clock.time(),
+        }
+        await self.pipeline._publish("metrics.prices.providers", payload)
+
+    def _reset_price_caches(self) -> None:
+        prices.PRICE_CACHE = PriceTTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
+        prices.QUOTE_CACHE = PriceTTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
+        prices.BATCH_CACHE = PriceTTLCache(maxsize=256, ttl=PRICE_CACHE_TTL)
+
     async def _wait_until(self, predicate, *, timeout: float = 2.0) -> None:
         start = time.monotonic()
         while time.monotonic() - start < timeout:
@@ -525,8 +786,64 @@ def golden_harness() -> Iterable[GoldenPipelineHarness]:
         "solhunter_zero.golden_pipeline.voting.now_ts",
     ):
         monkeypatch.setattr(target, clock.time, raising=False)
+    monkeypatch.setattr(prices, "_monotonic", clock.time, raising=False)
+    monkeypatch.setenv("BIRDEYE_API_KEY", "stub-birdeye-key-000000000000000001")
+    monkeypatch.setenv("PRICE_PROVIDERS", "pyth,birdeye,jupiter,dexscreener,synthetic")
+
+    async def _empty_provider(*_args, **_kwargs):
+        return {}
+
+    price_stub = PriceProviderStub(clock)
+    price_stub.configure(
+        "birdeye",
+        [
+            {"kind": "timeout"},
+            {"kind": "http", "status": 503},
+            {"kind": "disconnect"},
+            {"kind": "success", "price": 1.005},
+        ],
+    )
+    price_stub.configure(
+        "jupiter",
+        [
+            {"kind": "disconnect"},
+            {"kind": "success", "price": 1.004},
+            {"kind": "success", "price": 1.003},
+        ],
+    )
+    price_stub.configure(
+        "dexscreener",
+        [
+            {"kind": "success", "price": 1.002},
+            {"kind": "success", "price": 1.002},
+            {"kind": "success", "price": 1.002},
+            {"kind": "success", "price": 1.002},
+        ],
+    )
+
+    async def stubbed_birdeye(session, tokens):
+        return await price_stub.execute("birdeye", tokens)
+
+    async def stubbed_jupiter(session, tokens):
+        return await price_stub.execute("jupiter", tokens)
+
+    async def stubbed_dexscreener(session, tokens):
+        return await price_stub.execute("dexscreener", tokens)
+
+    monkeypatch.setattr(prices, "_fetch_quotes_birdeye", stubbed_birdeye)
+    monkeypatch.setattr(prices, "_fetch_quotes_jupiter", stubbed_jupiter)
+    monkeypatch.setattr(prices, "_fetch_quotes_dexscreener", stubbed_dexscreener)
+    monkeypatch.setattr(prices, "_fetch_quotes_pyth", _empty_provider)
+    monkeypatch.setattr(prices, "_fetch_quotes_synthetic", _empty_provider)
+    monkeypatch.setattr(prices, "_fetch_quotes_helius", _empty_provider, raising=False)
+
+    prices.reset_provider_health()
+    prices.PRICE_CACHE = PriceTTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
+    prices.QUOTE_CACHE = PriceTTLCache(maxsize=512, ttl=PRICE_CACHE_TTL)
+    prices.BATCH_CACHE = PriceTTLCache(maxsize=256, ttl=PRICE_CACHE_TTL)
+
     bus = FakeBroker()
-    harness = GoldenPipelineHarness(clock=clock, bus=bus)
+    harness = GoldenPipelineHarness(clock=clock, bus=bus, price_stub=price_stub)
     try:
         asyncio.run(harness.run())
         yield harness
@@ -542,3 +859,13 @@ def frozen_clock(golden_harness: GoldenPipelineHarness) -> FrozenClock:
 @pytest.fixture(scope="module")
 def fake_broker(golden_harness: GoldenPipelineHarness) -> FakeBroker:
     return golden_harness.bus
+
+
+@pytest.fixture(scope="module")
+def das_failure_stub(golden_harness: GoldenPipelineHarness) -> DiscoveryFailureStub:
+    return golden_harness.das_stub
+
+
+@pytest.fixture(scope="module")
+def price_provider_stub(golden_harness: GoldenPipelineHarness) -> PriceProviderStub:
+    return golden_harness.price_stub
