@@ -3,18 +3,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import math
 import os
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, List, AsyncIterator
 
+import yaml
 from aiohttp import ClientTimeout
 import aiohttp
 
+from .http import HostCircuitOpenError, host_request, host_retry_config
+from .http import get_session as _shared_http_session
 from .scanner_common import DEFAULT_BIRDEYE_API_KEY
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
@@ -46,9 +53,6 @@ _OVERFETCH_FACTOR = float(os.getenv("DISCOVERY_OVERFETCH_FACTOR", "0.8") or 0.8)
 _CACHE_TTL = float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45)
 _MAX_OFFSET = int(os.getenv("DISCOVERY_MAX_OFFSET", "4000") or 4000)
 _MEMPOOL_LIMIT = int(os.getenv("DISCOVERY_MEMPOOL_LIMIT", "12") or 12)
-_VOLUME_WEIGHT = float(os.getenv("DISCOVERY_VOLUME_WEIGHT", "0.45") or 0.45)
-_LIQUIDITY_WEIGHT = float(os.getenv("DISCOVERY_LIQUIDITY_WEIGHT", "0.55") or 0.55)
-_MEMPOOL_BONUS = float(os.getenv("DISCOVERY_MEMPOOL_BONUS", "5.0") or 5.0)
 _ENABLE_MEMPOOL = os.getenv("DISCOVERY_ENABLE_MEMPOOL", "1").lower() in {"1", "true", "yes"}
 _WARM_TIMEOUT = float(os.getenv("DISCOVERY_WARM_TIMEOUT", "5") or 5)
 _BIRDEYE_RETRIES = int(os.getenv("DISCOVERY_BIRDEYE_RETRIES", "3") or 3)
@@ -118,6 +122,97 @@ if not _BIRDEYE_TOKENLIST_URL:
     _BIRDEYE_TOKENLIST_URL = "https://api.birdeye.so/defi/tokenlist"
 
 
+_SCORING_DEFAULT = {
+    "bias": -2.3,
+    "weights": {
+        "liquidity_usd": 0.25,
+        "vol_1h_z": 0.2,
+        "pool_age_min": -0.35,
+        "source_diversity": 0.35,
+        "oracle_present": 0.45,
+        "sellable": 0.4,
+        "mempool_pressure": 2.4,
+        "staleness_ms": -0.3,
+    },
+}
+
+
+def _resolve_weights_path() -> Path:
+    configured = os.getenv("DISCOVERY_SCORE_WEIGHTS")
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.exists():
+            return candidate
+    default = Path(__file__).resolve().parents[1] / "configs" / "discovery_score_weights.yaml"
+    return default
+
+
+def _load_scoring_weights() -> tuple[float, Dict[str, float]]:
+    bias = float(_SCORING_DEFAULT["bias"])
+    weights = dict(_SCORING_DEFAULT["weights"])
+    path = _resolve_weights_path()
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            payload = yaml.safe_load(fh) or {}
+    except Exception:
+        payload = {}
+    try:
+        bias = float(payload.get("bias", bias))
+    except Exception:
+        bias = float(_SCORING_DEFAULT["bias"])
+    raw_weights = payload.get("weights") or {}
+    if isinstance(raw_weights, dict):
+        for key, value in raw_weights.items():
+            try:
+                weights[key] = float(value)
+            except Exception:
+                continue
+    return bias, weights
+
+
+_SCORING_BIAS, _SCORING_WEIGHTS = _load_scoring_weights()
+_STAGE_B_SCORE_THRESHOLD = float(os.getenv("DISCOVERY_STAGE_B_THRESHOLD", "0.65") or 0.65)
+_STAGE_B_MIN_SOURCES = int(os.getenv("DISCOVERY_STAGE_B_MIN_SOURCES", "2") or 2)
+_SOLSCAN_NEGATIVE_TTL = float(os.getenv("SOLSCAN_NEGATIVE_TTL", "1800") or 1800.0)
+_SOLSCAN_NEGATIVE_CACHE: TTLCache[str, bool] = TTLCache(maxsize=2048, ttl=_SOLSCAN_NEGATIVE_TTL)
+
+_ETAG_HOSTS = {
+    "api.dexscreener.com",
+    "public-api.birdeye.so",
+    "api.meteora.ag",
+    "api.dexlab.space",
+}
+
+
+@dataclass(slots=True)
+class _CachedJSON:
+    data: Any
+    etag: str | None
+    timestamp: float
+
+
+_JSON_CACHE: Dict[str, _CachedJSON] = {}
+_JSON_CACHE_LOCK: asyncio.Lock | None = None
+
+
+def _cache_key(url: str, params: Dict[str, Any] | None) -> str:
+    if not params:
+        return url
+    try:
+        items = sorted((k, json.dumps(v, sort_keys=True)) for k, v in params.items())
+    except Exception:
+        items = sorted((str(k), str(v)) for k, v in params.items())
+    serialised = "&".join(f"{k}={v}" for k, v in items)
+    return f"{url}?{serialised}"
+
+
+async def _get_cache_lock() -> asyncio.Lock:
+    global _JSON_CACHE_LOCK
+    if _JSON_CACHE_LOCK is None:
+        _JSON_CACHE_LOCK = asyncio.Lock()
+    return _JSON_CACHE_LOCK
+
+
 def _resolve_birdeye_api_key() -> str:
     """Return the configured BirdEye API key (env var or default)."""
 
@@ -162,8 +257,10 @@ def _make_timeout(value: Any) -> ClientTimeout | None:
 
 
 async def get_session(*, timeout: ClientTimeout | None = None) -> aiohttp.ClientSession:
-    """Factory for aiohttp sessions; patched in tests."""
-    return aiohttp.ClientSession(timeout=timeout)
+    """Return a shared HTTP session."""
+
+    _ = timeout  # Per-call timeouts handled on requests; session is shared.
+    return await _shared_http_session()
 
 
 async def fetch_trending_tokens_async() -> List[str]:  # pragma: no cover - legacy hook
@@ -171,14 +268,87 @@ async def fetch_trending_tokens_async() -> List[str]:  # pragma: no cover - lega
     return []
 
 
-def _score_component(value: float) -> float:
+def _sigmoid(value: float) -> float:
+    if value >= 0:
+        z = math.exp(-value)
+        return 1.0 / (1.0 + z)
+    z = math.exp(value)
+    return z / (1.0 + z)
+
+
+def _source_count(entry: Dict[str, Any]) -> int:
+    sources = entry.get("sources")
+    if isinstance(sources, set):
+        return len(sources)
+    if isinstance(sources, (list, tuple)):
+        return len(set(sources))
+    return 0
+
+
+def _compute_feature_vector(
+    entry: Dict[str, Any],
+    mempool: Dict[str, float] | None,
+) -> Dict[str, float]:
+    now = time.time()
+    liquidity = max(0.0, _coerce_numeric(entry.get("liquidity")))
+    volume = max(0.0, _coerce_numeric(entry.get("volume")))
+    liquidity_feature = math.log1p(liquidity / 1000.0)
+    vol_feature = entry.get("vol_1h_z")
+    if vol_feature is None:
+        vol_feature = entry.get("volume_z")
     try:
-        numeric = float(value)
+        vol_feature = float(vol_feature)
     except Exception:
-        return 0.0
-    if numeric <= 0 or math.isnan(numeric):
-        return 0.0
-    return math.log1p(numeric)
+        vol_feature = math.log1p(volume / 1000.0)
+    discovered_at = entry.get("discovered_at")
+    age_minutes = 0.0
+    if discovered_at:
+        try:
+            age_minutes = max(0.0, (now - float(discovered_at)) / 60.0)
+        except Exception:
+            age_minutes = 0.0
+    else:
+        age_minutes = 0.0
+    source_diversity = float(_source_count(entry))
+    oracle_present = 0.0
+    if entry.get("oracle") or entry.get("oracle_present"):
+        oracle_present = 1.0
+    else:
+        try:
+            if _coerce_numeric(entry.get("price")) > 0:
+                oracle_present = 1.0
+        except Exception:
+            oracle_present = 0.0
+    sellable = 1.0 if liquidity >= _TRENDING_MIN_LIQUIDITY else 0.0
+    mempool_pressure = 0.0
+    if mempool:
+        try:
+            mempool_pressure = float(mempool.get("score", 0.0))
+        except Exception:
+            mempool_pressure = 0.0
+    if mempool_pressure <= 0.0:
+        try:
+            mempool_pressure = float(entry.get("score_mp") or entry.get("mempool_score") or 0.0)
+        except Exception:
+            mempool_pressure = 0.0
+    asof = entry.get("asof") or entry.get("updated_at") or discovered_at
+    staleness_minutes = 0.0
+    if asof:
+        try:
+            staleness_minutes = max(0.0, (now - float(asof)) / 60.0)
+        except Exception:
+            staleness_minutes = 0.0
+    features = {
+        "liquidity_usd": float(liquidity_feature),
+        "vol_1h_z": float(vol_feature),
+        "pool_age_min": float(age_minutes),
+        "source_diversity": float(source_diversity),
+        "oracle_present": float(oracle_present),
+        "sellable": float(sellable),
+        "mempool_pressure": float(max(0.0, mempool_pressure)),
+        "staleness_ms": float(staleness_minutes),
+    }
+    return features
 
 
 def _clear_birdeye_cache_for_tests() -> None:
@@ -355,29 +525,56 @@ async def _http_get_json(
     session: aiohttp.ClientSession | None = None,
 ) -> Any:
     request_timeout = _make_timeout(timeout)
+    request_headers: Dict[str, str] = dict(headers or {})
+    cache_key = _cache_key(url, params)
+    cached_entry: _CachedJSON | None = None
+    parsed_host = urlparse(url).hostname or ""
+    use_cache = parsed_host in _ETAG_HOSTS
+    if use_cache:
+        lock = await _get_cache_lock()
+        async with lock:
+            cached_entry = _JSON_CACHE.get(cache_key)
+        if cached_entry and cached_entry.etag:
+            request_headers.setdefault("If-None-Match", cached_entry.etag)
+        request_headers.setdefault("Accept-Encoding", "gzip, deflate")
 
-    async def _perform_request(sess: aiohttp.ClientSession) -> Any:
-        async with sess.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=request_timeout,
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.json(content_type=None)
+    attempts, backoff = host_retry_config(url)
+    last_error: Exception | None = None
 
     if session is not None:
-        return await _perform_request(session)
+        owned_session = session
+    else:
+        owned_session = await get_session(timeout=request_timeout)
 
-    try:
-        session_cm = await get_session(timeout=request_timeout)
-    except TypeError:
-        session_cm = await get_session()
-    async with session_cm as owned_session:
+    for attempt in range(max(1, attempts)):
         try:
-            return await _perform_request(owned_session)
-        except Exception:
+            async with host_request(url):
+                async with owned_session.get(
+                    url,
+                    params=params,
+                    headers=request_headers,
+                    timeout=request_timeout,
+                ) as resp:
+                    if resp.status == 304 and cached_entry is not None:
+                        return cached_entry.data
+                    resp.raise_for_status()
+                    payload = await resp.json(content_type=None)
+                    if use_cache:
+                        etag = resp.headers.get("ETag")
+                        lock = await _get_cache_lock()
+                        async with lock:
+                            _JSON_CACHE[cache_key] = _CachedJSON(payload, etag, time.time())
+                    return payload
+        except HostCircuitOpenError:
             raise
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 >= attempts:
+                break
+            await asyncio.sleep(backoff * (2 ** attempt))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"request to {url} failed without response")
 
 
 async def _fetch_birdeye_tokens() -> List[TokenEntry]:
@@ -419,67 +616,66 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
 
     session_timeout = ClientTimeout(total=12, connect=4, sock_read=8)
     try:
-        session_cm = await get_session(timeout=session_timeout)
+        session = await get_session(timeout=session_timeout)
     except TypeError:
-        session_cm = await get_session()
-    async with session_cm as session:
-        while offset < _MAX_OFFSET and len(tokens) < target_count:
-            logger.debug(
-                "BirdEye fetch page offset=%s limit=%s accumulated=%s",
-                offset,
-                _PAGE_LIMIT,
-                len(tokens),
-            )
-            params = {
-                "offset": offset,
-                "limit": _PAGE_LIMIT,
-                "sortBy": "v24hUSD",
-                "chain": "solana",  # also pass chain in query to satisfy stricter backends
-            }
-            payload: Dict[str, Any] | None = None
-            for attempt in range(1, _BIRDEYE_RETRIES + 1):
-                try:
-                    request_cm = session.get(
-                        _BIRDEYE_TOKENLIST_URL, params=params, headers=_headers()
-                    )
-                    async with request_cm as resp:
-                        if resp.status in (429, 503) or 500 <= resp.status < 600:
-                            logger.warning(
-                                "BirdEye %s attempt=%s offset=%s backoff=%.2fs",
-                                resp.status,
-                                attempt,
-                                offset,
-                                backoff,
-                            )
-                            delay = backoff
-                            retry_after = resp.headers.get("Retry-After")
-                            if retry_after:
-                                try:
-                                    ra_val = min(float(retry_after), _BIRDEYE_BACKOFF_MAX)
-                                    delay = max(delay, ra_val)
-                                except ValueError:
-                                    pass
-                            if attempt >= _BIRDEYE_RETRIES:
-                                if tokens:
-                                    logger.warning(
-                                        "BirdEye %s after %s tokens; returning partial results",
-                                        resp.status,
-                                        len(tokens),
-                                    )
-                                    payload = None
-                                    break
-                                _cache_set(cache_key, [])
-                                return []
-                            await asyncio.sleep(delay)
-                            backoff = min(max(backoff * 2, delay), _BIRDEYE_BACKOFF_MAX)
-                            continue
-
-                        if resp.status == 400:
-                            text = await resp.text()
-                            lower_text = text.lower()
-                            if any(marker in lower_text for marker in _BIRDEYE_THROTTLE_MARKERS):
+        session = await get_session()
+    while offset < _MAX_OFFSET and len(tokens) < target_count:
+        logger.debug(
+            "BirdEye fetch page offset=%s limit=%s accumulated=%s",
+            offset,
+            _PAGE_LIMIT,
+            len(tokens),
+        )
+        params = {
+            "offset": offset,
+            "limit": _PAGE_LIMIT,
+            "sortBy": "v24hUSD",
+            "chain": "solana",  # also pass chain in query to satisfy stricter backends
+        }
+        payload: Dict[str, Any] | None = None
+        for attempt in range(1, _BIRDEYE_RETRIES + 1):
+            try:
+                request_cm = session.get(
+                    _BIRDEYE_TOKENLIST_URL, params=params, headers=_headers()
+                )
+                async with request_cm as resp:
+                    if resp.status in (429, 503) or 500 <= resp.status < 600:
+                        logger.warning(
+                            "BirdEye %s attempt=%s offset=%s backoff=%.2fs",
+                            resp.status,
+                            attempt,
+                            offset,
+                            backoff,
+                        )
+                        delay = backoff
+                        retry_after = resp.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                ra_val = min(float(retry_after), _BIRDEYE_BACKOFF_MAX)
+                                delay = max(delay, ra_val)
+                            except ValueError:
+                                pass
+                        if attempt >= _BIRDEYE_RETRIES:
+                            if tokens:
                                 logger.warning(
-                                    "BirdEye throttle %s attempt=%s offset=%s backoff=%.2fs: %s",
+                                    "BirdEye %s after %s tokens; returning partial results",
+                                    resp.status,
+                                    len(tokens),
+                                )
+                                payload = None
+                                break
+                            _cache_set(cache_key, [])
+                            return []
+                        await asyncio.sleep(delay)
+                        backoff = min(max(backoff * 2, delay), _BIRDEYE_BACKOFF_MAX)
+                        continue
+
+                    if resp.status == 400:
+                        text = await resp.text()
+                        lower_text = text.lower()
+                        if any(marker in lower_text for marker in _BIRDEYE_THROTTLE_MARKERS):
+                            logger.warning(
+                                "BirdEye throttle %s attempt=%s offset=%s backoff=%.2fs: %s",
                                     resp.status,
                                     attempt,
                                     offset,
@@ -1011,6 +1207,8 @@ async def _enrich_with_solscan(
         needs_symbol = not entry.get("symbol")
         needs_name = not entry.get("name") or entry.get("name") == addr
         needs_decimals = "decimals" not in entry
+        if _SOLSCAN_NEGATIVE_CACHE.get(addr):
+            continue
         if needs_symbol or needs_name or needs_decimals:
             pending.append(addr)
         if len(pending) >= _SOLSCAN_ENRICH_LIMIT:
@@ -1024,11 +1222,7 @@ async def _enrich_with_solscan(
         headers["token"] = _SOLSCAN_API_KEY
 
     timeout = _make_timeout(_SOLSCAN_TIMEOUT)
-
-    try:
-        session_cm = await get_session(timeout=timeout)
-    except TypeError:
-        session_cm = await get_session()
+    session = await get_session(timeout=timeout)
 
     concurrency = max(1, min(4, _SOLSCAN_ENRICH_LIMIT))
     semaphore = asyncio.Semaphore(concurrency)
@@ -1037,20 +1231,26 @@ async def _enrich_with_solscan(
         params = {"tokenAddress": address, "address": address}
         async with semaphore:
             try:
-                async with session.get(
+                payload = await _http_get_json(
                     _SOLSCAN_META_URL,
                     params=params,
                     headers=headers,
                     timeout=timeout,
-                ) as resp:
-                    if resp.status == 404:
-                        return
-                    resp.raise_for_status()
-                    payload = await resp.json(content_type=None)
-            except Exception as exc:
-                logger.debug(
-                    "Solscan metadata fetch failed for %s: %s", address, exc
+                    session=session,
                 )
+            except HostCircuitOpenError:
+                logger.debug("Solscan circuit open; skipping %s", address)
+                return
+            except aiohttp.ClientResponseError as exc:
+                if exc.status == 404:
+                    _SOLSCAN_NEGATIVE_CACHE.set(address, True)
+                logger.debug("Solscan metadata unavailable for %s: %s", address, exc)
+                return
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.debug("Solscan metadata fetch failed for %s: %s", address, exc)
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Solscan metadata unexpected error for %s: %s", address, exc)
                 return
 
         try:
@@ -1059,11 +1259,9 @@ async def _enrich_with_solscan(
             logger.debug(
                 "Solscan metadata processing failed for %s: %s", address, exc
             )
-
-    async with session_cm as session:
-        tasks = [_fetch_and_apply(addr) for addr in pending]
-        if tasks:
-            await asyncio.gather(*tasks)
+    tasks = [_fetch_and_apply(addr) for addr in pending]
+    if tasks:
+        await asyncio.gather(*tasks)
 
 async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, Dict[str, float]]:
     """Collect a small batch of ranked mempool candidates (with depth)."""
@@ -1146,40 +1344,33 @@ def discover_candidates(
     ) -> None:
         for addr, entry in candidates.items():
             entry.setdefault("sources", set())
-
-            liquidity = float(entry.get("liquidity", 0.0) or 0.0)
-            volume = float(entry.get("volume", 0.0) or 0.0)
-
-            liq_comp = _LIQUIDITY_WEIGHT * _score_component(liquidity)
-            vol_comp = _VOLUME_WEIGHT * _score_component(volume)
-            mp_comp = 0.0
-
             mp = mempool.get(addr)
-            if mp:
-                raw_score = mp.get("score", 0.0)
-                try:
-                    raw = float(raw_score or 0.0)
-                except Exception:
-                    raw = 0.0
-                mp_score = max(0.0, min(raw, 1.0))
-                mp_comp = _MEMPOOL_BONUS * mp_score
-
-            try:
-                change = float(entry.get("price_change", 0.0) or 0.0)
-            except Exception:
-                change = 0.0
-            mult = max(0.5, min(1.25, 1.0 + (change / 100.0) * 0.1))
-
-            base = (liq_comp + vol_comp + mp_comp) * mult
-
-            entry.update(
-                {
-                    "score": base,
-                    "score_liq": liq_comp,
-                    "score_vol": vol_comp,
-                    "score_mp": mp_comp,
-                    "score_mult": mult,
-                }
+            features = _compute_feature_vector(entry, mp)
+            z = float(_SCORING_BIAS)
+            breakdown: List[Dict[str, float]] = []
+            for name, value in features.items():
+                weight = float(_SCORING_WEIGHTS.get(name, 0.0))
+                contribution = weight * value
+                breakdown.append(
+                    {
+                        "name": name,
+                        "value": float(value),
+                        "weight": weight,
+                        "contribution": float(contribution),
+                    }
+                )
+                z += contribution
+            score = _sigmoid(z)
+            entry["score"] = float(score)
+            entry["score_features"] = features
+            entry["score_breakdown"] = breakdown
+            top = sorted(breakdown, key=lambda item: abs(item["contribution"]), reverse=True)[:3]
+            entry["top_features"] = top
+            for legacy in ("score_liq", "score_vol", "score_mp", "score_mult"):
+                entry.pop(legacy, None)
+            source_count = _source_count(entry)
+            entry["_stage_b_eligible"] = bool(
+                score >= _STAGE_B_SCORE_THRESHOLD or source_count >= _STAGE_B_MIN_SOURCES
             )
 
     def _snapshot(
@@ -1202,6 +1393,8 @@ def discover_candidates(
                 src_list = sorted(list(sources or []))
             copy = dict(entry)
             copy["sources"] = src_list
+            for internal in ("_stage_b_eligible", "score_breakdown"):
+                copy.pop(internal, None)
             final.append(copy)
         return final
 
@@ -1397,8 +1590,14 @@ def discover_candidates(
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
 
+            if candidates:
+                _score_candidates(candidates, mempool)
+            stage_b_candidates = [
+                addr for addr, entry in candidates.items() if entry.get("_stage_b_eligible")
+            ]
             try:
-                await _enrich_with_solscan(candidates)
+                if stage_b_candidates:
+                    await _enrich_with_solscan(candidates, addresses=stage_b_candidates)
             except Exception as exc:
                 logger.debug("Solscan enrichment unavailable: %s", exc)
 
