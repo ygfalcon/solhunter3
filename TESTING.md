@@ -23,6 +23,39 @@ Then run the tests from the project root:
 pytest
 ```
 
+## Continuous integration matrix
+
+GitHub Actions runs a multi-stage workflow that mirrors the local entry
+points so failures are isolated to the relevant suite:
+
+* **`unit`** installs the development extras, regenerates protobufs, runs
+  lint/bytecode checks and executes the CLI-focused unit tests used in the
+  smoke pipeline.
+* **`golden`** provisions the heavier `full` dependencies and runs the
+  regression suite under `tests/golden_pipeline` to validate the offline
+  data/golden signal generation.
+* **`ui-smoke`** runs the Flask UI API tests (`tests/test_ui.py`,
+  `tests/test_ui_websockets.py`, `tests/test_ui_meta_ws.py`) in headless
+  mode to ensure the HTTP/websocket shims continue to work without a
+  browser.
+* **`chaos`** executes the short `@pytest.mark.chaos` scenarios with
+  remediation output written to `artifacts/chaos` before regenerating the
+  published runbook.
+
+Each job uploads its diagnostics on failure or success. The unit job always
+archives the `docs/observability` bundle, while the chaos job publishes both
+`artifacts/chaos` and the generated runbook so investigators can download the
+latest remediation bundle from the Actions UI even when tests fail.
+
+## Canary promotion flow
+
+Once the test jobs pass, the `staging-canary` job builds a staging wheel via
+`python -m build --wheel --outdir dist` and uploads it as an artifact. The
+same job invokes `scripts/bus_smoke.py ping` and `scripts/bus_smoke.py keys`
+against the staging Redis bus URL (stored in the `STAGING_REDIS_URL` secret)
+to ensure streams and TTL-bound keys behave as expected before promotion. A
+failed canary blocks downstream promotion until the bus smoke check passes.
+
 ## Demo and paper CLI
 
 `demo.py` and `paper.py` now delegate to the same
