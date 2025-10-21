@@ -75,14 +75,26 @@ class SynthRuntime:
     paper_positions: List[Dict[str, Any]] = field(default_factory=list)
     summary: Dict[str, Any] = field(
         default_factory=lambda: {
-            "suggestions_5m": 0,
-            "acceptance_rate": 0.0,
-            "open_vote_windows": 0,
-            "golden_hashes": 0,
-            "paper_pnl": {
+            "evaluation": {
+                "suggestions_5m": 0.0,
+                "acceptance_rate": 0.0,
+                "open_vote_windows": 0,
+            },
+            "execution": {
+                "turnover": 0.0,
                 "pnl_1d": 0.0,
-                "drawdown_pct": 0.0,
+                "drawdown": 0.0,
+                "latest_unrealized": 0.0,
+                "count": 0,
+            },
+            "paper_pnl": {
+                "count": 0,
+                "latest_unrealized": 0.0,
                 "turnover_usd": 0.0,
+            },
+            "golden": {
+                "count": 0,
+                "lag_ms": None,
             },
         }
     )
@@ -579,17 +591,33 @@ async def _seed_runtime(
         },
     )
 
-    runtime.summary.update(
+    runtime.summary.setdefault("evaluation", {}).update(
         {
-            "suggestions_5m": 3,
-            "acceptance_rate": 66.7,
+            "suggestions_5m": 3.0,
+            "acceptance_rate": 0.667,
             "open_vote_windows": 2,
-            "golden_hashes": len(golden_hashes),
-            "paper_pnl": {
-                "pnl_1d": 64.0,
-                "drawdown_pct": 0.3,
-                "turnover_usd": 1_200.0,
-            },
+        }
+    )
+    runtime.summary.setdefault("execution", {}).update(
+        {
+            "turnover": 1_200.0,
+            "pnl_1d": 64.0,
+            "drawdown": 0.003,
+            "latest_unrealized": 64.0,
+            "count": len(fill_payloads),
+        }
+    )
+    runtime.summary.setdefault("paper_pnl", {}).update(
+        {
+            "count": len(runtime.paper_positions),
+            "latest_unrealized": 64.0,
+            "turnover_usd": 1_200.0,
+        }
+    )
+    runtime.summary.setdefault("golden", {}).update(
+        {
+            "count": len(golden_hashes),
+            "lag_ms": runtime.metrics.get("golden_lag_ms"),
         }
     )
 
