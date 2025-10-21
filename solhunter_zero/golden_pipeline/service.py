@@ -700,24 +700,47 @@ class GoldenPipelineService:
         task.add_done_callback(self._pending.discard)
 
     async def _ensure_bus_visible(self) -> None:
-        heartbeat = {"type": "golden_heartbeat", "ts": time.time()}
+        channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v2")
+        max_attempts = 5
+        base_delay = 0.5
         ack = asyncio.Event()
 
         async def _on_meta(payload: Any) -> None:
+            nonlocal ack
             if isinstance(payload, dict) and payload.get("type") == "golden_heartbeat":
                 ack.set()
 
         unsubscribe = self._event_bus.subscribe("x:mint.golden.__meta", _on_meta)
         try:
-            self._event_bus.publish("x:mint.golden.__meta", heartbeat)
-            await asyncio.wait_for(ack.wait(), timeout=2.0)
-        except asyncio.TimeoutError as exc:
-            channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v2")
-            log.error(
-                "GoldenPipelineService bus self-check failed (channel=%s): heartbeat not observed",
-                channel,
-            )
-            raise RuntimeError("golden pipeline event bus heartbeat failed") from exc
+            for attempt in range(1, max_attempts + 1):
+                ack = asyncio.Event()
+                heartbeat = {"type": "golden_heartbeat", "ts": time.time()}
+                self._event_bus.publish("x:mint.golden.__meta", heartbeat)
+                try:
+                    await asyncio.wait_for(ack.wait(), timeout=2.0)
+                except asyncio.TimeoutError as exc:
+                    if attempt == max_attempts:
+                        log.error(
+                            "GoldenPipelineService bus self-check failed after %s attempts (channel=%s)",
+                            attempt,
+                            channel,
+                        )
+                        raise RuntimeError("golden pipeline event bus heartbeat failed") from exc
+                    delay = base_delay * (2 ** (attempt - 1))
+                    log.warning(
+                        "GoldenPipelineService bus self-check attempt %s/%s did not observe heartbeat; retrying in %.2fs",
+                        attempt,
+                        max_attempts,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    if attempt > 1:
+                        log.info(
+                            "GoldenPipelineService bus self-check succeeded after %s attempts",
+                            attempt,
+                        )
+                    return
         finally:
             unsubscribe()
 
