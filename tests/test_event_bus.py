@@ -712,6 +712,33 @@ def test_event_bus_fallback_json(monkeypatch):
     assert not ev._USE_ORJSON
 
 
+@pytest.mark.asyncio
+async def test_redis_listener_json_fallback():
+    import importlib
+
+    import solhunter_zero.event_bus as ev
+
+    ev = importlib.reload(ev)
+    ev.reset()
+    payload = {"foo": "bar"}
+    encoded = ev._encode_event("x:mint.golden", payload)
+
+    class DummyPubSub:
+        def __init__(self, messages):
+            self._messages = messages
+
+        async def listen(self):
+            for message in self._messages:
+                yield message
+
+    seen: list[dict[str, str]] = []
+    with ev.subscription("x:mint.golden", lambda p: seen.append(p)):
+        await ev._redis_listener(DummyPubSub([{"type": "message", "data": encoded}]))
+
+    assert seen == [payload]
+    ev.reset()
+
+
 def test_event_bus_msgpack(monkeypatch):
     pytest.importorskip("msgpack")
     import importlib
@@ -1006,4 +1033,3 @@ def test_redis_broker_connection_error_falls_back(monkeypatch):
     ev.publish("local", {"x": 1})
     unsub()
     assert events == [{"x": 1}]
-
