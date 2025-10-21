@@ -1,12 +1,28 @@
 import asyncio
 import json
+import sys
+import types
 from collections import defaultdict
+from types import SimpleNamespace
 from typing import Mapping
 
 import pytest
 
+from tests.stubs import stub_sqlalchemy
+
+stub_sqlalchemy()
+
+if "base58" not in sys.modules:
+    base58_mod = types.ModuleType("base58")
+    base58_mod.b58decode = lambda *a, **k: b""
+    base58_mod.b58encode = lambda *a, **k: b""
+    sys.modules["base58"] = base58_mod
+
 from solhunter_zero.golden_pipeline.bus import EventBusAdapter, InMemoryBus, MessageBus
+from solhunter_zero.golden_pipeline.contracts import STREAMS
 from solhunter_zero.golden_pipeline.pipeline import GoldenPipeline
+from solhunter_zero.golden_pipeline.service import AgentManagerAgent
+from solhunter_zero.golden_pipeline.types import GoldenSnapshot
 from solhunter_zero.event_bus import BUS as RUNTIME_EVENT_BUS
 from solhunter_zero.production.env import (
     Provider,
@@ -271,3 +287,169 @@ def test_pipeline_requires_bus_in_live_mode(monkeypatch):
 
     with pytest.raises(RuntimeError):
         GoldenPipeline(enrichment_fetcher=_fetcher)
+
+
+class _StubPortfolio:
+    pass
+
+
+class _StaticManager:
+    def __init__(self, actions: list[dict[str, object]]) -> None:
+        self._actions = actions
+
+    async def evaluate_with_swarm(self, mint: str, portfolio: _StubPortfolio) -> SimpleNamespace:
+        return SimpleNamespace(actions=list(self._actions))
+
+
+def _build_guard_snapshot(
+    *,
+    mint: str = "GuardMint11111111111111111111111111111111",
+    depth1: float = 20_000.0,
+    buyers: int = 32,
+    zret: float = 3.2,
+    zvol: float = 3.5,
+    spread: float = 32.0,
+) -> GoldenSnapshot:
+    now = 1_700_000_000.0
+    return GoldenSnapshot(
+        mint=mint,
+        asof=now,
+        meta={
+            "symbol": "GUARD",
+            "decimals": 6,
+            "token_program": "Tokenkeg11111111111111111111111111111111",
+        },
+        px={"mid_usd": 1.0, "spread_bps": spread},
+        liq={
+            "depth_pct": {
+                "1": depth1,
+                "2": depth1 * 1.4,
+                "5": depth1 * 2.2,
+            },
+            "asof": now,
+        },
+        ohlcv5m={
+            "o": 1.0,
+            "h": 1.01,
+            "l": 0.99,
+            "c": 1.0,
+            "vol_usd": 250_000.0,
+            "buyers": buyers,
+            "trades": 120,
+            "flow_usd": 0.0,
+            "zret": zret,
+            "zvol": zvol,
+            "asof_close": now,
+        },
+        hash=f"hash-{mint}",
+        metrics={},
+    )
+
+
+def _run_agent(agent: AgentManagerAgent, snapshot: GoldenSnapshot) -> list:
+    async def _inner() -> list:
+        return await agent.generate(snapshot)
+
+    return asyncio.run(_inner())
+
+
+def test_budget_guard_emits_global_cap_event():
+    bus = InMemoryBus()
+    raw_action = {
+        "side": "buy",
+        "notional_usd": 15_000.0,
+        "pattern": "first_pullback",
+        "expected_roi": 0.12,
+        "agent": "momentum",
+    }
+    manager = _StaticManager([raw_action])
+    agent = AgentManagerAgent(
+        manager,
+        _StubPortfolio(),
+        bus=bus,
+        global_notional_cap=5_000.0,
+    )
+    snapshot = _build_guard_snapshot()
+    agent._last_buyers[snapshot.mint] = 12
+
+    suggestions = _run_agent(agent, snapshot)
+    assert suggestions == []
+
+    events = bus.events.get(STREAMS.trade_rejected, [])
+    assert len(events) == 1
+    event = events[0]
+    assert event["guard"] == "budget"
+    assert event["scope"] == "global"
+    assert pytest.approx(event["cap_usd"]) == 5_000.0
+    assert pytest.approx(event["notional_usd"]) == 15_000.0
+    assert "global cap" in event["reason"].lower()
+
+
+def test_budget_guard_emits_agent_cap_event():
+    bus = InMemoryBus()
+    raw_action = {
+        "side": "buy",
+        "notional_usd": 6_500.0,
+        "pattern": "first_pullback",
+        "expected_roi": 0.15,
+        "agent": "scalper",
+    }
+    manager = _StaticManager([raw_action])
+    agent = AgentManagerAgent(
+        manager,
+        _StubPortfolio(),
+        bus=bus,
+        global_notional_cap=25_000.0,
+        agent_notional_caps={"scalper": 4_000.0},
+    )
+    snapshot = _build_guard_snapshot(mint="GuardMintAgent1111111111111111111111111111")
+    agent._last_buyers[snapshot.mint] = 18
+
+    suggestions = _run_agent(agent, snapshot)
+    assert suggestions == []
+
+    events = bus.events.get(STREAMS.trade_rejected, [])
+    assert len(events) == 1
+    event = events[0]
+    assert event["guard"] == "budget"
+    assert event["scope"] == "agent"
+    assert event["source_agent"] == "scalper"
+    assert pytest.approx(event["cap_usd"]) == 4_000.0
+    assert pytest.approx(event["notional_usd"]) == 6_500.0
+    assert "cap" in event["reason"].lower()
+
+
+def test_slippage_guard_blocks_thin_books():
+    bus = InMemoryBus()
+    raw_action = {
+        "side": "buy",
+        "notional_usd": 45_000.0,
+        "pattern": "first_pullback",
+        "expected_roi": 0.2,
+        "max_slippage_bps": 40.0,
+        "agent": "momentum",
+    }
+    manager = _StaticManager([raw_action])
+    agent = AgentManagerAgent(
+        manager,
+        _StubPortfolio(),
+        bus=bus,
+        global_notional_cap=90_000.0,
+    )
+    snapshot = _build_guard_snapshot(
+        mint="GuardMintThin111111111111111111111111111111",
+        depth1=18_000.0,
+    )
+    agent._last_buyers[snapshot.mint] = 20
+
+    suggestions = _run_agent(agent, snapshot)
+    assert suggestions == []
+
+    events = bus.events.get(STREAMS.trade_rejected, [])
+    assert len(events) == 1
+    event = events[0]
+    assert event["guard"] == "slippage"
+    assert pytest.approx(event["notional_usd"]) == 45_000.0
+    available = event.get("available_notional_usd")
+    assert available is not None and available < event["notional_usd"]
+    assert "slippage" in (event.get("reason") or "").lower()
