@@ -932,6 +932,47 @@ async def _fetch_dexlab_tokens() -> List[TokenEntry]:
     return list(tokens.values())
 
 
+def _apply_solscan_enrichment(
+    candidates: Dict[str, Dict[str, Any]],
+    address: str,
+    payload: Any,
+) -> None:
+    data = payload
+    if isinstance(payload, dict):
+        data = payload.get("data") or payload.get("token") or payload
+    if not isinstance(data, dict):
+        return
+
+    entry = candidates.get(address)
+    if entry is None:
+        return
+
+    name = data.get("name") or data.get("symbolName")
+    symbol = data.get("symbol")
+    decimals = data.get("decimals")
+    supply = data.get("supply") or data.get("totalSupply")
+    holders = data.get("holder") or data.get("holders")
+    verified = data.get("verified")
+
+    if symbol and not entry.get("symbol"):
+        entry["symbol"] = str(symbol)
+    if name and (not entry.get("name") or entry.get("name") == address):
+        entry["name"] = str(name)
+    if decimals is not None:
+        try:
+            entry["decimals"] = int(decimals)
+        except Exception:
+            pass
+    if supply is not None:
+        entry["supply"] = _coerce_numeric(supply)
+    if holders is not None:
+        entry["holders"] = _coerce_numeric(holders)
+    if isinstance(verified, bool):
+        entry["verified"] = verified
+
+    entry.setdefault("sources", set()).add("solscan")
+
+
 async def _enrich_with_solscan(
     candidates: Dict[str, Dict[str, Any]],
     *,
@@ -972,9 +1013,12 @@ async def _enrich_with_solscan(
     except TypeError:
         session_cm = await get_session()
 
-    async with session_cm as session:
-        for addr in pending:
-            params = {"tokenAddress": addr, "address": addr}
+    concurrency = max(1, min(4, _SOLSCAN_ENRICH_LIMIT))
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _fetch_and_apply(address: str) -> None:
+        params = {"tokenAddress": address, "address": address}
+        async with semaphore:
             try:
                 async with session.get(
                     _SOLSCAN_META_URL,
@@ -983,47 +1027,26 @@ async def _enrich_with_solscan(
                     timeout=timeout,
                 ) as resp:
                     if resp.status == 404:
-                        continue
+                        return
                     resp.raise_for_status()
                     payload = await resp.json(content_type=None)
             except Exception as exc:
-                logger.debug("Solscan metadata fetch failed for %s: %s", addr, exc)
-                continue
+                logger.debug(
+                    "Solscan metadata fetch failed for %s: %s", address, exc
+                )
+                return
 
-            data = payload
-            if isinstance(payload, dict):
-                data = payload.get("data") or payload.get("token") or payload
-            if not isinstance(data, dict):
-                continue
+        try:
+            _apply_solscan_enrichment(candidates, address, payload)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "Solscan metadata processing failed for %s: %s", address, exc
+            )
 
-            entry = candidates.get(addr)
-            if entry is None:
-                continue
-
-            name = data.get("name") or data.get("symbolName")
-            symbol = data.get("symbol")
-            decimals = data.get("decimals")
-            supply = data.get("supply") or data.get("totalSupply")
-            holders = data.get("holder") or data.get("holders")
-            verified = data.get("verified")
-
-            if symbol and not entry.get("symbol"):
-                entry["symbol"] = str(symbol)
-            if name and (not entry.get("name") or entry.get("name") == addr):
-                entry["name"] = str(name)
-            if decimals is not None:
-                try:
-                    entry["decimals"] = int(decimals)
-                except Exception:
-                    pass
-            if supply is not None:
-                entry["supply"] = _coerce_numeric(supply)
-            if holders is not None:
-                entry["holders"] = _coerce_numeric(holders)
-            if isinstance(verified, bool):
-                entry["verified"] = verified
-
-            entry.setdefault("sources", set()).add("solscan")
+    async with session_cm as session:
+        tasks = [_fetch_and_apply(addr) for addr in pending]
+        if tasks:
+            await asyncio.gather(*tasks)
 
 async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, Dict[str, float]]:
     """Collect a small batch of ranked mempool candidates (with depth)."""
