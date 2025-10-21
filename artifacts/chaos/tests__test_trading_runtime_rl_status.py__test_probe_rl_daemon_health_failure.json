@@ -1,0 +1,31 @@
+{
+  "markers": [
+    "chaos"
+  ],
+  "module": "tests.test_trading_runtime_rl_status",
+  "records": [
+    {
+      "component": "RL daemon",
+      "detection": "`_probe_rl_daemon_health` raises urllib errors for the URL recorded in `rl_daemon.health.json`, setting `running` to False.",
+      "failure": "Trading runtime cannot reach the RL health endpoint",
+      "impact": "The runtime treats the RL service as offline and skips RL-assisted policy updates.",
+      "metadata": {
+        "error": "<urlopen error boom>",
+        "url": "http://127.0.0.1:8080/health"
+      },
+      "remediation": [
+        "Verify the RL health endpoint `http://127.0.0.1:8080/health` is reachable from the runtime host (e.g. `curl http://127.0.0.1:8080/health`).",
+        "Restart the RL daemon with `python scripts/run_rl_daemon.py` or restart the managed service to re-register the health server.",
+        "After restart, re-run `python scripts/healthcheck.py` to confirm the RL check reports PASS."
+      ],
+      "severity": "high",
+      "tags": [
+        "runtime",
+        "healthcheck",
+        "rl"
+      ],
+      "verification": "`curl http://127.0.0.1:8080/health` returns HTTP 200 and `_probe_rl_daemon_health()` reports `running: True`."
+    }
+  ],
+  "test": "tests/test_trading_runtime_rl_status.py::test_probe_rl_daemon_health_failure"
+}

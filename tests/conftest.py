@@ -1,6 +1,9 @@
+import json
 import os
 import sys
 import types
+from pathlib import Path
+from typing import Any, Sequence
 import importlib.util
 import importlib.machinery
 import pytest
@@ -313,6 +316,132 @@ def _reset_event_bus():
     event_bus.reset()
     yield
     event_bus.reset()
+
+
+_CHAOS_METADATA_ENV = "CHAOS_REMEDIATION_DIR"
+_DEFAULT_CHAOS_DIR = Path("artifacts/chaos")
+
+
+def _normalise_node_id(node_id: str) -> str:
+    safe = node_id.replace("::", "__")
+    safe = safe.replace("/", "__").replace("\\", "__")
+    return safe
+
+
+def _coerce_steps(remediation: str | Sequence[str]) -> list[str]:
+    if isinstance(remediation, str):
+        return [remediation.strip()] if remediation.strip() else []
+    steps: list[str] = []
+    for item in remediation:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            steps.append(text)
+    return steps
+
+
+def _unique_list(items: Sequence[str] | None) -> list[str]:
+    if not items:
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+@pytest.fixture
+def chaos_remediator(request):
+    """Record remediation guidance for chaos/health test scenarios."""
+
+    records: list[dict[str, Any]] = []
+
+    def record(
+        *,
+        component: str,
+        failure: str,
+        remediation: str | Sequence[str],
+        detection: str | None = None,
+        impact: str | None = None,
+        verification: str | None = None,
+        severity: str | None = None,
+        notes: str | None = None,
+        tags: Sequence[str] | None = None,
+        links: Sequence[str] | None = None,
+        owner: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not component:
+            raise ValueError("component is required")
+        if not failure:
+            raise ValueError("failure is required")
+
+        steps = _coerce_steps(remediation)
+        if not steps:
+            raise ValueError("remediation must include at least one step")
+
+        entry: dict[str, Any] = {
+            "component": component,
+            "failure": failure,
+            "remediation": steps,
+        }
+        if detection:
+            entry["detection"] = detection
+        if impact:
+            entry["impact"] = impact
+        if verification:
+            entry["verification"] = verification
+        if severity:
+            entry["severity"] = severity
+        if notes:
+            entry["notes"] = notes
+        if owner:
+            entry["owner"] = owner
+        tags_list = _unique_list(tags)
+        if tags_list:
+            entry["tags"] = tags_list
+        links_list = _unique_list(links)
+        if links_list:
+            entry["links"] = links_list
+        if metadata:
+            entry["metadata"] = metadata
+
+        records.append(entry)
+
+    yield record
+
+    if not records:
+        return
+
+    base_dir = Path(os.getenv(_CHAOS_METADATA_ENV, _DEFAULT_CHAOS_DIR))
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    node_id = _normalise_node_id(request.node.nodeid)
+    artifact_path = base_dir / f"{node_id}.json"
+
+    module = getattr(request.node, "module", None)
+    module_name = getattr(module, "__name__", None) if module else None
+    try:
+        markers = sorted({marker.name for marker in request.node.iter_markers()})
+    except Exception:  # pragma: no cover - defensive
+        markers = []
+
+    payload: dict[str, Any] = {
+        "test": request.node.nodeid,
+        "module": module_name,
+        "markers": markers,
+        "records": records,
+    }
+
+    artifact_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 @pytest.fixture
