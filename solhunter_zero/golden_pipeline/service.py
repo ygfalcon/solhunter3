@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
 
 from ..agent_manager import AgentManager
-from ..event_bus import publish, subscribe
+from ..event_bus import BUS as RUNTIME_EVENT_BUS, EventBus
 from ..portfolio import Portfolio
 from ..token_aliases import canonical_mint
 from ..token_scanner import TRENDING_METADATA
 
 from .agents import BaseAgent
+from .bus import EventBusAdapter
 from .pipeline import GoldenPipeline
 from .types import (
     Decision,
@@ -330,11 +332,14 @@ class GoldenPipelineService:
         agent_manager: AgentManager,
         portfolio: Portfolio,
         enrichment_fetcher: Optional[Callable[[Iterable[str]], Awaitable[Dict[str, TokenSnapshot]]]] = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
+        self._event_bus = event_bus or RUNTIME_EVENT_BUS
         if enrichment_fetcher is None:
             enrichment_fetcher = self._default_enrichment_fetcher
+        shared_bus = EventBusAdapter(self._event_bus)
         self.pipeline = GoldenPipeline(
             enrichment_fetcher=enrichment_fetcher,
             agents=[AgentManagerAgent(agent_manager, portfolio)],
@@ -343,6 +348,7 @@ class GoldenPipelineService:
             on_suggestion=self._handle_suggestion,
             on_virtual_fill=self._handle_virtual_fill,
             on_virtual_pnl=self._handle_virtual_pnl,
+            bus=shared_bus,
         )
 
         self._subscriptions: List[Callable[[], None]] = []
@@ -354,10 +360,18 @@ class GoldenPipelineService:
     async def start(self) -> None:
         if self._running:
             return
+        await self._ensure_bus_visible()
         self._running = True
-        self._subscriptions.append(subscribe("token_discovered", self._on_discovery))
-        self._subscriptions.append(subscribe("price_update", self._on_price))
-        self._subscriptions.append(subscribe("depth_update", self._on_depth))
+        self._log_bus_configuration()
+        self._subscriptions.append(
+            self._event_bus.subscribe("token_discovered", self._on_discovery)
+        )
+        self._subscriptions.append(
+            self._event_bus.subscribe("price_update", self._on_price)
+        )
+        self._subscriptions.append(
+            self._event_bus.subscribe("depth_update", self._on_depth)
+        )
         self._tasks.append(asyncio.create_task(self._market_flush_loop(), name="golden_market_flush"))
         log.info("GoldenPipelineService started (subscriptions=token_discovered, price_update, depth_update)")
 
@@ -401,6 +415,50 @@ class GoldenPipelineService:
         task = asyncio.create_task(coro)
         self._pending.add(task)
         task.add_done_callback(self._pending.discard)
+
+    async def _ensure_bus_visible(self) -> None:
+        heartbeat = {"type": "golden_heartbeat", "ts": time.time()}
+        ack = asyncio.Event()
+
+        async def _on_meta(payload: Any) -> None:
+            if isinstance(payload, dict) and payload.get("type") == "golden_heartbeat":
+                ack.set()
+
+        unsubscribe = self._event_bus.subscribe("x:mint.golden.__meta", _on_meta)
+        try:
+            self._event_bus.publish("x:mint.golden.__meta", heartbeat)
+            await asyncio.wait_for(ack.wait(), timeout=2.0)
+        except asyncio.TimeoutError as exc:
+            channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v2")
+            log.error(
+                "GoldenPipelineService bus self-check failed (channel=%s): heartbeat not observed",
+                channel,
+            )
+            raise RuntimeError("golden pipeline event bus heartbeat failed") from exc
+        finally:
+            unsubscribe()
+
+    def _log_bus_configuration(self) -> None:
+        channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v2")
+        url = (
+            os.getenv("EVENT_BUS_URL")
+            or os.getenv("BROKER_URL")
+            or os.getenv("REDIS_URL")
+        )
+        broker_urls = getattr(self._event_bus, "broker_urls", None)
+        if not url and broker_urls:
+            url = broker_urls[0] if broker_urls else ""
+        transport = "local"
+        if url and ":" in url:
+            transport = url.split(":", 1)[0].lower() or transport
+        elif url:
+            transport = url.lower()
+        log.info(
+            "golden.bus=%s channel=%s url=%s (shared)",
+            transport,
+            channel,
+            url or "n/a",
+        )
 
     def _on_discovery(self, payload: Any) -> None:
         if not self._running:
@@ -502,10 +560,10 @@ class GoldenPipelineService:
                 "snapshot_hash": decision.snapshot_hash,
             },
         }
-        publish("action_decision", payload)
+        self._event_bus.publish("action_decision", payload)
 
     async def _handle_virtual_fill(self, fill: VirtualFill) -> None:
-        publish(
+        self._event_bus.publish(
             "runtime.log",
             {
                 "stage": "golden",
@@ -514,7 +572,7 @@ class GoldenPipelineService:
         )
 
     async def _handle_virtual_pnl(self, pnl: VirtualPnL) -> None:
-        publish(
+        self._event_bus.publish(
             "virtual_pnl",
             {
                 "order_id": pnl.order_id,
@@ -527,7 +585,7 @@ class GoldenPipelineService:
         )
 
     async def _handle_snapshot(self, snapshot: GoldenSnapshot) -> None:
-        publish(
+        self._event_bus.publish(
             "runtime.log",
             {
                 "stage": "golden",
@@ -536,7 +594,7 @@ class GoldenPipelineService:
         )
 
     async def _handle_suggestion(self, suggestion: TradeSuggestion) -> None:
-        publish(
+        self._event_bus.publish(
             "runtime.log",
             {
                 "stage": "golden",

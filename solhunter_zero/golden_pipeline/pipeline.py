@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from typing import Awaitable, Callable, Dict, Iterable, Mapping, Optional
 
@@ -30,6 +31,47 @@ from .types import (
     VirtualPnL,
 )
 from .voting import VotingStage
+from .utils import now_ts
+
+
+class _PaperPositionState:
+    """Track synthetic paper position state for shadow execution."""
+
+    def __init__(self) -> None:
+        self.qty_base: float = 0.0
+        self.avg_cost: float = 0.0
+        self.realized_usd: float = 0.0
+
+    def apply_fill(self, side: str, qty: float, price: float, fees: float) -> None:
+        if qty <= 0.0:
+            return
+        direction = 1 if side.lower() == "buy" else -1
+        signed_qty = qty * direction
+        if self.qty_base == 0.0 or self.qty_base * signed_qty > 0:
+            total_qty = abs(self.qty_base) + qty
+            numerator = self.avg_cost * abs(self.qty_base) + price * qty
+            numerator += fees if direction > 0 else -fees
+            self.avg_cost = numerator / total_qty if total_qty else 0.0
+            self.qty_base += signed_qty
+            return
+
+        closing_qty = min(abs(self.qty_base), qty)
+        residual = qty - closing_qty
+        self.qty_base += signed_qty
+        if self.qty_base == 0.0:
+            self.avg_cost = 0.0
+        elif residual > 0:
+            self.avg_cost = price
+
+    def mark_to_market(self, mid: float, spread_bps: float) -> float:
+        if self.qty_base == 0.0:
+            return 0.0
+        half_spread = mid * (spread_bps / 20000.0)
+        if self.qty_base > 0:
+            mark = mid - half_spread
+        else:
+            mark = mid + half_spread
+        return (mark - self.avg_cost) * self.qty_base
 
 
 class GoldenPipeline:
@@ -55,10 +97,26 @@ class GoldenPipeline:
         vote_window_ms: int = 400,
         vote_quorum: int = 2,
         vote_min_score: float = 0.04,
+        allow_inmemory_bus_for_tests: bool = False,
     ) -> None:
-        self._bus = bus or InMemoryBus()
+        mode = (os.getenv("SOLHUNTER_MODE") or "test").strip().lower() or "test"
+        if bus is None:
+            if not allow_inmemory_bus_for_tests:
+                if mode != "test":
+                    raise RuntimeError(
+                        "GoldenPipeline requires a shared message bus in non-test modes"
+                    )
+                raise RuntimeError(
+                    "GoldenPipeline requires a message bus; set allow_inmemory_bus_for_tests=True for unit tests"
+                )
+            bus = InMemoryBus()
+        if mode in {"live", "paper"} and isinstance(bus, InMemoryBus):
+            raise SystemExit(78)
+        self._bus = bus
         self._kv = kv or InMemoryKeyValueStore()
         self._context = ExecutionContext()
+        self._latest_snapshots: Dict[str, GoldenSnapshot] = {}
+        self._paper_positions: Dict[str, _PaperPositionState] = {}
         self._on_golden = on_golden
         self._on_suggestion = on_suggestion
         self._on_decision = on_decision
@@ -68,8 +126,10 @@ class GoldenPipeline:
 
         async def _emit_golden(snapshot: GoldenSnapshot) -> None:
             self._context.record(snapshot)
+            self._latest_snapshots[snapshot.mint] = snapshot
             self.metrics.record(snapshot)
             await self._publish(STREAMS.golden_snapshot, asdict(snapshot))
+            await self._publish_metrics(snapshot)
             if self._on_golden:
                 await self._on_golden(snapshot)
             await self._agent_stage.submit(snapshot)
@@ -78,6 +138,7 @@ class GoldenPipeline:
 
         async def _emit_suggestion(suggestion: TradeSuggestion) -> None:
             await self._publish(STREAMS.trade_suggested, asdict(suggestion))
+            await self._publish("agent.suggestion", asdict(suggestion))
             if self._on_suggestion:
                 await self._on_suggestion(suggestion)
             await self._voting_stage.submit(suggestion)
@@ -93,6 +154,7 @@ class GoldenPipeline:
 
         async def _emit_decision(decision: Decision) -> None:
             await self._publish(STREAMS.vote_decisions, asdict(decision))
+            await self._publish("agent.vote", asdict(decision))
             if self._on_decision:
                 await self._on_decision(decision)
             snapshot = self._context.get(decision.snapshot_hash)
@@ -118,10 +180,42 @@ class GoldenPipeline:
 
         async def _emit_virtual(fill: VirtualFill) -> None:
             await self._publish(STREAMS.virtual_fills, asdict(fill))
+            await self._publish("execution.shadow.fill", asdict(fill))
+            state = self._paper_positions.setdefault(fill.mint, _PaperPositionState())
+            state.apply_fill(
+                fill.side,
+                float(fill.qty_base),
+                float(fill.price_usd),
+                float(fill.fees_usd),
+            )
             if self._on_virtual_fill:
                 await self._on_virtual_fill(fill)
 
         async def _emit_virtual_pnl(pnl: VirtualPnL) -> None:
+            state = self._paper_positions.setdefault(pnl.mint, _PaperPositionState())
+            state.realized_usd += float(pnl.realized_usd)
+            snapshot = self._latest_snapshots.get(pnl.mint)
+            if snapshot is None:
+                snapshot = self._context.get(pnl.snapshot_hash)
+            unrealized = float(pnl.unrealized_usd)
+            payload = {
+                "mint": pnl.mint,
+                "order_id": pnl.order_id,
+                "snapshot_hash": pnl.snapshot_hash,
+                "qty_base": state.qty_base,
+                "avg_cost": state.avg_cost,
+                "realized_usd": state.realized_usd,
+                "unrealized_usd": unrealized,
+                "total_pnl_usd": state.realized_usd + unrealized,
+                "ts": pnl.ts,
+            }
+            if snapshot is not None:
+                mid = float(snapshot.px.get("mid_usd", 0.0) or 0.0)
+                spread = float(snapshot.px.get("spread_bps", 0.0) or 0.0)
+                payload["mark_to_market_usd"] = state.mark_to_market(mid, spread)
+                payload["mid_usd"] = mid
+                payload["spread_bps"] = spread
+            await self._publish("paper.position.update", payload)
             if self._on_virtual_pnl:
                 await self._on_virtual_pnl(pnl)
 
@@ -243,3 +337,31 @@ class GoldenPipeline:
         if not self._bus:
             return
         await self._bus.publish(stream, payload)
+
+    async def _publish_metrics(self, snapshot: GoldenSnapshot) -> None:
+        metrics = snapshot.metrics or {}
+        now = now_ts()
+        bus_latency = None
+        emitted = metrics.get("emitted_at")
+        try:
+            if emitted is not None:
+                bus_latency = max(0.0, (now - float(emitted)) * 1000.0)
+        except Exception:
+            bus_latency = None
+        mapping = {
+            "metrics.bus_latency": bus_latency,
+            "metrics.ohlcv_lag": metrics.get("candle_age_ms"),
+            "metrics.depth_lag": metrics.get("depth_staleness_ms"),
+            "metrics.golden_lag": metrics.get("latency_ms"),
+        }
+        base_payload = {
+            "mint": snapshot.mint,
+            "asof": snapshot.asof,
+            "hash": snapshot.hash,
+        }
+        for topic, value in mapping.items():
+            if value is None:
+                continue
+            payload = dict(base_payload)
+            payload["value"] = float(value)
+            await self._publish(topic, payload)

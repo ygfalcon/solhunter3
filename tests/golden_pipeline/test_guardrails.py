@@ -1,8 +1,13 @@
+import asyncio
 import json
 from collections import defaultdict
+from typing import Mapping
 
 import pytest
 
+from solhunter_zero.golden_pipeline.bus import EventBusAdapter, InMemoryBus, MessageBus
+from solhunter_zero.golden_pipeline.pipeline import GoldenPipeline
+from solhunter_zero.event_bus import BUS as RUNTIME_EVENT_BUS
 from solhunter_zero.production.env import (
     Provider,
     format_configured_providers,
@@ -215,3 +220,54 @@ def test_pricing_execution_risk_and_observability(golden_harness, fake_broker):
     decision_ids = {decision.client_order_id for decision in golden_harness.decisions}
     assert all(event["sig"] in decision_ids for event in live_events)
     assert all(event["fees_usd"] <= 3.0 for event in live_events)
+
+
+def test_pipeline_uses_injected_bus_in_live_mode(monkeypatch):
+    """GoldenPipeline must emit via the injected bus when running live."""
+
+    monkeypatch.setenv("SOLHUNTER_MODE", "live")
+    created_inmemory = {"count": 0}
+    original_init = InMemoryBus.__init__
+
+    def _tracking_init(self) -> None:  # type: ignore[override]
+        created_inmemory["count"] += 1
+        original_init(self)
+
+    monkeypatch.setattr(
+        "solhunter_zero.golden_pipeline.pipeline.InMemoryBus.__init__",
+        _tracking_init,
+    )
+
+    adapter = EventBusAdapter(RUNTIME_EVENT_BUS)
+
+    class SpyBus(MessageBus):
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict[str, object]]] = []
+
+        async def publish(self, stream: str, payload: Mapping[str, object]) -> None:
+            record = (stream, dict(payload))
+            self.sent.append(record)
+            await adapter.publish(stream, payload)
+
+    spy_bus = SpyBus()
+
+    async def _fetcher(mints):
+        return {}
+
+    pipeline = GoldenPipeline(enrichment_fetcher=_fetcher, bus=spy_bus)
+    asyncio.run(pipeline._publish(STREAMS.golden_snapshot, {"mint": "MintLive"}))
+
+    assert spy_bus.sent and spy_bus.sent[0][0] == STREAMS.golden_snapshot
+    assert created_inmemory["count"] == 0
+
+
+def test_pipeline_requires_bus_in_live_mode(monkeypatch):
+    """Constructing the pipeline without a bus in live mode should fail fast."""
+
+    monkeypatch.setenv("SOLHUNTER_MODE", "live")
+
+    async def _fetcher(mints):
+        return {}
+
+    with pytest.raises(RuntimeError):
+        GoldenPipeline(enrichment_fetcher=_fetcher)
