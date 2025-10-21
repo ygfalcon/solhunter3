@@ -313,6 +313,18 @@ def test_set_env_from_config_booleans(monkeypatch):
     assert os.getenv("USE_SERVICE_EXEC") == "True"
     assert os.getenv("USE_MEV_BUNDLES") == "True"
 
+
+def test_get_broker_urls_falls_back_to_event_bus(monkeypatch):
+    from solhunter_zero.config import get_broker_urls
+
+    monkeypatch.delenv("BROKER_URLS", raising=False)
+    monkeypatch.delenv("BROKER_URL", raising=False)
+    monkeypatch.setenv("EVENT_BUS_URL", "redis://localhost:6399/0")
+
+    urls = get_broker_urls({})
+    assert urls == ["redis://localhost:6399/0"]
+    monkeypatch.delenv("EVENT_BUS_URL", raising=False)
+
 def test_load_dex_config_env(monkeypatch):
     monkeypatch.setenv("DEX_BASE_URL", "http://b")
     monkeypatch.setenv("ORCA_DEX_URL", "http://o")

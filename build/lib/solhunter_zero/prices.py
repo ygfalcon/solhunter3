@@ -162,6 +162,7 @@ if not os.getenv("HTTP_FORCE_IPV4"):
 PYTH_PRICE_URL = os.getenv("PYTH_PRICE_URL", "https://hermes.pyth.network/v2/price_feeds")
 
 SYNTHETIC_HINTS_ENV = "SYNTHETIC_PRICE_HINTS"
+LEGACY_SYNTHETIC_HINTS_ENV = "SYNTHETIC_HINTS"
 OFFLINE_PRICE_DEFAULT = os.getenv("OFFLINE_PRICE_DEFAULT")
 
 _LAST_BIRDEYE_KEY: str | None = None
@@ -1205,7 +1206,11 @@ async def _fetch_quotes_synthetic(
     session: aiohttp.ClientSession, tokens: Sequence[str]
 ) -> Dict[str, PriceQuote]:
     quotes: Dict[str, PriceQuote] = {}
-    hints_raw = os.getenv(SYNTHETIC_HINTS_ENV)
+    hints_env = SYNTHETIC_HINTS_ENV
+    hints_raw = os.getenv(hints_env)
+    if not hints_raw:
+        hints_env = LEGACY_SYNTHETIC_HINTS_ENV
+        hints_raw = os.getenv(hints_env)
     hints: Dict[str, Any] = {}
     if hints_raw:
         try:
@@ -1213,7 +1218,7 @@ async def _fetch_quotes_synthetic(
             if isinstance(loaded, MutableMapping):
                 hints = loaded
         except json.JSONDecodeError:
-            logger.debug("Invalid JSON in %s; ignoring", SYNTHETIC_HINTS_ENV)
+            logger.debug("Invalid JSON in %s; ignoring", hints_env or SYNTHETIC_HINTS_ENV)
     fallback_value = None
     if OFFLINE_PRICE_DEFAULT is not None:
         try:
