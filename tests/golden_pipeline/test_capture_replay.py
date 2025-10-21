@@ -51,10 +51,16 @@ from solhunter_zero.schemas import to_dict
 
 MINT = "MintCaptureReplay1111111111111111111111111111111"
 INPUT_TOPICS = ["token_discovered", "price_update", "depth_update"]
-UI_TOPICS = [STREAMS.golden_snapshot, STREAMS.trade_suggested]
+UI_TOPICS = [STREAMS.golden_snapshot, STREAMS.trade_suggested, STREAMS.market_depth]
 EVENT_SEQUENCE: list[tuple[str, Mapping[str, Any]]] = [
     ("token_discovered", {"tokens": [MINT]}),
     ("price_update", {"token": MINT, "price": 1.052, "venue": "sim", "pool": "sim-1"}),
+    (
+        "depth_update",
+        {
+            MINT: None,
+        },
+    ),
     (
         "depth_update",
         {
@@ -162,11 +168,13 @@ def _summarise_metrics(metrics: Mapping[str, Mapping[str, Any]]) -> dict[str, di
 def _summarise_outputs(outputs: Mapping[str, list[Mapping[str, Any]]]) -> dict[str, Any]:
     golden = outputs.get(STREAMS.golden_snapshot, [])
     suggestions = outputs.get(STREAMS.trade_suggested, [])
+    depth_events = outputs.get(STREAMS.market_depth, [])
     return {
         "golden_hashes": sorted(entry.get("hash") for entry in golden),
         "golden_count": len(golden),
         "agents": sorted(entry.get("agent") for entry in suggestions),
         "suggestion_count": len(suggestions),
+        "depth_count": len(depth_events),
     }
 
 
@@ -288,10 +296,12 @@ async def _exercise_capture_replay(tmp_path: Path) -> None:
     assert len(recorded) == len(EVENT_SEQUENCE)
 
     first_summary = _summarise_outputs(first_outputs)
+    assert first_summary["depth_count"] == 2
     reset_event_bus()
 
     second_outputs, second_metrics = await _drive_and_replay(capture_path)
     second_summary = _summarise_outputs(second_outputs)
+    assert second_summary["depth_count"] == 2
 
     assert second_summary == first_summary
     assert second_metrics == first_metrics

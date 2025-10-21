@@ -797,6 +797,8 @@ class GoldenPipelineService:
             return
         now = time.time()
         for token, entry in payload.items():
+            if not isinstance(entry, Mapping):
+                continue
             try:
                 mint = canonical_mint(str(token))
             except Exception:
