@@ -1666,9 +1666,16 @@ async def _redis_listener(pubsub) -> None:
                 if not isinstance(decoded, dict) or not decoded.get("topic"):
                     logging.warning("Dropping redis event missing topic after fallback decode")
                     continue
+                payload = decoded.get("payload")
+                if payload is None:
+                    payload = {
+                        key: value
+                        for key, value in decoded.items()
+                        if key not in {"topic", "dedupe_key"}
+                    }
                 publish(
                     str(decoded["topic"]),
-                    decoded.get("payload"),
+                    payload,
                     dedupe_key=_normalize_dedupe_key(decoded.get("dedupe_key")),
                     _broadcast=False,
                 )
@@ -1770,7 +1777,7 @@ async def connect_broker(urls: Sequence[str] | str) -> None:
             pubsub = conn.pubsub()
             await pubsub.subscribe(_BROKER_CHANNEL)
             logging.getLogger(__name__).info(
-                "Event bus: connected redis broker %s channel=%s", _redact(url), _BROKER_CHANNEL
+                "Event bus: connected redis broker %s channel=%s", url, _BROKER_CHANNEL
             )
             task = asyncio.create_task(_redis_listener(pubsub))
             _BROKER_TYPES.append("redis")
