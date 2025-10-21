@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Optional
 
@@ -59,14 +60,42 @@ class _Position:
 class ExecutionContext:
     """Stores the latest Golden Snapshots for execution lookup."""
 
-    def __init__(self) -> None:
-        self._snapshots: Dict[str, GoldenSnapshot] = {}
+    def __init__(
+        self,
+        *,
+        max_entries: int = 256,
+        ttl_seconds: float | None = 600.0,
+    ) -> None:
+        if max_entries <= 0:
+            raise ValueError("ExecutionContext max_entries must be positive")
+        self._max_entries = max_entries
+        self._ttl_seconds = ttl_seconds
+        self._snapshots: OrderedDict[str, tuple[float, GoldenSnapshot]] = OrderedDict()
 
     def record(self, snapshot: GoldenSnapshot) -> None:
-        self._snapshots[snapshot.hash] = snapshot
+        now = now_ts()
+        self._snapshots[snapshot.hash] = (now, snapshot)
+        self._snapshots.move_to_end(snapshot.hash)
+        self._prune(now)
 
     def get(self, snapshot_hash: str) -> Optional[GoldenSnapshot]:
-        return self._snapshots.get(snapshot_hash)
+        self._prune(now_ts())
+        entry = self._snapshots.get(snapshot_hash)
+        if not entry:
+            return None
+        _, snapshot = entry
+        return snapshot
+
+    def _prune(self, now: float) -> None:
+        if self._ttl_seconds is not None:
+            cutoff = now - self._ttl_seconds
+            while self._snapshots:
+                oldest_hash, (ts, _) = next(iter(self._snapshots.items()))
+                if ts >= cutoff:
+                    break
+                self._snapshots.popitem(last=False)
+        while len(self._snapshots) > self._max_entries:
+            self._snapshots.popitem(last=False)
 
 
 class ShadowExecutor:

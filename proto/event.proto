@@ -265,4 +265,5 @@ message Event {
     StartupComplete startup_complete = 32;
     VirtualPnL virtual_pnl = 33;
   }
+  string dedupe_key = 34;
 }

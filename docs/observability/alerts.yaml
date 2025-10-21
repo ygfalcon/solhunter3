@@ -1,0 +1,74 @@
+groups:
+  - name: solhunter-observability
+    interval: 1m
+    rules:
+      - alert: EventBusLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le, environment)(rate(event_bus_latency_seconds_bucket[5m]))) > 0.35
+        for: 5m
+        labels:
+          severity: warning
+          dashboard: solhunter-observability
+        annotations:
+          summary: "Event bus latency p95 is above 350ms"
+          description: |
+            Investigate consumer lag and broker saturation when the p95 bus latency exceeds
+            the target SLO. Correlate with the "Bus Latency" panel on the Solhunter Observability dashboard.
+      - alert: SuggestionAcceptanceDrop
+        expr: (
+          sum(rate(strategy_acceptances_total[10m]))
+          /
+          sum(rate(strategy_suggestions_total[10m]))
+        ) < 0.6
+        for: 10m
+        labels:
+          severity: critical
+          dashboard: solhunter-observability
+        annotations:
+          summary: "Suggestion acceptance rate fell below 60%"
+          description: |
+            Either proposals are being rejected or the execution feedback loop is degraded.
+            Check the "Suggestion Acceptance Rate" panel to confirm the regression.
+      - alert: VoteWindowExhausted
+        expr: avg(vote_window_remaining_seconds{vote_window_remaining_seconds>=0}) < 30
+        for: 3m
+        labels:
+          severity: warning
+          dashboard: solhunter-observability
+        annotations:
+          summary: "Vote windows are nearly exhausted"
+          description: |
+            Remaining governance vote window is below 30s across schedulers. Review autopilot pacing
+            and expand the window if necessary.
+      - alert: PaperPnLRegression
+        expr: sum(paper_portfolio_unrealized_pnl_usd{portfolio="paper"}) < -2500
+        for: 15m
+        labels:
+          severity: warning
+          dashboard: solhunter-observability
+        annotations:
+          summary: "Paper portfolio unrealized PnL is trending negative"
+          description: |
+            Paper trading drifted below -$2.5k within the last 15 minutes. Inspect the "Paper Unrealized PnL"
+            panel for the impacted portfolio before mirroring the change in live accounts.
+      - alert: RLShadowFillSilence
+        expr: sum(rate(rl_shadow_fills_total[15m])) == 0
+        for: 15m
+        labels:
+          severity: critical
+          dashboard: solhunter-observability
+        annotations:
+          summary: "RL shadow fills have stopped"
+          description: |
+            No RL warmup fills were observed in the past 15 minutes. Confirm that the RL runner and
+            the simulated venues are healthy.
+      - alert: ProviderErrorSpike
+        expr: sum by (provider)(rate(provider_request_errors_total[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+          dashboard: solhunter-observability
+        annotations:
+          summary: "Provider error rate above 0.5/s"
+          description: |
+            Provider endpoints are returning errors above the expected ceiling. Consult the "Provider Error Rate"
+            table to identify the faulty upstream and fail over where possible.

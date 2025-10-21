@@ -51,8 +51,12 @@ class VotingStage:
         self._quorum = quorum
         self._min_score = min_score
         self._pending: Dict[Tuple[str, str, str], List[TradeSuggestion]] = defaultdict(list)
-        self._locks: Dict[Tuple[str, str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._locks: Dict[Tuple[str, str, str], asyncio.Lock] = {}
+        self._lock_timestamps: Dict[Tuple[str, str, str], float] = {}
         self._timers: Dict[Tuple[str, str, str], asyncio.Task] = {}
+        self._timer_deadlines: Dict[Tuple[str, str, str], float] = {}
+        self._transient_ttl = max(self._window_sec * 5.0, 1.0)
+        self._last_cleanup = 0.0
         self._weights: Dict[str, float] = {
             agent: float(weight)
             for agent, weight in (rl_weights.items() if rl_weights else [])
@@ -72,7 +76,8 @@ class VotingStage:
     async def submit(self, suggestion: TradeSuggestion) -> None:
         key = (suggestion.mint, suggestion.side, suggestion.inputs_hash)
         immediate = suggestion.side == "sell" and suggestion.must_exit
-        async with self._locks[key]:
+        lock = self._ensure_lock(key)
+        async with lock:
             self._pending[key].append(suggestion)
             if suggestion.side == "sell" and suggestion.must_exit:
                 expiry = now_ts() + max(self._window_sec * 2.0, 0.25)
@@ -81,10 +86,14 @@ class VotingStage:
                 timer = self._timers.pop(key, None)
                 if timer:
                     timer.cancel()
-            elif key not in self._timers:
-                self._timers[key] = asyncio.create_task(
-                    self._finalise_later(key, self._window_sec)
-                )
+                self._timer_deadlines.pop(key, None)
+            else:
+                now = now_ts()
+                if key not in self._timers:
+                    self._timers[key] = asyncio.create_task(
+                        self._finalise_later(key, self._window_sec)
+                    )
+                self._timer_deadlines[key] = now + self._transient_ttl
         if immediate:
             await self._process_key(key)
 
@@ -96,12 +105,18 @@ class VotingStage:
         await self._process_key(key)
 
     async def _process_key(self, key: Tuple[str, str, str]) -> None:
-        async with self._locks[key]:
+        lock = self._ensure_lock(key)
+        async with lock:
             suggestions = self._pending.pop(key, [])
-            self._timers.pop(key, None)
+            timer = self._timers.pop(key, None)
+            if timer is not None:
+                self._timer_deadlines.pop(key, None)
+            self._retire_lock_if_idle(key, lock)
         if not suggestions:
+            self._cleanup_transients(now_ts(), skip_key=key)
             return
         await self._finalise_suggestions(key, suggestions)
+        self._cleanup_transients(now_ts(), skip_key=key)
 
     async def _finalise_suggestions(
         self, key: Tuple[str, str, str], suggestions: List[TradeSuggestion]
@@ -198,6 +213,64 @@ class VotingStage:
         if sell_score is None:
             return False
         return abs(sell_score - score) <= self.conflict_delta
+
+    def _ensure_lock(self, key: Tuple[str, str, str]) -> asyncio.Lock:
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        self._lock_timestamps[key] = now_ts()
+        return lock
+
+    def _retire_lock_if_idle(
+        self, key: Tuple[str, str, str], lock: asyncio.Lock
+    ) -> None:
+        if key in self._pending or key in self._timers:
+            self._lock_timestamps[key] = now_ts()
+            return
+        waiters = getattr(lock, "_waiters", None)
+        if waiters:
+            self._lock_timestamps[key] = now_ts()
+            return
+        self._locks.pop(key, None)
+        self._lock_timestamps.pop(key, None)
+
+    def _cleanup_transients(
+        self,
+        now: float,
+        *,
+        skip_key: Tuple[str, str, str] | None = None,
+    ) -> None:
+        if now - self._last_cleanup < self._transient_ttl:
+            return
+        self._last_cleanup = now
+        cutoff = now - self._transient_ttl
+        for lock_key, touched in list(self._lock_timestamps.items()):
+            if lock_key == skip_key or touched >= cutoff:
+                continue
+            if lock_key in self._pending or lock_key in self._timers:
+                continue
+            lock = self._locks.get(lock_key)
+            if lock is None:
+                self._lock_timestamps.pop(lock_key, None)
+                continue
+            waiters = getattr(lock, "_waiters", None)
+            if waiters or lock.locked():
+                continue
+            self._locks.pop(lock_key, None)
+            self._lock_timestamps.pop(lock_key, None)
+        for timer_key, deadline in list(self._timer_deadlines.items()):
+            if timer_key == skip_key:
+                continue
+            task = self._timers.get(timer_key)
+            if task and not task.done() and deadline > now:
+                continue
+            if task and not task.done():
+                task.cancel()
+            self._timers.pop(timer_key, None)
+            self._timer_deadlines.pop(timer_key, None)
+            if timer_key in self._pending:
+                asyncio.create_task(self._process_key(timer_key))
 
     def _prune_exit_bias(self, now: float) -> None:
         expired = [key for key, expiry in self._exit_bias.items() if expiry <= now]

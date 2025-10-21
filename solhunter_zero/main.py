@@ -12,7 +12,7 @@ import sys
 import time
 from argparse import ArgumentParser
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 import cProfile
 
 from .util import install_uvloop, parse_bool_env
@@ -41,6 +41,7 @@ from .loop import (
     place_order_async,
     trading_loop,
     FirstTradeTimeoutError,
+    ResourceBudgetExceeded,
     run_iteration as _run_iteration,
 )
 from .agents.discovery import DiscoveryAgent
@@ -95,6 +96,71 @@ def _log_active_keypair_path() -> None:
     message = f"Configured {source} points to missing path {path}"
     log.error(message)
     raise SystemExit(message)
+
+
+def _ensure_live_keypair_ready(cfg: Mapping[str, object]) -> None:
+    """Guarantee a signing keypair is available when running in live mode."""
+
+    try:
+        mode = get_feature_flags().mode.lower()
+    except Exception:
+        mode = "paper"
+    if mode != "live":
+        return
+
+    candidates: list[tuple[str, Path]] = []
+    for source in ("KEYPAIR_PATH", "SOLANA_KEYPAIR"):
+        raw = os.getenv(source)
+        if not raw:
+            continue
+        candidates.append((source, Path(str(raw))))
+
+    cfg_path = cfg.get("solana_keypair") if isinstance(cfg, Mapping) else None
+    if isinstance(cfg_path, str) and cfg_path.strip():
+        candidates.append(("config.solana_keypair", Path(cfg_path.strip())))
+
+    deduped: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for label, path in candidates:
+        expanded = path.expanduser()
+        if not expanded.is_absolute():
+            expanded = ROOT / expanded
+        key = str(expanded)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((label, expanded))
+
+    for label, path in deduped:
+        try:
+            wallet.load_keypair(str(path))
+        except FileNotFoundError:
+            log.debug("Live trading keypair candidate missing at %s (%s)", label, path)
+            continue
+        except Exception as exc:
+            log.warning(
+                "Failed to load live trading keypair from %s (%s): %s",
+                label,
+                path,
+                exc,
+            )
+            continue
+        os.environ.setdefault("KEYPAIR_PATH", str(path))
+        os.environ.setdefault("SOLANA_KEYPAIR", str(path))
+        log.info("Live trading keypair ready from %s (%s)", label, path)
+        return
+
+    info = wallet.setup_default_keypair()
+    default_path = Path(wallet.KEYPAIR_DIR) / f"{info.name}.json"
+    os.environ.setdefault("KEYPAIR_PATH", str(default_path))
+    os.environ.setdefault("SOLANA_KEYPAIR", str(default_path))
+    try:
+        wallet.load_keypair(str(default_path))
+    except Exception as exc:  # pragma: no cover - catastrophic misconfiguration
+        message = f"Failed to load generated default keypair at {default_path}: {exc}"
+        log.error(message)
+        raise SystemExit(message) from exc
+    log.info("Generated default keypair for live trading at %s", default_path)
 
 _ORIGINAL_STRATEGY_MANAGER = StrategyManager
 
@@ -226,6 +292,7 @@ async def perform_startup_async(
     start = time.perf_counter()
     cfg = apply_env_overrides(load_config(config_path))
     set_env_from_config(cfg)
+    _ensure_live_keypair_ready(cfg)
     _log_active_keypair_path()
     try:
         prices.validate_pyth_overrides_on_boot(network_required=not (offline or dry_run))
@@ -600,6 +667,9 @@ def main(
                     )
                 )
                 break
+            except ResourceBudgetExceeded as exc:
+                logging.error("Resource budget triggered shutdown: %s", exc)
+                raise SystemExit(str(exc)) from exc
             except FirstTradeTimeoutError:
                 logging.error("Retrying trading loop after first trade timeout")
                 continue

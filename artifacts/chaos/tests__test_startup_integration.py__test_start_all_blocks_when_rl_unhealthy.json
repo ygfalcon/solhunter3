@@ -1,0 +1,30 @@
+{
+  "markers": [
+    "chaos"
+  ],
+  "module": "tests.test_startup_integration",
+  "records": [
+    {
+      "component": "RL daemon",
+      "detection": "`scripts.start_all.launch_detached` raises `RL daemon gate failed: rl health down` and `start_all.main([])` returns exit code 1.",
+      "failure": "RL health gate blocks startup when the daemon reports unhealthy",
+      "impact": "Trading startup aborts before the runtime and agents come online.",
+      "metadata": {
+        "exception": "RL daemon gate failed: rl health down"
+      },
+      "remediation": [
+        "Check the RL daemon logs for recent errors (for example `journalctl -u solhunter-rl --since -15m`).",
+        "Restart the RL daemon service or container so the `/health` endpoint responds 200 (e.g. `systemctl restart solhunter-rl`).",
+        "Re-run `python scripts/healthcheck.py` to confirm the RL gate passes before retrying startup."
+      ],
+      "severity": "critical",
+      "tags": [
+        "startup",
+        "healthcheck",
+        "rl"
+      ],
+      "verification": "`python -m scripts.startup --non-interactive` proceeds past the RL gate and the UI reports the daemon as healthy."
+    }
+  ],
+  "test": "tests/test_startup_integration.py::test_start_all_blocks_when_rl_unhealthy"
+}

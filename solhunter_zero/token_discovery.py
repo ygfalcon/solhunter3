@@ -74,6 +74,16 @@ if not _BIRDEYE_TOKENLIST_URL:
     _BIRDEYE_TOKENLIST_URL = "https://api.birdeye.so/defi/tokenlist"
 
 
+def _resolve_birdeye_api_key() -> str:
+    """Return the configured BirdEye API key (env var or default)."""
+
+    api_key = (os.getenv("BIRDEYE_API_KEY") or "").strip()
+    if not api_key:
+        default_key = (DEFAULT_BIRDEYE_API_KEY or "").strip()
+        api_key = default_key
+    return api_key
+
+
 def _cache_get(key: str) -> List[TokenEntry] | None:
     with _CACHE_LOCK:
         return _BIRDEYE_CACHE.get(key)
@@ -153,9 +163,7 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
     Pull BirdEye token list (paginated) for Solana with correct headers & params.
     Numeric filters only; no name/suffix heuristics.
     """
-    api_key = (os.getenv("BIRDEYE_API_KEY") or "").strip()
-    if not api_key:
-        api_key = DEFAULT_BIRDEYE_API_KEY
+    api_key = _resolve_birdeye_api_key()
     global _BIRDEYE_DISABLED_INFO
     if not api_key:
         if not _BIRDEYE_DISABLED_INFO and not _ENABLE_MEMPOOL:
@@ -595,7 +603,8 @@ async def discover_candidates(
 
 def warm_cache(rpc_url: str, *, limit: int | None = None) -> None:
     """Prime the discovery cache synchronously (best-effort)."""
-    if not (rpc_url or BIRDEYE_API_KEY):
+    api_key = _resolve_birdeye_api_key()
+    if not (rpc_url or api_key):
         return
 
     limit = limit or min(_MAX_TOKENS, 10)

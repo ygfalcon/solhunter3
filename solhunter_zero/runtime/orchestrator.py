@@ -33,7 +33,7 @@ from ..memory import Memory
 from ..portfolio import Portfolio
 from ..strategy_manager import StrategyManager
 from ..agent_manager import AgentManager
-from ..loop import trading_loop as _trading_loop
+from ..loop import ResourceBudgetExceeded, trading_loop as _trading_loop
 from .. import ui as _ui_module
 from .runtime_wiring import RuntimeWiring, initialise_runtime_wiring, resolve_golden_enabled
 
@@ -210,6 +210,54 @@ class RuntimeOrchestrator:
         self._golden_service: Any | None = None
         self._golden_enabled: bool = False
         self._ui_forwarder: _UIPanelForwarder | None = None
+        self._stop_reason: str | None = None
+
+    @property
+    def stop_reason(self) -> str | None:
+        return self._stop_reason
+
+    def _register_task(self, task: asyncio.Task) -> None:
+        self.handles.tasks.append(task)
+        try:
+            task.add_done_callback(self._on_task_done)
+        except Exception:
+            log.debug("Failed to register task callback", exc_info=True)
+
+    async def _handle_resource_budget_exit(self, exc: ResourceBudgetExceeded) -> None:
+        detail = str(exc)
+        await self._publish_stage("runtime:resource_exit", False, detail)
+        await self.stop_all()
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        try:
+            self.handles.tasks.remove(task)
+        except ValueError:
+            pass
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except Exception as err:  # pragma: no cover - defensive
+            log.debug("Task exception retrieval failed: %s", err)
+            return
+        if exc is None:
+            return
+        loop: asyncio.AbstractEventLoop | None
+        try:
+            loop = task.get_loop()
+        except Exception:
+            loop = None
+        if isinstance(exc, ResourceBudgetExceeded):
+            message = str(exc)
+            self._stop_reason = message
+            log.error("Trading loop stopped due to resource budget: %s", message)
+            if loop and not loop.is_closed():
+                loop.create_task(self._handle_resource_budget_exit(exc))
+            return
+        self._stop_reason = str(exc)
+        log.exception("Runtime task %s failed", task.get_name(), exc_info=exc)
+        if loop and not loop.is_closed():
+            loop.create_task(self.stop_all())
 
     def _emit_ui_ready(self, host: str, port: int) -> None:
         """Log and persist UI readiness details for downstream consumers."""
@@ -425,7 +473,7 @@ class RuntimeOrchestrator:
                                 log.exception("RPC mint stream terminated unexpectedly")
 
                         task.add_done_callback(_log_mint_stream_done)
-                        self.handles.tasks.append(task)
+                        self._register_task(task)
                         ws_url = os.getenv("MINT_STREAM_WS_URL") or "-"
                         await self._publish_stage(
                             "discovery:mint_stream",
@@ -464,7 +512,7 @@ class RuntimeOrchestrator:
                                 log.exception("Jito mempool stream terminated unexpectedly")
 
                         task.add_done_callback(_log_mempool_done)
-                        self.handles.tasks.append(task)
+                        self._register_task(task)
                         await self._publish_stage(
                             "discovery:mempool_stream",
                             True,
@@ -502,7 +550,7 @@ class RuntimeOrchestrator:
                                 log.exception("AMM pool watcher terminated unexpectedly")
 
                         task.add_done_callback(_log_amm_done)
-                        self.handles.tasks.append(task)
+                        self._register_task(task)
                         await self._publish_stage(
                             "discovery:amm_watch",
                             True,
@@ -540,7 +588,7 @@ class RuntimeOrchestrator:
                                 log.exception("Seed token publisher terminated unexpectedly")
 
                         task.add_done_callback(_log_seed_done)
-                        self.handles.tasks.append(task)
+                        self._register_task(task)
                         await self._publish_stage(
                             "discovery:seed_tokens",
                             True,
@@ -832,7 +880,7 @@ class RuntimeOrchestrator:
 
         if not event_driven:
             task = asyncio.create_task(_run_classic(), name="trading_loop")
-            self.handles.tasks.append(task)
+            self._register_task(task)
             await self._publish_stage("agents:loop", True)
             return
 
@@ -879,7 +927,9 @@ class RuntimeOrchestrator:
 
         # Start RL training if enabled
         rl_task = await _init_rl_training(cfg, rl_daemon=rl_daemon, rl_interval=rl_interval)
-        if rl_task is not None:
+        if isinstance(rl_task, asyncio.Task):
+            self._register_task(rl_task)
+        elif rl_task is not None:
             self.handles.tasks.append(rl_task)
 
         # MEV bundles readiness hint
@@ -887,8 +937,8 @@ class RuntimeOrchestrator:
         if use_bundles and (not os.getenv("JITO_RPC_URL") or not os.getenv("JITO_AUTH")):
             await self._publish_stage("mev:warn", False, "MEV bundles enabled but JITO credentials missing")
 
-        self.handles.tasks.append(asyncio.create_task(_discovery_loop(), name="discovery_loop"))
-        self.handles.tasks.append(asyncio.create_task(_evolve_loop(), name="evolve_loop"))
+        self._register_task(asyncio.create_task(_discovery_loop(), name="discovery_loop"))
+        self._register_task(asyncio.create_task(_evolve_loop(), name="evolve_loop"))
         await self._publish_stage("agents:event_runtime", True)
 
     async def start(self) -> None:

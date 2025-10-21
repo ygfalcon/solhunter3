@@ -5,13 +5,14 @@ import contextlib
 import errno
 import json
 import logging
+import math
 import os
 import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from queue import Queue
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 from urllib.parse import urlparse, urlunparse
 
 from flask import Flask, Request, Response, jsonify, render_template_string, request
@@ -71,6 +72,12 @@ class _WebsocketState:
         "port",
         "name",
         "host",
+        "queue_max",
+        "queue_depth",
+        "queue_high",
+        "drop_count",
+        "recent_close_codes",
+        "lock",
     )
 
     def __init__(self, name: str) -> None:
@@ -83,6 +90,12 @@ class _WebsocketState:
         self.port: int = 0
         self.name = name
         self.host: str | None = None
+        self.queue_max: int = 0
+        self.queue_depth: int = 0
+        self.queue_high: int = 0
+        self.drop_count: int = 0
+        self.recent_close_codes: Deque[int | None] = deque(maxlen=10)
+        self.lock = threading.Lock()
 
 
 _WS_CHANNELS: dict[str, _WebsocketState] = {
@@ -166,6 +179,18 @@ def _enqueue_message(channel: str, payload: Any) -> bool:
             except asyncio.QueueEmpty:  # pragma: no cover - race
                 pass
             state.queue.put_nowait(message)
+            with state.lock:
+                state.drop_count += 1
+                depth = state.queue.qsize()
+                state.queue_depth = depth
+                if depth > state.queue_high:
+                    state.queue_high = depth
+        else:
+            with state.lock:
+                depth = state.queue.qsize()
+                state.queue_depth = depth
+                if depth > state.queue_high:
+                    state.queue_high = depth
 
     state.loop.call_soon_threadsafe(_put)
     return True
@@ -187,6 +212,33 @@ def push_log(payload: Any) -> bool:
     """Broadcast *payload* to log websocket listeners."""
 
     return _enqueue_message("logs", payload)
+
+
+def get_ws_client_counts() -> Dict[str, int]:
+    """Return the number of connected websocket clients per channel."""
+
+    counts: Dict[str, int] = {}
+    for name, state in _WS_CHANNELS.items():
+        with state.lock:
+            counts[name] = len(state.clients)
+    return counts
+
+
+def get_ws_channel_metrics() -> Dict[str, Dict[str, Any]]:
+    """Return queue depth/backpressure metrics for each websocket channel."""
+
+    metrics: Dict[str, Dict[str, Any]] = {}
+    for name, state in _WS_CHANNELS.items():
+        with state.lock:
+            metrics[name] = {
+                "queue_max": state.queue_max,
+                "queue_depth": state.queue_depth,
+                "queue_high": state.queue_high,
+                "drops": state.drop_count,
+                "clients": len(state.clients),
+                "recent_close_codes": list(state.recent_close_codes),
+            }
+    return metrics
 
 
 def _normalize_ws_url(value: str | None) -> str | None:
@@ -329,10 +381,13 @@ def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> No
             loop.run_until_complete(server.wait_closed())
     state.server = None
 
-    for ws in list(state.clients):
+    with state.lock:
+        clients_snapshot = list(state.clients)
+    for ws in clients_snapshot:
         with contextlib.suppress(Exception):
             loop.run_until_complete(ws.close(code=1012, reason="server shutdown"))
-    state.clients.clear()
+    with state.lock:
+        state.clients.clear()
 
     if state.task is not None:
         state.task.cancel()
@@ -352,6 +407,13 @@ def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> No
     state.thread = None
     state.port = 0
     state.host = None
+    with state.lock:
+        state.queue = None
+        state.queue_max = 0
+        state.queue_depth = 0
+        state.queue_high = 0
+        state.drop_count = 0
+        state.recent_close_codes.clear()
 
 
 def _start_channel(
@@ -386,22 +448,35 @@ def _start_channel(
         queue = asyncio.Queue[str](maxsize=queue_size)
         state.queue = queue
         backlog: deque[str] = deque()
+        with state.lock:
+            state.queue_max = queue_size
+            state.queue_depth = 0
+            state.queue_high = 0
+            state.drop_count = 0
+            state.recent_close_codes = deque(maxlen=10)
 
         async def _broadcast_loop() -> None:
             while True:
                 message = await queue.get()
                 stale_clients: list[Any] = []
-                for ws in list(state.clients):
+                with state.lock:
+                    clients_snapshot = list(state.clients)
+                for ws in clients_snapshot:
                     try:
                         await ws.send(message)
                     except Exception:
                         stale_clients.append(ws)
-                for ws in stale_clients:
-                    state.clients.discard(ws)
+                if stale_clients:
+                    with state.lock:
+                        for ws in stale_clients:
+                            state.clients.discard(ws)
                 backlog.append(message)
                 if len(backlog) > BACKLOG_MAX:
                     backlog.popleft()
                 queue.task_done()
+                with state.lock:
+                    depth = queue.qsize()
+                    state.queue_depth = depth
 
         async def _handler(websocket, path) -> None:  # type: ignore[override]
             parsed = urlparse(path or "")
@@ -421,12 +496,14 @@ def _start_channel(
             if req_path not in allowed_paths:
                 await websocket.close(code=1008, reason="invalid path")
                 return
-            state.clients.add(websocket)
+            with state.lock:
+                state.clients.add(websocket)
             hello = json.dumps({"channel": channel, "event": "hello"})
             try:
                 await websocket.send(hello)
             except Exception:
-                state.clients.discard(websocket)
+                with state.lock:
+                    state.clients.discard(websocket)
                 return
             try:
                 for cached in list(backlog):
@@ -436,7 +513,9 @@ def _start_channel(
                         break
                 await websocket.wait_closed()
             finally:
-                state.clients.discard(websocket)
+                with state.lock:
+                    state.clients.discard(websocket)
+                    state.recent_close_codes.append(getattr(websocket, "close_code", None))
 
         server = None
         last_exc: Exception | None = None
@@ -726,6 +805,7 @@ class UIState:
     settings_provider: DictProvider = field(
         default=lambda: {"controls": {}, "overrides": {}, "staleness": {}}
     )
+    health_provider: DictProvider = field(default=lambda: {})
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -840,7 +920,7 @@ class UIState:
             return dict(self.suggestions_provider())
         except Exception:  # pragma: no cover
             log.exception("UI suggestions provider failed")
-            return {"suggestions": [], "metrics": {}}
+            return {"suggestions": [], "rejections": [], "metrics": {}}
 
     def snapshot_exit(self) -> Dict[str, Any]:
         try:
@@ -881,6 +961,13 @@ class UIState:
         except Exception:  # pragma: no cover
             log.exception("UI settings provider failed")
             return {"controls": {}, "overrides": {}, "staleness": {}}
+
+    def snapshot_health(self) -> Dict[str, Any]:
+        try:
+            return dict(self.health_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI health provider failed")
+            return {"ok": False}
 
 
 _PAGE_TEMPLATE = """
@@ -961,8 +1048,60 @@ _PAGE_TEMPLATE = """
             border-color: rgba(255,123,114,0.4);
         }
         .connection-detail {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
             color: var(--muted);
-            font-size: 0.85rem;
+            font-size: 0.82rem;
+            align-items: center;
+        }
+        .connection-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            border: 1px solid rgba(88,166,255,0.2);
+            background: rgba(13,17,23,0.72);
+            line-height: 1.2;
+        }
+        .connection-badge::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+            opacity: 0.9;
+            margin-right: 4px;
+        }
+        .connection-badge .badge-label {
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .connection-badge .badge-detail {
+            color: rgba(230, 237, 243, 0.65);
+            font-size: 0.75rem;
+        }
+        .connection-badge.status-ok {
+            border-color: rgba(63,185,80,0.4);
+            color: var(--success);
+        }
+        .connection-badge.status-warn {
+            border-color: rgba(242,204,96,0.45);
+            color: var(--warning);
+        }
+        .connection-badge.status-danger {
+            border-color: rgba(255,123,114,0.45);
+            color: var(--danger);
+        }
+        .connection-badge.status-pending {
+            border-color: rgba(88,166,255,0.35);
+            color: var(--accent);
+        }
+        .connection-badge.status-idle {
+            border-color: rgba(88,166,255,0.2);
+            color: var(--muted);
         }
         .status-grid {
             display: grid;
@@ -1035,6 +1174,31 @@ _PAGE_TEMPLATE = """
             border-radius: 12px;
             padding: 10px 12px;
             border: 1px solid rgba(88,166,255,0.12);
+        }
+        #session-summary-panel .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-top: 12px;
+        }
+        #session-summary-panel .summary-card {
+            padding: 12px;
+            border-radius: 12px;
+            background: rgba(13,17,23,0.72);
+            border: 1px solid rgba(88,166,255,0.12);
+        }
+        #session-summary-panel .summary-card strong {
+            display: block;
+            margin-top: 4px;
+            font-size: 1.18rem;
+        }
+        #session-summary-panel .summary-card small {
+            font-size: 0.75rem;
+            color: var(--muted);
+            margin-left: 4px;
+        }
+        #session-summary-panel .lag-grid {
+            margin-top: 16px;
         }
         .color-chip {
             width: 10px;
@@ -1231,9 +1395,27 @@ _PAGE_TEMPLATE = """
 <body>
     <div class=\"layout\">
         <header>
-            <div id=\"connection-banner\" class=\"connection-banner connection-banner--connecting\">
+            <div id=\"connection-banner\" class=\"connection-banner connection-banner--connecting\"
+                data-ohlcv-lag=\"{{ header_signals.stream_lag.ohlcv | default('', true) }}\"
+                data-depth-lag=\"{{ header_signals.stream_lag.depth | default('', true) }}\"
+                data-golden-lag=\"{{ golden_lag_value | default('', true) }}\"
+                data-agents-stale=\"{{ '1' if agent_is_stale else '0' }}\"
+                data-agents-age=\"{{ agent_age_label }}\">
                 <strong id=\"connection-status-label\">Connecting to runtime…</strong>
-                <div id=\"connection-status-detail\" class=\"connection-detail\">Fetching runtime metadata…</div>
+                <div id=\"connection-status-detail\" class=\"connection-detail\">
+                    {% if connection_badges %}
+                    {% for badge in connection_badges %}
+                    <span class=\"connection-badge {{ badge.css_class }}\" data-channel=\"{{ badge.name }}\" data-status=\"{{ badge.status }}\">
+                        <span class=\"badge-label\">{{ badge.label }}</span>
+                        {% if badge.detail %}
+                        <span class=\"badge-detail\">{{ badge.detail }}</span>
+                        {% endif %}
+                    </span>
+                    {% endfor %}
+                    {% else %}
+                    <span class=\"muted\">Fetching runtime metadata…</span>
+                    {% endif %}
+                </div>
             </div>
             <div class=\"header-top\">
                 <div class=\"section-title\">
@@ -1314,6 +1496,98 @@ _PAGE_TEMPLATE = """
                 {% endfor %}
             </div>
         </header>
+
+        {% set summary_state = 'warn' if swarm_overall.get('stale') else 'ok' %}
+        <section class=\"panel\" id=\"session-summary-panel\">
+            <div class=\"section-title\">
+                <h2><span class=\"color-chip {{ summary_state }}\"></span>Session Summary</h2>
+                <span class=\"muted\">Last update {{ swarm_overall.get('age_label', 'n/a') }}</span>
+            </div>
+            <div class=\"summary-grid\">
+                <div class=\"summary-card\">
+                    <span class=\"muted\">Suggestions / 5m</span>
+                    {% if session_summary.suggestions_5m is not none %}
+                    <strong>{{ session_summary.suggestions_5m | round(2) }}</strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+                <div class=\"summary-card\">
+                    <span class=\"muted\">Acceptance Rate</span>
+                    {% if session_summary.acceptance_rate is not none %}
+                    <strong>{{ (session_summary.acceptance_rate * 100) | round(1) }}%</strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+                <div class=\"summary-card\">
+                    <span class=\"muted\">Golden Hashes</span>
+                    {% if session_summary.golden_hashes is not none %}
+                    <strong>{{ session_summary.golden_hashes }}</strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+                <div class=\"summary-card\">
+                    <span class=\"muted\">Shadow Fills</span>
+                    {% if session_summary.shadow_fills is not none %}
+                    <strong>{{ session_summary.shadow_fills }}</strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+                <div class=\"summary-card\">
+                    <span class=\"muted\">Open Vote Windows</span>
+                    {% if session_summary.open_vote_windows is not none %}
+                    <strong>{{ session_summary.open_vote_windows }}</strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+                <div class=\"summary-card\">
+                    <span class=\"muted\">Paper Unrealized</span>
+                    {% if session_summary.paper_unrealized_usd is not none %}
+                    <strong>{{ session_summary.paper_unrealized_usd | round(2) }}<small>USD</small></strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+            </div>
+            <div class=\"summary-grid lag-grid\">
+                <div class=\"summary-card\">
+                    <span class=\"muted\">Bus Lag</span>
+                    {% if session_summary.lag_bus_ms is not none %}
+                    <strong>{{ session_summary.lag_bus_ms | round(1) }} ms</strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+                <div class=\"summary-card\">
+                    <span class=\"muted\">OHLCV Lag</span>
+                    {% if session_summary.lag_ohlcv_ms is not none %}
+                    <strong>{{ session_summary.lag_ohlcv_ms | round(1) }} ms</strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+                <div class=\"summary-card\">
+                    <span class=\"muted\">Depth Lag</span>
+                    {% if session_summary.lag_depth_ms is not none %}
+                    <strong>{{ session_summary.lag_depth_ms | round(1) }} ms</strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+                <div class=\"summary-card\">
+                    <span class=\"muted\">Golden Lag</span>
+                    {% if session_summary.lag_golden_ms is not none %}
+                    <strong>{{ session_summary.lag_golden_ms | round(1) }} ms</strong>
+                    {% else %}
+                    <strong>—</strong>
+                    {% endif %}
+                </div>
+            </div>
+        </section>
 
         <section class=\"grid-two\">
             <article class=\"panel\" id=\"discovery-panel\">
@@ -1974,13 +2248,74 @@ _PAGE_TEMPLATE = """
                 const connectionBanner = document.getElementById('connection-banner');
                 const connectionLabel = document.getElementById('connection-status-label');
                 const connectionDetail = document.getElementById('connection-status-detail');
-                const channelOrder = ['events', 'rl', 'logs'];
-                const channelLabels = {events: 'Events', rl: 'RL', logs: 'Logs'};
-                const channelState = {
-                    events: {status: 'idle', detail: 'Waiting for metadata…', socket: null, retryTimer: null, retries: 0, url: ''},
-                    rl: {status: 'idle', detail: 'Waiting for metadata…', socket: null, retryTimer: null, retries: 0, url: ''},
-                    logs: {status: 'idle', detail: 'Waiting for metadata…', socket: null, retryTimer: null, retries: 0, url: ''}
+                const channelOrder = ['events', 'market', 'golden', 'agents', 'rl', 'logs'];
+                const websocketChannels = ['events', 'rl', 'logs'];
+                const channelLabels = {
+                    events: 'Events',
+                    market: 'Market',
+                    golden: 'Golden',
+                    agents: 'Agents',
+                    rl: 'RL',
+                    logs: 'Logs'
                 };
+
+                function createChannel(initialDetail) {
+                    return {
+                        status: 'connecting',
+                        detail: initialDetail,
+                        socket: null,
+                        retryTimer: null,
+                        retries: 0,
+                        url: ''
+                    };
+                }
+
+                const channelState = {
+                    events: createChannel('Waiting for metadata…'),
+                    market: createChannel('Awaiting market data'),
+                    golden: createChannel('Awaiting golden stream'),
+                    agents: createChannel('Awaiting agent data'),
+                    rl: createChannel('Waiting for metadata…'),
+                    logs: createChannel('Waiting for metadata…')
+                };
+
+                function normalizeStatus(status) {
+                    switch (status) {
+                        case 'open':
+                        case 'ok':
+                        case 'streaming':
+                            return 'ok';
+                        case 'warn':
+                        case 'warning':
+                            return 'warn';
+                        case 'error':
+                        case 'fail':
+                        case 'danger':
+                            return 'danger';
+                        case 'connecting':
+                        case 'pending':
+                        case 'waiting':
+                            return 'pending';
+                        default:
+                            return 'idle';
+                    }
+                }
+
+                function statusClassFor(status) {
+                    const normalized = normalizeStatus(status);
+                    switch (normalized) {
+                        case 'ok':
+                            return 'status-ok';
+                        case 'warn':
+                            return 'status-warn';
+                        case 'danger':
+                            return 'status-danger';
+                        case 'pending':
+                            return 'status-pending';
+                        default:
+                            return 'status-idle';
+                    }
+                }
 
                 function renderConnectionSummary() {
                     if (!connectionBanner || !connectionLabel || !connectionDetail) {
@@ -1988,42 +2323,64 @@ _PAGE_TEMPLATE = """
                     }
                     let anyError = false;
                     let anyWarn = false;
-                    let allOpen = true;
+                    let allNominal = true;
                     const parts = [];
+                    const fragment = document.createDocumentFragment();
                     channelOrder.forEach((name) => {
                         const info = channelState[name];
                         if (!info) {
                             return;
                         }
                         const label = channelLabels[name] || name;
-                        parts.push(label + ': ' + info.detail);
-                        if (info.status === 'error') {
+                        const normalized = normalizeStatus(info.status);
+                        if (normalized === 'danger') {
                             anyError = true;
-                        }
-                        if (info.status === 'warn') {
+                        } else if (normalized === 'warn') {
                             anyWarn = true;
                         }
-                        if (info.status !== 'open') {
-                            allOpen = false;
+                        if (normalized !== 'ok') {
+                            allNominal = false;
                         }
+                        if (info.detail) {
+                            parts.push(label + ': ' + info.detail);
+                        } else {
+                            parts.push(label);
+                        }
+                        const badge = document.createElement('span');
+                        badge.className = 'connection-badge ' + statusClassFor(info.status);
+                        badge.dataset.channel = name;
+                        badge.dataset.status = info.status;
+                        badge.title = info.detail ? label + ': ' + info.detail : label;
+                        const labelSpan = document.createElement('span');
+                        labelSpan.className = 'badge-label';
+                        labelSpan.textContent = label;
+                        badge.appendChild(labelSpan);
+                        if (info.detail) {
+                            const detailSpan = document.createElement('span');
+                            detailSpan.className = 'badge-detail';
+                            detailSpan.textContent = info.detail;
+                            badge.appendChild(detailSpan);
+                        }
+                        fragment.appendChild(badge);
                     });
+                    connectionDetail.replaceChildren(fragment);
+                    connectionDetail.setAttribute('data-status-text', parts.join(' · '));
                     let overall = 'connecting';
                     if (anyError) {
                         overall = 'error';
                     } else if (anyWarn) {
                         overall = 'warning';
-                    } else if (allOpen && parts.length) {
+                    } else if (allNominal && parts.length) {
                         overall = 'ok';
                     }
                     const messages = {
-                        ok: 'Connected to runtime',
+                        ok: 'Realtime streams nominal',
                         error: 'Realtime stream disconnected',
                         warning: 'Realtime stream degraded',
                         connecting: 'Connecting to runtime…'
                     };
                     connectionLabel.textContent = messages[overall] || messages.connecting;
                     connectionBanner.className = 'connection-banner connection-banner--' + overall;
-                    connectionDetail.textContent = parts.join(' · ');
                 }
 
                 function setChannelState(name, status, detail) {
@@ -2039,6 +2396,57 @@ _PAGE_TEMPLATE = """
                         info.retries = 0;
                     }
                     renderConnectionSummary();
+                }
+
+                function parseLag(value) {
+                    if (typeof value !== 'string' || value === '') {
+                        return null;
+                    }
+                    const parsed = Number(value);
+                    return Number.isFinite(parsed) ? parsed : null;
+                }
+
+                function setLagChannel(name, lagValue, waitingDetail) {
+                    const info = channelState[name];
+                    if (!info) {
+                        return;
+                    }
+                    if (lagValue === null) {
+                        setChannelState(name, 'connecting', waitingDetail);
+                        return;
+                    }
+                    let status = 'open';
+                    if (lagValue > 1500) {
+                        status = 'error';
+                    } else if (lagValue > 600) {
+                        status = 'warn';
+                    }
+                    const detail = 'Lag ' + Math.round(lagValue) + ' ms';
+                    setChannelState(name, status, detail);
+                }
+
+                function updateDataChannelsFromBanner() {
+                    if (!connectionBanner) {
+                        return;
+                    }
+                    const ohlcvLag = parseLag(connectionBanner.dataset.ohlcvLag);
+                    const depthLag = parseLag(connectionBanner.dataset.depthLag);
+                    const goldenLag = parseLag(connectionBanner.dataset.goldenLag);
+                    const agentStale = connectionBanner.dataset.agentsStale === '1';
+                    const agentAge = connectionBanner.dataset.agentsAge || 'n/a';
+                    const lagValues = [];
+                    if (ohlcvLag !== null) {
+                        lagValues.push(ohlcvLag);
+                    }
+                    if (depthLag !== null) {
+                        lagValues.push(depthLag);
+                    }
+                    const marketLag = lagValues.length ? Math.max(...lagValues) : null;
+                    setLagChannel('market', marketLag, 'Awaiting market data');
+                    setLagChannel('golden', goldenLag, 'Awaiting golden stream');
+                    const agentPrefix = agentStale ? 'Stale' : 'Fresh';
+                    const agentDetail = (agentPrefix + ' · ' + agentAge).trim();
+                    setChannelState('agents', agentStale ? 'warn' : 'open', agentDetail);
                 }
 
                 function shortUrl(url) {
@@ -2162,7 +2570,7 @@ _PAGE_TEMPLATE = """
                         meta = await response.json();
                     } catch (err) {
                         const message = err && err.message ? err.message : 'failed to load meta';
-                        channelOrder.forEach((name) => {
+                        websocketChannels.forEach((name) => {
                             setChannelState(name, 'error', 'Meta fetch failed — ' + message);
                         });
                         return;
@@ -2172,7 +2580,7 @@ _PAGE_TEMPLATE = """
                         rl: meta && typeof meta.rl_ws === 'string' ? meta.rl_ws : '',
                         logs: meta && typeof meta.logs_ws === 'string' ? meta.logs_ws : ''
                     };
-                    channelOrder.forEach((name) => {
+                    websocketChannels.forEach((name) => {
                         const url = mapping[name] || '';
                         if (url) {
                             connectChannel(name, url);
@@ -2182,6 +2590,7 @@ _PAGE_TEMPLATE = """
                     });
                 }
 
+                updateDataChannelsFromBanner();
                 renderConnectionSummary();
                 bootRealtime();
 
@@ -2578,6 +2987,132 @@ def create_app(state: UIState | None = None) -> Flask:
             "depth": (market_state.get("lag_ms") or {}).get("depth_ms"),
             "golden": golden_detail.get("lag_ms"),
         }
+        golden_lag_value = None
+        golden_candidates = [
+            status.get("golden_lag_ms"),
+            summary.get("golden", {}).get("lag_ms")
+            if isinstance(summary, dict)
+            else None,
+            stream_lag.get("golden"),
+        ]
+        for candidate in golden_candidates:
+            try:
+                numeric = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(numeric):
+                continue
+            golden_lag_value = numeric
+            break
+        agent_is_stale = bool(suggestion_metrics.get("stale"))
+        agent_age_label = suggestion_metrics.get("updated_label") or swarm_overall.get(
+            "age_label", "n/a"
+        )
+        if not isinstance(summary, dict):
+            summary = {}
+        evaluation_summary = summary.get("evaluation")
+        if not isinstance(evaluation_summary, dict):
+            evaluation_summary = {}
+        execution_summary = summary.get("execution")
+        if not isinstance(execution_summary, dict):
+            execution_summary = {}
+        paper_summary = summary.get("paper_pnl")
+        if not isinstance(paper_summary, dict):
+            paper_summary = {}
+        golden_meta = summary.get("golden")
+        if not isinstance(golden_meta, dict):
+            golden_meta = {}
+
+        session_summary = {
+            "suggestions_5m": evaluation_summary.get("suggestions_5m"),
+            "acceptance_rate": evaluation_summary.get("acceptance_rate"),
+            "open_vote_windows": evaluation_summary.get("open_vote_windows"),
+            "golden_hashes": golden_meta.get("count"),
+            "shadow_fills": execution_summary.get("count"),
+            "paper_unrealized_usd": paper_summary.get("latest_unrealized"),
+            "lag_bus_ms": status.get("bus_latency_ms"),
+            "lag_ohlcv_ms": status.get("ohlcv_lag_ms")
+            if status.get("ohlcv_lag_ms") is not None
+            else stream_lag.get("ohlcv"),
+            "lag_depth_ms": status.get("depth_lag_ms")
+            if status.get("depth_lag_ms") is not None
+            else stream_lag.get("depth"),
+            "lag_golden_ms": golden_lag_value,
+        }
+
+        def _badge_css(status_value: str) -> str:
+            mapping = {
+                "open": "status-ok",
+                "ok": "status-ok",
+                "streaming": "status-ok",
+                "warn": "status-warn",
+                "warning": "status-warn",
+                "error": "status-danger",
+                "fail": "status-danger",
+                "danger": "status-danger",
+                "connecting": "status-pending",
+                "pending": "status-pending",
+                "idle": "status-idle",
+            }
+            return mapping.get(status_value, "status-idle")
+
+        def _lag_badge(value: Any, fallback: str) -> tuple[str, str]:
+            if value is None:
+                return "connecting", fallback
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return "connecting", fallback
+            if not math.isfinite(numeric):
+                return "connecting", fallback
+            if numeric > 1800.0:
+                status_value = "error"
+            elif numeric > 600.0:
+                status_value = "warn"
+            else:
+                status_value = "open"
+            detail = f"Lag {int(numeric + 0.5)} ms"
+            return status_value, detail
+
+        def _make_badge(name: str, label: str, status_value: str, detail: str) -> Dict[str, str]:
+            return {
+                "name": name,
+                "label": label,
+                "status": status_value,
+                "detail": detail,
+                "css_class": _badge_css(status_value),
+            }
+
+        market_lag_value: float | None = None
+        for candidate in (
+            session_summary.get("lag_ohlcv_ms"),
+            session_summary.get("lag_depth_ms"),
+        ):
+            try:
+                numeric = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(numeric):
+                continue
+            if market_lag_value is None or numeric > market_lag_value:
+                market_lag_value = numeric
+        market_status, market_detail = _lag_badge(market_lag_value, "Awaiting market data")
+        golden_status, golden_detail = _lag_badge(
+            golden_lag_value, "Awaiting golden stream"
+        )
+        agent_label = agent_age_label or "n/a"
+        agent_prefix = "Stale" if agent_is_stale else "Fresh"
+        agent_detail = f"{agent_prefix} · {agent_label}"
+
+        connection_badges = [
+            _make_badge("events", "Events", "connecting", "Waiting for metadata…"),
+            _make_badge("market", "Market", market_status, market_detail),
+            _make_badge("golden", "Golden", golden_status, golden_detail),
+            _make_badge("agents", "Agents", "warn" if agent_is_stale else "open", agent_detail),
+            _make_badge("rl", "RL", "connecting", "Waiting for metadata…"),
+            _make_badge("logs", "Logs", "connecting", "Waiting for metadata…"),
+        ]
+        stream_lag["golden"] = golden_lag_value
         header_signals = {
             "environment": (status.get("environment") or "dev").upper(),
             "paper_mode": bool(status.get("paper_mode")),
@@ -2616,6 +3151,11 @@ def create_app(state: UIState | None = None) -> Flask:
             swarm_overall=swarm_overall,
             header_signals=header_signals,
             kpis=kpis,
+            session_summary=session_summary,
+            connection_badges=connection_badges,
+            golden_lag_value=golden_lag_value,
+            agent_is_stale=agent_is_stale,
+            agent_age_label=agent_age_label,
         )
 
     def _ws_config_payload() -> Dict[str, str]:
@@ -2711,6 +3251,16 @@ def create_app(state: UIState | None = None) -> Flask:
         status = state.snapshot_status()
         ok = bool(status.get("event_bus")) and bool(status.get("trading_loop"))
         return jsonify({"ok": ok, "status": status})
+
+    @app.get("/health/runtime")
+    def health_runtime_view() -> Any:
+        payload = state.snapshot_health()
+        if "ok" not in payload:
+            event_bus_ok = bool(payload.get("event_bus", {}).get("connected"))
+            heartbeat_ok = bool(payload.get("heartbeat", {}).get("ok", True))
+            resource_ok = not bool(payload.get("resource", {}).get("exit_active"))
+            payload["ok"] = event_bus_ok and heartbeat_ok and resource_ok
+        return jsonify(_json_ready(payload))
 
     @app.get("/status")
     def status_view() -> Any:

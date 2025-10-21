@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "environment": "staging",
+    "generated_at": "2024-05-16T12:05:00Z"
+  },
+  "panels": [
+    {
+      "title": "Bus Latency",
+      "series": [
+        {"cluster": "bus-core", "p95": 0.128}
+      ]
+    },
+    {
+      "title": "Suggestion Acceptance",
+      "series": [
+        {"strategy": "momentum", "suggestions_per_min": 6.8, "acceptance_rate": 0.79}
+      ]
+    },
+    {
+      "title": "Provider Errors",
+      "series": [
+        {"provider": "helius", "errors_per_min": 0.2}
+      ]
+    }
+  ],
+  "placeholders": {
+    "api_key": "<REDACTED>",
+    "session_cookie": "<REDACTED>"
+  }
+}

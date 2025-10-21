@@ -1,80 +1,178 @@
-# This workflow will install Python dependencies, run tests and lint with a single version of Python
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
 name: Python application
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 permissions:
   contents: read
 
 jobs:
-  build:
-
+  unit:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v3
-      with:
-        python-version: "3.11"
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -e '.[dev]'
-    - name: Verify protobufs
-      run: |
-        python scripts/check_protos.py
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Bytecode compile check
-      run: |
-        python -m compileall -q .
-    - name: Test with pytest
-      run: |
-        pytest tests/test_full_system_integration.py \
-          tests/test_investor_demo_cli.py \
-          tests/test_wallet_cli.py
-
-    mac-startup:
-      runs-on: ubuntu-latest
-      steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.11
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
-      - name: Run Mac startup test
+      - name: Verify protobufs
+        run: python scripts/check_protos.py
+      - name: Lint with flake8
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      - name: Bytecode compile check
+        run: python -m compileall -q .
+      - name: Unit tests
+        run: |
+          pytest tests/test_full_system_integration.py \
+                 tests/test_investor_demo_cli.py \
+                 tests/test_wallet_cli.py
+      - name: macOS startup sanity
         run: |
           pytest tests/test_startup.py::test_mac_startup_prereqs \
-            tests/test_device.py::test_configure_gpu_env_mps \
-            tests/test_device.py::test_configure_gpu_env_mps_unavailable
+                 tests/test_device.py::test_configure_gpu_env_mps \
+                 tests/test_device.py::test_configure_gpu_env_mps_unavailable
+      - name: Upload observability bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: observability-bundle
+          path: docs/observability
+          if-no-files-found: warn
 
-    integration-tests:
-      runs-on: ubuntu-latest
-      steps:
+  golden:
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.11
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev,full]'
-      - name: Run integration tests
+      - name: Prepare artifact directory
+        run: mkdir -p artifacts/golden
+      - name: Golden pipeline tests
+        run: pytest tests/golden_pipeline
+      - name: Upload golden pipeline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-pipeline-artifacts
+          path: artifacts/golden
+          if-no-files-found: warn
+
+  ui-smoke:
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
         run: |
-          pytest -m integration
+          python -m pip install --upgrade pip
+          pip install -e '.[dev,full]'
+      - name: Prepare UI artifact directory
+        run: mkdir -p artifacts/ui
+      - name: Headless UI smoke tests
+        env:
+          SOLHUNTER_HEADLESS: "1"
+        run: |
+          pytest tests/test_ui.py \
+                 tests/test_ui_websockets.py \
+                 tests/test_ui_meta_ws.py
+      - name: Upload UI smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-smoke-artifacts
+          path: artifacts/ui
+          if-no-files-found: warn
+
+  chaos:
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+      - name: Prepare chaos artifact directory
+        run: mkdir -p artifacts/chaos
+      - name: Short chaos scenarios
+        env:
+          CHAOS_REMEDIATION_DIR: artifacts/chaos
+        run: pytest -m chaos --maxfail=1
+      - name: Regenerate chaos runbook
+        run: python scripts/generate_chaos_runbook.py --input artifacts/chaos --output docs/runbook_generated.md
+      - name: Ensure chaos runbook is current
+        run: |
+          git diff --stat docs/runbook_generated.md
+          git diff --exit-code docs/runbook_generated.md
+      - name: Upload chaos artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-runbook
+          path: |
+            artifacts/chaos
+            docs/runbook_generated.md
+          if-no-files-found: warn
+
+  staging-canary:
+    runs-on: ubuntu-latest
+    needs:
+      - unit
+      - golden
+      - ui-smoke
+      - chaos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build redis
+      - name: Build staging bundle
+        run: python -m build --wheel --outdir dist
+      - name: Canary check against staging bus
+        env:
+          STAGING_REDIS_URL: ${{ secrets.STAGING_REDIS_URL }}
+        run: |
+          if [ -z "$STAGING_REDIS_URL" ]; then
+            echo "::error::STAGING_REDIS_URL secret must be set"
+            exit 1
+          fi
+          python scripts/bus_smoke.py ping --redis-url "$STAGING_REDIS_URL"
+          python scripts/bus_smoke.py keys --redis-url "$STAGING_REDIS_URL"
+      - name: Upload staging bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-bundle
+          path: dist
+          if-no-files-found: warn

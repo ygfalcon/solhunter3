@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import math
@@ -14,7 +15,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ..agent_manager import AgentManager
 from ..config import get_broker_urls, load_selected_config, set_env_from_config
@@ -27,12 +28,20 @@ from ..event_bus import (
     verify_broker_connection,
 )
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
-from ..loop import FirstTradeTimeoutError, run_iteration, _init_rl_training
+from ..loop import (
+    FirstTradeTimeoutError,
+    ResourceBudgetExceeded,
+    run_iteration,
+    _init_rl_training,
+)
+from .. import resource_monitor
 from ..pipeline import PipelineCoordinator
 from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory
 from ..portfolio import Portfolio
+from ..exit_management import ExitManager
+from ..schemas import RuntimeLog
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..golden_pipeline.service import GoldenPipelineService
@@ -149,6 +158,41 @@ def _probe_rl_daemon_health(timeout: float = 0.5) -> Dict[str, Any]:
     return result
 
 
+_EXIT_PANEL_KEYS: tuple[str, ...] = (
+    "hot_watch",
+    "diagnostics",
+    "queue",
+    "closed",
+    "missed_exits",
+)
+
+
+def _sanitize_exit_payload(data: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Return a defensive copy of *data* with required keys present."""
+
+    sanitized: Dict[str, Any] = {}
+    if isinstance(data, Mapping):
+        for key, value in data.items():
+            try:
+                sanitized[key] = copy.deepcopy(value)
+            except Exception:
+                sanitized[key] = value
+    for key in _EXIT_PANEL_KEYS:
+        value = sanitized.get(key)
+        if isinstance(value, list):
+            try:
+                sanitized[key] = copy.deepcopy(value)
+            except Exception:
+                sanitized[key] = list(value)
+        elif value is None:
+            sanitized[key] = []
+        else:
+            sanitized[key] = [value]
+    for key in _EXIT_PANEL_KEYS:
+        sanitized.setdefault(key, [])
+    return sanitized
+
+
 @dataclass
 class RuntimeStatus:
     event_bus: bool = False
@@ -253,6 +297,9 @@ class TradingRuntime:
         self._agent_suggestions: Deque[Dict[str, Any]] = deque(
             maxlen=_int_env("UI_SUGGESTIONS_LIMIT", 600)
         )
+        self._agent_rejections: Deque[Dict[str, Any]] = deque(
+            maxlen=_int_env("UI_REJECTIONS_LIMIT", 600)
+        )
         self._vote_decisions: Deque[Dict[str, Any]] = deque(
             maxlen=_int_env("UI_VOTE_LIMIT", 400)
         )
@@ -283,6 +330,10 @@ class TradingRuntime:
         self._rl_gate_active: bool = False
         self._rl_gate_reason: Optional[str] = "boot"
         self._last_heartbeat_perf: Optional[float] = None
+        self._loop_delay: float = 30.0
+        self._loop_min_delay: float = 5.0
+        self._loop_max_delay: float = 120.0
+        self._heartbeat_budget: float = 60.0
         self._rl_status_info: Dict[str, Any] = {
             "enabled": False,
             "running": False,
@@ -295,6 +346,11 @@ class TradingRuntime:
             "heartbeat_age": None,
             "heartbeat_ts": None,
         }
+        self._resource_snapshot: Dict[str, Any] = {}
+        self._resource_alerts: Dict[str, Any] = {}
+        self._exit_manager = ExitManager()
+        self._exit_summary: Dict[str, Any] = _sanitize_exit_payload(None)
+        self._exit_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -514,6 +570,11 @@ class TradingRuntime:
         else:
             self.activity.add("broker", "verified")
 
+        try:
+            resource_monitor.start_monitor()
+        except Exception:  # pragma: no cover - best effort
+            log.debug("Resource monitor start failed", exc_info=True)
+
         self._subscribe_to_events()
 
     def _subscribe_to_events(self) -> None:
@@ -601,6 +662,15 @@ class TradingRuntime:
             with self._swarm_lock:
                 self._agent_suggestions.appendleft(payload)
 
+        async def _on_suggestion_rejected(event: Any) -> None:
+            payload = _normalize_event(event)
+            mint = payload.get("mint")
+            if not mint:
+                return
+            payload["_received"] = time.time()
+            with self._swarm_lock:
+                self._agent_rejections.appendleft(payload)
+
         async def _on_vote_decision(event: Any) -> None:
             payload = _normalize_event(event)
             mint = payload.get("mint")
@@ -686,6 +756,21 @@ class TradingRuntime:
                 except Exception:
                     log.exception("Failed to forward RL weights to pipeline")
 
+        async def _on_resource_update(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not payload:
+                return
+            payload["_received"] = time.time()
+            self._resource_snapshot = payload
+
+        async def _on_resource_alert(event: Any) -> None:
+            payload = _normalize_event(event)
+            if not payload:
+                return
+            payload["_received"] = time.time()
+            resource_name = str(payload.get("resource") or payload.get("name") or "resource")
+            self._resource_alerts[resource_name] = payload
+
         self._subscriptions.append(("action_executed", _on_action))
         subscribe("action_executed", _on_action)
         self._subscriptions.append(("runtime.log", _on_log))
@@ -697,10 +782,13 @@ class TradingRuntime:
             ("x:market.depth", _on_market_depth),
             ("x:mint.golden", _on_golden_snapshot),
             ("x:trade.suggested", _on_suggestion),
+            ("x:trade.rejected", _on_suggestion_rejected),
             ("x:vote.decisions", _on_vote_decision),
             ("x:virt.fills", _on_virtual_fill),
             ("x:live.fills", _on_live_fill),
             ("rl:weights.applied", _on_rl_weights),
+            ("resource_update", _on_resource_update),
+            ("resource_alert", _on_resource_alert),
         ):
             self._subscriptions.append((topic, handler))
             subscribe(topic, handler)
@@ -726,6 +814,8 @@ class TradingRuntime:
         self.ui_state.shadow_provider = self._collect_shadow_panel
         self.ui_state.rl_provider = self._collect_rl_panel
         self.ui_state.settings_provider = self._collect_settings_panel
+        self.ui_state.exit_provider = self._collect_exit_panel
+        self.ui_state.health_provider = self._collect_health_metrics
 
         if not self._ui_enabled:
             self.ui_server = None
@@ -1111,6 +1201,10 @@ class TradingRuntime:
                 min_delay = min(min_delay, 1.0)
             if self.explicit_max_delay is None and self.cfg.get("max_delay") is None:
                 max_delay = min(max_delay, 15.0)
+        self._loop_delay = loop_delay
+        self._loop_min_delay = min_delay
+        self._loop_max_delay = max_delay
+        self._heartbeat_budget = max(loop_delay * 2.0, 30.0)
         discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
         if discovery_method is None:
             discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
@@ -1125,6 +1219,7 @@ class TradingRuntime:
         arbitrage_amount = _maybe_float(self.cfg.get("arbitrage_amount"), 0.0)
         live_discovery = self.cfg.get("live_discovery")
 
+        throttle_logged = False
         while not self.stop_event.is_set():
             start = time.perf_counter()
             try:
@@ -1164,6 +1259,39 @@ class TradingRuntime:
 
             elapsed = time.perf_counter() - start
             sleep_for = max(min_delay, min(max_delay, loop_delay - elapsed))
+            exit_candidates = resource_monitor.active_budget("exit")
+            throttle_candidates = resource_monitor.active_budget("throttle")
+            exit_policy = exit_candidates[0] if exit_candidates else None
+            throttle_policy = throttle_candidates[0] if throttle_candidates else None
+            if exit_policy:
+                resource = str(exit_policy.get("resource") or "resource")
+                self.activity.add("loop", f"resource exit {resource}", ok=False)
+                publish(
+                    "runtime.log",
+                    RuntimeLog(stage="loop", detail=f"resource-exit:{resource}", level="ERROR"),
+                )
+                log.error(
+                    "Resource budget triggered shutdown action for %s: %s",
+                    resource,
+                    exit_policy,
+                )
+                self.stop_event.set()
+                break
+            throttled = bool(throttle_policy)
+            if throttled:
+                sleep_for = max(sleep_for, max_delay)
+                if not throttle_logged:
+                    publish(
+                        "runtime.log",
+                        RuntimeLog(stage="loop", detail="resource-throttle", level="WARN"),
+                    )
+                    log.warning(
+                        "Resource budget throttle active; sleeping for %.2fs",
+                        sleep_for,
+                    )
+                    throttle_logged = True
+            else:
+                throttle_logged = False
             await asyncio.sleep(max(0.1, sleep_for))
 
         self.status.trading_loop = False
@@ -1240,6 +1368,62 @@ class TradingRuntime:
         status["rl_gate"] = rl_snapshot.get("gate")
         status["rl_gate_reason"] = rl_snapshot.get("gate_reason")
         return status
+
+    def _collect_health_metrics(self) -> Dict[str, Any]:
+        budgets = resource_monitor.get_budget_status()
+        heartbeat_age = self._internal_heartbeat_age()
+        heartbeat_threshold = max(self._loop_delay * 2.0, 30.0)
+        heartbeat_ok = heartbeat_age is None or heartbeat_age <= heartbeat_threshold
+        exit_active = any(
+            info.get("active") and str(info.get("action")).lower() == "exit"
+            for info in budgets.values()
+        )
+        throttle_active = any(
+            info.get("active") and str(info.get("action")).lower() == "throttle"
+            for info in budgets.values()
+        )
+        queue_stats: Dict[str, Any] = {}
+        if self.pipeline is not None:
+            try:
+                queue_stats = self.pipeline.queue_snapshot()
+            except Exception:
+                queue_stats = {}
+        try:
+            from ..ui import get_ws_client_counts
+        except Exception:  # pragma: no cover - optional during CI
+            ws_clients: Dict[str, int] = {}
+        else:
+            try:
+                ws_clients = get_ws_client_counts()
+            except Exception:
+                ws_clients = {}
+        resource_snapshot = dict(self._resource_snapshot)
+        resource_alerts = {name: dict(info) for name, info in self._resource_alerts.items()}
+        ok = bool(self.status.event_bus) and heartbeat_ok and not exit_active
+        payload: Dict[str, Any] = {
+            "ok": ok,
+            "event_bus": {"connected": bool(self.status.event_bus)},
+            "heartbeat": {
+                "age": heartbeat_age,
+                "threshold": heartbeat_threshold,
+                "ok": heartbeat_ok,
+            },
+            "queues": queue_stats,
+            "loop": {
+                "delay": self._loop_delay,
+                "min_delay": self._loop_min_delay,
+                "max_delay": self._loop_max_delay,
+            },
+            "resource": {
+                "budgets": budgets,
+                "alerts": resource_alerts,
+                "latest": resource_snapshot,
+                "exit_active": exit_active,
+                "throttle_active": throttle_active,
+            },
+            "ui": {"ws_clients": ws_clients},
+        }
+        return payload
 
     def _collect_weights(self) -> Dict[str, Any]:
         if self.agent_manager is None:
@@ -1537,6 +1721,7 @@ class TradingRuntime:
             suggestions = list(self._agent_suggestions)
             golden_hashes = dict(self._latest_golden_hash)
             decisions = list(self._vote_decisions)
+            rejections = list(self._agent_rejections)
         items: List[Dict[str, Any]] = []
         recent_count = 0
         for payload in suggestions:
@@ -1597,6 +1782,54 @@ class TradingRuntime:
             )
             if age is not None and age <= window:
                 recent_count += 1
+        rejection_items: List[Dict[str, Any]] = []
+        recent_rejections = 0
+        for payload in rejections:
+            mint = payload.get("mint")
+            if not mint:
+                continue
+            ts = _entry_timestamp(payload, "detected_at")
+            if ts is None:
+                ts = _entry_timestamp(payload, "asof")
+            age = _age_seconds(ts, now)
+            if age is None and payload.get("_received") is not None:
+                try:
+                    age = max(0.0, now - float(payload["_received"]))
+                except Exception:
+                    age = None
+            if age is not None and age <= window:
+                recent_rejections += 1
+            rejection_items.append(
+                {
+                    "agent": payload.get("agent"),
+                    "source_agent": payload.get("source_agent"),
+                    "mint": mint,
+                    "side": (payload.get("side") or "").lower() or None,
+                    "notional_usd": _maybe_float(payload.get("notional_usd")),
+                    "requested_notional_usd": _maybe_float(
+                        payload.get("requested_notional_usd")
+                    ),
+                    "reason": payload.get("reason"),
+                    "reason_code": payload.get("reason_code"),
+                    "guard": payload.get("guard"),
+                    "scope": payload.get("scope"),
+                    "cap_usd": _maybe_float(payload.get("cap_usd")),
+                    "available_notional_usd": _maybe_float(
+                        payload.get("available_notional_usd")
+                    ),
+                    "max_slippage_bps": _maybe_float(payload.get("max_slippage_bps")),
+                    "guard_slippage_bps": _maybe_float(
+                        payload.get("guard_slippage_bps")
+                    ),
+                    "snapshot_hash": payload.get("snapshot_hash"),
+                    "snapshot_hash_short": _short_hash(payload.get("snapshot_hash")),
+                    "age_label": _format_age(age),
+                    "age_seconds": age,
+                    "detected_at": payload.get("detected_at"),
+                    "gating": payload.get("gating") or {},
+                    "depth_points": payload.get("depth_points") or [],
+                }
+            )
         latest_age = None
         for item in items:
             age = item.get("age_seconds")
@@ -1625,8 +1858,14 @@ class TradingRuntime:
             "updated_label": _format_age(latest_age),
             "stale": latest_age is not None and latest_age > window,
             "golden_tracked": len(golden_hashes),
+            "rejections": len(rejection_items),
+            "rejections_rate_per_min": recent_rejections / max(window / 60.0, 1e-6),
         }
-        return {"suggestions": items[:200], "metrics": metrics}
+        return {
+            "suggestions": items[:200],
+            "rejections": rejection_items[:200],
+            "metrics": metrics,
+        }
 
     def _collect_vote_panel(self) -> Dict[str, Any]:
         now = time.time()
@@ -1744,6 +1983,35 @@ class TradingRuntime:
                 }
             )
         return {"windows": windows[:60], "decisions": tape[:60]}
+
+    def _refresh_exit_summary(self, summary: Optional[Mapping[str, Any]] = None) -> None:
+        data: Optional[Mapping[str, Any]] = None
+        if summary and isinstance(summary, Mapping):
+            for key in (
+                "exit_summary",
+                "exit_panel",
+                "exit_state",
+                "exit_manager",
+                "exit_manager_summary",
+            ):
+                candidate = summary.get(key)
+                if isinstance(candidate, Mapping):
+                    data = candidate
+                    break
+        if data is None and self._exit_manager is not None:
+            try:
+                data = self._exit_manager.summary()
+            except Exception:  # pragma: no cover - defensive
+                log.debug("Exit manager summary failed", exc_info=True)
+                data = None
+        sanitized = _sanitize_exit_payload(data)
+        with self._exit_lock:
+            self._exit_summary = sanitized
+
+    def _collect_exit_panel(self) -> Dict[str, Any]:
+        self._refresh_exit_summary()
+        with self._exit_lock:
+            return copy.deepcopy(self._exit_summary)
 
     def _collect_shadow_panel(self) -> Dict[str, Any]:
         now = time.time()
@@ -2165,6 +2433,7 @@ class TradingRuntime:
                 "actions": summary.get("actions_count") or 0,
             },
         )
+        self._refresh_exit_summary(summary)
 
     async def _pipeline_on_evaluation(self, result) -> None:
         if result is None:

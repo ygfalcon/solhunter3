@@ -8,6 +8,15 @@ from typing import Any, Dict, List, Optional, Sequence
 
 Timestamp = float
 
+GOLDEN_SNAPSHOT_SCHEMA_VERSION = "1.0"
+TOKEN_SNAPSHOT_SCHEMA_VERSION = "1.0"
+DEPTH_SNAPSHOT_SCHEMA_VERSION = "1.0"
+TRADE_SUGGESTION_SCHEMA_VERSION = "1.0"
+DECISION_SCHEMA_VERSION = "1.0"
+VIRTUAL_FILL_SCHEMA_VERSION = "1.0"
+LIVE_FILL_SCHEMA_VERSION = "1.0"
+TRADE_REJECTION_SCHEMA_VERSION = "1.0"
+
 
 @dataclass(slots=True)
 class DiscoveryCandidate:
@@ -29,6 +38,7 @@ class TokenSnapshot:
     venues: Sequence[str] | None = None
     flags: Dict[str, Any] = field(default_factory=dict)
     asof: Timestamp = 0.0
+    schema_version: str = field(default=TOKEN_SNAPSHOT_SCHEMA_VERSION)
 
 
 @dataclass(slots=True)
@@ -81,6 +91,7 @@ class DepthSnapshot:
     spread_bps: float
     depth_pct: Dict[str, float]
     asof: Timestamp
+    schema_version: str = field(default=DEPTH_SNAPSHOT_SCHEMA_VERSION)
 
 
 @dataclass(slots=True)
@@ -95,6 +106,7 @@ class GoldenSnapshot:
     ohlcv5m: Dict[str, Any]
     hash: str
     metrics: Dict[str, Any] = field(default_factory=dict)
+    schema_version: str = field(default=GOLDEN_SNAPSHOT_SCHEMA_VERSION)
 
 
 @dataclass(slots=True)
@@ -116,6 +128,8 @@ class TradeSuggestion:
     must_exit: bool = False
     hot_watch: bool = False
     exit_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    sequence: int = 0
+    schema_version: str = field(default=TRADE_SUGGESTION_SCHEMA_VERSION)
 
 
 @dataclass(slots=True)
@@ -130,6 +144,8 @@ class Decision:
     client_order_id: str
     agents: List[str]
     ts: Timestamp
+    sequence: int = 0
+    schema_version: str = field(default=DECISION_SCHEMA_VERSION)
 
 
 @dataclass(slots=True)
@@ -146,6 +162,7 @@ class VirtualFill:
     snapshot_hash: str
     route: str
     ts: Timestamp
+    schema_version: str = field(default=VIRTUAL_FILL_SCHEMA_VERSION)
 
 
 @dataclass(slots=True)
@@ -161,6 +178,7 @@ class LiveFill:
     slippage_bps: float
     route: str
     snapshot_hash: str
+    schema_version: str = field(default=LIVE_FILL_SCHEMA_VERSION)
 
 
 @dataclass(slots=True)

@@ -409,6 +409,8 @@ def stub_sqlalchemy() -> None:
     sa.text = text
     sa.Insert = Insert
     sa.TextClause = TextClause
+    sa.Index = lambda *a, **k: None
+    sa.event = types.SimpleNamespace(listens_for=lambda *a, **k: (lambda func: func))
 
     orm = types.ModuleType('sqlalchemy.orm')
     orm.__spec__ = importlib.machinery.ModuleSpec('sqlalchemy.orm', None)
