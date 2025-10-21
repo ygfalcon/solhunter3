@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Optional
 
 
 class MessageBus:
@@ -61,4 +61,18 @@ class InMemoryBus(MessageBus):
         return _unsubscribe
 
 
-__all__ = ["MessageBus", "InMemoryBus"]
+class EventBusAdapter(MessageBus):
+    """Adapter that exposes :mod:`solhunter_zero.event_bus` as a ``MessageBus``."""
+
+    def __init__(self, event_bus: Any) -> None:
+        self._event_bus = event_bus
+
+    async def publish(self, stream: str, payload: Mapping[str, object]) -> None:
+        materialised = dict(payload)
+        self._event_bus.publish(stream, materialised)
+
+    async def healthcheck(self) -> bool:
+        return True
+
+
+__all__ = ["MessageBus", "InMemoryBus", "EventBusAdapter"]

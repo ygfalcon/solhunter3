@@ -679,6 +679,7 @@ def test_golden_snapshot_metrics_and_determinism():
             agents=[DeterministicAgent("alpha")],
             on_golden=on_golden,
             on_suggestion=on_suggestion,
+            allow_inmemory_bus_for_tests=True,
         )
 
         mint = "MintDeterministic11111111111111111111111111"
