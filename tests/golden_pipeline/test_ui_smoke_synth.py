@@ -1,7 +1,11 @@
+import asyncio
 import re
 from html.parser import HTMLParser
 
 import pytest
+
+from solhunter_zero.golden_pipeline.contracts import STREAMS
+from solhunter_zero.golden_pipeline.types import GOLDEN_SNAPSHOT_SCHEMA_VERSION
 
 pytest_plugins = ["tests.golden_pipeline.synth_seed"]
 
@@ -17,7 +21,11 @@ def test_ui_smoke_synth_values(runtime, bus, kv, synth_seed):
     snapshots = golden_snapshot.get("snapshots", [])
     assert len(snapshots) == 7
     assert all((entry.get("px") or 0.0) > 0.0 for entry in snapshots)
+    assert all((entry.get("px_mid_usd") or 0.0) > 0.0 for entry in snapshots)
     assert all((entry.get("liq") or 0.0) > 0.0 for entry in snapshots)
+    for entry in snapshots:
+        detail = entry.get("px_detail") or {}
+        assert (detail.get("mid_usd") or 0.0) > 0.0
 
     suggestions = runtime.ui_state.snapshot_suggestions()
     assert len(suggestions.get("suggestions", [])) >= 2
@@ -165,3 +173,64 @@ def test_ui_smoke_synth_values(runtime, bus, kv, synth_seed):
         liq_text = re.sub(r'<[^>]+>', '', cells[3]).strip()
         assert price_text and price_text != '—'
         assert liq_text and liq_text != '—'
+
+
+def test_golden_snapshot_nested_payload(runtime, bus):
+    mint = "NestedMint111111111111111111111111111111111111111"
+    mid_usd = 2.75
+    spread_bps = 14.5
+    depth_map = {"1": 1_500.0, "2": 2_750.0}
+    liquidity_total = 5_500.0
+    payload = {
+        "mint": mint,
+        "asof": 1_704_000_000.0,
+        "meta": {
+            "symbol": "NST",
+            "decimals": 6,
+            "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "asof": 1_704_000_000.0,
+        },
+        "px": {"mid_usd": mid_usd, "spread_bps": spread_bps},
+        "liq": {
+            "depth_pct": depth_map,
+            "liquidity_usd": liquidity_total,
+            "asof": 1_704_000_000.0,
+        },
+        "ohlcv5m": {
+            "mint": mint,
+            "o": 2.7,
+            "h": 2.8,
+            "l": 2.6,
+            "c": 2.75,
+            "vol_usd": 12_000.0,
+            "trades": 42,
+            "buyers": 20,
+            "zret": 0.0,
+            "zvol": 0.0,
+            "asof_close": 1_703_999_700.0,
+        },
+        "hash": "nested-hash-001",
+        "metrics": {"latency_ms": 42.0},
+        "schema_version": GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    }
+
+    asyncio.run(bus.publish(STREAMS.golden_snapshot, payload))
+    asyncio.run(runtime.wait_for_golden())
+
+    snapshot = runtime.ui_state.snapshot_golden_snapshots()
+    entries = snapshot.get("snapshots", [])
+    assert any(entry["mint"] == mint for entry in entries)
+    entry = next(item for item in entries if item["mint"] == mint)
+
+    assert entry["px"] == pytest.approx(mid_usd, rel=1e-9)
+    assert entry["px_mid_usd"] == pytest.approx(mid_usd, rel=1e-9)
+    assert entry["spread_bps"] == pytest.approx(spread_bps, rel=1e-9)
+    assert entry["liq"] == pytest.approx(depth_map["1"], rel=1e-9)
+    assert entry["liq_total_usd"] == pytest.approx(liquidity_total, rel=1e-9)
+    assert entry["liq_depth_pct"]["1"] == pytest.approx(depth_map["1"], rel=1e-9)
+    assert entry["liq_depth_pct"]["2"] == pytest.approx(depth_map["2"], rel=1e-9)
+
+    px_detail = entry.get("px_detail") or {}
+    assert px_detail.get("spread_bps") == pytest.approx(spread_bps, rel=1e-9)
+    liq_detail = entry.get("liq_detail") or {}
+    assert liq_detail.get("liquidity_usd") == pytest.approx(liquidity_total, rel=1e-9)
