@@ -47,6 +47,21 @@ run_with_audit() {
 }
 
 main() {
+  export NEW_DAS_DISCOVERY=${NEW_DAS_DISCOVERY:-1}
+  export EXIT_FEATURES_ON=${EXIT_FEATURES_ON:-1}
+  export RL_WEIGHTS_DISABLED=${RL_WEIGHTS_DISABLED:-1}
+
+  if [[ -z ${HELIUS_API_KEY:-} ]]; then
+    local env_file="$ROOT_DIR/etc/solhunter/env.production"
+    if [[ -f $env_file ]]; then
+      local helius_key
+      helius_key=$(grep -E '^HELIUS_API_KEY=' "$env_file" | tail -n 1 | cut -d= -f2-)
+      if [[ -n $helius_key ]]; then
+        export HELIUS_API_KEY="$helius_key"
+      fi
+    fi
+  fi
+
   local env_audit
   local env_status="pass"
   if ! env_audit=$(run_with_audit env_doctor "$SCRIPT_DIR/env_doctor.sh"); then
