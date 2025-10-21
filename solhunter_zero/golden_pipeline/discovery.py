@@ -83,14 +83,16 @@ class DiscoveryStage:
     def _validate(self, mint: str) -> bool:
         if not mint or not _BASE58_RE.match(mint):
             return False
-        if self._allow_program_prefixes:
-            return True
         program_prefixes = {
             "JUP",  # Jupiter router
             "Tokenkeg",
             "Token2022",
             "Vote111",
         }
+        if self._allow_program_prefixes and any(
+            mint.startswith(prefix) for prefix in self._allow_program_prefixes
+        ):
+            return True
         if any(mint.startswith(prefix) for prefix in program_prefixes):
             return False
         return True
