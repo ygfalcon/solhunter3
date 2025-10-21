@@ -3,6 +3,17 @@
 This guide maps each UI panel to its backing stream or API, the fields that must be rendered, and
 staleness rules.
 
+## Swarm Summary
+
+- **Endpoint:** `/summary`
+- **Fields:** `evaluation`, `execution`, `paper_pnl`, `golden`, `seeded`.
+- **Seeded tokens:** `seeded.tokens` surfaces each configured mint with `canonical_mint`,
+  `status`, and the resolved `pyth_feed_id`/`pyth_account` (when available). Tokens without a
+  configured Pyth identifier are marked `status=missing` so the header can highlight gaps.
+- **Validation:** The list is built from `SEED_TOKENS` and normalised using the configured Pyth
+  overrides (`PYTH_PRICE_IDS` plus defaults). Missing or malformed identifiers are logged during
+  startup and called out in the summary for quick remediation.
+
 ## Discovery & Enrichment
 
 ### Discovery Panel

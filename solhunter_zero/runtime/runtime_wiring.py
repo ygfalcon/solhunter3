@@ -752,6 +752,55 @@ class RuntimeEventCollectors:
             "latest_unrealized": latest_unrealized,
             "turnover_usd": turnover,
         }
+        seeded_summary: Dict[str, Any] = {
+            "count": 0,
+            "mapped": 0,
+            "missing": [],
+            "tokens": [],
+        }
+        try:
+            from .. import seed_token_publisher
+        except Exception as exc:  # pragma: no cover - defensive import guard
+            seeded_summary["error"] = str(exc)
+        else:
+            try:
+                seed_tokens = seed_token_publisher.configured_seed_tokens()
+            except Exception as exc:
+                seeded_summary["error"] = str(exc)
+                seed_tokens = tuple()
+            if seed_tokens:
+                try:
+                    metadata = seed_token_publisher.build_seeded_token_metadata(seed_tokens)
+                except Exception as exc:
+                    seeded_summary["error"] = str(exc)
+                else:
+                    entries: List[Dict[str, Any]] = []
+                    missing: List[str] = []
+                    mapped = 0
+                    for token in seed_tokens:
+                        info = metadata.get(token, {})
+                        status = str(info.get("status") or "missing")
+                        entry = {
+                            "mint": token,
+                            "canonical_mint": info.get("canonical_mint", token),
+                            "status": status,
+                            "pyth_feed_id": info.get("feed_id"),
+                            "pyth_account": info.get("account"),
+                            "pyth_kind": info.get("kind"),
+                        }
+                        entries.append(entry)
+                        if status == "available":
+                            mapped += 1
+                        else:
+                            missing.append(token)
+                    seeded_summary.update(
+                        {
+                            "count": len(seed_tokens),
+                            "mapped": mapped,
+                            "tokens": entries,
+                            "missing": missing,
+                        }
+                    )
         return {
             "evaluation": evaluation,
             "execution": execution,
@@ -760,6 +809,7 @@ class RuntimeEventCollectors:
                 "count": len(golden.get("snapshots", [])),
                 "lag_ms": golden.get("lag_ms"),
             },
+            "seeded": seeded_summary,
         }
 
     def settings_snapshot(self) -> Dict[str, Any]:
