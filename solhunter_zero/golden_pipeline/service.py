@@ -560,7 +560,14 @@ class GoldenPipelineService:
                 "snapshot_hash": decision.snapshot_hash,
             },
         }
-        self._event_bus.publish("action_decision", payload)
+        dedupe_key = None
+        try:
+            seq_value = int(getattr(decision, "sequence", 0))
+        except Exception:
+            seq_value = 0
+        if seq_value > 0:
+            dedupe_key = f"action_decision:{decision.mint}:{seq_value}"
+        self._event_bus.publish("action_decision", payload, dedupe_key=dedupe_key)
 
     async def _handle_virtual_fill(self, fill: VirtualFill) -> None:
         self._event_bus.publish(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import asdict
 from typing import Awaitable, Callable, Dict, Iterable, Mapping, Optional
@@ -114,6 +115,8 @@ class GoldenPipeline:
             raise SystemExit(78)
         self._bus = bus
         self._kv = kv or InMemoryKeyValueStore()
+        self._sequence_cache: Dict[str, int] = {}
+        self._sequence_lock = asyncio.Lock()
         self._context = ExecutionContext()
         self._latest_snapshots: Dict[str, GoldenSnapshot] = {}
         self._paper_positions: Dict[str, _PaperPositionState] = {}
@@ -137,8 +140,21 @@ class GoldenPipeline:
         self._coalescer = SnapshotCoalescer(_emit_golden, kv=self._kv)
 
         async def _emit_suggestion(suggestion: TradeSuggestion) -> None:
-            await self._publish(STREAMS.trade_suggested, asdict(suggestion))
-            await self._publish("agent.suggestion", asdict(suggestion))
+            mint_key = str(suggestion.mint)
+            sequence = await self._next_sequence(mint_key)
+            suggestion.sequence = sequence
+            payload = asdict(suggestion)
+            dedupe_suffix = f"{mint_key}:{sequence}"
+            await self._publish(
+                STREAMS.trade_suggested,
+                payload,
+                dedupe_key=f"{STREAMS.trade_suggested}:{dedupe_suffix}",
+            )
+            await self._publish(
+                "agent.suggestion",
+                dict(payload),
+                dedupe_key=f"agent.suggestion:{dedupe_suffix}",
+            )
             if self._on_suggestion:
                 await self._on_suggestion(suggestion)
             await self._voting_stage.submit(suggestion)
@@ -153,8 +169,21 @@ class GoldenPipeline:
         )
 
         async def _emit_decision(decision: Decision) -> None:
-            await self._publish(STREAMS.vote_decisions, asdict(decision))
-            await self._publish("agent.vote", asdict(decision))
+            mint_key = str(decision.mint)
+            sequence = await self._next_sequence(mint_key)
+            decision.sequence = sequence
+            payload = asdict(decision)
+            dedupe_suffix = f"{mint_key}:{sequence}"
+            await self._publish(
+                STREAMS.vote_decisions,
+                payload,
+                dedupe_key=f"{STREAMS.vote_decisions}:{dedupe_suffix}",
+            )
+            await self._publish(
+                "agent.vote",
+                dict(payload),
+                dedupe_key=f"agent.vote:{dedupe_suffix}",
+            )
             if self._on_decision:
                 await self._on_decision(decision)
             snapshot = self._context.get(decision.snapshot_hash)
@@ -333,10 +362,42 @@ class GoldenPipeline:
 
         return self.metrics.snapshot()
 
-    async def _publish(self, stream: str, payload: Mapping[str, object]) -> None:
+    def _sequence_kv_key(self, mint: str) -> str:
+        return f"golden:sequence:{mint}"
+
+    async def _next_sequence(self, mint: str) -> int:
+        mint_key = str(mint)
+        async with self._sequence_lock:
+            current = self._sequence_cache.get(mint_key)
+            if current is None and self._kv is not None:
+                try:
+                    stored = await self._kv.get(self._sequence_kv_key(mint_key))
+                except Exception:
+                    stored = None
+                if stored is not None:
+                    try:
+                        current = int(stored)
+                    except Exception:
+                        current = 0
+                else:
+                    current = 0
+            if current is None:
+                current = 0
+            next_seq = current + 1
+            self._sequence_cache[mint_key] = next_seq
+            if self._kv is not None:
+                try:
+                    await self._kv.set(self._sequence_kv_key(mint_key), str(next_seq))
+                except Exception:
+                    pass
+            return next_seq
+
+    async def _publish(
+        self, stream: str, payload: Mapping[str, object], *, dedupe_key: str | None = None
+    ) -> None:
         if not self._bus:
             return
-        await self._bus.publish(stream, payload)
+        await self._bus.publish(stream, payload, dedupe_key=dedupe_key)
 
     async def _publish_metrics(self, snapshot: GoldenSnapshot) -> None:
         metrics = snapshot.metrics or {}

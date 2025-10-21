@@ -20,6 +20,8 @@ except Exception:  # pragma: no cover - optional dependency
 import os
 import zlib
 import mmap
+import threading
+import time
 
 try:  # optional compression libraries
     import lz4.frame
@@ -39,7 +41,7 @@ except Exception:  # pragma: no cover - optional dependency
     _ZSTD_COMPRESSOR = None
     _ZSTD_DECOMPRESSOR = None
 from contextlib import contextmanager
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Awaitable, Callable, Dict, Generator, Iterable, List, Set, Sequence, cast
 
 try:
@@ -97,6 +99,51 @@ def _broker_preflight() -> None:
 _broker_preflight()
 
 from asyncio import Queue
+
+try:
+    _EVENT_DEDUPE_TTL = float(os.getenv("EVENT_BUS_DEDUPE_TTL", "30") or 30.0)
+except Exception:
+    _EVENT_DEDUPE_TTL = 30.0
+if _EVENT_DEDUPE_TTL <= 0:
+    _EVENT_DEDUPE_TTL = 30.0
+
+_DEDUPE_SEEN: dict[str, float] = {}
+_DEDUPE_QUEUE: deque[tuple[float, str]] = deque()
+_DEDUPE_LOCK = threading.Lock()
+
+
+def _normalize_dedupe_key(value: Any | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _dedupe_prune(now: float) -> None:
+    while _DEDUPE_QUEUE and _DEDUPE_QUEUE[0][0] <= now:
+        _, key = _DEDUPE_QUEUE.popleft()
+        expiry = _DEDUPE_SEEN.get(key)
+        if expiry is not None and expiry <= now:
+            _DEDUPE_SEEN.pop(key, None)
+
+
+def _dedupe_should_drop(key: str) -> bool:
+    now = time.time()
+    with _DEDUPE_LOCK:
+        _dedupe_prune(now)
+        expiry = _DEDUPE_SEEN.get(key)
+        if expiry is not None and expiry > now:
+            return True
+        new_expiry = now + _EVENT_DEDUPE_TTL
+        _DEDUPE_SEEN[key] = new_expiry
+        _DEDUPE_QUEUE.append((new_expiry, key))
+    return False
+
+
+def _dedupe_reset() -> None:
+    with _DEDUPE_LOCK:
+        _DEDUPE_SEEN.clear()
+        _DEDUPE_QUEUE.clear()
 
 
 from .schemas import validate_message, to_dict
@@ -676,13 +723,16 @@ _BROKER_RETRY_LIMIT = int(os.getenv("BROKER_RETRY_LIMIT", "3") or 3)
 _BROKER_HEARTBEAT_TASK: asyncio.Task | None = None
 
 
-def _encode_event(topic: str, payload: Any) -> Any:
+def _encode_event(topic: str, payload: Any, dedupe_key: str | None = None) -> Any:
     cls = _PB_MAP.get(topic)
     if cls is None:
         # Preserve payloads for unknown topics using JSON serialization so
         # downstream consumers receive the original data instead of an empty
         # protobuf envelope.
-        return _dumps({"topic": topic, "payload": to_dict(payload)})
+        data = {"topic": topic, "payload": to_dict(payload)}
+        if dedupe_key:
+            data["dedupe_key"] = dedupe_key
+        return _dumps(data)
 
     if topic == "action_executed":
         event = pb.Event(
@@ -736,6 +786,8 @@ def _encode_event(topic: str, payload: Any) -> Any:
             event = pb.Event(topic=topic, depth_update=pb.DepthUpdate(entries=entries))
         else:
             event = pb.Event(topic=topic, depth_diff=pb.DepthDiff(entries=entries))
+        if dedupe_key:
+            event.dedupe_key = dedupe_key
         data = event.SerializeToString()
         return _compress_event(data)
     elif topic == "depth_service_status":
@@ -1074,6 +1126,8 @@ def _encode_event(topic: str, payload: Any) -> Any:
             topic=topic,
             memory_sync_response=pb.MemorySyncResponse(trades=trades, index=data.get("index") or b""),
         )
+    if dedupe_key:
+        event.dedupe_key = dedupe_key
     data = event.SerializeToString()
     return _compress_event(data)
 
@@ -1307,8 +1361,17 @@ def _unsubscribe_impl(topic: str, handler: Callable[[Any], Awaitable[None] | Non
     if not handlers:
         _subscribers.pop(topic, None)
 
-def _publish_impl(topic: str, payload: Any, *, _broadcast: bool = True) -> None:
+def _publish_impl(
+    topic: str,
+    payload: Any,
+    *,
+    dedupe_key: str | None = None,
+    _broadcast: bool = True,
+) -> None:
     """Publish ``payload`` to all subscribers of ``topic`` and over websockets."""
+    key = _normalize_dedupe_key(dedupe_key)
+    if key and _dedupe_should_drop(key):
+        return
     payload = validate_message(topic, payload)
     handlers = list(_subscribers.get(topic, []))
     try:
@@ -1326,7 +1389,7 @@ def _publish_impl(topic: str, payload: Any, *, _broadcast: bool = True) -> None:
 
     msg: Any | None = None
     if (websockets or _BROKER_CONNS or _EVENT_BUS_MMAP) and _broadcast:
-        msg = _encode_event(topic, payload)
+        msg = _encode_event(topic, payload, dedupe_key=key)
     if _EVENT_BUS_MMAP and _broadcast and isinstance(msg, (bytes, bytearray)):
         _mmap_write(bytes(msg))
     if websockets and _broadcast:
@@ -1389,8 +1452,15 @@ class EventBus:
     def unsubscribe(self, topic: str, handler: Callable[[Any], Awaitable[None] | None]):
         _unsubscribe_impl(topic, handler)
 
-    def publish(self, topic: str, payload: Any, *, _broadcast: bool = True) -> None:
-        _publish_impl(topic, payload, _broadcast=_broadcast)
+    def publish(
+        self,
+        topic: str,
+        payload: Any,
+        *,
+        dedupe_key: str | None = None,
+        _broadcast: bool = True,
+    ) -> None:
+        _publish_impl(topic, payload, dedupe_key=dedupe_key, _broadcast=_broadcast)
 
     def reset(self) -> None:
         """Reset subscriptions and broker state for tests."""
@@ -1398,6 +1468,8 @@ class EventBus:
         _BROKER_CONNS.clear()
         _BROKER_TASKS.clear()
         _BROKER_URLS.clear()
+        _BROKER_TYPES.clear()
+        _dedupe_reset()
 
 
 BUS = EventBus()
@@ -1417,8 +1489,14 @@ def unsubscribe(topic: str, handler: Callable[[Any], Awaitable[None] | None]):
     BUS.unsubscribe(topic, handler)
 
 
-def publish(topic: str, payload: Any, *, _broadcast: bool = True) -> None:
-    BUS.publish(topic, payload, _broadcast=_broadcast)
+def publish(
+    topic: str,
+    payload: Any,
+    *,
+    dedupe_key: str | None = None,
+    _broadcast: bool = True,
+) -> None:
+    BUS.publish(topic, payload, dedupe_key=dedupe_key, _broadcast=_broadcast)
 
 
 def configure(**kw) -> None:
@@ -1538,12 +1616,19 @@ async def _receiver(ws) -> None:
                         ev = pb.Event()
                         ev.ParseFromString(data)
                         payload = _decode_payload(ev)
-                        publish(ev.topic, payload, _broadcast=False)
+                        dedupe = getattr(ev, "dedupe_key", None) or None
+                        publish(
+                            ev.topic,
+                            payload,
+                            dedupe_key=dedupe,
+                            _broadcast=False,
+                        )
                     else:
                         data = _loads(single)
                         topic = data.get("topic")
                         payload = data.get("payload")
-                        publish(topic, payload, _broadcast=False)
+                        dedupe = data.get("dedupe_key") if isinstance(data, dict) else None
+                        publish(topic, payload, dedupe_key=dedupe, _broadcast=False)
                 await broadcast_ws(msg, to_server=False)
             except Exception:  # pragma: no cover - malformed msg
                 continue
@@ -1569,7 +1654,13 @@ async def _redis_listener(pubsub) -> None:
             except _ProtoDecodeError:
                 logging.warning("Dropping redis event with incompatible protobuf schema")
                 continue
-            publish(ev.topic, _decode_payload(ev), _broadcast=False)
+            dedupe = getattr(ev, "dedupe_key", None) or None
+            publish(
+                ev.topic,
+                _decode_payload(ev),
+                dedupe_key=dedupe,
+                _broadcast=False,
+            )
     except asyncio.CancelledError:  # pragma: no cover - shutdown
         pass
 
@@ -1581,7 +1672,8 @@ async def _connect_nats(url: str):
     async def _cb(msg):
         ev = pb.Event()
         ev.ParseFromString(_maybe_decompress(msg.data))
-        publish(ev.topic, _decode_payload(ev), _broadcast=False)
+        dedupe = getattr(ev, "dedupe_key", None) or None
+        publish(ev.topic, _decode_payload(ev), dedupe_key=dedupe, _broadcast=False)
 
     await nc.subscribe(_BROKER_CHANNEL, cb=_cb)
     return nc
