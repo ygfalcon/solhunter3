@@ -29,6 +29,7 @@ from .types import (
     TapeEvent,
     TokenSnapshot,
     TradeSuggestion,
+    TRADE_REJECTION_SCHEMA_VERSION,
     VirtualFill,
     VirtualPnL,
 )
@@ -472,6 +473,7 @@ class AgentManagerAgent(BaseAgent):
             ),
             "detected_at": time.time(),
             "gating": dict(gating or {}),
+            "schema_version": TRADE_REJECTION_SCHEMA_VERSION,
         }
         cap = reason.get("cap_usd")
         if cap is not None:
