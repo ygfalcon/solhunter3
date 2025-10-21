@@ -26,6 +26,10 @@ from solhunter_zero.golden_pipeline.types import (
     VirtualFill,
     VirtualPnL,
 )
+from solhunter_zero.golden_pipeline.validation import (
+    SchemaValidationError,
+    validate_stream_payload,
+)
 from solhunter_zero.golden_pipeline.kv import InMemoryKeyValueStore
 from solhunter_zero.golden_pipeline.agents import BaseAgent
 from solhunter_zero.golden_pipeline.contracts import STREAMS
@@ -348,6 +352,7 @@ class FakeBroker:
         self.events: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
         self.published: list[tuple[str, dict[str, Any]]] = []
         self._closed: list[str] = []
+        self.validation_failures: collections.Counter[str] = collections.Counter()
 
     async def publish(
         self,
@@ -356,7 +361,11 @@ class FakeBroker:
         *,
         dedupe_key: str | None = None,
     ) -> None:
-        materialised = dict(payload)
+        try:
+            materialised = validate_stream_payload(stream, payload)
+        except SchemaValidationError:
+            self.validation_failures[stream] += 1
+            raise
         self.published.append((stream, materialised))
         self.events[stream].append(materialised)
 

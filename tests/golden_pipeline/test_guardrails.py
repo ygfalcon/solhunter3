@@ -22,7 +22,18 @@ from solhunter_zero.golden_pipeline.bus import EventBusAdapter, InMemoryBus, Mes
 from solhunter_zero.golden_pipeline.contracts import STREAMS
 from solhunter_zero.golden_pipeline.pipeline import GoldenPipeline
 from solhunter_zero.golden_pipeline.service import AgentManagerAgent
-from solhunter_zero.golden_pipeline.types import GoldenSnapshot
+from solhunter_zero.golden_pipeline.types import (
+    DECISION_SCHEMA_VERSION,
+    DEPTH_SNAPSHOT_SCHEMA_VERSION,
+    GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    LIVE_FILL_SCHEMA_VERSION,
+    TOKEN_SNAPSHOT_SCHEMA_VERSION,
+    TRADE_REJECTION_SCHEMA_VERSION,
+    TRADE_SUGGESTION_SCHEMA_VERSION,
+    VIRTUAL_FILL_SCHEMA_VERSION,
+    GoldenSnapshot,
+)
+from solhunter_zero.golden_pipeline.validation import SchemaValidationError
 from solhunter_zero.event_bus import BUS as RUNTIME_EVENT_BUS
 from solhunter_zero.production.env import (
     Provider,
@@ -390,6 +401,7 @@ def test_budget_guard_emits_global_cap_event():
     assert pytest.approx(event["cap_usd"]) == 5_000.0
     assert pytest.approx(event["notional_usd"]) == 15_000.0
     assert "global cap" in event["reason"].lower()
+    assert event["schema_version"] == TRADE_REJECTION_SCHEMA_VERSION
 
 
 def test_budget_guard_emits_agent_cap_event():
@@ -424,6 +436,7 @@ def test_budget_guard_emits_agent_cap_event():
     assert pytest.approx(event["cap_usd"]) == 4_000.0
     assert pytest.approx(event["notional_usd"]) == 6_500.0
     assert "cap" in event["reason"].lower()
+    assert event["schema_version"] == TRADE_REJECTION_SCHEMA_VERSION
 
 
 def test_slippage_guard_blocks_thin_books():
@@ -460,3 +473,85 @@ def test_slippage_guard_blocks_thin_books():
     available = event.get("available_notional_usd")
     assert available is not None and available < event["notional_usd"]
     assert "slippage" in (event.get("reason") or "").lower()
+    assert event["schema_version"] == TRADE_REJECTION_SCHEMA_VERSION
+
+
+def test_inmemory_bus_rejects_invalid_payload():
+    bus = InMemoryBus()
+    invalid_payload = {
+        "mint": "MintInvalid0000000000000000000000000000000",
+        "asof": 0.0,
+        "meta": {},
+        "px": {},
+        "liq": {},
+        "ohlcv5m": {},
+        "hash": "hash",
+        "schema_version": "0.0",
+    }
+
+    with pytest.raises(SchemaValidationError):
+        asyncio.run(bus.publish(STREAMS.golden_snapshot, invalid_payload))
+
+    assert bus.validation_failures[STREAMS.golden_snapshot] == 1
+    assert STREAMS.golden_snapshot not in bus.events
+
+
+def test_schema_versions_propagate(golden_harness, fake_broker):
+    assert golden_harness.golden_snapshots
+    assert all(
+        snapshot.schema_version == GOLDEN_SNAPSHOT_SCHEMA_VERSION
+        for snapshot in golden_harness.golden_snapshots
+    )
+
+    assert golden_harness.trade_suggestions
+    assert all(
+        suggestion.schema_version == TRADE_SUGGESTION_SCHEMA_VERSION
+        for suggestion in golden_harness.trade_suggestions
+    )
+
+    assert golden_harness.decisions
+    assert all(
+        decision.schema_version == DECISION_SCHEMA_VERSION
+        for decision in golden_harness.decisions
+    )
+
+    assert golden_harness.virtual_fills
+    assert all(
+        fill.schema_version == VIRTUAL_FILL_SCHEMA_VERSION
+        for fill in golden_harness.virtual_fills
+    )
+
+    token_events = fake_broker.events[STREAMS.token_snapshot]
+    assert token_events and all(
+        event["schema_version"] == TOKEN_SNAPSHOT_SCHEMA_VERSION for event in token_events
+    )
+
+    depth_events = fake_broker.events[STREAMS.market_depth]
+    assert depth_events and all(
+        event["schema_version"] == DEPTH_SNAPSHOT_SCHEMA_VERSION for event in depth_events
+    )
+
+    golden_events = fake_broker.events[STREAMS.golden_snapshot]
+    assert golden_events and all(
+        event["schema_version"] == GOLDEN_SNAPSHOT_SCHEMA_VERSION for event in golden_events
+    )
+
+    suggestion_events = fake_broker.events[STREAMS.trade_suggested]
+    assert suggestion_events and all(
+        event["schema_version"] == TRADE_SUGGESTION_SCHEMA_VERSION for event in suggestion_events
+    )
+
+    decision_events = fake_broker.events[STREAMS.vote_decisions]
+    assert decision_events and all(
+        event["schema_version"] == DECISION_SCHEMA_VERSION for event in decision_events
+    )
+
+    virtual_events = fake_broker.events[STREAMS.virtual_fills]
+    assert virtual_events and all(
+        event["schema_version"] == VIRTUAL_FILL_SCHEMA_VERSION for event in virtual_events
+    )
+
+    live_events = fake_broker.events[STREAMS.live_fills]
+    assert live_events and all(
+        event["schema_version"] == LIVE_FILL_SCHEMA_VERSION for event in live_events
+    )

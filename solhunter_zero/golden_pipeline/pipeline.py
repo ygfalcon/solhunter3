@@ -293,6 +293,7 @@ class GoldenPipeline:
                     "spread_bps": depth.spread_bps,
                     "depth_pct": depth.depth_pct,
                     "asof": depth.asof,
+                    "schema_version": depth.schema_version,
                 },
             )
             await self._coalescer.update_depth(depth)
