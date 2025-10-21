@@ -76,11 +76,12 @@ class MarketDataStage:
             return
         window_start = (event.ts // _WINDOW_SEC) * _WINDOW_SEC
         window_end = window_start + _WINDOW_SEC
+        bars_to_emit: list[OHLCVBar] = []
         async with self._lock:
             current = self._bars.get(event.mint_base)
             if current and event.ts >= current.window_end:
                 # Close existing bar before starting new window.
-                await self._emit(current.to_bar())
+                bars_to_emit.append(current.to_bar())
                 current = None
             if not current:
                 current = _BarState(
@@ -94,9 +95,12 @@ class MarketDataStage:
                 )
                 self._bars[event.mint_base] = current
             current.apply(event)
+        for bar in bars_to_emit:
+            await self._emit(bar)
 
     async def flush(self, now: Optional[float] = None) -> None:
         now = now or now_ts()
+        bars_to_emit: list[OHLCVBar] = []
         async with self._lock:
             closed = [
                 mint for mint, state in self._bars.items() if now >= state.window_end + 1
@@ -105,4 +109,6 @@ class MarketDataStage:
                 state = self._bars.pop(mint)
                 if state.trades == 0:
                     continue
-                await self._emit(state.to_bar())
+                bars_to_emit.append(state.to_bar())
+        for bar in bars_to_emit:
+            await self._emit(bar)
