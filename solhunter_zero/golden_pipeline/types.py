@@ -118,6 +118,16 @@ class GoldenSnapshot:
     content_hash: str = ""
     idempotency_key: str = ""
     metrics: Dict[str, Any] = field(default_factory=dict)
+    momentum_score: float | None = None
+    pump_intensity: float | None = None
+    pump_score: float | None = None
+    social_score: float | None = None
+    social_sentiment: float | None = None
+    tweets_per_min: float | None = None
+    momentum_sources: tuple[str, ...] = field(default_factory=tuple)
+    momentum_breakdown: Dict[str, Any] = field(default_factory=dict)
+    momentum_partial: bool = False
+    momentum_stale: bool = False
     schema_version: str = field(default=GOLDEN_SNAPSHOT_SCHEMA_VERSION)
 
 
