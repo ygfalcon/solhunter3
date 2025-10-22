@@ -75,6 +75,26 @@ def start_depth_service(
     if keypair_path:
         cmd += ["--keypair", keypair_path]
     env = os.environ.copy()
+    if "DEPTH_SERVICE_VERSION" not in env:
+        try:
+            result = subprocess.run(
+                [str(depth_bin), "--version"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            version_text = None
+        else:
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+            version_text = stdout or stderr or None
+        if version_text:
+            env["DEPTH_SERVICE_VERSION"] = version_text
+    if "DEPTH_SERVICE_RPC_URL" not in env:
+        rpc_url = os.getenv("DEPTH_SERVICE_RPC_URL") or os.getenv("SOLANA_RPC_URL")
+        if rpc_url:
+            env["DEPTH_SERVICE_RPC_URL"] = rpc_url
     stderr = subprocess.PIPE if stream_stderr else None
     proc = subprocess.Popen(cmd, env=env, stderr=stderr)
     if stream_stderr and proc.stderr is not None:

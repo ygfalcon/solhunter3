@@ -82,10 +82,10 @@ def test_start_event_bus_invokes_readiness(monkeypatch):
     monkeypatch.setattr(ap.event_bus, "start_ws_server", fake_start)
     monkeypatch.setattr(ap.event_bus, "stop_ws_server", fake_stop)
     monkeypatch.setattr(ap.websockets, "connect", fake_connect)
-    ap._start_event_bus("ws://localhost:8769")
+    ap._start_event_bus("ws://localhost:8779")
     assert called["host"] == "localhost"
-    assert called["port"] == 8769
-    assert called["url"] == "ws://localhost:8769"
+    assert called["port"] == 8779
+    assert called["url"] == "ws://localhost:8779"
     assert called.get("connect") is True
     if ap._EVENT_LOOP:
         fut = asyncio.run_coroutine_threadsafe(

@@ -39,7 +39,7 @@ async def main() -> None:
     parser.add_argument("--messages", type=int, default=1000)
     parser.add_argument("--batch-ms", type=int, default=10)
     parser.add_argument("--host", default="localhost")
-    parser.add_argument("--port", type=int, default=8769)
+    parser.add_argument("--port", type=int, default=8779)
     args = parser.parse_args()
 
     rate1, cpu1 = await _run(0, args.messages, args.host, args.port)
