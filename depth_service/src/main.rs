@@ -35,7 +35,7 @@ fn cfg_str(cfg: &TomlTable, key: &str) -> Option<String> {
     cfg.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
-fn schema_version() -> &'static str {
+fn event_schema_version() -> &'static str {
     EVENT_SCHEMA_VERSION
         .get_or_init(|| std::env::var("EVENT_SCHEMA_VERSION").unwrap_or_else(|_| "v3".to_string()))
         .as_str()
@@ -616,7 +616,7 @@ async fn update_mmap(
             )
         })
         .collect();
-    let schema_version = schema_version().to_owned();
+    let schema_version_value = event_schema_version().to_string();
     let (event, send_binary) = if diff_updates && changed && !header_changed {
         let mut diff = HashMap::new();
         diff.insert(token.to_string(), entries.get(token).unwrap().clone());
@@ -624,7 +624,7 @@ async fn update_mmap(
             pb::Event {
                 topic: "depth_diff".to_string(),
                 dedupe_key: token.to_string(),
-                schema_version: schema_version.clone(),
+                schema_version: schema_version_value.clone(),
                 kind: Some(pb::event::Kind::DepthDiff(pb::DepthDiff { entries: diff })),
             },
             false,
@@ -634,7 +634,7 @@ async fn update_mmap(
             pb::Event {
                 topic: "depth_update".to_string(),
                 dedupe_key: token.to_string(),
-                schema_version: schema_version.clone(),
+                schema_version: schema_version_value.clone(),
                 kind: Some(pb::event::Kind::DepthUpdate(pb::DepthUpdate { entries })),
             },
             true,
@@ -1277,12 +1277,12 @@ async fn main() -> Result<()> {
                         let (write, mut read) = socket.split();
                         let write = Arc::new(Mutex::new(write));
                         let write_read = write.clone();
-                        let schema_version = event_schema_version();
+                        let schema_version_value = event_schema_version().to_string();
                         // Notify bus that the service is online
                         let online = pb::Event {
                             topic: "depth_service_status".to_string(),
                             dedupe_key: "depth_service_status".to_string(),
-                            schema_version: schema_version.clone(),
+                            schema_version: schema_version_value.clone(),
                             kind: Some(pb::event::Kind::DepthServiceStatus(
                                 pb::DepthServiceStatus {
                                     status: "online".to_string(),
@@ -1296,7 +1296,7 @@ async fn main() -> Result<()> {
                             .await;
                         let tx_metrics = tx_clone.clone();
                         let tx_hb = tx_clone.clone();
-                        let schema_version_metrics = schema_version.clone();
+                        let schema_version_metrics = schema_version_value.clone();
                         tokio::spawn(async move {
                             let mut sys = System::new();
                             loop {
@@ -1321,7 +1321,7 @@ async fn main() -> Result<()> {
                                 tokio::time::sleep(Duration::from_secs(30)).await;
                             }
                         });
-                        let schema_version_hb = schema_version.clone();
+                        let schema_version_hb = schema_version_value.clone();
                         tokio::spawn(async move {
                             loop {
                                 let ev = pb::Event {
@@ -1703,7 +1703,7 @@ async fn main() -> Result<()> {
     let kp = if !keypair_path.is_empty() {
         match read_keypair_file(&keypair_path) {
             Ok(kp) => kp,
-            Err(err) if paper_mode => {
+            Err(_err) if paper_mode => {
                 if PAPER_KEYPAIR_WARNED.set(()).is_ok() {
                     eprintln!(
                         "[depth_service] keypair missing at {} (paper mode); continuing with ephemeral key",
