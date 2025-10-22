@@ -25,6 +25,9 @@ class DiscoveryCandidate:
 
     mint: str
     asof: Timestamp
+    source: str | None = None
+    sources: tuple[str, ...] = field(default_factory=tuple)
+    v: str = "1.0"
 
 
 @dataclass(slots=True)

@@ -1937,7 +1937,13 @@ _PAGE_TEMPLATE = """
                         <tr class=\"{{ 'stale' if row.stale else '' }}\" data-mint=\"{{ row.mint }}\">
                             <td>{{ row.mint }}</td>
                             <td>{{ row.score if row.score is not none else '—' }}</td>
-                            <td>{{ row.source or '—' }}</td>
+                            <td>
+                                {% if row.sources %}
+                                <span title="{{ row.sources | join(', ') }}">{{ row.source or row.sources[0] }}</span>
+                                {% else %}
+                                {{ row.source or '—' }}
+                                {% endif %}
+                            </td>
                             <td>
                                 {{ row.asof or '—' }}
                                 <span class=\"pill {{ 'stale' if row.stale else 'fresh' }}\">{{ row.age_label }}</span>
@@ -3664,9 +3670,9 @@ def create_app(state: UIState | None = None) -> Flask:
                 return "connecting", fallback
             if not math.isfinite(numeric):
                 return "connecting", fallback
-            if numeric > 1800.0:
+            if numeric > 10_000.0:
                 status_value = "error"
-            elif numeric > 600.0:
+            elif numeric > 3_000.0:
                 status_value = "warn"
             else:
                 status_value = "open"

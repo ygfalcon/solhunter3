@@ -10,6 +10,7 @@ class StreamNames:
     """Container describing the message bus stream identifiers."""
 
     discovery_candidates: str = "x:discovery.candidates"
+    mint_discovered: str = "x:mint.discovered"
     token_snapshot: str = "x:token.snap"
     market_ohlcv: str = "x:market.ohlcv.5m"
     market_depth: str = "x:market.depth"

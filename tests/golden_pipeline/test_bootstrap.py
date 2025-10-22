@@ -14,6 +14,7 @@ def test_bootstrap_runtime_advertises_readiness(golden_harness, fake_broker):
 
     expected_streams = {
         STREAMS.discovery_candidates,
+        STREAMS.mint_discovered,
         STREAMS.token_snapshot,
         STREAMS.market_ohlcv,
         STREAMS.market_depth,

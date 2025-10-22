@@ -130,6 +130,46 @@ def _configured_seed_tokens() -> tuple[str, ...]:
     return tuple(tokens)
 
 
+def _normalize_source_values(*values: Any) -> tuple[str, ...]:
+    """Flatten arbitrary ``values`` into a normalised tuple of source slugs."""
+
+    collected: list[str] = []
+
+    def _collect(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                collected.append(text)
+            return
+        if isinstance(value, Mapping):
+            for key in ("source", "sources", "origin", "method", "provider", "providers", "tag", "tags"):
+                if key in value:
+                    _collect(value.get(key))
+            if "discovery" in value:
+                _collect(value.get("discovery"))
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                _collect(item)
+
+    for entry in values:
+        _collect(entry)
+
+    normalised: list[str] = []
+    seen: set[str] = set()
+    for raw in collected:
+        candidate = str(raw).strip()
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered not in seen:
+            seen.add(lowered)
+            normalised.append(lowered)
+    return tuple(normalised)
+
+
 def _default_symbol(mint: str) -> str:
     return mint[:6].upper()
 
@@ -1053,6 +1093,20 @@ class GoldenPipelineService:
         """Seed cached trending metadata into the discovery pipeline."""
 
         snapshot = list(TRENDING_METADATA.items())
+        seeds = _configured_seed_tokens()
+        for token in seeds:
+            canonical = canonical_mint(str(token))
+            if not canonical:
+                continue
+            meta = TRENDING_METADATA.get(canonical)
+            if isinstance(meta, Mapping):
+                seed_meta: Dict[str, Any] = dict(meta)
+                existing_sources = list(seed_meta.get("sources") or [])
+                existing_sources.append("seeded")
+                seed_meta["sources"] = existing_sources
+            else:
+                seed_meta = {"sources": ["seeded"]}
+            snapshot.append((canonical, seed_meta))
         if not snapshot:
             return 0
 
@@ -1061,6 +1115,7 @@ class GoldenPipelineService:
         now = time.time()
 
         for key, meta in snapshot:
+            meta_dict = dict(meta) if isinstance(meta, Mapping) else {}
             candidates: list[str] = []
             if isinstance(meta, Mapping):
                 for field in ("address", "mint"):
@@ -1086,9 +1141,17 @@ class GoldenPipelineService:
                 continue
 
             seen.add(canonical)
+            candidate_sources = _normalize_source_values(meta_dict)
+            if not candidate_sources:
+                candidate_sources = ("trending",)
             try:
                 accepted = await self.pipeline.submit_discovery(
-                    DiscoveryCandidate(mint=canonical, asof=now)
+                    DiscoveryCandidate(
+                        mint=canonical,
+                        asof=now,
+                        source=candidate_sources[0] if candidate_sources else None,
+                        sources=candidate_sources,
+                    )
                 )
             except Exception:
                 log.exception(
@@ -1106,19 +1169,57 @@ class GoldenPipelineService:
     def _on_discovery(self, payload: Any) -> None:
         if not self._running:
             return
-        tokens: Iterable[Any]
-        if isinstance(payload, dict) and "tokens" in payload:
-            tokens = payload.get("tokens") or []
-        elif isinstance(payload, dict) and payload.get("mint"):
-            tokens = [payload.get("mint")]
-        elif isinstance(payload, (list, tuple, set)):
-            tokens = payload
-        else:
-            return
         now = time.time()
-        for raw in tokens:
-            mint = canonical_mint(str(raw))
-            candidate = DiscoveryCandidate(mint=mint, asof=now)
+        root_context = payload if isinstance(payload, Mapping) else None
+
+        def _iter_entries() -> Iterable[tuple[str, Any]]:
+            if isinstance(payload, Mapping) and "tokens" in payload:
+                tokens = payload.get("tokens") or []
+                for entry in tokens:
+                    yield entry, payload
+                return
+            if isinstance(payload, Mapping):
+                yield payload, None
+                return
+            if isinstance(payload, (list, tuple, set)):
+                for entry in payload:
+                    yield entry, None
+                return
+            yield payload, None
+
+        for entry, context in _iter_entries():
+            raw_mint: Any
+            if isinstance(entry, Mapping):
+                for key in ("mint", "token", "address"):
+                    raw_mint = entry.get(key)
+                    if isinstance(raw_mint, str) and raw_mint.strip():
+                        break
+                else:
+                    raw_mint = None
+            else:
+                raw_mint = entry
+            if not raw_mint:
+                continue
+            try:
+                mint = canonical_mint(str(raw_mint))
+            except Exception:
+                continue
+            if not mint:
+                continue
+            candidate_sources = _normalize_source_values(
+                entry,
+                context,
+                root_context,
+                TRENDING_METADATA.get(mint),
+            )
+            if not candidate_sources and root_context is not None:
+                candidate_sources = ("discovery",)
+            candidate = DiscoveryCandidate(
+                mint=mint,
+                asof=now,
+                source=candidate_sources[0] if candidate_sources else None,
+                sources=candidate_sources,
+            )
             self._spawn(self.pipeline.submit_discovery(candidate))
             if self._momentum_agent and mint:
                 self._momentum_agent.record_candidate(mint, ts=now)
