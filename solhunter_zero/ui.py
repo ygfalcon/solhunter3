@@ -807,6 +807,7 @@ class UIState:
     )
     health_provider: DictProvider = field(default=lambda: {})
     golden_depth_enabled: bool = False
+    golden_momentum_enabled: bool = False
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -1284,6 +1285,60 @@ _PAGE_TEMPLATE = """
         tbody tr:hover { background: rgba(88,166,255,0.06); }
         tbody tr.stale { background: rgba(255,123,114,0.06); }
         .muted { color: var(--muted); }
+        .momentum-cell { min-width: 150px; }
+        .momentum-bar {
+            position: relative;
+            height: 7px;
+            border-radius: 999px;
+            background: rgba(88,166,255,0.12);
+            overflow: hidden;
+        }
+        .momentum-bar .fill {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            background: linear-gradient(90deg, rgba(31,146,63,0.85) 0%, rgba(242,204,96,0.9) 50%, rgba(217,56,30,0.9) 100%);
+            border-radius: inherit;
+            transition: width 0.25s ease;
+        }
+        .momentum-bar.stale { opacity: 0.35; }
+        .momentum-bar .momentum-indicator {
+            position: absolute;
+            right: 4px;
+            top: -4px;
+            font-size: 0.7rem;
+        }
+        .momentum-value {
+            font-size: 0.72rem;
+            margin-top: 4px;
+            color: rgba(230,237,243,0.85);
+        }
+        .momentum-breakdown { margin-top: 6px; }
+        .momentum-breakdown summary {
+            cursor: pointer;
+            font-size: 0.72rem;
+            color: var(--muted);
+            list-style: none;
+        }
+        .momentum-breakdown summary::-webkit-details-marker { display: none; }
+        .momentum-card {
+            margin-top: 6px;
+            background: rgba(13,17,23,0.75);
+            border: 1px solid rgba(88,166,255,0.12);
+            border-radius: 10px;
+            padding: 10px 12px;
+            display: grid;
+            gap: 6px;
+        }
+        .momentum-card div {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.74rem;
+            color: rgba(230,237,243,0.82);
+        }
+        .momentum-card span { color: var(--muted); }
+        .momentum-card strong { font-weight: 600; }
         .section-title {
             display: flex;
             align-items: center;
@@ -1762,6 +1817,9 @@ _PAGE_TEMPLATE = """
                             <th>Hash</th>
                             <th>Price</th>
                             <th>Liquidity</th>
+                            {% if golden_momentum_enabled %}
+                            <th>Momentum</th>
+                            {% endif %}
                             <th>Lag (ms)</th>
                             <th>Published</th>
                         </tr>
@@ -1830,13 +1888,58 @@ _PAGE_TEMPLATE = """
                                     {{ snap.liq or '—' }}
                                 {% endif %}
                             </td>
+                            {% if golden_momentum_enabled %}
+                            <td class="momentum-cell">
+                                {% set momentum_score = snap.momentum_score %}
+                                <div class="momentum-bar {{ 'stale' if snap.momentum_stale else '' }}" title="Composite momentum from liquidity rank, short-horizon price velocity, Pump.fun heat, and social mentions; updated ~60 seconds; lower is cooler, higher is hotter.">
+                                    <div class="fill" style="width: {{ (momentum_score * 100) | round(1) if momentum_score is not none else 0 }}%;"></div>
+                                    {% if snap.momentum_stale %}<span class="momentum-indicator">⏱</span>{% endif %}
+                                </div>
+                                <div class="momentum-value">{{ momentum_score | round(3) if momentum_score is not none else '—' }}</div>
+                                {% set breakdown = snap.momentum_breakdown or {} %}
+                                {% if breakdown or snap.momentum_sources or snap.momentum_partial or snap.social_score is not none %}
+                                <details class="momentum-breakdown">
+                                    <summary>Breakdown</summary>
+                                    <div class="momentum-card">
+                                        {% set vol1 = breakdown.get('volume_rank_1h') %}
+                                        <div><span>Vol 1h</span><strong>{{ vol1 | round(3) if vol1 is not none else '—' }}</strong></div>
+                                        {% set price5 = breakdown.get('price_momentum_5m') %}
+                                        <div><span>Price 5m</span><strong>{{ price5 | round(3) if price5 is not none else '—' }}</strong></div>
+                                        {% set price1 = breakdown.get('price_momentum_1h') %}
+                                        <div><span>Price 1h</span><strong>{{ price1 | round(3) if price1 is not none else '—' }}</strong></div>
+                                        {% set pump = breakdown.get('pump_intensity') %}
+                                        <div><span>Pump</span><strong>{{ pump | round(3) if pump is not none else '—' }}</strong></div>
+                                        {% set tweets = breakdown.get('tweets_per_min') %}
+                                        <div><span>Tweets/min</span><strong>{{ tweets | round(3) if tweets is not none else '—' }}</strong></div>
+                                        {% set social_sent = snap.social_sentiment if snap.social_sentiment is not none else breakdown.get('social_sentiment') %}
+                                        <div><span>Social Sent.</span><strong>{{ social_sent | round(3) if social_sent is not none else '—' }}</strong></div>
+                                        {% set social_score = snap.social_score if snap.social_score is not none else breakdown.get('social_score') %}
+                                        <div><span>Social Score</span><strong>{{ social_score | round(3) if social_score is not none else '—' }}</strong></div>
+                                        {% set buyers = breakdown.get('buyers_last_hour') %}
+                                        <div><span>Buyers (1h)</span><strong>{{ buyers if buyers is not none else '—' }}</strong></div>
+                                        {% set errors = breakdown.get('error_hosts') %}
+                                        {% if errors %}
+                                            <div><span>Errors</span><strong>{{ errors | join(', ') if errors is iterable else errors }}</strong></div>
+                                        {% endif %}
+                                        <div><span>Sources</span><strong>{{ snap.momentum_sources | join(', ') if snap.momentum_sources else '—' }}</strong></div>
+                                        {% if snap.momentum_partial %}
+                                            <div><span>Coverage</span><strong>Partial</strong></div>
+                                        {% endif %}
+                                        {% if snap.momentum_latency_ms is not none %}
+                                            <div><span>Latency</span><strong>{{ snap.momentum_latency_ms | round(1) }} ms</strong></div>
+                                        {% endif %}
+                                    </div>
+                                </details>
+                                {% endif %}
+                            </td>
+                            {% endif %}
                             <td>
                                 <span class=\"pill {{ 'stale' if snap.stale else 'fresh' }}\">{{ snap.lag_ms | round(0) if snap.lag_ms is not none else '—' }}</span>
                             </td>
                             <td>{{ snap.age_label }}</td>
                         </tr>
                         {% else %}
-                        <tr class=\"skeleton-row\"><td colspan=\"6\" class=\"muted\">Golden pipeline idle.</td></tr>
+                        <tr class=\"skeleton-row\"><td colspan=\"{{ 7 if golden_momentum_enabled else 6 }}\" class=\"muted\">Golden pipeline idle.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -3225,6 +3328,7 @@ def create_app(state: UIState | None = None) -> Flask:
             agent_is_stale=agent_is_stale,
             agent_age_label=agent_age_label,
             golden_depth_enabled=state.golden_depth_enabled,
+            golden_momentum_enabled=state.golden_momentum_enabled,
         )
 
     def _ws_config_payload() -> Dict[str, str]:

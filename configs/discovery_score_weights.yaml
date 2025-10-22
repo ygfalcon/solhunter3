@@ -8,3 +8,21 @@ weights:
   sellable: 0.4
   mempool_pressure: 2.4
   staleness_ms: -0.3
+momentum:
+  top_n_active: 250
+  weights:
+    volume_rank_1h: 0.4
+    volume_rank_24h: 0.2
+    price_momentum_5m: 0.2
+    price_momentum_1h: 0.1
+    pump_intensity: 0.05
+    social_sentiment: 0.05
+  social:
+    min_max:
+      - 0.0
+      - 2.0
+golden:
+  depth:
+    enabled: true
+  momentum:
+    enabled: false

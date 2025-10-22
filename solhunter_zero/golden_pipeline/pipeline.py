@@ -17,6 +17,7 @@ from .enrichment import EnrichmentStage, EnrichmentFetcher
 from .execution import ExecutionContext, LiveExecutor, ShadowExecutor
 from .kv import InMemoryKeyValueStore, KeyValueStore
 from .market import MarketDataStage
+from .momentum import MomentumComputation
 from .metrics import GoldenMetrics
 from .types import (
     Decision,
@@ -386,9 +387,50 @@ class GoldenPipeline:
             await self._on_golden(snapshot)
         await self._agent_stage.submit(snapshot)
 
+    async def publish_momentum(self, mint: str, computation: MomentumComputation) -> None:
+        snapshot = self._latest_snapshots.get(mint)
+        if snapshot is None:
+            return
+        snapshot.momentum_score = computation.momentum_score
+        snapshot.pump_intensity = computation.pump_intensity
+        snapshot.pump_score = computation.pump_score
+        snapshot.social_score = computation.social_score
+        snapshot.social_sentiment = computation.social_sentiment
+        snapshot.tweets_per_min = computation.tweets_per_min
+        snapshot.momentum_sources = computation.momentum_sources
+        snapshot.momentum_breakdown = dict(computation.momentum_breakdown)
+        snapshot.momentum_partial = computation.momentum_partial
+        snapshot.momentum_stale = computation.momentum_stale
+        snapshot.metrics.setdefault("momentum", {})
+        momentum_metrics = snapshot.metrics.get("momentum")
+        if isinstance(momentum_metrics, dict):
+            momentum_metrics.update(
+                score=snapshot.momentum_score,
+                partial=bool(snapshot.momentum_partial),
+                stale=bool(snapshot.momentum_stale),
+                latency_ms=computation.latency_ms,
+            )
+        payload = asdict(snapshot)
+        payload["momentum_sources"] = list(snapshot.momentum_sources)
+        payload["momentum_breakdown"] = dict(snapshot.momentum_breakdown)
+        payload["momentum_partial"] = bool(snapshot.momentum_partial)
+        payload["momentum_stale"] = bool(snapshot.momentum_stale)
+        payload.setdefault("metrics", {})
+        if isinstance(payload["metrics"], dict):
+            payload["metrics"].setdefault("momentum", momentum_metrics or {})
+        payload["momentum_latency_ms"] = computation.latency_ms
+        dedupe = snapshot.idempotency_key or snapshot.content_hash or snapshot.hash
+        dedupe_key = None
+        if dedupe:
+            dedupe_key = f"{STREAMS.golden_snapshot}:{dedupe}:momentum"
+        await self._publish(STREAMS.golden_snapshot, payload, dedupe_key=dedupe_key)
+
     @property
     def context(self) -> ExecutionContext:
         return self._context
+
+    def latest_snapshot(self, mint: str) -> GoldenSnapshot | None:
+        return self._latest_snapshots.get(mint)
 
     def set_rl_weights(self, weights: Mapping[str, float]) -> None:
         """Update reinforcement learning weights for voting."""
