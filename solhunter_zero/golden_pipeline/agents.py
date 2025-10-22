@@ -90,6 +90,7 @@ class AgentStage:
         blacklist: Iterable[str] | None = None,
         cooldown_sec: float = 0.0,
         agent_timeout_sec: float | None = None,
+        depth_near_fresh_ms: float | None = None,
     ) -> None:
         self._emit = emit
         self._agents: List[BaseAgent] = list(agents or [])
@@ -100,6 +101,19 @@ class AgentStage:
         self._cooldown = TTLCache()
         self._cooldown_sec = max(0.0, cooldown_sec)
         self._agent_timeout = agent_timeout_sec if agent_timeout_sec and agent_timeout_sec > 0 else None
+        if depth_near_fresh_ms is None:
+            normalized_near_fresh = None
+        else:
+            try:
+                candidate = float(depth_near_fresh_ms)
+            except Exception:
+                candidate = None
+            if candidate is not None and candidate > 0:
+                normalized_near_fresh = candidate
+            else:
+                normalized_near_fresh = None
+        self._depth_near_fresh_ms = normalized_near_fresh
+        self._stale_depth_logged: Set[str] = set()
 
     def register_agent(self, agent: BaseAgent) -> None:
         self._agents.append(agent)
@@ -113,6 +127,33 @@ class AgentStage:
         mint_key = snapshot.mint.lower()
         if mint_key in self._blacklist:
             return
+        metrics = snapshot.metrics if isinstance(snapshot.metrics, dict) else {}
+        staleness_ms = _maybe_float(metrics.get("depth_staleness_ms"))
+        window_override = _maybe_float(metrics.get("depth_near_fresh_window_ms"))
+        window_ms = self._depth_near_fresh_ms
+        if window_ms is None and window_override is not None and window_override > 0:
+            window_ms = window_override
+        near_flag = metrics.get("depth_near_fresh") if isinstance(metrics, dict) else None
+        if window_ms is not None:
+            stale = False
+            if staleness_ms is not None:
+                stale = staleness_ms > window_ms
+            elif isinstance(near_flag, bool):
+                stale = not near_flag
+            if stale:
+                if mint_key not in self._stale_depth_logged:
+                    staleness_text = (
+                        f"{staleness_ms:.0f}ms" if staleness_ms is not None else "unknown"
+                    )
+                    log.info(
+                        "Skipping agent evaluation for %s due to stale depth (staleness=%s window=%.0fms)",
+                        snapshot.mint,
+                        staleness_text,
+                        window_ms,
+                    )
+                    self._stale_depth_logged.add(mint_key)
+                return
+            self._stale_depth_logged.discard(mint_key)
         if self._cooldown_sec > 0 and not self._cooldown.add(mint_key, self._cooldown_sec):
             return
         async with self._lock:

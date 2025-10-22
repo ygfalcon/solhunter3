@@ -10,6 +10,7 @@ import signal
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from solhunter_zero.logging_utils import setup_stdout_logging
 
@@ -36,6 +37,13 @@ def _set_runtime_env(args: argparse.Namespace) -> None:
     os.environ.setdefault("NEW_RUNTIME", "1")
     os.environ.setdefault("FLASK_ENV", "production")
     os.environ.setdefault("FLASK_DEBUG", "0")
+    os.environ.setdefault("EVENT_BUS_URL", "ws://127.0.0.1:8779")
+    os.environ.setdefault("BROKER_CHANNEL", "solhunter-events-v3")
+    default_redis = "redis://localhost:6379/1"
+    for key in ("REDIS_URL", "MINT_STREAM_REDIS_URL", "MEMPOOL_STREAM_REDIS_URL", "AMM_WATCH_REDIS_URL"):
+        os.environ.setdefault(key, default_redis)
+    for key in ("MINT_STREAM_BROKER_CHANNEL", "MEMPOOL_STREAM_BROKER_CHANNEL", "AMM_WATCH_BROKER_CHANNEL"):
+        os.environ.setdefault(key, os.environ["BROKER_CHANNEL"])
     os.environ["MODE"] = "live" if args.mode == "live" else "paper"
     os.environ["MICRO_MODE"] = str(args.micro)
     # Running in paper mode should never touch the live executor
@@ -68,11 +76,72 @@ def _validate_environment() -> None:
         raise SystemExit(2)
 
 
+def _emit_runtime_manifest() -> None:
+    default_redis = "redis://localhost:6379/1"
+    default_bus = "ws://127.0.0.1:8779"
+
+    channel = os.environ.setdefault("BROKER_CHANNEL", "solhunter-events-v3")
+    bus_url = os.environ.setdefault("EVENT_BUS_URL", default_bus)
+    redis_keys = [
+        "REDIS_URL",
+        "MINT_STREAM_REDIS_URL",
+        "MEMPOOL_STREAM_REDIS_URL",
+        "AMM_WATCH_REDIS_URL",
+    ]
+    canonical_url: str | None = None
+
+    for key in redis_keys:
+        raw = os.environ.get(key) or default_redis
+        os.environ[key] = raw
+        candidate = raw if "://" in raw else f"redis://{raw}"
+        parsed = urlparse(candidate)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 6379
+        segment = (parsed.path or "/").lstrip("/").split("/", 1)[0]
+        try:
+            db_index = int(segment) if segment else 0
+        except ValueError as exc:  # pragma: no cover - defensive
+            raise SystemExit(f"Invalid Redis URL for {key}: {raw}") from exc
+        if db_index != 1:
+            raise SystemExit(
+                f"{key} targets Redis database {db_index}; configure redis://localhost:6379/1 for all runtime services."
+            )
+        normalized = f"redis://{host}:{port}/{db_index}"
+        os.environ[key] = normalized
+        if canonical_url is None:
+            canonical_url = normalized
+        elif normalized != canonical_url:
+            raise SystemExit(
+                "All runtime components must share the same Redis endpoint. Set REDIS_URL, MINT_STREAM_REDIS_URL, "
+                "MEMPOOL_STREAM_REDIS_URL, and AMM_WATCH_REDIS_URL to the same redis://host:port/1 value."
+            )
+
+    for key in ("MINT_STREAM_BROKER_CHANNEL", "MEMPOOL_STREAM_BROKER_CHANNEL", "AMM_WATCH_BROKER_CHANNEL"):
+        value = os.environ.get(key)
+        if value and value != channel:
+            raise SystemExit(
+                f"{key}={value} does not match BROKER_CHANNEL={channel}; use a single channel for all producers."
+            )
+        os.environ.setdefault(key, channel)
+
+    manifest = (
+        "RUNTIME_MANIFEST "
+        f"channel={channel} "
+        f"redis={os.environ.get('REDIS_URL', default_redis)} "
+        f"mint_stream={os.environ.get('MINT_STREAM_REDIS_URL', default_redis)} "
+        f"mempool={os.environ.get('MEMPOOL_STREAM_REDIS_URL', default_redis)} "
+        f"amm_watch={os.environ.get('AMM_WATCH_REDIS_URL', default_redis)} "
+        f"bus={bus_url}"
+    )
+    logging.info(manifest)
+
+
 async def _run_controller(args: argparse.Namespace) -> int:
     from solhunter_zero.runtime.orchestrator import RuntimeOrchestrator
 
     _set_runtime_env(args)
     _validate_environment()
+    _emit_runtime_manifest()
     orch = RuntimeOrchestrator(config_path=args.config, run_http=not args.no_http)
 
     stop_event = asyncio.Event()

@@ -118,6 +118,18 @@ def _coerce_float(value: Any) -> Optional[float]:
         return None
 
 
+def _configured_seed_tokens() -> tuple[str, ...]:
+    raw = os.getenv("SEED_TOKENS")
+    if raw is None or not raw.strip():
+        return tuple()
+    tokens: list[str] = []
+    for part in raw.split(","):
+        candidate = part.strip()
+        if candidate:
+            tokens.append(candidate)
+    return tuple(tokens)
+
+
 def _default_symbol(mint: str) -> str:
     return mint[:6].upper()
 
@@ -718,6 +730,13 @@ class GoldenPipelineService:
         self._momentum_flag = resolve_momentum_flag(config)
         if enrichment_fetcher is None:
             enrichment_fetcher = self._default_enrichment_fetcher
+        depth_cache_ttl = _resolve_depth_cache_ttl(config)
+        self._depth_cache_ttl = depth_cache_ttl
+        self._depth_near_fresh_ms: float | None
+        if depth_cache_ttl > 0:
+            self._depth_near_fresh_ms = depth_cache_ttl * 2000.0
+        else:
+            self._depth_near_fresh_ms = None
         shared_bus = EventBusAdapter(self._event_bus)
         manager_agent = AgentManagerAgent(
             agent_manager,
@@ -735,6 +754,7 @@ class GoldenPipelineService:
             on_virtual_pnl=self._handle_virtual_pnl,
             bus=shared_bus,
             depth_extensions_enabled=self._depth_flag,
+            depth_near_fresh_ms=self._depth_near_fresh_ms,
         )
         self._momentum_agent: MomentumAgent | None = None
         if self._momentum_flag:
@@ -743,7 +763,6 @@ class GoldenPipelineService:
                 publish=self.pipeline.publish_momentum,
                 config=config,
             )
-        depth_cache_ttl = _resolve_depth_cache_ttl(config)
         self._depth_adapter = GoldenDepthAdapter(
             enabled=self._depth_flag,
             submit_depth=self.pipeline.submit_depth,
@@ -766,6 +785,73 @@ class GoldenPipelineService:
                 return int(getattr(snapshot, "decimals", 6))
         return 6
 
+    def _seed_price_hint(self, token: str, canonical: str) -> float:
+        price_candidates: list[Any] = []
+        price_candidates.append(self._last_price.get(canonical))
+        for key in (canonical, token):
+            meta = TRENDING_METADATA.get(key)
+            if not isinstance(meta, Mapping):
+                continue
+            for field in (
+                "mid_usd",
+                "midPrice",
+                "mid_price",
+                "usd_price",
+                "usdPrice",
+                "price_usd",
+                "priceUsd",
+                "price",
+                "close",
+            ):
+                if field in meta:
+                    price_candidates.append(meta.get(field))
+        for candidate in price_candidates:
+            hint = _coerce_float(candidate)
+            if hint is not None and hint > 0:
+                return float(hint)
+        return 0.0
+
+    async def _publish_warm_start_depth(self) -> None:
+        if not self._running:
+            return
+        tokens = _configured_seed_tokens()
+        if not tokens:
+            log.debug("Warm-start depth skipped (no seed tokens configured)")
+            return
+        now = time.time()
+        seen: set[str] = set()
+        published = 0
+        for token in tokens:
+            canonical = canonical_mint(str(token))
+            if not canonical or canonical in seen:
+                continue
+            seen.add(canonical)
+            mid = self._seed_price_hint(str(token), canonical)
+            depth_pct = {"1": 0.0}
+            snapshot = DepthSnapshot(
+                mint=canonical,
+                venue="warm_start",
+                mid_usd=float(mid),
+                spread_bps=0.0,
+                depth_pct=depth_pct,
+                asof=now,
+                px_bid_usd=float(mid) if mid > 0 else None,
+                px_ask_usd=float(mid) if mid > 0 else None,
+                degraded=True,
+                source="warm_start",
+                staleness_ms=0.0,
+            )
+            try:
+                await self.pipeline.submit_depth(snapshot)
+            except Exception:  # pragma: no cover - defensive
+                log.exception("Failed to publish warm-start depth for %s", canonical)
+                continue
+            published += 1
+        if published:
+            log.info(
+                "Warm-started depth snapshots for %s seed tokens", published
+            )
+
     async def start(self) -> None:
         if self._running:
             return
@@ -784,6 +870,7 @@ class GoldenPipelineService:
         )
         await self.pipeline.flush_market()
         await self._depth_adapter.start()
+        await self._publish_warm_start_depth()
         if self._momentum_agent:
             await self._momentum_agent.start()
         self._tasks.append(asyncio.create_task(self._market_flush_loop(), name="golden_market_flush"))

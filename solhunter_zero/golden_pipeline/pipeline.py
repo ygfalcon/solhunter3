@@ -101,6 +101,7 @@ class GoldenPipeline:
         vote_min_score: float = 0.04,
         allow_inmemory_bus_for_tests: bool = False,
         depth_extensions_enabled: bool = False,
+        depth_near_fresh_ms: float | None = None,
     ) -> None:
         mode = (os.getenv("SOLHUNTER_MODE") or "test").strip().lower() or "test"
         if bus is None:
@@ -115,6 +116,19 @@ class GoldenPipeline:
             bus = InMemoryBus()
         if mode in {"live", "paper"} and isinstance(bus, InMemoryBus):
             raise SystemExit(78)
+        normalized_near_fresh: float | None
+        if depth_near_fresh_ms is None:
+            normalized_near_fresh = None
+        else:
+            try:
+                candidate = float(depth_near_fresh_ms)
+            except Exception:
+                candidate = None
+            if candidate is not None and candidate > 0:
+                normalized_near_fresh = candidate
+            else:
+                normalized_near_fresh = None
+        self._depth_near_fresh_ms = normalized_near_fresh
         self._bus = bus
         self._kv = kv or InMemoryKeyValueStore()
         self._sequence_cache: Dict[str, int] = {}
@@ -173,6 +187,7 @@ class GoldenPipeline:
             _emit_golden,
             kv=self._kv,
             depth_extensions_enabled=depth_extensions_enabled,
+            depth_near_fresh_ms=self._depth_near_fresh_ms,
         )
 
         async def _emit_suggestion(suggestion: TradeSuggestion) -> None:
@@ -202,6 +217,7 @@ class GoldenPipeline:
             cooldown_sec=agent_cooldown_sec,
             max_spread_bps=max_agent_spread_bps,
             min_depth1_pct_usd=min_agent_depth1_usd,
+            depth_near_fresh_ms=self._depth_near_fresh_ms,
         )
 
         async def _emit_decision(decision: Decision) -> None:

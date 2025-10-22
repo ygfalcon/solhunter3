@@ -38,6 +38,7 @@ class SnapshotCoalescer:
         hash_ttl: float = 90.0,
         hash_cache_size: int = 4096,
         depth_extensions_enabled: bool = False,
+        depth_near_fresh_ms: float | None = None,
     ) -> None:
         self._emit = emit
         self._meta: Dict[str, TokenSnapshot] = {}
@@ -54,6 +55,19 @@ class SnapshotCoalescer:
         self._hash_ttl = hash_ttl
         self._prewarm_task: asyncio.Task[None] | None = None
         self._depth_extensions_enabled = depth_extensions_enabled
+        normalized_near_fresh: float | None
+        if depth_near_fresh_ms is None:
+            normalized_near_fresh = None
+        else:
+            try:
+                candidate = float(depth_near_fresh_ms)
+            except Exception:
+                candidate = None
+            if candidate is not None and candidate > 0:
+                normalized_near_fresh = candidate
+            else:
+                normalized_near_fresh = None
+        self._depth_near_fresh_ms = normalized_near_fresh
         self._schedule_hash_prewarm()
 
     def _schedule_hash_prewarm(self) -> None:
@@ -376,6 +390,9 @@ class SnapshotCoalescer:
         latency_ms = max(0.0, (now - asof) * 1000.0)
         depth_staleness_ms = max(0.0, (now - depth.asof) * 1000.0)
         candle_age_ms = max(0.0, (now - bar.asof_close) * 1000.0)
+        near_fresh = None
+        if self._depth_near_fresh_ms is not None:
+            near_fresh = depth_staleness_ms <= self._depth_near_fresh_ms
         payload["liq"]["staleness_ms"] = depth_staleness_ms
         if self._depth_extensions_enabled:
             payload["staleness_ms"] = depth_staleness_ms
@@ -396,4 +413,7 @@ class SnapshotCoalescer:
                 "candle_age_ms": candle_age_ms,
             },
         )
+        if near_fresh is not None:
+            golden.metrics["depth_near_fresh"] = bool(near_fresh)
+            golden.metrics["depth_near_fresh_window_ms"] = self._depth_near_fresh_ms
         await self._emit(golden)

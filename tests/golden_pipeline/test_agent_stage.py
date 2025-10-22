@@ -6,6 +6,8 @@ import asyncio
 from collections import deque
 from typing import Iterable, Sequence
 
+import pytest
+
 from solhunter_zero.golden_pipeline.agents import AgentStage, BaseAgent
 from solhunter_zero.golden_pipeline.types import GoldenSnapshot, TradeSuggestion
 
@@ -121,3 +123,57 @@ def test_slow_agent_timeout_does_not_block_fast_agent() -> None:
     asyncio.run(_run())
 
     assert list(emitted) == ["fast"]
+
+
+def test_agent_stage_respects_near_fresh_window() -> None:
+    snap = _snapshot()
+    snap.metrics["depth_staleness_ms"] = 15_000.0
+    snap.metrics["depth_near_fresh_window_ms"] = 20_000.0
+    snap.metrics["depth_near_fresh"] = True
+
+    agent = _StubAgent("fresh", suggestions=[_suggestion("fresh")])
+    emitted: deque[str] = deque()
+
+    async def _emit(suggestion: TradeSuggestion) -> None:
+        emitted.append(suggestion.agent)
+
+    stage = AgentStage(_emit, agents=[agent], depth_near_fresh_ms=20_000.0)
+
+    asyncio.run(stage.submit(snap))
+
+    assert list(emitted) == ["fresh"]
+
+
+def test_agent_stage_skips_and_logs_on_stale_depth(caplog: pytest.LogCaptureFixture) -> None:
+    snap = _snapshot()
+    snap.metrics["depth_staleness_ms"] = 45_000.0
+    snap.metrics["depth_near_fresh_window_ms"] = 20_000.0
+    snap.metrics["depth_near_fresh"] = False
+
+    agent = _StubAgent("stale", suggestions=[_suggestion("stale")])
+    emitted: deque[str] = deque()
+
+    async def _emit(suggestion: TradeSuggestion) -> None:
+        emitted.append(suggestion.agent)
+
+    stage = AgentStage(_emit, agents=[agent], depth_near_fresh_ms=20_000.0)
+
+    with caplog.at_level("INFO"):
+        asyncio.run(stage.submit(snap))
+        asyncio.run(stage.submit(snap))
+
+    assert not emitted
+    records = [record for record in caplog.records if "stale depth" in record.message]
+    assert len(records) == 1
+
+    # When depth becomes fresh we clear the latch so future stale episodes log again.
+    caplog.clear()
+    snap.metrics["depth_staleness_ms"] = 10_000.0
+    snap.metrics["depth_near_fresh"] = True
+    asyncio.run(stage.submit(snap))
+    snap.metrics["depth_staleness_ms"] = 50_000.0
+    snap.metrics["depth_near_fresh"] = False
+    with caplog.at_level("INFO"):
+        asyncio.run(stage.submit(snap))
+    records = [record for record in caplog.records if "stale depth" in record.message]
+    assert len(records) == 1

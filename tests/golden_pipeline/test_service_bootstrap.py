@@ -1,5 +1,7 @@
 import asyncio
+import os
 import sys
+import time
 import types
 from types import SimpleNamespace
 from typing import Iterable
@@ -67,6 +69,7 @@ class RecordingAgentManager:
 
 
 MINT = "MintAphex1111111111111111111111111111111"
+MINT_TWO = "MintAphex2222222222222222222222222222222"
 
 def test_agents_receive_bootstrapped_snapshot() -> None:
     async def _run() -> None:
@@ -90,7 +93,7 @@ def test_agents_receive_bootstrapped_snapshot() -> None:
                     token_program="Tokenkeg",
                     venues=("bootstrap",),
                     flags={"source": "bootstrap"},
-                    asof=1_234_567.0,
+                    asof=time.time(),
                 )
                 for mint in batch
             }
@@ -110,6 +113,7 @@ def test_agents_receive_bootstrapped_snapshot() -> None:
             await service.start()
             assert fetch_calls == [(MINT,)]
 
+            now = time.time()
             bar = OHLCVBar(
                 mint=MINT,
                 open=1.0,
@@ -123,7 +127,7 @@ def test_agents_receive_bootstrapped_snapshot() -> None:
                 flow_usd=8_000.0,
                 zret=3.2,
                 zvol=3.5,
-                asof_close=1_234_572.0,
+                asof_close=now,
             )
             await service.pipeline.inject_bar(bar)
 
@@ -133,7 +137,7 @@ def test_agents_receive_bootstrapped_snapshot() -> None:
                 mid_usd=1.05,
                 spread_bps=24.0,
                 depth_pct={"1": 20_000.0, "2": 35_000.0},
-                asof=1_234_573.0,
+                asof=now,
             )
             await service.pipeline.submit_depth(depth)
 
@@ -163,6 +167,15 @@ def test_depth_cache_ttl_config_override() -> None:
     )
 
     assert service._depth_adapter._cache_ttl == pytest.approx(18.5)
+    assert service._depth_near_fresh_ms == pytest.approx(37_000.0)
+    assert (
+        service.pipeline._coalescer._depth_near_fresh_ms
+        == pytest.approx(37_000.0)
+    )
+    assert (
+        service.pipeline._agent_stage._depth_near_fresh_ms
+        == pytest.approx(37_000.0)
+    )
 
 
 def test_depth_cache_ttl_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,3 +196,63 @@ def test_depth_cache_ttl_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert service._depth_adapter._cache_ttl == pytest.approx(12.25)
+    assert service._depth_near_fresh_ms == pytest.approx(24_500.0)
+    assert (
+        service.pipeline._coalescer._depth_near_fresh_ms
+        == pytest.approx(24_500.0)
+    )
+    assert (
+        service.pipeline._agent_stage._depth_near_fresh_ms
+        == pytest.approx(24_500.0)
+    )
+
+
+def test_warm_start_depth_publishes_seed_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEED_TOKENS", f"{MINT},{MINT_TWO}")
+
+    async def _run() -> None:
+        token_scanner_stub.TRENDING_METADATA.clear()
+        token_scanner_stub.TRENDING_METADATA[MINT] = {"usdPrice": 1.23}
+        token_scanner_stub.TRENDING_METADATA[MINT_TWO] = {"price": 0.87}
+
+        async def _noop_enrichment(mints: Iterable[str]) -> dict[str, TokenSnapshot]:
+            return {}
+
+        manager = RecordingAgentManager()
+        portfolio = Portfolio(path=None)
+        bus = EventBus()
+
+        service = GoldenPipelineService(
+            agent_manager=manager,
+            portfolio=portfolio,
+            enrichment_fetcher=_noop_enrichment,
+            event_bus=bus,
+        )
+
+        submissions: list[DepthSnapshot] = []
+
+        async def _capture(snapshot: DepthSnapshot) -> None:
+            submissions.append(snapshot)
+
+        service.pipeline.submit_depth = _capture  # type: ignore[assignment]
+
+        async def _noop_start() -> None:
+            return None
+
+        async def _noop_stop() -> None:
+            return None
+
+        service._depth_adapter.start = _noop_start  # type: ignore[assignment]
+        service._depth_adapter.stop = _noop_stop  # type: ignore[assignment]
+
+        try:
+            await service.start()
+            assert {snap.mint for snap in submissions} == {MINT, MINT_TWO}
+            assert all(snap.source == "warm_start" for snap in submissions)
+        finally:
+            await service.stop()
+            token_scanner_stub.TRENDING_METADATA.clear()
+
+    asyncio.run(_run())

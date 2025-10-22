@@ -15,6 +15,11 @@ DEFAULTS: dict[str, str] = {
     "USE_DAS_DISCOVERY": "1",
     "DEXSCREENER_DISABLED": "0",
     "SYNTHETIC_PRICE_HINTS": '{"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 1.0}',
+    "REDIS_URL": "redis://localhost:6379/1",
+    "MINT_STREAM_REDIS_URL": "redis://localhost:6379/1",
+    "MEMPOOL_STREAM_REDIS_URL": "redis://localhost:6379/1",
+    "AMM_WATCH_REDIS_URL": "redis://localhost:6379/1",
+    "EVENT_BUS_URL": "ws://127.0.0.1:8779",
     # Core service toggles
     "DEPTH_SERVICE": "true",
     "USE_DEPTH_STREAM": "1",
@@ -38,7 +43,7 @@ DEFAULTS: dict[str, str] = {
     "DEPTH_MMAP_POLL_INTERVAL": "1",
     "DEPTH_START_TIMEOUT": "10",
     "DEPTH_MAX_RESTARTS": "1",
-    "DEPTH_CACHE_TTL": "0.5",
+    "DEPTH_CACHE_TTL": "0.8",
     "GOLDEN_DEPTH_CACHE_TTL": "10",
 
     # DEX and API endpoints
@@ -92,6 +97,9 @@ DEFAULTS: dict[str, str] = {
     "EVENT_MMAP_BATCH_SIZE": "16",
     "EVENT_BATCH_MS": "10",
     "BROKER_CHANNEL": "solhunter-events-v3",
+    "MINT_STREAM_BROKER_CHANNEL": "solhunter-events-v3",
+    "MEMPOOL_STREAM_BROKER_CHANNEL": "solhunter-events-v3",
+    "AMM_WATCH_BROKER_CHANNEL": "solhunter-events-v3",
 
     # Order book service
     "ORDERBOOK_CACHE_TTL": "5",
