@@ -21,6 +21,7 @@ EXIT_CONNECTIVITY=3
 EXIT_HEALTH=4
 EXIT_DEPS=5
 EXIT_SCHEMA=6
+EXIT_GOLDEN=7
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VENV_DIR="$ROOT_DIR/.venv"
@@ -125,6 +126,57 @@ run_schema_smoke_tests() {
     echo "Golden schema validation failed; agent suggestions will not appear until schemas are fixed" >&2
     exit $EXIT_SCHEMA
   fi
+}
+
+run_golden_demo() {
+  log_info "Running deterministic Golden Demonstration"
+  local demo_log="$LOG_DIR/golden_demo.log"
+  local -a overrides=(
+    "ENVIRONMENT=production"
+    "SOLHUNTER_MODE=${SOLHUNTER_MODE:-paper}"
+    "GOLDEN_PIPELINE=1"
+    "EVENT_BUS_URL=ws://127.0.0.1:8779"
+    "BROKER_CHANNEL=solhunter-events-v3"
+    "REDIS_URL=redis://localhost:6379/1"
+    "PRICE_PROVIDERS=pyth,dexscreener,birdeye,synthetic"
+    "SEED_TOKENS=So11111111111111111111111111111111111111112,EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9,Es9vMFrzaCERzSi1jS6t4G8iKrrf5gkP8KkP4dDLf2N9"
+  )
+  (
+    export "${overrides[@]}"
+    "$PYTHON_BIN" -m pytest -q tests/golden_pipeline/test_golden_demo.py
+  ) >"$demo_log" 2>&1 || {
+    log_warn "Golden Demonstration failed (see $demo_log)"
+    tail -n 100 "$demo_log" >&2 || true
+    exit $EXIT_GOLDEN
+  }
+  local summary
+  if ! summary=$("$PYTHON_BIN" - <<'PY'
+import json
+from tools.demo_payloads import REPORT_JSON_PATH, REPORT_MARKDOWN_PATH, ARTIFACT_DIR
+
+report = json.loads(REPORT_JSON_PATH.read_text(encoding="utf-8"))
+status = str(report.get("status", "UNKNOWN")).upper()
+if status != "PASS":
+    raise SystemExit(1)
+checks = report.get("checks") or {}
+lines = [
+    f"Golden Demo status: {status}",
+    f"Counts: discovery={report.get('discovery_count', 0)} golden={report.get('golden_count', 0)} suggestions={report.get('suggestion_count', 0)}",
+]
+for name, ok in sorted(checks.items()):
+    label = name.replace("_", " ")
+    lines.append(f"Check {label}: {'PASS' if ok else 'FAIL'}")
+lines.append(f"Frames directory: {ARTIFACT_DIR.resolve()}")
+lines.append(f"Markdown report: {REPORT_MARKDOWN_PATH.resolve()}")
+print("\n".join(lines))
+PY
+  ); then
+    log_warn "Golden Demonstration produced a failing status"
+    exit $EXIT_GOLDEN
+  fi
+  while IFS= read -r line; do
+    [[ -n $line ]] && log_info "$line"
+  done <<< "$summary"
 }
 
 normalize_bus_configuration() {
@@ -678,6 +730,7 @@ ORIG_MODE=${MODE-}
 export SOLHUNTER_MODE="${SOLHUNTER_MODE:-paper}"
 export MODE="${MODE:-paper}"
 run_schema_smoke_tests
+run_golden_demo
 if [[ -n ${ORIG_SOLHUNTER_MODE:-} ]]; then
   export SOLHUNTER_MODE="$ORIG_SOLHUNTER_MODE"
 else

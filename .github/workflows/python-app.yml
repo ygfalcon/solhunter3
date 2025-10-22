@@ -71,7 +71,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[dev,full]'
       - name: Prepare artifact directory
-        run: mkdir -p artifacts/golden
+        run: mkdir -p artifacts/demo/frames
       - name: Golden pipeline tests
         run: pytest tests/golden_pipeline
       - name: Upload golden pipeline artifacts
@@ -79,7 +79,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: golden-pipeline-artifacts
-          path: artifacts/golden
+          path: artifacts/demo
           if-no-files-found: warn
 
   ui-smoke:

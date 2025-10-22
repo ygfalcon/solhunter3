@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import contextlib
 import errno
+import json
 import logging
 import os
 import subprocess
@@ -25,7 +26,7 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping, Sequence
-from typing import Callable, TypeVar
+from typing import Any, Callable, Dict, TypeVar
 
 from solhunter_zero.runtime.trading_runtime import TradingRuntime
 from solhunter_zero.config import (
@@ -49,6 +50,11 @@ from solhunter_zero.health_runtime import (
     http_ok,
     resolve_rl_health_url,
     wait_for,
+)
+from tools.demo_payloads import (
+    ARTIFACT_DIR as DEMO_FRAMES_DIR,
+    REPORT_JSON_PATH as DEMO_REPORT_JSON,
+    REPORT_MARKDOWN_PATH as DEMO_REPORT_MD,
 )
 
 
@@ -147,6 +153,79 @@ def log_config_overview(cfg: dict) -> None:
         else:
             preview[key] = type(value).__name__
     log.info("Active configuration overview: %s", preview)
+
+
+def run_golden_demo(pytest_args: Sequence[str] | None = None) -> Dict[str, Any]:
+    """Execute the deterministic golden demo and return its report."""
+
+    import pytest
+
+    overrides = {
+        "ENVIRONMENT": "production",
+        "SOLHUNTER_MODE": os.environ.get("SOLHUNTER_MODE", "paper"),
+        "GOLDEN_PIPELINE": "1",
+        "EVENT_BUS_URL": "ws://127.0.0.1:8779",
+        "BROKER_CHANNEL": "solhunter-events-v3",
+        "REDIS_URL": "redis://localhost:6379/1",
+        "PRICE_PROVIDERS": "pyth,dexscreener,birdeye,synthetic",
+        "SEED_TOKENS": (
+            "So11111111111111111111111111111111111111112,"
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9,"
+            "Es9vMFrzaCERzSi1jS6t4G8iKrrf5gkP8KkP4dDLf2N9",
+        ),
+    }
+    previous = {key: os.environ.get(key) for key in overrides}
+    os.environ.update(overrides)
+    try:
+        args = ["-q", "tests/golden_pipeline/test_golden_demo.py"]
+        if pytest_args:
+            args.extend(pytest_args)
+        exit_code = pytest.main(args)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    if exit_code != 0:
+        raise RuntimeError(f"Golden Demonstration failed with pytest exit code {exit_code}")
+    if not DEMO_REPORT_JSON.exists():
+        raise RuntimeError(
+            f"Golden Demonstration did not produce a report: {DEMO_REPORT_JSON}"
+        )
+    report = json.loads(DEMO_REPORT_JSON.read_text(encoding="utf-8"))
+    status = str(report.get("status") or "UNKNOWN").upper()
+    if status != "PASS":
+        raise RuntimeError(
+            f"Golden Demonstration returned status {status}; see {DEMO_REPORT_JSON}"
+        )
+    log.info(
+        "Golden Demo PASS — discovery=%s golden=%s suggestions=%s",
+        report.get("discovery_count", 0),
+        report.get("golden_count", 0),
+        report.get("suggestion_count", 0),
+    )
+    checks = report.get("checks") or {}
+    for name, ok in sorted(checks.items()):
+        label = name.replace("_", " ")
+        log.info("  check %-32s %s", label, "OK" if ok else "FAIL")
+    log.info(
+        "  artifacts: frames=%s report=%s",
+        DEMO_FRAMES_DIR.resolve(),
+        DEMO_REPORT_MD.resolve(),
+    )
+    top = report.get("top_suggestions") or []
+    if top:
+        best = top[0]
+        edge = float(best.get("edge") or 0.0) * 100.0
+        log.info(
+            "  top suggestion: %s %s edge=%.2f%% notional=%s",
+            best.get("mint"),
+            best.get("side"),
+            edge,
+            best.get("notional") or best.get("notional_usd"),
+        )
+    return report
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -428,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_stage("process-cleanup", kill_lingering_processes, stage_results)
             env = run_stage("ensure-environment", lambda: ensure_environment(args.config), stage_results)
             cfg_path = env["config_path"]
+            run_stage("golden-demo", run_golden_demo, stage_results)
             loaded_env = run_stage("load-production-env", _load_production_environment, stage_results)
             run_stage("validate-keys", _validate_keys, stage_results)
             run_stage("write-env-manifest", lambda: _write_manifest(loaded_env), stage_results)

@@ -85,11 +85,14 @@ external network calls by running the synthetic demo harness:
 bash scripts/run_golden_demo.sh
 ```
 
-The script forces paper-mode defaults, executes
-`tests/golden_pipeline/test_golden_demo.py`, and writes JSONL plus a compact
-markdown summary under `artifacts/golden_demo/`. Inspect
-`artifacts/golden_demo/summary.md` to confirm counts, medians, and the top
-suggestions before promoting a new environment to live trading.
+The script forces the deterministic paper-mode defaults, executes
+`tests/golden_pipeline/test_golden_demo.py`, and writes JSONL plus a structured
+report under `artifacts/demo/` (`frames/` for the raw topics, `report.json`, and
+`report.md`). Inspect `artifacts/demo/report.md` to confirm counts, medians, and
+the top suggestions before promoting a new environment to live trading. The
+live startup helpers (`scripts/start_all.py`, `scripts/launch_live.sh`) now gate
+runtime launches on a passing Golden Demo and surface the summary in their
+logs.
 
 ## Paper Trading Simulation
 

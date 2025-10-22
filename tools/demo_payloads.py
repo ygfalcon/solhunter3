@@ -15,7 +15,10 @@ from solhunter_zero.golden_pipeline.types import (
     TokenSnapshot,
 )
 
-ARTIFACT_DIR = Path("artifacts/golden_demo")
+ARTIFACT_ROOT = Path("artifacts/demo")
+ARTIFACT_DIR = ARTIFACT_ROOT / "frames"
+REPORT_JSON_PATH = ARTIFACT_ROOT / "report.json"
+REPORT_MARKDOWN_PATH = ARTIFACT_ROOT / "report.md"
 
 _BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
@@ -267,8 +270,9 @@ def summarise(
 
 
 def write_summary_markdown(path: Path, summary: Mapping[str, Any]) -> None:
+    status = str(summary.get("status", "UNKNOWN")).upper()
     lines = [
-        "Golden Demo Summary (synthetic, paper mode)",
+        f"Golden Demo Summary — {status}",
         "",
         f"Discovery: {summary['discovery_count']} candidates (source: synthetic:demo)",
         (
@@ -305,15 +309,69 @@ def write_summary_markdown(path: Path, summary: Mapping[str, Any]) -> None:
             f"depth_1% {depth_text}  hash {entry.get('integrity', {}).get('golden_hash', '')}"
         )
     lines.append("")
-    lines.append("Lag metrics: bus 320 ms · depth 1.6 s · golden ttl 60 s")
-    lines.append("All contracts compatible. No protobuf/schema drops detected.")
-    lines.append("Artifacts: artifacts/golden_demo/*.jsonl")
+    checks = summary.get("checks") or {}
+    if checks:
+        lines.append("Checks:")
+        for name, ok in sorted(checks.items()):
+            label = name.replace("_", " ")
+            state = "PASS" if ok else "FAIL"
+            lines.append(f"- {label}: {state}")
+        lines.append("")
+    metrics = summary.get("metrics") or {}
+    if metrics:
+        bus = metrics.get("bus_latency_ms")
+        depth = metrics.get("depth_latency_ms")
+        golden = metrics.get("golden_lag_ms")
+        lag_parts = []
+        if bus is not None:
+            lag_parts.append(f"bus {bus:.0f} ms")
+        if depth is not None:
+            lag_parts.append(f"depth {depth:.0f} ms")
+        if golden is not None:
+            lag_parts.append(f"golden {golden:.0f} ms")
+        if lag_parts:
+            lines.append("Lag metrics: " + " · ".join(lag_parts))
+    handshake = summary.get("handshake") or {}
+    if handshake:
+        lines.append("Handshake:")
+        schema = handshake.get("schema_version")
+        ack = handshake.get("ack_version")
+        if schema is not None:
+            lines.append(f"- schema version: {schema}")
+        if ack is not None:
+            lines.append(f"- ack version: {ack}")
+        if handshake.get("event_bus"):
+            lines.append(f"- event bus: {handshake['event_bus']}")
+        if handshake.get("broker_channel"):
+            lines.append(f"- broker channel: {handshake['broker_channel']}")
+        lines.append("")
+    artifacts = summary.get("artifacts") or {}
+    frames_path = artifacts.get("frames")
+    report_json = artifacts.get("report_json")
+    report_md = artifacts.get("report_markdown")
+    lines.append("Artifacts:")
+    if frames_path:
+        lines.append(f"- frames: {frames_path}/*.jsonl")
+    if report_json:
+        lines.append(f"- report (json): {report_json}")
+    if report_md:
+        lines.append(f"- report (markdown): {report_md}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_summary_json(path: Path, summary: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
 __all__ = [
+    "ARTIFACT_ROOT",
     "ARTIFACT_DIR",
+    "REPORT_JSON_PATH",
+    "REPORT_MARKDOWN_PATH",
     "DemoToken",
     "generate_candidates",
     "candidate_to_dataclass",
@@ -323,4 +381,5 @@ __all__ = [
     "write_jsonl",
     "summarise",
     "write_summary_markdown",
+    "write_summary_json",
 ]

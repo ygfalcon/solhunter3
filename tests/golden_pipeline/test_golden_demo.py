@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from typing import Any, Dict, List
 
 import pytest
@@ -11,8 +12,11 @@ pytest_plugins = ["tests.golden_pipeline.fixtures_demo"]
 
 from tools.demo_payloads import (
     ARTIFACT_DIR,
+    REPORT_JSON_PATH,
+    REPORT_MARKDOWN_PATH,
     summarise,
     write_jsonl,
+    write_summary_json,
     write_summary_markdown,
 )
 from .fixtures_demo import STREAM_DISCOVERY, STREAM_GOLDEN, STREAM_SUGGESTED
@@ -94,16 +98,21 @@ def test_golden_demo(demo_context, demo_tokens, caplog):
         assert key in lag_metrics
     assert hello_frame is not None, "expected hello acknowledgement from UI websocket"
 
-    discovered_path = ARTIFACT_DIR / "discovered.jsonl"
-    golden_path = ARTIFACT_DIR / "golden.jsonl"
-    suggestions_path = ARTIFACT_DIR / "suggestions.jsonl"
-    summary_path = ARTIFACT_DIR / "summary.md"
+    discovered_path = ARTIFACT_DIR / f"{STREAM_DISCOVERY.replace(':', '_')}.jsonl"
+    golden_path = ARTIFACT_DIR / f"{STREAM_GOLDEN.replace(':', '_')}.jsonl"
+    suggestions_path = ARTIFACT_DIR / f"{STREAM_SUGGESTED.replace(':', '_')}.jsonl"
+    report_json_path = REPORT_JSON_PATH
+    summary_path = REPORT_MARKDOWN_PATH
 
     discovered_events: List[Dict[str, Any]] = []
     golden_events: List[Dict[str, Any]] = []
     suggestion_events: List[Dict[str, Any]] = []
     summary: Dict[str, Any] | None = None
 
+    golden_hashes: set[str | None] = set()
+    status_snapshot: Dict[str, Any] = {}
+    bus_lag: float | None = None
+    depth_lag: float | None = None
     try:
         demo_context.feed_tokens()
         demo_context.loop.run_until_complete(asyncio.sleep(0.1))
@@ -114,6 +123,7 @@ def test_golden_demo(demo_context, demo_tokens, caplog):
         golden_events = demo_context.loop.run_until_complete(
             demo_context.recorder.wait_for(STREAM_GOLDEN, 15, timeout=5.0)
         )
+        golden_hashes = {entry.get("hash") for entry in golden_events}
         suggestion_events = demo_context.loop.run_until_complete(
             demo_context.recorder.wait_for(STREAM_SUGGESTED, 6, timeout=5.0)
         )
@@ -129,9 +139,73 @@ def test_golden_demo(demo_context, demo_tokens, caplog):
             golden=golden_events,
             suggestions=suggestion_events,
         )
+        handshake_version = handshake.get("v")
+        ack_version = None
+        if isinstance(hello_frame, dict):
+            ack_version = hello_frame.get("v") or hello_frame.get("version")
+        summary_payload["handshake"] = {
+            "schema_version": handshake_version,
+            "ack_version": ack_version,
+            "event_bus": bus_info.get("url_ws"),
+            "broker_channel": broker.get("channel"),
+            "version": handshake.get("version"),
+        }
         write_jsonl(discovered_path, discovered_events)
         write_jsonl(golden_path, golden_events)
         write_jsonl(suggestions_path, suggestion_events)
+        from solhunter_zero import token_scanner
+
+        das_until = float(getattr(token_scanner, "_DAS_CIRCUIT_OPEN_UNTIL", 0.0) or 0.0)
+        das_circuit_closed = das_until <= time.monotonic()
+
+        status_snapshot = demo_context.wiring.collectors.status_snapshot()
+        bus_lag_raw = status_snapshot.get("bus_latency_ms")
+        depth_lag_raw = status_snapshot.get("depth_lag_ms")
+        try:
+            bus_lag = float(bus_lag_raw) if bus_lag_raw is not None else None
+        except Exception:
+            bus_lag = None
+        try:
+            depth_lag = float(depth_lag_raw) if depth_lag_raw is not None else None
+        except Exception:
+            depth_lag = None
+
+        checks = {
+            "discovery_minimum_met": len(discovered_events) >= 20,
+            "golden_minimum_met": len(golden_events) >= 15,
+            "agent_minimum_met": len(suggestion_events) >= 6,
+            "integrity_hashes_present": all(
+                (entry.get("integrity", {}).get("golden_hash") in golden_hashes)
+                for entry in suggestion_events
+            ),
+            "ui_handshake_version_match": bool(handshake_version)
+            and (ack_version is None or str(ack_version) == str(handshake_version)),
+            "lag_within_demo_threshold": (
+                (bus_lag is None or bus_lag < 1000.0)
+                and (depth_lag is None or depth_lag < 2500.0)
+            ),
+            "das_circuit_closed": das_circuit_closed,
+        }
+        summary_payload["checks"] = checks
+        summary_payload["status"] = "PASS" if all(checks.values()) else "FAIL"
+        summary_payload["metrics"] = {
+            "bus_latency_ms": bus_lag,
+            "depth_latency_ms": depth_lag,
+            "golden_lag_ms": lag_metrics.get("golden_ms"),
+            "golden_count": len(golden_events),
+            "suggestion_count": len(suggestion_events),
+        }
+        summary_payload["artifacts"] = {
+            "frames": str(ARTIFACT_DIR.resolve()),
+            "report_json": str(report_json_path.resolve()),
+            "report_markdown": str(summary_path.resolve()),
+        }
+        summary_payload["streams"] = {
+            "discovered": STREAM_DISCOVERY,
+            "golden": STREAM_GOLDEN,
+            "suggested": STREAM_SUGGESTED,
+        }
+        write_summary_json(report_json_path, summary_payload)
         write_summary_markdown(summary_path, summary_payload)
 
     assert len(discovered_events) >= 20
@@ -181,7 +255,9 @@ def test_golden_demo(demo_context, demo_tokens, caplog):
     assert golden_path.exists()
     assert suggestions_path.exists()
     assert summary_path.exists()
+    assert report_json_path.exists()
+    payload = json.loads(report_json_path.read_text(encoding="utf-8"))
+    assert payload.get("status") == "PASS"
     summary_text = summary_path.read_text(encoding="utf-8")
-    assert "Discovery:" in summary_text
-    assert "Golden:" in summary_text
-    assert "Agents:" in summary_text
+    assert "Golden Demo Summary" in summary_text
+    assert "Checks:" in summary_text

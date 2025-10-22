@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from solhunter_zero.ui import UIState, start_websockets, stop_websockets
 
 from tools.demo_payloads import (
     ARTIFACT_DIR,
+    ARTIFACT_ROOT,
     DemoToken,
     build_depth_snapshots,
     build_token_snapshot,
@@ -35,12 +37,12 @@ STREAM_SUGGESTED = "x:trade.suggested"
 
 @pytest.fixture(scope="session", autouse=True)
 def demo_env() -> Iterable[None]:
-    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-    for existing in ARTIFACT_DIR.glob("*"):
-        try:
+    ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
+    for existing in ARTIFACT_ROOT.glob("*"):
+        if existing.is_dir():
+            shutil.rmtree(existing)
+        else:
             existing.unlink()
-        except IsADirectoryError:
-            pass
     overrides = {
         "ENVIRONMENT": "production",
         "SOLHUNTER_MODE": "live",
