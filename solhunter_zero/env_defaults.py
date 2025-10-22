@@ -39,6 +39,7 @@ DEFAULTS: dict[str, str] = {
     "DEPTH_START_TIMEOUT": "10",
     "DEPTH_MAX_RESTARTS": "1",
     "DEPTH_CACHE_TTL": "0.5",
+    "GOLDEN_DEPTH_CACHE_TTL": "10",
 
     # DEX and API endpoints
     "ORCA_API_URL": "https://api.orca.so",

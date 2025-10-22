@@ -152,7 +152,7 @@ class GoldenDepthAdapter:
         submit_depth: Callable[[DepthSnapshot], Awaitable[None]],
         decimals_resolver: Callable[[str], int],
         max_active: int = 8,
-        cache_ttl: float = 8.0,
+        cache_ttl: float = 10.0,
     ) -> None:
         self._enabled = enabled
         self._submit_depth = submit_depth
