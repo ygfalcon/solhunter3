@@ -1257,6 +1257,31 @@ class RuntimeEventCollectors:
             hash_map = dict(self._latest_golden_hash)
         snapshots: List[Dict[str, Any]] = []
         lag_samples: List[float] = []
+
+        def _normalize_momentum_breakdown(value: Any) -> Any:
+            if isinstance(value, bool) or value is None:
+                return value
+            if isinstance(value, Mapping):
+                return {
+                    str(key): _normalize_momentum_breakdown(val)
+                    for key, val in value.items()
+                }
+            if isinstance(value, (list, tuple, set)):
+                return [_normalize_momentum_breakdown(val) for val in value]
+            numeric = _maybe_float(value)
+            if numeric is not None:
+                return numeric
+            return value
+
+        def _as_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+            if isinstance(value, (int, float)):
+                return bool(value)
+            return False
+
         for mint in sorted(golden.keys()):
             payload = dict(golden[mint])
             normalized_golden = read_golden(payload, reader="runtime_wiring")
@@ -1300,6 +1325,42 @@ class RuntimeEventCollectors:
                     stale_flag = age > stale_threshold
                 else:
                     stale_flag = age > 60.0
+            momentum_score = _maybe_float(payload.get("momentum_score"))
+            pump_intensity = _maybe_float(payload.get("pump_intensity"))
+            pump_score = _maybe_float(payload.get("pump_score"))
+            if pump_intensity is None and pump_score is not None:
+                pump_intensity = pump_score
+            social_score = _maybe_float(payload.get("social_score"))
+            social_sentiment = _maybe_float(payload.get("social_sentiment"))
+            tweets_per_min = _maybe_float(payload.get("tweets_per_min"))
+            buyers_last_hour = _maybe_int(payload.get("buyers_last_hour"))
+            momentum_latency = _maybe_float(payload.get("momentum_latency_ms"))
+            raw_sources = payload.get("momentum_sources")
+            if isinstance(raw_sources, (list, tuple, set)):
+                candidate_sources = list(raw_sources)
+            elif isinstance(raw_sources, str):
+                candidate_sources = [raw_sources]
+            else:
+                candidate_sources = []
+            momentum_sources: List[str] = []
+            seen_sources: set[str] = set()
+            for source in candidate_sources:
+                if source is None:
+                    continue
+                source_text = str(source).strip()
+                if not source_text or source_text in seen_sources:
+                    continue
+                seen_sources.add(source_text)
+                momentum_sources.append(source_text)
+            raw_breakdown = payload.get("momentum_breakdown")
+            momentum_breakdown: Dict[str, Any] = {}
+            if isinstance(raw_breakdown, Mapping):
+                momentum_breakdown = {
+                    str(key): _normalize_momentum_breakdown(value)
+                    for key, value in raw_breakdown.items()
+                }
+            momentum_stale = _as_bool(payload.get("momentum_stale"))
+            momentum_partial = _as_bool(payload.get("momentum_partial"))
             px_mid = normalized_golden.get("mid_usd")
             spread_bps = _extract_golden_spread(payload)
             px_payload = payload.get("px")
@@ -1398,6 +1459,18 @@ class RuntimeEventCollectors:
                     "coalesce_window_s": coalesce,
                     "lag_ms": age * 1000.0 if age is not None else None,
                     "stale_threshold_s": stale_threshold,
+                    "momentum_score": momentum_score,
+                    "momentum_stale": momentum_stale,
+                    "momentum_partial": momentum_partial,
+                    "momentum_sources": momentum_sources,
+                    "momentum_breakdown": momentum_breakdown,
+                    "pump_intensity": pump_intensity,
+                    "pump_score": pump_score,
+                    "social_score": social_score,
+                    "social_sentiment": social_sentiment,
+                    "tweets_per_min": tweets_per_min,
+                    "buyers_last_hour": buyers_last_hour,
+                    "momentum_latency_ms": momentum_latency,
                 }
             )
         return {
