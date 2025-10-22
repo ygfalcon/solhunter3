@@ -98,7 +98,7 @@ class ConnectivityChecker:
         if not rest:
             price_base = env.get("HELIUS_PRICE_BASE_URL") or "https://api.helius.xyz"
             rest = f"{price_base.rstrip('/')}/v0/token-metadata"
-        redis_url = env.get("REDIS_URL") or "redis://127.0.0.1:6379/0"
+        redis_url = env.get("REDIS_URL") or "redis://127.0.0.1:6379/1"
         ui_ws = (
             env.get("UI_EVENTS_WS")
             or env.get("UI_EVENTS_WS_URL")

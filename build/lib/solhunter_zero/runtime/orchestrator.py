@@ -157,7 +157,7 @@ def _runtime_artifact_dir() -> Path:
 def _publish_ui_url_to_redis(ui_url: str) -> None:
     """Publish the UI URL to Redis using durable and TTL keys."""
 
-    redis_url = os.getenv("REDIS_URL") or "redis://127.0.0.1:6379/0"
+    redis_url = os.getenv("REDIS_URL") or "redis://127.0.0.1:6379/1"
     if not redis_url:
         return
     try:

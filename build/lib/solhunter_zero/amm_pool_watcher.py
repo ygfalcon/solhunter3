@@ -261,8 +261,8 @@ async def _fetch_json(session: aiohttp.ClientSession, url: str) -> object:
 
 
 async def run_amm_pool_watcher() -> None:
-    redis_url = os.getenv("AMM_WATCH_REDIS_URL", "redis://localhost:6379/0")
-    channel = os.getenv("AMM_WATCH_BROKER_CHANNEL", "solhunter-events-v2")
+    redis_url = os.getenv("AMM_WATCH_REDIS_URL", "redis://localhost:6379/1")
+    channel = os.getenv("AMM_WATCH_BROKER_CHANNEL", "solhunter-events-v3")
     poll_interval = _parse_int_env("AMM_WATCH_INTERVAL", 90, minimum=15)
     dedup_ttl = _parse_float_env("AMM_WATCH_DEDUP_TTL_SEC", 3600.0, minimum=60.0)
 
