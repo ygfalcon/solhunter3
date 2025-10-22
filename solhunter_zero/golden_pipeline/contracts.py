@@ -14,6 +14,7 @@ class StreamNames:
     market_ohlcv: str = "x:market.ohlcv.5m"
     market_depth: str = "x:market.depth"
     golden_snapshot: str = "x:mint.golden"
+    preliminary_snapshot: str = "x:mint.golden.prelim"
     trade_suggested: str = "x:trade.suggested"
     trade_rejected: str = "x:trade.rejected"
     vote_decisions: str = "x:vote.decisions"

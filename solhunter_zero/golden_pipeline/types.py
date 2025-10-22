@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 Timestamp = float
@@ -17,6 +17,7 @@ DECISION_SCHEMA_VERSION = "1.0"
 VIRTUAL_FILL_SCHEMA_VERSION = "1.0"
 LIVE_FILL_SCHEMA_VERSION = "1.0"
 TRADE_REJECTION_SCHEMA_VERSION = "1.0"
+PRELIMINARY_SNAPSHOT_SCHEMA_VERSION = "1.0"
 
 
 @dataclass(slots=True)
@@ -25,6 +26,57 @@ class DiscoveryCandidate:
 
     mint: str
     asof: Timestamp
+
+
+@dataclass(slots=True)
+class CandidateStats:
+    liquidity_usd: float
+    volume_1h_usd: float
+    volume_24h_usd: float
+    pair_age_min: float | None = None
+
+
+@dataclass(slots=True)
+class NormalizedCandidate:
+    """Normalized discovery candidate consumed by the Phase-One pipeline."""
+
+    mint: str
+    symbol: str | None
+    name: str | None
+    decimals: int | None
+    first_seen_at: str
+    sources: Tuple[str, ...]
+    stats: CandidateStats
+    raw_payload_hash: str
+
+
+@dataclass(slots=True)
+class PreliminaryProvenance:
+    sources: Tuple[str, ...]
+    producer: Dict[str, str]
+
+
+@dataclass(slots=True)
+class PreliminarySnapshot:
+    """Preliminary Golden snapshot emitted by Phase-One Stage-A."""
+
+    mint: str
+    symbol: str
+    decimals: int
+    asof: str
+    px_mid_usd: float
+    price_source: str
+    staleness_ms: float
+    liquidity_usd: float
+    volume_1h_usd: float
+    volume_24h_usd: float
+    pair_age_min: float | None
+    score: float
+    provenance: PreliminaryProvenance
+    idempotency_key: str
+    price_confidence: float | None = None
+    name: str | None = None
+    schema_version: str = PRELIMINARY_SNAPSHOT_SCHEMA_VERSION
 
 
 @dataclass(slots=True)

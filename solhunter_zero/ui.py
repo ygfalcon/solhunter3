@@ -9,10 +9,10 @@ import math
 import os
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from queue import Queue
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 from urllib.parse import urlparse, urlunparse
 
 from flask import Flask, Request, Response, jsonify, render_template_string, request
@@ -787,6 +787,9 @@ class UIState:
     golden_snapshot_provider: DictProvider = field(
         default=lambda: {"snapshots": [], "hash_map": {}}
     )
+    preliminary_snapshot_provider: DictProvider = field(
+        default=lambda: {"snapshots": [], "metrics": {}}
+    )
     suggestions_provider: DictProvider = field(
         default=lambda: {"suggestions": [], "metrics": {}}
     )
@@ -914,6 +917,13 @@ class UIState:
         except Exception:  # pragma: no cover
             log.exception("UI golden snapshot provider failed")
             return {"snapshots": [], "hash_map": {}}
+
+    def snapshot_preliminary(self) -> Dict[str, Any]:
+        try:
+            return dict(self.preliminary_snapshot_provider())
+        except Exception:  # pragma: no cover
+            log.exception("UI preliminary snapshot provider failed")
+            return {"snapshots": [], "metrics": {}}
 
     def snapshot_suggestions(self) -> Dict[str, Any]:
         try:
@@ -1228,6 +1238,108 @@ _PAGE_TEMPLATE = """
         .pill.pass { color: var(--success); border-color: rgba(63,185,80,0.35); }
         .pill.blocked { color: var(--danger); border-color: rgba(255,123,114,0.45); }
         .pill.neutral { color: var(--muted); border-color: rgba(110,118,129,0.35); }
+        .path-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            background: rgba(63,185,80,0.9);
+            border: 2px solid rgba(63,185,80,0.9);
+        }
+        .path-dot.pyth {
+            background: transparent;
+            border-color: rgba(63,185,80,0.9);
+        }
+        .path-dot.danger {
+            background: rgba(255,123,114,0.9);
+            border-color: rgba(255,123,114,0.9);
+        }
+        .staleness-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 0.72rem;
+            letter-spacing: 0.05em;
+            border: 1px solid rgba(88,166,255,0.25);
+            text-transform: uppercase;
+        }
+        .staleness-pill.stale-red { color: var(--danger); border-color: rgba(255,123,114,0.45); }
+        .staleness-pill.stale-amber { color: var(--warning); border-color: rgba(242,204,96,0.45); }
+        .staleness-pill.stale-green { color: var(--success); border-color: rgba(63,185,80,0.35); }
+        .staleness-pill.stale-unknown { color: var(--muted); border-color: rgba(110,118,129,0.35); }
+        .price-meta {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 2px;
+        }
+        .price-source-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            border-radius: 4px;
+            font-size: 0.72rem;
+            font-weight: 600;
+        }
+        .price-source-badge.jupiter {
+            background: rgba(63,185,80,0.15);
+            border: 1px solid rgba(63,185,80,0.45);
+            color: var(--success);
+        }
+        .price-source-badge.pyth {
+            background: rgba(88,166,255,0.18);
+            border: 1px solid rgba(88,166,255,0.35);
+            color: var(--accent);
+        }
+        .price-source-badge.danger {
+            background: rgba(255,123,114,0.16);
+            border: 1px solid rgba(255,123,114,0.45);
+            color: var(--danger);
+        }
+        .throttle-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .throttle-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: rgba(13,17,23,0.6);
+            border: 1px solid rgba(88,166,255,0.18);
+            font-size: 0.75rem;
+        }
+        .throttle-chip .chip-label {
+            font-weight: 600;
+        }
+        .throttle-chip.breaker-open {
+            border-color: rgba(255,123,114,0.45);
+            color: var(--danger);
+        }
+        .prelim-details {
+            margin-top: 4px;
+        }
+        .prelim-details summary {
+            cursor: pointer;
+            color: var(--accent);
+        }
+        .prelim-details .detail-grid {
+            margin-top: 8px;
+            display: grid;
+            gap: 6px;
+        }
+        .prelim-details .detail-grid strong {
+            display: block;
+            font-size: 0.78rem;
+            color: var(--muted);
+        }
         .grid-two {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
@@ -1722,6 +1834,107 @@ _PAGE_TEMPLATE = """
                         </tr>
                         {% else %}
                         <tr class=\"skeleton-row\"><td colspan=\"7\" class=\"muted\">Waiting for market state…</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+
+            <article class=\"panel\" id=\"preliminary-panel\">
+                {% set preliminary_state_flag = preliminary.state if preliminary.state else 'idle' %}
+                <div class=\"section-title\">
+                    <h2><span class=\"color-chip {{ preliminary_state_flag }}\"></span>Preliminary Golden Stream</h2>
+                    <span class=\"muted\">{{ preliminary.count }} live</span>
+                    <span class=\"preflight-result\" data-preflight-panel=\"preliminary\">⏳</span>
+                </div>
+                {% if preliminary.throttle %}
+                <div class=\"throttle-bar\">
+                    {% for chip in preliminary.throttle %}
+                    <span class=\"throttle-chip {{ 'breaker-open' if chip.breaker_open else '' }}\" title=\"Tokens {{ chip.tokens | round(2) }} / {{ chip.capacity | round(2) }} · In flight {{ chip.in_flight | round(1) }}\">
+                        <span class=\"chip-label\">{{ chip.label }}</span>
+                        <span>{{ chip.tokens | round(1) }}/{{ chip.capacity | round(1) }}</span>
+                    </span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <table>
+                    <thead>
+                        <tr>
+                            <th title=\"Network path for the latest price request.\">Path</th>
+                            <th title=\"Symbol from discovery sources; falls back to the mint prefix when missing.\">Symbol</th>
+                            <th title=\"Token mint address. Click to highlight this mint across panels.\">Mint</th>
+                            <th title=\"Spot mid in USD from Jupiter Price v3; falls back to Pyth oracle mid if routing price is unavailable.\">Mid / Source</th>
+                            <th title=\"Normalized liquidity in USD across discovery inputs.\">Liquidity</th>
+                            <th title=\"Normalized USD volume over the last hour.\">1h Vol</th>
+                            <th title=\"Normalized USD volume over the last 24 hours.\">24h Vol</th>
+                            <th title=\"Minutes since the primary liquidity pair was created.\">Pair Age</th>
+                            <th title=\"Phase-One logistic score from liquidity, volume, diversity, and price freshness.\">Score</th>
+                            <th title=\"Expanded provenance, network status, and throttling diagnostics.\">Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in preliminary.snapshots %}
+                        {% set path_class = 'danger' if row.breaker_open else ('pyth' if row.price_badge != 'J' else 'jupiter') %}
+                        {% set badge_class = 'jupiter' if row.price_badge == 'J' else 'pyth' %}
+                        {% if row.breaker_open %}
+                            {% set badge_class = badge_class + ' danger' %}
+                        {% endif %}
+                        <tr data-mint=\"{{ row.mint }}\" class=\"{{ 'stale' if row.stale else '' }}\">
+                            <td>
+                                <span class=\"path-dot {{ path_class }}\" title=\"{{ row.price_source_label }}{% if row.price_confidence is not none %} · ±{{ row.price_confidence | round(6) }}{% endif %}\"></span>
+                            </td>
+                            <td>
+                                <strong>{{ row.symbol_display }}</strong>
+                                {% if row.name %}
+                                <div class=\"muted\">{{ row.name }}</div>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <a href=\"#\" class=\"mint-chip\" data-mint=\"{{ row.mint }}\" title=\"Click to highlight this mint across panels\">{{ row.mint }}</a>
+                            </td>
+                            <td>
+                                <div>{{ row.px_mid_usd | round(6) if row.px_mid_usd is not none else '—' }}</div>
+                                <div class=\"price-meta\">
+                                    <span class=\"price-source-badge {{ badge_class }}\" title=\"{{ row.price_source_label }}\">{{ row.price_badge }}</span>
+                                    <span class=\"staleness-pill {{ row.staleness_class }}\" title=\"Staleness {{ row.staleness_label }}\">{{ row.staleness_label }}</span>
+                                </div>
+                            </td>
+                            <td>{{ '{:,.2f}'.format(row.liquidity_usd) if row.liquidity_usd is not none else '—' }}</td>
+                            <td>{{ '{:,.2f}'.format(row.volume_1h_usd) if row.volume_1h_usd is not none else '—' }}</td>
+                            <td>{{ '{:,.2f}'.format(row.volume_24h_usd) if row.volume_24h_usd is not none else '—' }}</td>
+                            <td>{{ row.pair_age_min | round(1) if row.pair_age_min is not none else '—' }}</td>
+                            <td>{{ row.score | round(4) }}</td>
+                            <td>
+                                <details class=\"prelim-details\">
+                                    <summary>Details</summary>
+                                    <div class=\"detail-grid\">
+                                        <div>
+                                            <strong>Sources</strong>
+                                            <span>{{ row.source_list | join(', ') if row.source_list else '—' }}</span>
+                                        </div>
+                                        <div>
+                                            <strong>Producer</strong>
+                                            <span>{{ row.producer_label or '—' }}</span>
+                                        </div>
+                                        <div>
+                                            <strong>Price Path</strong>
+                                            <span>{{ row.price_source_label }}{% if row.price_confidence is not none %} · confidence ±{{ row.price_confidence | round(6) }}{% endif %}</span>
+                                        </div>
+                                        {% if preliminary.throttle %}
+                                        <div>
+                                            <strong>Throttle</strong>
+                                            <span>
+                                                {% for chip in preliminary.throttle %}
+                                                    {{ chip.label }} {{ chip.tokens | round(1) }}/{{ chip.capacity | round(1) }}{% if not loop.last %} · {% endif %}
+                                                {% endfor %}
+                                            </span>
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                </details>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan=\"10\" class=\"muted\">Waiting for preliminary snapshots…</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -2659,7 +2872,7 @@ _PAGE_TEMPLATE = """
                     if (!mint) {
                         return;
                     }
-                    const panels = ['#token-facts-panel', '#market-panel', '#golden-panel'];
+                    const panels = ['#token-facts-panel', '#market-panel', '#preliminary-panel', '#golden-panel'];
                     panels.forEach((selector) => {
                         const row = document.querySelector(selector + ' tr[data-mint="' + mint + '"]');
                         if (row) {
@@ -2698,6 +2911,7 @@ _PAGE_TEMPLATE = """
                         {panel: 'discovery', url: '/swarm/discovery'},
                         {panel: 'token-facts', url: '/tokens'},
                         {panel: 'market', url: '/swarm/market'},
+                        {panel: 'preliminary', url: '/swarm/golden/preliminary'},
                         {panel: 'golden', url: '/swarm/golden'},
                         {panel: 'suggestions', url: '/swarm/suggestions'},
                         {panel: 'vote', url: '/swarm/votes'},
@@ -2724,6 +2938,7 @@ _PAGE_TEMPLATE = """
                     'discovery-panel',
                     'token-facts-panel',
                     'market-panel',
+                    'preliminary-panel',
                     'golden-panel',
                     'suggestions-panel',
                     'vote-panel',
@@ -2928,11 +3143,234 @@ def create_app(state: UIState | None = None) -> Flask:
                     "state": "ok",
                     "caption": str(heartbeat),
                 }
-            )
+        )
         return cards
+
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _host_label(host: str) -> str:
+        text = str(host or "")
+        lowered = text.lower()
+        for needle, label in (
+            ("jup", "Jupiter Price"),
+            ("price.jup.ag", "Jupiter Price"),
+            ("pyth", "Pyth Hermes"),
+            ("hermes", "Pyth Hermes"),
+            ("birdeye", "Birdeye"),
+            ("helius", "Helius DAS"),
+            ("dex", "DexScreener"),
+            ("solscan", "Solscan"),
+        ):
+            if needle in lowered:
+                return label
+        return text or "unknown"
+
+    def _breaker_open(entry: Any) -> bool:
+        if isinstance(entry, Mapping):
+            if entry.get("open") or entry.get("is_open"):
+                return True
+            remaining = entry.get("cooldown_remaining")
+            try:
+                if remaining is not None and float(remaining) > 0.0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+            opened = entry.get("opened_until")
+            try:
+                if opened is not None and float(opened) > 0.0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+            status_value = entry.get("status")
+            if isinstance(status_value, str) and status_value.lower() in {"open", "tripped"}:
+                return True
+            return False
+        return bool(entry)
+
+    def _breaker_info_for(alias: str, breakers: Mapping[str, Any] | None) -> Any:
+        if not isinstance(breakers, Mapping):
+            return None
+        alias_lower = alias.lower()
+        for key, value in breakers.items():
+            key_lower = str(key).lower()
+            if key_lower == alias_lower:
+                return value
+        for key, value in breakers.items():
+            key_lower = str(key).lower()
+            if alias_lower and alias_lower in key_lower:
+                return value
+        return None
+
+    def _staleness_class(value_ms: Any) -> str:
+        try:
+            numeric = float(value_ms)
+        except (TypeError, ValueError):
+            return "stale-unknown"
+        if numeric > 30000.0:
+            return "stale-red"
+        if numeric > 5000.0:
+            return "stale-amber"
+        return "stale-green"
+
+    def _staleness_label(value_ms: Any) -> str:
+        try:
+            numeric = float(value_ms)
+        except (TypeError, ValueError):
+            return "n/a"
+        return f"{numeric / 1000.0:.2f}s"
+
+    def _format_preliminary_throttle(metrics: Mapping[str, Any] | None) -> List[Dict[str, Any]]:
+        if not isinstance(metrics, Mapping):
+            return []
+        buckets = metrics.get("buckets")
+        breaker_meta = metrics.get("breakers") or metrics.get("breaker_open") or {}
+        summary: List[Dict[str, Any]] = []
+        if isinstance(buckets, Mapping):
+            for host, info in buckets.items():
+                if not isinstance(info, Mapping):
+                    continue
+                tokens = _safe_float(info.get("tokens"), 0.0)
+                capacity = max(_safe_float(info.get("capacity"), 1.0), 1e-6)
+                breaker_entry = _breaker_info_for(str(host), breaker_meta)
+                summary.append(
+                    {
+                        "host": str(host),
+                        "label": _host_label(host),
+                        "tokens": tokens,
+                        "capacity": capacity,
+                        "ratio": max(0.0, min(1.0, tokens / capacity)),
+                        "refill_rate": _safe_float(info.get("refill_rate"), 0.0),
+                        "available": _safe_float(info.get("available_slots"), 0.0),
+                        "in_flight": _safe_float(info.get("in_flight"), 0.0),
+                        "breaker_open": _breaker_open(breaker_entry),
+                    }
+                )
+        summary.sort(key=lambda item: item["label"])
+        return summary
+
+    def _prepare_preliminary_rows(
+        snapshots: Iterable[Any], metrics: Mapping[str, Any] | None
+    ) -> List[Dict[str, Any]]:
+        breakers = metrics.get("breakers") if isinstance(metrics, Mapping) else None
+        if not isinstance(breakers, Mapping):
+            breakers = metrics.get("breaker_open") if isinstance(metrics, Mapping) else None
+        rows: List[Dict[str, Any]] = []
+        for entry in snapshots or []:
+            if is_dataclass(entry):
+                raw = asdict(entry)
+            elif isinstance(entry, Mapping):
+                raw = dict(entry)
+            else:
+                continue
+            provenance = raw.get("provenance")
+            if provenance and is_dataclass(provenance):
+                provenance = asdict(provenance)
+                raw["provenance"] = provenance
+            elif not isinstance(provenance, Mapping):
+                provenance = None
+            sources = raw.get("sources")
+            if not isinstance(sources, (list, tuple)):
+                if isinstance(provenance, Mapping) and isinstance(provenance.get("sources"), Iterable):
+                    sources = list(provenance.get("sources"))
+                else:
+                    sources = []
+            raw["source_list"] = [str(value) for value in sources]
+            mint = str(raw.get("mint") or "")
+            raw["mint"] = mint
+            symbol = raw.get("symbol")
+            if not symbol and mint:
+                symbol = mint[:4].upper() + "…" if len(mint) > 4 else mint
+            raw["symbol_display"] = symbol
+            raw["staleness_class"] = _staleness_class(raw.get("staleness_ms"))
+            raw["staleness_label"] = _staleness_label(raw.get("staleness_ms"))
+            price_source = str(raw.get("price_source") or "")
+            raw["price_badge"] = "J" if price_source == "jup_price" else "P"
+            raw["price_source_label"] = (
+                "Jupiter Price v3" if price_source == "jup_price" else "Pyth Hermes"
+            )
+            breaker_entry = raw.get("breaker_open")
+            if breaker_entry is None and breakers:
+                aliases = [price_source]
+                if price_source == "jup_price":
+                    aliases.extend(["jupiter", "price.jup.ag", "jup"])
+                elif price_source == "pyth_mid":
+                    aliases.extend(["pyth", "hermes"])
+                for alias in aliases:
+                    info = _breaker_info_for(alias, breakers)
+                    if info is not None:
+                        breaker_entry = info
+                        break
+            raw["breaker_open"] = _breaker_open(breaker_entry)
+            raw["liquidity_usd"] = _safe_float(raw.get("liquidity_usd"), 0.0)
+            raw["volume_1h_usd"] = _safe_float(raw.get("volume_1h_usd"), 0.0)
+            raw["volume_24h_usd"] = _safe_float(raw.get("volume_24h_usd"), 0.0)
+            pair_age_value = raw.get("pair_age_min")
+            try:
+                raw["pair_age_min"] = float(pair_age_value) if pair_age_value is not None else None
+            except (TypeError, ValueError):
+                raw["pair_age_min"] = None
+            if raw.get("price_confidence") is not None:
+                raw["price_confidence"] = _safe_float(raw.get("price_confidence"), 0.0)
+            raw["score"] = _safe_float(raw.get("score"), 0.0)
+            producer = None
+            if isinstance(provenance, Mapping):
+                producer = provenance.get("producer")
+            if isinstance(producer, Mapping):
+                service = producer.get("service")
+                build = producer.get("build")
+                label = ""
+                if service:
+                    label += str(service)
+                if build:
+                    label = (label + " · " if label else "") + str(build)
+                raw["producer_label"] = label or None
+            else:
+                raw["producer_label"] = None
+            raw["stale"] = raw["staleness_class"] == "stale-red"
+            rows.append(raw)
+        return rows
+
+    def _preliminary_state(
+        rows: Iterable[Mapping[str, Any]], throttle: Iterable[Mapping[str, Any]]
+    ) -> str:
+        row_list = list(rows)
+        if not row_list:
+            return "idle"
+        if any(row.get("breaker_open") for row in row_list):
+            return "danger"
+        if any(row.get("staleness_class") == "stale-red" for row in row_list):
+            return "danger"
+        if any(row.get("staleness_class") == "stale-amber" for row in row_list):
+            return "warn"
+        if any(entry.get("breaker_open") for entry in throttle):
+            return "warn"
+        return "ok"
 
     @app.get("/")
     def index() -> Any:
+        preliminary_detail = state.snapshot_preliminary()
+        preliminary_metrics = (
+            preliminary_detail.get("metrics") if isinstance(preliminary_detail, Mapping) else {}
+        )
+        preliminary_rows = _prepare_preliminary_rows(
+            preliminary_detail.get("snapshots", []) if isinstance(preliminary_detail, Mapping) else [],
+            preliminary_metrics if isinstance(preliminary_metrics, Mapping) else {},
+        )
+        throttle_summary = _format_preliminary_throttle(
+            preliminary_metrics if isinstance(preliminary_metrics, Mapping) else {}
+        )
+        preliminary_view = {
+            "snapshots": preliminary_rows,
+            "metrics": preliminary_metrics if isinstance(preliminary_metrics, Mapping) else {},
+            "throttle": throttle_summary,
+            "lag_ms": preliminary_detail.get("lag_ms") if isinstance(preliminary_detail, Mapping) else None,
+            "state": _preliminary_state(preliminary_rows, throttle_summary),
+            "count": len(preliminary_rows),
+        }
         if request.args.get("format", "").lower() == "json":
             payload = {
                 "message": "SolHunter Zero Swarm UI",
@@ -2942,6 +3380,7 @@ def create_app(state: UIState | None = None) -> Flask:
                 "token_facts": state.snapshot_token_facts(),
                 "market": state.snapshot_market_state(),
                 "golden": state.snapshot_golden_snapshots(),
+                "preliminary": preliminary_view,
                 "suggestions": state.snapshot_suggestions(),
                 "votes": state.snapshot_vote_windows(),
                 "shadow": state.snapshot_shadow(),
@@ -2962,6 +3401,7 @@ def create_app(state: UIState | None = None) -> Flask:
         token_facts = state.snapshot_token_facts()
         market_state = state.snapshot_market_state()
         golden_detail = state.snapshot_golden_snapshots()
+        preliminary = preliminary_view
         suggestions = state.snapshot_suggestions()
         exit_panel = state.snapshot_exit()
         vote_windows = state.snapshot_vote_windows()
@@ -3140,6 +3580,7 @@ def create_app(state: UIState | None = None) -> Flask:
             market_state=market_state,
             golden_snapshots=golden_snapshots,
             golden_summary=golden_summary,
+            preliminary=preliminary,
             suggestions=suggestions,
             suggestion_metrics=suggestion_metrics,
             exit_panel=exit_panel,
@@ -3359,6 +3800,10 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.get("/swarm/golden")
     def swarm_golden() -> Any:
         return jsonify(_json_ready(state.snapshot_golden_snapshots()))
+
+    @app.get("/swarm/golden/preliminary")
+    def swarm_golden_preliminary() -> Any:
+        return jsonify(_json_ready(state.snapshot_preliminary()))
 
     @app.get("/swarm/suggestions")
     def swarm_suggestions() -> Any:
