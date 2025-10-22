@@ -1,9 +1,9 @@
 [project]
 name = "solhunter-zero"
-version = "0.1.0"
+version = "0.3.7"
 description = "Autonomous AI-driven trading bot for the Solana blockchain"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31,<3.0",
     "sqlalchemy>=2.0,<3.0",
@@ -26,7 +26,7 @@ dependencies = [
     "redis>=4.6,<6.0",
     "watchfiles>=0.19,<2.0",
     "pydantic>=1.10,<3.0",
-    "jsonschema[format-nongpl]>=4.20,<5",
+    "jsonschema[format-nongpl]==4.23.0",
     "cryptography>=41,<44",
     "rich>=13,<14",
     "protobuf>=6.31,<7",
@@ -54,18 +54,18 @@ extras = [
     "psutil>=5.9,<6.0",
 ]
 dev = [
-    "pytest>=7.4,<9",
-    "pytest-asyncio",
-    "jsonschema[format-nongpl]>=4.20,<5",
-    "ruff>=0.6.8",
-    "black>=24.8",
-    "flake8",
-    "grpcio-tools",
-    "mypy",
+    "pytest==8.3.3",
+    "pytest-asyncio==0.23.8",
+    "jsonschema[format-nongpl]==4.23.0",
+    "ruff==0.6.8",
+    "black==24.8.0",
+    "flake8==7.1.1",
+    "grpcio-tools==1.76.0",
+    "mypy==1.11.1",
 ]
 test = [
-    "pytest>=7.4,<9",
-    "jsonschema[format-nongpl]>=4.20,<5",
+    "pytest==8.3.3",
+    "jsonschema[format-nongpl]==4.23.0",
 ]
 numba = ["numba"]
 fastjson = ["orjson"]
@@ -89,7 +89,7 @@ solhunter-replay = "scripts.replay_capture:main"
 requires = [
     "setuptools>=61",
     "wheel",
-    "grpcio-tools>=1.60,<2.0",
+    "grpcio-tools>=1.76,<2.0",
 ]
 build-backend = "setuptools.build_meta"
 
