@@ -862,15 +862,21 @@ class GoldenPipelineService:
     def _spawn(self, coro: Awaitable[Any]) -> None:
         if not self._running:
             return
+        gate = getattr(self, "_pending_gate", None)
+        if gate is None:
+            gate = asyncio.Semaphore(_MAX_IN_FLIGHT_SPAWN_TASKS)
+            setattr(self, "_pending_gate", gate)
+        if not hasattr(self, "_pending"):
+            self._pending = set()  # type: ignore[attr-defined]
         async def _runner() -> Any:
             acquired = False
             try:
-                await self._pending_gate.acquire()
+                await gate.acquire()
                 acquired = True
                 return await coro
             finally:
                 if acquired:
-                    self._pending_gate.release()
+                    gate.release()
 
         task = asyncio.create_task(_runner())
         self._pending.add(task)
@@ -1038,7 +1044,7 @@ class GoldenPipelineService:
         if not token or price is None or price <= 0:
             return
         mint = canonical_mint(str(token))
-        if self._depth_flag:
+        if getattr(self, "_depth_flag", False):
             self._depth_adapter.record_activity(mint)
         self._last_price[mint] = price
         try:
@@ -1076,7 +1082,7 @@ class GoldenPipelineService:
                 mint = canonical_mint(str(token))
             except Exception:
                 continue
-            if self._depth_flag:
+            if getattr(self, "_depth_flag", False):
                 self._depth_adapter.record_activity(mint, weight=2.0)
             bids = _coerce_float(entry.get("bids")) or 0.0
             asks = _coerce_float(entry.get("asks")) or 0.0
