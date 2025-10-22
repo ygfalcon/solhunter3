@@ -64,15 +64,21 @@ def test_ui_meta_websocket_smoke(monkeypatch):
             ui.push_event({"event": "heartbeat", "ts": time.time()})
             time.sleep(0.2)
 
-            async def _collect() -> tuple[str, str]:
+            async def _collect() -> tuple[str, str, str]:
                 async with ws_mod.connect(meta["events_ws"]) as conn:
                     hello = await asyncio.wait_for(conn.recv(), timeout=5)
+                    await conn.send(json.dumps({"event": "hello", "client": "tests", "version": 3}))
+                    meta_frame = await asyncio.wait_for(conn.recv(), timeout=5)
                     payload = await asyncio.wait_for(conn.recv(), timeout=5)
-                    return hello, payload
+                    return hello, meta_frame, payload
 
-            hello_msg, payload_msg = asyncio.run(_collect())
+            hello_msg, meta_msg, payload_msg = asyncio.run(_collect())
             hello_obj = json.loads(hello_msg)
             assert hello_obj.get("event") == "hello"
+            assert hello_obj.get("channel") == "events"
+            meta_obj = json.loads(meta_msg)
+            assert meta_obj.get("type") == "UI_META"
+            assert meta_obj.get("v") == 3
             payload_obj = json.loads(payload_msg)
             assert payload_obj.get("event") == "heartbeat"
         finally:
