@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Mapping, Optional, Tuple
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(os.environ.get("SOLHUNTER_ROOT") or Path(__file__).resolve().parents[2])
 
 from ..agent_manager import AgentManager
 from ..config import get_broker_urls, load_selected_config, set_env_from_config
@@ -58,10 +58,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .runtime_wiring import resolve_golden_enabled
     from .schema_adapters import read_golden, read_ohlcv
     from .tuning import analyse_evaluation
-
-
-# Compute ROOT locally to avoid circular imports during module import time.
-ROOT = Path(__file__).resolve().parent.parent
 
 
 log = logging.getLogger(__name__)
