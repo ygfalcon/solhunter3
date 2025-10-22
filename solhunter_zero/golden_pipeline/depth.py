@@ -16,6 +16,7 @@ class DepthStage:
         self._emit = emit
         self._by_mint: Dict[str, Dict[str, DepthSnapshot]] = defaultdict(dict)
         self._lock = asyncio.Lock()
+        self._last_emit: Dict[str, DepthSnapshot] = {}
 
     async def submit(self, snapshot: DepthSnapshot) -> None:
         async with self._lock:
@@ -23,6 +24,10 @@ class DepthStage:
             per_mint[snapshot.venue] = snapshot
             aggregate = self._aggregate(snapshot.mint, per_mint.values())
         if aggregate:
+            previous = self._last_emit.get(snapshot.mint)
+            if previous is not None and _is_redundant_depth(previous, aggregate):
+                return
+            self._last_emit[snapshot.mint] = aggregate
             await self._emit(aggregate)
 
     @staticmethod
@@ -69,3 +74,20 @@ class DepthStage:
             route_meta=freshest.route_meta if freshest else None,
             staleness_ms=freshest.staleness_ms if freshest else None,
         )
+
+
+def _depth_signature(snapshot: DepthSnapshot) -> tuple[float, float, float]:
+    depth_map = snapshot.depth_pct or {}
+    return (
+        float(depth_map.get("1", 0.0) or 0.0),
+        float(depth_map.get("2", 0.0) or 0.0),
+        float(depth_map.get("5", 0.0) or 0.0),
+    )
+
+
+def _is_redundant_depth(previous: DepthSnapshot, current: DepthSnapshot) -> bool:
+    if current.spread_bps and current.spread_bps > 0:
+        return False
+    if abs(current.mid_usd - previous.mid_usd) > 1e-9:
+        return False
+    return _depth_signature(previous) == _depth_signature(current)
