@@ -311,19 +311,32 @@ def _dumps_text(obj: Any) -> str:
     return data
 
 
+def _json_loads(data: Any) -> Any:
+    """Deserialize ``data`` using JSON regardless of the backend in use."""
+    if isinstance(data, memoryview):
+        data = data.tobytes()
+    if _USE_ORJSON:
+        if isinstance(data, (bytes, bytearray)):
+            data = bytes(data)
+        return json.loads(data)
+    if isinstance(data, (bytes, bytearray)):
+        data = bytes(data).decode()
+    return json.loads(data)
+
+
 def _loads(data: Any) -> Any:
     """Deserialize ``data`` using the configured serialization format."""
     if _USE_MSGPACK:
         if isinstance(data, str):
             data = data.encode()
-        return msgpack.loads(data, raw=False)
-    if _USE_ORJSON:
-        if isinstance(data, str):
-            data = data.encode()
-        return json.loads(data)
-    if isinstance(data, bytes):
-        data = data.decode()
-    return json.loads(data)
+        try:
+            return msgpack.loads(data, raw=False)
+        except Exception as exc:
+            try:
+                return _json_loads(data)
+            except Exception:
+                raise exc
+    return _json_loads(data)
 
 
 def open_mmap(path: str | None = None, size: int | None = None) -> mmap.mmap | None:

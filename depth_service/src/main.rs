@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use std::time::{Duration, Instant};
 
 static PAPER_KEYPAIR_WARNED: OnceLock<()> = OnceLock::new();
+static EVENT_SCHEMA_VERSION: OnceLock<String> = OnceLock::new();
 
 use anyhow::{anyhow, Result};
 use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
@@ -32,6 +33,12 @@ use zstd::stream::{decode_all, encode_all};
 
 fn cfg_str(cfg: &TomlTable, key: &str) -> Option<String> {
     cfg.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+fn schema_version() -> &'static str {
+    EVENT_SCHEMA_VERSION
+        .get_or_init(|| std::env::var("EVENT_SCHEMA_VERSION").unwrap_or_else(|_| "v3".to_string()))
+        .as_str()
 }
 
 fn event_bus_url(cfg: &TomlTable) -> Option<String> {
@@ -609,6 +616,7 @@ async fn update_mmap(
             )
         })
         .collect();
+    let schema_version = schema_version().to_owned();
     let (event, send_binary) = if diff_updates && changed && !header_changed {
         let mut diff = HashMap::new();
         diff.insert(token.to_string(), entries.get(token).unwrap().clone());
@@ -616,6 +624,7 @@ async fn update_mmap(
             pb::Event {
                 topic: "depth_diff".to_string(),
                 dedupe_key: token.to_string(),
+                schema_version: schema_version.clone(),
                 kind: Some(pb::event::Kind::DepthDiff(pb::DepthDiff { entries: diff })),
             },
             false,
@@ -625,6 +634,7 @@ async fn update_mmap(
             pb::Event {
                 topic: "depth_update".to_string(),
                 dedupe_key: token.to_string(),
+                schema_version: schema_version.clone(),
                 kind: Some(pb::event::Kind::DepthUpdate(pb::DepthUpdate { entries })),
             },
             true,
@@ -1267,10 +1277,12 @@ async fn main() -> Result<()> {
                         let (write, mut read) = socket.split();
                         let write = Arc::new(Mutex::new(write));
                         let write_read = write.clone();
+                        let schema_version = event_schema_version();
                         // Notify bus that the service is online
                         let online = pb::Event {
                             topic: "depth_service_status".to_string(),
                             dedupe_key: "depth_service_status".to_string(),
+                            schema_version: schema_version.clone(),
                             kind: Some(pb::event::Kind::DepthServiceStatus(
                                 pb::DepthServiceStatus {
                                     status: "online".to_string(),
@@ -1284,6 +1296,7 @@ async fn main() -> Result<()> {
                             .await;
                         let tx_metrics = tx_clone.clone();
                         let tx_hb = tx_clone.clone();
+                        let schema_version_metrics = schema_version.clone();
                         tokio::spawn(async move {
                             let mut sys = System::new();
                             loop {
@@ -1296,6 +1309,7 @@ async fn main() -> Result<()> {
                                 let ev = pb::Event {
                                     topic: "system_metrics".to_string(),
                                     dedupe_key: "system_metrics".to_string(),
+                                    schema_version: schema_version_metrics.clone(),
                                     kind: Some(pb::event::Kind::SystemMetrics(pb::SystemMetrics {
                                         cpu,
                                         memory: mem,
@@ -1307,11 +1321,13 @@ async fn main() -> Result<()> {
                                 tokio::time::sleep(Duration::from_secs(30)).await;
                             }
                         });
+                        let schema_version_hb = schema_version.clone();
                         tokio::spawn(async move {
                             loop {
                                 let ev = pb::Event {
                                     topic: "heartbeat".to_string(),
                                     dedupe_key: "heartbeat:depth_service".to_string(),
+                                    schema_version: schema_version_hb.clone(),
                                     kind: Some(pb::event::Kind::Heartbeat(pb::Heartbeat {
                                         service: "depth_service".to_string(),
                                     })),
@@ -1724,4 +1740,3 @@ async fn main() -> Result<()> {
     .await?;
     Ok(())
 }
-
