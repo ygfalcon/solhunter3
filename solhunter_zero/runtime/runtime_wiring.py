@@ -465,6 +465,8 @@ class RuntimeEventCollectors:
             "last_stage_detail": None,
             "last_stage_ts": None,
         }
+        self._topic_lock = threading.Lock()
+        self._topic_activity: Dict[str, float] = {}
         self._environment = (
             os.getenv("SOLHUNTER_ENV")
             or os.getenv("DEPLOY_ENV")
