@@ -76,6 +76,21 @@ python demo.py --full-system --reports reports
 All modes emit the same report files and console snippets. The `reports/`
 directory is ignored by Git so these generated files remain local.
 
+## Run a Golden Demo (offline)
+
+Validate the discovery → golden snapshot → agent suggestion flow without any
+external network calls by running the synthetic demo harness:
+
+```bash
+bash scripts/run_golden_demo.sh
+```
+
+The script forces paper-mode defaults, executes
+`tests/golden_pipeline/test_golden_demo.py`, and writes JSONL plus a compact
+markdown summary under `artifacts/golden_demo/`. Inspect
+`artifacts/golden_demo/summary.md` to confirm counts, medians, and the top
+suggestions before promoting a new environment to live trading.
+
 ## Paper Trading Simulation
 
 Run the investor demo against live prices or bundled presets:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 
 Timestamp = float
@@ -25,9 +25,21 @@ class DiscoveryCandidate:
 
     mint: str
     asof: Timestamp
-    source: str | None = None
+    source: str | Mapping[str, Any] | None = None
     sources: tuple[str, ...] = field(default_factory=tuple)
     v: str = "1.0"
+    symbol: str | None = None
+    name: str | None = None
+    decimals: int | None = None
+    seen_at: Timestamp | None = None
+    schema_version: int = 1
+    uri: str | None = None
+    hints: Dict[str, Any] = field(default_factory=dict)
+    initial_price: Dict[str, Any] = field(default_factory=dict)
+    liquidity: Dict[str, Any] = field(default_factory=dict)
+    risk: Dict[str, Any] = field(default_factory=dict)
+
+
 
 
 @dataclass(slots=True)
@@ -153,6 +165,10 @@ class TradeSuggestion:
     must_exit: bool = False
     hot_watch: bool = False
     exit_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    edge: float | None = None
+    breakeven_bp: float | None = None
+    edge_buffer_bp: float | None = None
+    integrity: Dict[str, Any] = field(default_factory=dict)
     sequence: int = 0
     schema_version: str = field(default=TRADE_SUGGESTION_SCHEMA_VERSION)
 

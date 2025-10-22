@@ -567,6 +567,13 @@ def stub_requests() -> None:
 def stub_websockets() -> None:
     if 'websockets' in sys.modules:
         return
+    try:
+        mod = importlib.import_module('websockets')
+    except Exception:
+        mod = None
+    if mod is not None:
+        sys.modules.setdefault('websockets', mod)
+        return
     mod = types.ModuleType('websockets')
     mod.__spec__ = importlib.machinery.ModuleSpec('websockets', None)
 
@@ -588,7 +595,7 @@ def stub_websockets() -> None:
         return DummyConn()
 
 
-    async def serve(handler, host, port):
+    async def serve(handler, host, port, *args, **kwargs):
         class Server:
             sockets = [types.SimpleNamespace(getsockname=lambda: (host, port))]
 

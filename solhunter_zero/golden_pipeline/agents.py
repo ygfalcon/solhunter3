@@ -52,6 +52,10 @@ class BaseAgent:
         must_exit: bool = False,
         hot_watch: bool = False,
         diagnostics: Dict[str, Any] | None = None,
+        edge: float | None = None,
+        breakeven_bp: float | None = None,
+        edge_buffer_bp: float | None = None,
+        integrity: Dict[str, Any] | None = None,
     ) -> TradeSuggestion:
         generated_at = snapshot.asof if snapshot.asof else now_ts()
         return TradeSuggestion(
@@ -70,6 +74,10 @@ class BaseAgent:
             must_exit=must_exit,
             hot_watch=hot_watch,
             exit_diagnostics=dict(diagnostics or {}),
+            edge=edge,
+            breakeven_bp=breakeven_bp,
+            edge_buffer_bp=edge_buffer_bp,
+            integrity=dict(integrity or {}),
         )
 
 
