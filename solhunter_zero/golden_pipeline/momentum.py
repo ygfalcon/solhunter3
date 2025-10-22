@@ -81,9 +81,11 @@ _DEFAULT_SOCIAL_MAX = 2.0
 
 _CACHE_TTL_SEC = 60.0
 _SOCIAL_CACHE_TTL_SEC = 300.0
+_LUNARCRUSH_CACHE_TTL_SEC = 60.0
 _NITTER_HOSTS = ("nitter.net", "www.nitter.net", "nitter.pufe.org")
 _BIRDEYE_MAX_PAGES = 5
 _PUMP_BUYERS_MAX = 200.0
+_STALL_TICKS_DEFAULT = 3
 
 _WEIGHTS_DEFAULT = {
     "volume_rank_1h": 0.40,
@@ -188,9 +190,33 @@ if Counter is not None:  # pragma: no branch - optional metrics
         "Momentum enrichment errors",
         labelnames=("host", "reason"),
     )
+    MOMENTUM_BREAKER_OPEN_TOTAL = Counter(
+        "momentum_breaker_open_total",
+        "Momentum circuit breaker transitions to OPEN",
+        labelnames=("host",),
+    )
+    MOMENTUM_BREAKER_HALF_OPEN_TOTAL = Counter(
+        "momentum_breaker_half_open_total",
+        "Momentum circuit breaker transitions to HALF_OPEN",
+        labelnames=("host",),
+    )
+    MOMENTUM_BREAKER_CLOSED_TOTAL = Counter(
+        "momentum_breaker_closed_total",
+        "Momentum circuit breaker transitions to CLOSED",
+        labelnames=("host",),
+    )
+    MOMENTUM_BREAKER_TRIP_TOTAL = Counter(
+        "momentum_breaker_trip_total",
+        "Momentum circuit breaker trip events",
+        labelnames=("host",),
+    )
 else:  # pragma: no cover - metrics optional
     MOMENTUM_EMIT_TOTAL = None
     MOMENTUM_ERROR_TOTAL = None
+    MOMENTUM_BREAKER_OPEN_TOTAL = None
+    MOMENTUM_BREAKER_HALF_OPEN_TOTAL = None
+    MOMENTUM_BREAKER_CLOSED_TOTAL = None
+    MOMENTUM_BREAKER_TRIP_TOTAL = None
 
 if Histogram is not None:  # pragma: no branch - optional metrics
     MOMENTUM_LATENCY_MS = Histogram(
@@ -198,27 +224,30 @@ if Histogram is not None:  # pragma: no branch - optional metrics
         "Momentum enrichment latency per mint",
         buckets=(25, 50, 100, 200, 300, 400, 600, 800, 1000, 1500, 2500),
     )
+    MOMENTUM_BREAKER_OPEN_SECONDS = Histogram(
+        "momentum_breaker_open_seconds",
+        "Momentum circuit breaker open duration in seconds",
+        labelnames=("host",),
+        buckets=(0.25, 0.5, 1, 2, 3, 5, 10, 20, 30, 60, 120, 300),
+    )
 else:  # pragma: no cover - metrics optional
     MOMENTUM_LATENCY_MS = None
+    MOMENTUM_BREAKER_OPEN_SECONDS = None
 
-if Counter is not None:  # pragma: no branch - optional metrics
-    BREAKER_OPEN_TOTAL = Counter(
-        "breaker_open_total",
-        "Circuit breaker open events by upstream host",
+if Gauge is not None:  # pragma: no branch - optional metrics
+    MOMENTUM_BREAKER_STATE = Gauge(
+        "momentum_breaker_state",
+        "Momentum circuit breaker state (0=closed, 1=half_open, 2=open)",
+        labelnames=("host",),
+    )
+    MOMENTUM_BREAKER_CONSECUTIVE_FAILURES = Gauge(
+        "momentum_breaker_consecutive_failures",
+        "Momentum circuit breaker consecutive failure count",
         labelnames=("host",),
     )
 else:  # pragma: no cover - metrics optional
-    BREAKER_OPEN_TOTAL = None
-
-if Histogram is not None:  # pragma: no branch - optional metrics
-    BREAKER_DURATION_MS = Histogram(
-        "breaker_duration_ms",
-        "Circuit breaker open duration in milliseconds",
-        labelnames=("host",),
-        buckets=(250, 500, 1000, 2500, 5000, 10_000, 30_000, 60_000, 120_000),
-    )
-else:  # pragma: no cover - metrics optional
-    BREAKER_DURATION_MS = None
+    MOMENTUM_BREAKER_STATE = None
+    MOMENTUM_BREAKER_CONSECUTIVE_FAILURES = None
 
 
 def _parse_bool(value: str | None) -> bool:
@@ -264,14 +293,14 @@ _LUNARCRUSH_HOST = (
 def _record_breaker_open(host: str, duration: float) -> None:
     if not host:
         return
-    if BREAKER_OPEN_TOTAL is not None:
+    if MOMENTUM_BREAKER_OPEN_TOTAL is not None:
         try:
-            BREAKER_OPEN_TOTAL.labels(host=host).inc()
+            MOMENTUM_BREAKER_OPEN_TOTAL.labels(host=host).inc()
         except Exception:  # pragma: no cover - metrics optional
             pass
-    if BREAKER_DURATION_MS is not None and duration > 0:
+    if MOMENTUM_BREAKER_TRIP_TOTAL is not None:
         try:
-            BREAKER_DURATION_MS.labels(host=host).observe(max(0.0, duration) * 1000.0)
+            MOMENTUM_BREAKER_TRIP_TOTAL.labels(host=host).inc()
         except Exception:  # pragma: no cover - metrics optional
             pass
 
@@ -304,6 +333,7 @@ class MomentumConfig:
     social_max: float = _DEFAULT_SOCIAL_MAX
     birdeye_volume_floor_1h: float = 0.0
     birdeye_volume_floor_24h: float = 0.0
+    enable_lunarcrush_fallback: bool = False
 
 
 @dataclass(slots=True)
@@ -356,6 +386,13 @@ def _read_yaml(path: Path) -> Mapping[str, Any]:
 
 def load_momentum_config(config: Mapping[str, Any] | None = None) -> MomentumConfig:
     """Load momentum configuration from YAML and runtime config mapping."""
+
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, (bool, int)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        return False
 
     payload = _read_yaml(_resolve_weights_path())
     weights_cfg = payload.get("momentum", {}) if isinstance(payload, Mapping) else {}
@@ -432,6 +469,28 @@ def load_momentum_config(config: Mapping[str, Any] | None = None) -> MomentumCon
                     elif isinstance(flag, (bool, int)):
                         enabled = bool(flag)
 
+    fallback_flag = False
+    env_fallback = os.getenv("ENABLE_LUNARCRUSH_FALLBACK")
+    if env_fallback is not None:
+        fallback_flag = _coerce_bool(env_fallback)
+    else:
+        if isinstance(config, Mapping):
+            golden_cfg = config.get("golden")
+            if isinstance(golden_cfg, Mapping):
+                momentum_cfg = golden_cfg.get("momentum")
+                if isinstance(momentum_cfg, Mapping):
+                    fallback_flag = _coerce_bool(
+                        momentum_cfg.get("enable_lunarcrush_fallback")
+                    )
+        if not fallback_flag and isinstance(payload, Mapping):
+            golden_section = payload.get("golden")
+            if isinstance(golden_section, Mapping):
+                section = golden_section.get("momentum")
+                if isinstance(section, Mapping):
+                    fallback_flag = _coerce_bool(
+                        section.get("enable_lunarcrush_fallback")
+                    )
+
     return MomentumConfig(
         enabled=enabled,
         top_n_active=top_n_active,
@@ -440,6 +499,7 @@ def load_momentum_config(config: Mapping[str, Any] | None = None) -> MomentumCon
         social_max=social_max if social_max > social_min else social_min + 2.0,
         birdeye_volume_floor_1h=max(0.0, floor_1h),
         birdeye_volume_floor_24h=max(0.0, floor_24h),
+        enable_lunarcrush_fallback=fallback_flag,
     )
 
 
@@ -513,11 +573,24 @@ class MomentumAgent:
         self._candidate_seen: Dict[str, float] = {}
         self._cache: Dict[str, tuple[float, Any]] = {}
         self._etag_cache: Dict[str, tuple[str, Any, float]] = {}
-        self._social_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+        self._social_cache: Dict[str, tuple[float, Dict[str, Any], float]] = {}
         self._symbol_cache: Dict[str, str] = {}
         self._recent_ticks: deque[OrderedDict[str, MomentumComputation]] = deque(maxlen=2)
         self._limiters: Dict[str, TokenBucket] = {}
         self._breakers: Dict[str, CircuitBreaker] = {}
+        self._breaker_state: Dict[str, str] = {}
+        self._breaker_opened_at: Dict[str, float] = {}
+        self._lunarcrush_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+        self._lunarcrush_history: Dict[str, tuple[float, float]] = {}
+        self._stall_counts: Dict[str, int] = {}
+        try:
+            stall_env = os.getenv("MOMENTUM_LUNARCRUSH_STALL_TICKS")
+            self._stall_threshold = max(
+                1,
+                int(stall_env) if stall_env is not None else _STALL_TICKS_DEFAULT,
+            )
+        except Exception:
+            self._stall_threshold = _STALL_TICKS_DEFAULT
         self._session_timeout = aiohttp.ClientTimeout(
             total=_TOTAL_TIMEOUT_SEC,
             sock_connect=_CONNECT_TIMEOUT_SEC,
@@ -529,13 +602,17 @@ class MomentumAgent:
         )
         template_override = os.getenv("LUNARCRUSH_URL_TEMPLATE") or _LUNARCRUSH_URL_TEMPLATE
         api_key_override = os.getenv("LUNARCRUSH_API_KEY")
-        self._lunarcrush_enabled = rate_free_enabled
+        self._rate_free_enabled = rate_free_enabled
+        fallback_enabled = self._config.enable_lunarcrush_fallback
+        self._lunarcrush_enabled = rate_free_enabled and fallback_enabled
         self._lunarcrush_url_template = template_override
         self._lunarcrush_api_key = (
             api_key_override if api_key_override is not None else _LUNARCRUSH_API_KEY
         )
         self._lunarcrush_host = (
-            _resolve_lunarcrush_host(template_override) if rate_free_enabled else ""
+            _resolve_lunarcrush_host(template_override)
+            if rate_free_enabled and fallback_enabled
+            else ""
         )
         for host, (rate, burst) in _HOST_RPS.items():
             self._limiters[host] = TokenBucket(host, rate=rate, burst=burst)
@@ -546,7 +623,7 @@ class MomentumAgent:
                 on_open=_breaker_open_callback(host),
             )
         if self._lunarcrush_enabled and self._lunarcrush_host:
-            rate, burst = _HOST_RPS.get(self._lunarcrush_host, (2.0, 2))
+            rate, burst = _HOST_RPS.get(self._lunarcrush_host, (1.0, 3))
             if self._lunarcrush_host not in self._limiters:
                 self._limiters[self._lunarcrush_host] = TokenBucket(
                     self._lunarcrush_host, rate=rate, burst=burst
@@ -565,6 +642,12 @@ class MomentumAgent:
 
     def update_config(self, config: Mapping[str, Any] | None) -> None:
         self._config = load_momentum_config(config)
+        fallback_enabled = self._config.enable_lunarcrush_fallback
+        self._lunarcrush_enabled = self._rate_free_enabled and fallback_enabled
+        if not self._lunarcrush_enabled:
+            self._lunarcrush_cache.clear()
+            self._lunarcrush_history.clear()
+            self._stall_counts.clear()
 
     def recent_ticks(self) -> Sequence[Mapping[str, MomentumComputation]]:
         """Return a snapshot of the last two momentum computations."""
@@ -797,6 +880,7 @@ class MomentumAgent:
         buyers_last_hour: int | None = None
         error_map = sources.get("_errors") if isinstance(sources, Mapping) else {}
         stale_due_to_errors = False
+        symbol = self._resolve_symbol(snapshot)
         if isinstance(error_map, Mapping):
             error_hosts: list[str] = []
             for host, exc in error_map.items():
@@ -908,6 +992,10 @@ class MomentumAgent:
             momentum_partial = True
         breakdown["price_momentum_5m"] = price_norm_5m
         breakdown["price_momentum_1h"] = price_norm_1h
+
+        price_missing = price_5m is None and price_1h is None
+        volume_missing = volume_rank_1h is None and volume_rank_24h is None
+        core_stalled = price_missing and volume_missing
 
         pump_entry = pumpfun.get(mint) if isinstance(pumpfun, Mapping) else None
         social_entry = social_inputs.get(mint) if isinstance(social_inputs, Mapping) else None
@@ -1058,6 +1146,60 @@ class MomentumAgent:
         social_score = clamp((social_base + tweets_norm) / social_denominator, 0.0, 1.0)
         breakdown["social_score"] = social_score
 
+        stall_ticks = self._update_stall_counter(mint, core_stalled)
+        fallback_override: float | None = None
+        if stall_ticks:
+            breakdown["stall_ticks"] = stall_ticks
+        if (
+            self._lunarcrush_enabled
+            and self._config.enable_lunarcrush_fallback
+            and stall_ticks >= self._stall_threshold
+        ):
+            if isinstance(social_entry, Mapping) and social_entry.get("social_source") == "lunarcrush":
+                fallback_payload: Mapping[str, Any] = social_entry
+            else:
+                fallback_payload = await self._get_lunarcrush_metrics(symbol)
+            sentiment_value = fallback_payload.get("social_sentiment")
+            fallback_sentiment: float | None = None
+            if sentiment_value is not None:
+                try:
+                    fallback_sentiment = clamp(float(sentiment_value), 0.0, 1.0)
+                except Exception:
+                    fallback_sentiment = None
+            if fallback_sentiment is not None:
+                delta = self._register_lunarcrush_sentiment(symbol, fallback_sentiment)
+                delta_norm = clamp(0.5 + delta * 2.0, 0.0, 1.0)
+                fallback_override = clamp(
+                    0.6 * fallback_sentiment + 0.4 * delta_norm,
+                    0.0,
+                    1.0,
+                )
+                social_sentiment = fallback_sentiment
+                social_score = max(social_score, fallback_override)
+                breakdown["social_sentiment"] = social_sentiment
+                breakdown["lunarcrush_sentiment"] = fallback_sentiment
+                breakdown["lunarcrush_delta"] = delta
+                source_label = fallback_payload.get("social_source") or "lunarcrush"
+                breakdown["social_source"] = source_label
+                sources_used.add("lunarcrush_fallback")
+                if fallback_payload.get("tweets_per_min") is not None and tweets_per_min is None:
+                    try:
+                        tweets_per_min = float(fallback_payload.get("tweets_per_min"))
+                    except Exception:
+                        tweets_per_min = None
+                if tweets_per_min is not None:
+                    tweets_norm = _normalize_min_max(
+                        tweets_per_min,
+                        minimum=self._config.social_min,
+                        maximum=self._config.social_max,
+                    )
+                    breakdown["tweets_per_min"] = tweets_norm
+                momentum_partial = False
+                stale_due_to_errors = False
+                breakdown["fallback_ticks"] = stall_ticks
+            if fallback_override is not None:
+                breakdown["fallback_momentum"] = fallback_override
+
         if MOMENTUM_EMIT_TOTAL is not None:
             for source in sources_used:
                 try:
@@ -1083,6 +1225,11 @@ class MomentumAgent:
             + weights.social_sentiment
         )
         momentum_score = weighted / weight_sum if weight_sum else weighted
+
+        if fallback_override is not None:
+            base_score = momentum_score if momentum_score is not None else 0.0
+            momentum_score = max(base_score, fallback_override)
+            breakdown["momentum_score_fallback"] = fallback_override
 
         if stale_due_to_errors:
             momentum_partial = True
@@ -1354,8 +1501,9 @@ class MomentumAgent:
         for symbol, ctx in symbol_context.items():
             cached = self._social_cache.get(symbol)
             if cached is not None:
-                cached_at, _data = cached
-                if now - cached_at <= _SOCIAL_CACHE_TTL_SEC:
+                cached_at = cached[0]
+                ttl = cached[2] if len(cached) >= 3 else _SOCIAL_CACHE_TTL_SEC
+                if now - cached_at <= ttl:
                     continue
             pairs = sorted(ctx.get("pairs") or [])
             fetch_tasks[symbol] = asyncio.create_task(self._fetch_social_symbol(symbol, pairs))
@@ -1365,7 +1513,11 @@ class MomentumAgent:
                 if isinstance(value, Exception):
                     self._record_error("social", value)
                     continue
-                self._social_cache[symbol] = (now_ts(), dict(value or {}))
+                entry = dict(value or {})
+                ttl = _SOCIAL_CACHE_TTL_SEC
+                if entry.get("social_source") == "lunarcrush":
+                    ttl = _LUNARCRUSH_CACHE_TTL_SEC
+                self._social_cache[symbol] = (now_ts(), entry, ttl)
         result: Dict[str, Dict[str, Any]] = {}
         for symbol, ctx in symbol_context.items():
             cached = self._social_cache.get(symbol)
@@ -1422,7 +1574,7 @@ class MomentumAgent:
         elif community_source is None:
             social_source = None
         if self._lunarcrush_enabled and symbol:
-            lunar_payload = await self._fetch_lunarcrush_social(symbol)
+            lunar_payload = await self._get_lunarcrush_metrics(symbol)
             if isinstance(lunar_payload, Mapping):
                 if social_sentiment is None and lunar_payload.get("social_sentiment") is not None:
                     try:
@@ -1476,6 +1628,22 @@ class MomentumAgent:
             tweets_per_min = min(5.0, len(recent) / 60.0)
             return tweets_per_min, f"nitter:{host}"
         return None, None
+
+    async def _get_lunarcrush_metrics(self, symbol: str) -> Mapping[str, Any]:
+        if not symbol:
+            return {}
+        cached = self._lunarcrush_cache.get(symbol)
+        if cached is not None:
+            cached_at, payload = cached
+            if now_ts() - cached_at <= _LUNARCRUSH_CACHE_TTL_SEC:
+                return dict(payload)
+        payload = await self._fetch_lunarcrush_social(symbol)
+        if isinstance(payload, Mapping):
+            snapshot = dict(payload)
+        else:
+            snapshot = {}
+        self._lunarcrush_cache[symbol] = (now_ts(), snapshot)
+        return snapshot
 
     async def _fetch_lunarcrush_social(self, symbol: str) -> Mapping[str, Any]:
         if not self._lunarcrush_enabled or not symbol:
@@ -1585,8 +1753,18 @@ class MomentumAgent:
     ) -> Any:
         limiter = self._limiters.get(host)
         breaker = self._breakers.get(host)
-        if breaker and breaker.is_open:
-            raise MomentumRateLimitError(f"circuit open for {host}")
+        if breaker:
+            failures = breaker.failure_count()
+            open_flag = breaker.is_open
+            if open_flag:
+                self._set_breaker_state(host, "open")
+                self._set_breaker_failures(host, failures)
+                raise MomentumRateLimitError(f"circuit open for {host}")
+            if self._breaker_state.get(host) == "open" or failures > 0:
+                self._set_breaker_state(host, "half_open")
+            else:
+                self._set_breaker_state(host, "closed")
+            self._set_breaker_failures(host, failures)
         if limiter:
             acquired = await limiter.acquire(timeout=_TOTAL_TIMEOUT_SEC)
             if not acquired:
@@ -1619,7 +1797,11 @@ class MomentumAgent:
                         if resp.status == 429:
                             if breaker:
                                 breaker.record_failure()
+                                failures = breaker.failure_count()
+                                self._set_breaker_failures(host, failures)
                                 breaker.open_for(30.0)
+                                self._set_breaker_state(host, "open")
+                                self._set_breaker_failures(host, breaker.failure_count())
                             if MOMENTUM_ERROR_TOTAL is not None:
                                 try:
                                     MOMENTUM_ERROR_TOTAL.labels(host=host, reason="429").inc()
@@ -1646,8 +1828,12 @@ class MomentumAgent:
                             self._etag_cache[url] = (etag, data, now_ts())
                         if breaker:
                             breaker.record_success()
+                            self._set_breaker_failures(host, 0)
+                            self._set_breaker_state(host, "closed")
                         return data
             except HostCircuitOpenError as exc:
+                if breaker:
+                    self._set_breaker_state(host, "open")
                 raise MomentumRateLimitError(str(exc)) from exc
             except asyncio.TimeoutError as exc:
                 last_error = MomentumTimeoutError(f"timeout contacting {host}")
@@ -1669,8 +1855,18 @@ class MomentumAgent:
     ) -> str:
         limiter = self._limiters.get(host)
         breaker = self._breakers.get(host)
-        if breaker and breaker.is_open:
-            raise MomentumRateLimitError(f"circuit open for {host}")
+        if breaker:
+            failures = breaker.failure_count()
+            open_flag = breaker.is_open
+            if open_flag:
+                self._set_breaker_state(host, "open")
+                self._set_breaker_failures(host, failures)
+                raise MomentumRateLimitError(f"circuit open for {host}")
+            if self._breaker_state.get(host) == "open" or failures > 0:
+                self._set_breaker_state(host, "half_open")
+            else:
+                self._set_breaker_state(host, "closed")
+            self._set_breaker_failures(host, failures)
         if limiter:
             acquired = await limiter.acquire(timeout=_TOTAL_TIMEOUT_SEC)
             if not acquired:
@@ -1703,7 +1899,11 @@ class MomentumAgent:
                         if resp.status == 429:
                             if breaker:
                                 breaker.record_failure()
+                                failures = breaker.failure_count()
+                                self._set_breaker_failures(host, failures)
                                 breaker.open_for(30.0)
+                                self._set_breaker_state(host, "open")
+                                self._set_breaker_failures(host, breaker.failure_count())
                             if MOMENTUM_ERROR_TOTAL is not None:
                                 try:
                                     MOMENTUM_ERROR_TOTAL.labels(host=host, reason="429").inc()
@@ -1726,8 +1926,12 @@ class MomentumAgent:
                             self._etag_cache[url] = (etag, body, now_ts())
                         if breaker:
                             breaker.record_success()
+                            self._set_breaker_failures(host, 0)
+                            self._set_breaker_state(host, "closed")
                         return body
             except HostCircuitOpenError as exc:
+                if breaker:
+                    self._set_breaker_state(host, "open")
                 raise MomentumRateLimitError(str(exc)) from exc
             except asyncio.TimeoutError:
                 last_error = MomentumTimeoutError(f"timeout contacting {host}")
@@ -1760,6 +1964,72 @@ class MomentumAgent:
             except Exception:  # pragma: no cover - metrics optional
                 pass
         logger.debug("Momentum source %s failed: %s", host, exc, exc_info=True)
+
+    def _set_breaker_state(self, host: str, state: str) -> None:
+        if not host:
+            return
+        prev = self._breaker_state.get(host)
+        if prev == state:
+            return
+        self._breaker_state[host] = state
+        numeric = 0
+        if state == "open":
+            numeric = 2
+            self._breaker_opened_at[host] = time.monotonic()
+        elif state == "half_open":
+            numeric = 1
+        else:
+            numeric = 0
+        if MOMENTUM_BREAKER_STATE is not None:
+            try:
+                MOMENTUM_BREAKER_STATE.labels(host=host).set(float(numeric))
+            except Exception:  # pragma: no cover - metrics optional
+                pass
+        if state == "half_open" and MOMENTUM_BREAKER_HALF_OPEN_TOTAL is not None:
+            try:
+                MOMENTUM_BREAKER_HALF_OPEN_TOTAL.labels(host=host).inc()
+            except Exception:  # pragma: no cover - metrics optional
+                pass
+        if state == "closed":
+            if MOMENTUM_BREAKER_CLOSED_TOTAL is not None:
+                try:
+                    MOMENTUM_BREAKER_CLOSED_TOTAL.labels(host=host).inc()
+                except Exception:  # pragma: no cover - metrics optional
+                    pass
+            opened_at = self._breaker_opened_at.pop(host, None)
+            if opened_at is not None and MOMENTUM_BREAKER_OPEN_SECONDS is not None:
+                duration = max(0.0, time.monotonic() - opened_at)
+                try:
+                    MOMENTUM_BREAKER_OPEN_SECONDS.labels(host=host).observe(duration)
+                except Exception:  # pragma: no cover - metrics optional
+                    pass
+        elif state == "open":
+            # ensure we retain the timestamp for subsequent close metrics
+            self._breaker_opened_at.setdefault(host, time.monotonic())
+
+    def _set_breaker_failures(self, host: str, count: int) -> None:
+        if MOMENTUM_BREAKER_CONSECUTIVE_FAILURES is None:
+            return
+        try:
+            MOMENTUM_BREAKER_CONSECUTIVE_FAILURES.labels(host=host).set(max(0.0, float(count)))
+        except Exception:  # pragma: no cover - metrics optional
+            pass
+
+    def _update_stall_counter(self, mint: str, stalled: bool) -> int:
+        if not stalled:
+            self._stall_counts.pop(mint, None)
+            return 0
+        count = self._stall_counts.get(mint, 0) + 1
+        self._stall_counts[mint] = count
+        return count
+
+    def _register_lunarcrush_sentiment(self, symbol: str, value: float) -> float:
+        now = now_ts()
+        previous = self._lunarcrush_history.get(symbol)
+        self._lunarcrush_history[symbol] = (now, value)
+        if previous is None:
+            return 0.0
+        return value - previous[1]
 
     def _log_update(self, result: MomentumComputation) -> None:
         try:

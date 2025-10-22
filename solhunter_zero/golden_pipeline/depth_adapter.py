@@ -84,8 +84,14 @@ if Histogram is not None:  # pragma: no branch - optional metrics
         "Golden depth adapter latency",
         buckets=(10, 25, 50, 75, 100, 200, 300, 400, 600, 800, 1200),
     )
+    DEPTH_CACHE_AGE_SECONDS = Histogram(
+        "golden_depth_cache_age_seconds",
+        "Age of cached Golden depth snapshots in seconds",
+        buckets=(0.25, 0.5, 1, 2, 4, 6, 8, 10, 12, 15, 20, 30, 45, 60, 90, 120),
+    )
 else:  # pragma: no cover - optional metrics
     DEPTH_LATENCY_MS = None
+    DEPTH_CACHE_AGE_SECONDS = None
 
 
 class _Budget:
@@ -158,9 +164,14 @@ class GoldenDepthAdapter:
         self._submit_depth = submit_depth
         self._resolve_decimals = decimals_resolver
         self._max_active = max(1, int(max_active))
-        self._cache_ttl = max(2.0, float(cache_ttl))
+        try:
+            ttl_value = float(cache_ttl)
+        except Exception:
+            ttl_value = 10.0
+        self._cache_ttl = max(0.5, ttl_value)
         self._activity: MutableMapping[str, tuple[float, float]] = {}
         self._cache: MutableMapping[str, tuple[float, DepthSnapshot]] = {}
+        self._cache_warned: MutableMapping[str, float] = {}
         self._lock = asyncio.Lock()
         self._running = False
         self._task: asyncio.Task | None = None
@@ -168,6 +179,26 @@ class GoldenDepthAdapter:
         self._pyth_mapping: Dict[str, str] = {}
         self._pyth_mapping_expiry = 0.0
         self._pyth_lock = asyncio.Lock()
+
+    def _record_cache_age(self, mint: str, age: float) -> None:
+        if DEPTH_CACHE_AGE_SECONDS is not None:
+            try:
+                DEPTH_CACHE_AGE_SECONDS.observe(max(0.0, float(age)))
+            except Exception:  # pragma: no cover - metrics optional
+                pass
+        if age <= self._cache_ttl:
+            return
+        now = time.time()
+        last_warn = self._cache_warned.get(mint)
+        if last_warn is not None and now - last_warn < max(self._cache_ttl, 5.0):
+            return
+        self._cache_warned[mint] = now
+        logger.warning(
+            "depth cache for %s stale (age=%.2fs, ttl=%.2fs)",
+            mint,
+            age,
+            self._cache_ttl,
+        )
 
     def record_activity(self, mint: str, weight: float = 1.0) -> None:
         if not self._enabled:
@@ -238,8 +269,11 @@ class GoldenDepthAdapter:
         start = time.perf_counter()
         now = time.time()
         cached = self._cache.get(mint)
-        if cached and now - cached[0] < self._cache_ttl:
-            return
+        if cached:
+            age = now - cached[0]
+            self._record_cache_age(mint, age)
+            if age < self._cache_ttl:
+                return
         session = await self._get_session()
         budget = _Budget(_PER_MINT_BUDGET)
         try:
@@ -277,6 +311,8 @@ class GoldenDepthAdapter:
         snapshot.degraded = not has_sell_quote
         self._validate_snapshot(snapshot, anchor)
         self._cache[mint] = (time.time(), snapshot)
+        self._cache_warned.pop(mint, None)
+        self._record_cache_age(mint, 0.0)
         await self._submit_depth(snapshot)
         if DEPTH_EMIT_TOTAL is not None:
             DEPTH_EMIT_TOTAL.labels(source=snapshot.source or "unknown").inc()

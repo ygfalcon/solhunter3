@@ -51,13 +51,21 @@ def _parse_float(value: Any) -> float | None:
 
 def _resolve_depth_cache_ttl(config: Mapping[str, Any] | None) -> float:
     default = 10.0
-    env_value = os.getenv("GOLDEN_DEPTH_CACHE_TTL")
+    env_name = None
+    env_value = None
+    for candidate_env in ("GOLDEN_DEPTH_TTL_SECONDS", "GOLDEN_DEPTH_CACHE_TTL"):
+        value = os.getenv(candidate_env)
+        if value is not None:
+            env_name = candidate_env
+            env_value = value
+            break
     if env_value is not None:
         parsed_env = _parse_float(env_value)
         if parsed_env is not None and parsed_env > 0:
             return max(0.5, parsed_env)
         log.warning(
-            "Invalid GOLDEN_DEPTH_CACHE_TTL=%r; falling back to default %.1f s",
+            "Invalid %s=%r; falling back to default %.1f s",
+            env_name,
             env_value,
             default,
         )
