@@ -1204,20 +1204,28 @@ class RuntimeEventCollectors:
             close_value = normalized_candle.get("close")
             volume_value = normalized_candle.get("volume_usd")
             volume_base_value = normalized_candle.get("volume_base")
-            buyers_value = normalized_candle.get("buyers")
-            if buyers_value is None:
-                buyers_value = _maybe_int(depth_entry.get("buyers"))
+            buyers_value = _maybe_int(depth_entry.get("buyers"))
             if buyers_value is None:
                 buyers_value = _maybe_int(depth_entry.get("buyer_count"))
             if buyers_value is None:
                 buyers_value = _maybe_int(depth_entry.get("num_buyers"))
-            sellers_value = normalized_candle.get("sellers")
-            if sellers_value is None:
-                sellers_value = _maybe_int(depth_entry.get("sellers"))
+            if buyers_value is None:
+                normalized_buyers = normalized_candle.get("buyers")
+                if isinstance(normalized_buyers, (int, float)):
+                    buyers_value = _maybe_int(normalized_buyers)
+                else:
+                    buyers_value = normalized_buyers
+            sellers_value = _maybe_int(depth_entry.get("sellers"))
             if sellers_value is None:
                 sellers_value = _maybe_int(depth_entry.get("seller_count"))
             if sellers_value is None:
                 sellers_value = _maybe_int(depth_entry.get("num_sellers"))
+            if sellers_value is None:
+                normalized_sellers = normalized_candle.get("sellers")
+                if isinstance(normalized_sellers, (int, float)):
+                    sellers_value = _maybe_int(normalized_sellers)
+                else:
+                    sellers_value = normalized_sellers
             markets.append(
                 {
                     "mint": mint,
