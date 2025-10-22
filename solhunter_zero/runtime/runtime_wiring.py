@@ -9,7 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..event_bus import subscribe
 from ..ui import UIState, get_ws_channel_metrics
@@ -482,6 +482,36 @@ class RuntimeEventCollectors:
             "rl_mode": "shadow" if parse_bool_env("RL_WEIGHTS_DISABLED", True) else "applied",
         }
 
+    def _record_topic(self, topic: str) -> None:
+        if not topic:
+            return
+        try:
+            key = str(topic)
+        except Exception:
+            return
+        with self._topic_lock:
+            self._topic_activity[key] = time.time()
+
+    def topic_seen(self, topic: str) -> bool:
+        try:
+            key = str(topic)
+        except Exception:
+            return False
+        with self._topic_lock:
+            return key in self._topic_activity
+
+    async def wait_for_topics(self, topics: Sequence[str], timeout: float = 5.0) -> List[str]:
+        deadline = time.time() + max(0.0, timeout)
+        remaining = {str(topic) for topic in topics if str(topic).strip()}
+        while remaining and time.time() < deadline:
+            with self._topic_lock:
+                seen = {topic for topic in remaining if topic in self._topic_activity}
+            remaining.difference_update(seen)
+            if not remaining:
+                break
+            await asyncio.sleep(0.1)
+        return sorted(remaining)
+
     def _parse_sequence(self, value: Any) -> Optional[int]:
         if value in (None, "", False):
             return None
@@ -717,7 +747,11 @@ class RuntimeEventCollectors:
             ("runtime.stage_changed", _on_stage),
             ("heartbeat", _on_heartbeat),
         ):
-            unsub = subscribe(topic, handler)
+            async def _wrapped(event: Any, _topic: str = topic, _handler: Callable[[Any], Awaitable[None]] = handler) -> None:
+                self._record_topic(_topic)
+                await _handler(event)
+
+            unsub = subscribe(topic, _wrapped)
             self._subscriptions.append(unsub)
 
     def stop(self) -> None:
@@ -1721,7 +1755,11 @@ class RuntimeWiring:
     async def wait_for_topic(self, topic: str, timeout: float = 5.0) -> bool:
         if topic == "x:mint.golden":
             return await self.collectors.wait_for_golden(timeout)
-        return True
+        missing = await self.collectors.wait_for_topics([topic], timeout)
+        return not missing
+
+    async def wait_for_topics(self, topics: Sequence[str], timeout: float = 5.0) -> List[str]:
+        return await self.collectors.wait_for_topics(topics, timeout)
 
 
 def initialise_runtime_wiring(ui_state: UIState) -> RuntimeWiring:

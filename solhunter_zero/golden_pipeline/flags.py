@@ -65,9 +65,10 @@ def resolve_depth_flag(config: Mapping[str, Any] | None = None) -> bool:
     if config_flag is not None:
         return config_flag
 
-    mode = (os.getenv("MODE") or os.getenv("SOLHUNTER_MODE") or "paper").strip().lower()
-    if mode in {"live", "production", "prod"}:
-        return False
+    # Depth extensions are part of the public Golden snapshot contract, so they must
+    # remain enabled unless explicitly disabled through config or environment
+    # overrides. Historically this default flipped off in live mode; keep the same
+    # override hooks but default to ``True`` for every runtime mode.
     return True
 
 
