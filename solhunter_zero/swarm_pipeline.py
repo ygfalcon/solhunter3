@@ -9,7 +9,7 @@ consistent action normalisation, and explicit asset feedback to the portfolio.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
 import asyncio
 import contextlib
 import hashlib
@@ -19,7 +19,7 @@ import os
 import time
 
 from .agents.discovery import DiscoveryAgent
-from .agent_manager import AgentManager, EvaluationContext
+from .agent_manager import AgentManager
 from .event_bus import publish
 from .schemas import ActionExecuted, RuntimeLog
 from .simulation import SimulationResult, run_simulations_async
@@ -29,6 +29,9 @@ from .execution import EventExecutor
 from .agents.price_utils import resolve_price
 from .prices import update_price_cache
 from .token_aliases import canonical_mint
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .agent_manager import EvaluationContext
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +198,7 @@ class EvaluationRecord:
     score: float
     latency: float
     actions: List[SwarmAction]
-    context: EvaluationContext | None
+    context: "EvaluationContext | None"
     errors: List[str] = field(default_factory=list)
 
 
@@ -1320,7 +1323,7 @@ class SwarmPipeline:
                     RuntimeLog(stage="evaluation", detail=f"start:{token} score={score:.3f}"),
                 )
                 t0 = time.perf_counter()
-                ctx: EvaluationContext | None = None
+                ctx: "EvaluationContext | None" = None
                 actions: List[SwarmAction] = []
                 token_errors: List[str] = []
                 remaining_total = self._remaining_budget()
