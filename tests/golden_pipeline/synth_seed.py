@@ -35,6 +35,7 @@ from solhunter_zero.golden_pipeline.types import (
     DECISION_SCHEMA_VERSION,
     DEPTH_SNAPSHOT_SCHEMA_VERSION,
     GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    OHLCV_BAR_SCHEMA_VERSION,
     TRADE_SUGGESTION_SCHEMA_VERSION,
     VIRTUAL_FILL_SCHEMA_VERSION,
 )
@@ -394,22 +395,40 @@ async def _seed_runtime(
                 }
             )
         latest_bar = bars[-1]
-        await bus.publish(
-            STREAMS.market_ohlcv,
-            {
-                "mint": mint,
-                "o": latest_bar["o"],
-                "h": latest_bar["h"],
-                "l": latest_bar["l"],
-                "c": latest_bar["c"],
-                "vol_usd": vol_1m * 5.0,
-                "buyers": latest_bar["buyers"],
-                "trades": latest_bar["trades"],
-                "zret": 0.0,
-                "zvol": 0.0,
-                "asof_close": latest_bar["t"],
-            },
-        )
+        volume_value = vol_1m * 5.0
+        ohlcv_payload = {
+            "mint": mint,
+            "o": latest_bar["o"],
+            "h": latest_bar["h"],
+            "l": latest_bar["l"],
+            "c": latest_bar["c"],
+            "close": latest_bar["c"],
+            "vol_usd": volume_value,
+            "volume": volume_value,
+            "volume_usd": volume_value,
+            "buyers": latest_bar["buyers"],
+            "trades": latest_bar["trades"],
+            "zret": 0.0,
+            "zvol": 0.0,
+            "asof_close": latest_bar["t"],
+            "schema_version": OHLCV_BAR_SCHEMA_VERSION,
+        }
+        ohlcv_payload["content_hash"] = hashlib.sha1(
+            json.dumps(ohlcv_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        await bus.publish(STREAMS.market_ohlcv, ohlcv_payload)
+        def _normalise_pct_label(raw: str) -> tuple[float, str] | None:
+            try:
+                numeric = float(raw)
+            except Exception:
+                return None
+            if numeric > 1.0:
+                numeric = numeric / 100.0
+            if numeric < 0:
+                return None
+            label = f"{numeric:.3f}".rstrip("0").rstrip(".")
+            return numeric, label
+
         depth_snapshot = {
             "mint": mint,
             "venue": "synthetic",
@@ -423,12 +442,23 @@ async def _seed_runtime(
             "asof": base_ts,
             "schema_version": DEPTH_SNAPSHOT_SCHEMA_VERSION,
         }
+        bands: List[Dict[str, float]] = []
+        depth_usd_by_pct: Dict[str, float] = {}
+        for pct_key, usd_value in depth_snapshot["depth_pct"].items():
+            normalised = _normalise_pct_label(pct_key)
+            if normalised is None:
+                continue
+            pct_value, label = normalised
+            usd_float = float(usd_value)
+            bands.append({"pct": pct_value, "usd": usd_float})
+            depth_usd_by_pct[label] = usd_float
         await bus.publish(STREAMS.market_depth, depth_snapshot)
 
         hash_input = f"{symbol}:{price:.6f}".encode("utf-8")
         golden_hash = hashlib.sha1(hash_input).hexdigest()
         golden_hashes[mint] = golden_hash
         volume_spike = vol_1m / volume_baselines[symbol]
+        half_spread = price * (spreads[symbol] / 20000.0)
         golden_payload = {
             "mint": mint,
             "asof": base_ts,
@@ -444,9 +474,14 @@ async def _seed_runtime(
                 "spread_bps": spreads[symbol],
                 "vol_1m_usd": vol_1m,
                 "liquidity_usd": liquidity,
+                "bid_usd": max(0.0, price - half_spread),
+                "ask_usd": max(0.0, price + half_spread),
+                "ts": base_ts,
             },
             "liq": {
                 "depth_pct": depth_snapshot["depth_pct"],
+                "depth_usd_by_pct": depth_usd_by_pct,
+                "bands": bands,
                 "liquidity_usd": liquidity,
                 "asof": base_ts,
             },
@@ -455,10 +490,14 @@ async def _seed_runtime(
                 "h": latest_bar["h"],
                 "l": latest_bar["l"],
                 "c": latest_bar["c"],
-                "vol_usd": vol_1m * 5.0,
+                "close": latest_bar["c"],
+                "vol_usd": volume_value,
+                "volume": volume_value,
+                "volume_usd": volume_value,
                 "buyers": latest_bar["buyers"],
                 "trades": latest_bar["trades"],
                 "asof_close": latest_bar["t"],
+                "schema_version": OHLCV_BAR_SCHEMA_VERSION,
             },
             "hash": golden_hash,
             "metrics": {
@@ -476,6 +515,18 @@ async def _seed_runtime(
             },
             "schema_version": GOLDEN_SNAPSHOT_SCHEMA_VERSION,
         }
+        content_material = {
+            "mint": golden_payload["mint"],
+            "asof": golden_payload["asof"],
+            "meta": golden_payload["meta"],
+            "px": golden_payload["px"],
+            "liq": golden_payload["liq"],
+            "ohlcv5m": golden_payload["ohlcv5m"],
+        }
+        golden_payload["content_hash"] = hashlib.sha1(
+            json.dumps(content_material, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        golden_payload["idempotency_key"] = f"{mint}:{int(base_ts * 1000)}"
         await bus.publish(STREAMS.golden_snapshot, golden_payload)
 
         await kv.set(

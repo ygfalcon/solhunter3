@@ -442,7 +442,7 @@ class ProviderConfig:
     requires_key: Callable[[], str | None] | None = None
 
 
-_DEFAULT_PROVIDER_ORDER = ["jupiter", "pyth", "dexscreener", "synthetic"]
+_DEFAULT_PROVIDER_ORDER = ["birdeye", "jupiter", "dexscreener", "pyth", "synthetic"]
 
 
 def _parse_provider_roster(raw: str | None) -> List[str]:
@@ -1587,20 +1587,25 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
         )
         requested = provider_requests.setdefault(provider_name, set())
         pending: List[str] = list(base_pending)
-        if PRICE_BLEND_MIN_SOURCES > 1:
-            diag_candidates: List[str] = []
-            for token in tokens:
-                if token in pending or token in requested:
-                    continue
-                if len(per_token_sources.get(token, set())) >= PRICE_BLEND_MIN_SOURCES:
-                    continue
-                diag_candidates.append(token)
-            if diag_candidates and not base_pending:
-                if diag_budget <= 0:
-                    diag_candidates = []
-                else:
-                    diag_budget -= 1
-            pending.extend(diag_candidates)
+        need_candidates: List[str] = []
+        extra_candidates: List[str] = []
+        for token in tokens:
+            if token in pending or token in requested:
+                continue
+            source_count = len(per_token_sources.get(token, set()))
+            if PRICE_BLEND_MIN_SOURCES > 1 and source_count < PRICE_BLEND_MIN_SOURCES:
+                need_candidates.append(token)
+                continue
+            if (
+                PRICE_BLEND_PROVIDER_LIMIT > PRICE_BLEND_MIN_SOURCES
+                and source_count < PRICE_BLEND_PROVIDER_LIMIT
+            ):
+                extra_candidates.append(token)
+        if need_candidates:
+            pending.extend(need_candidates)
+        elif extra_candidates and diag_budget > 0:
+            pending.extend(extra_candidates)
+            diag_budget = max(0, diag_budget - 1)
         if not pending and not config.overrides:
             continue
         if pending:
@@ -1644,16 +1649,20 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
             override_ahead = any(
                 PROVIDER_CONFIGS[name].overrides for name in order[idx + 1 :]
             )
-            if (
-                PRICE_BLEND_MIN_SOURCES <= 1
-                or all(
-                    len(per_token_sources.get(token, set()))
-                    >= PRICE_BLEND_MIN_SOURCES
-                    for token in tokens
-                )
-                or diag_budget <= 0
-            ) and not override_ahead:
-                break
+        min_sources_satisfied = all(
+            len(per_token_sources.get(token, set())) >= PRICE_BLEND_MIN_SOURCES
+            for token in tokens
+        )
+        provider_cap_reached = all(
+            len(per_token_sources.get(token, set())) >= PRICE_BLEND_PROVIDER_LIMIT
+            for token in tokens
+        )
+        if PRICE_BLEND_MIN_SOURCES <= 1:
+            should_break = diag_budget <= 0 or provider_cap_reached
+        else:
+            should_break = min_sources_satisfied and (diag_budget <= 0 or provider_cap_reached)
+        if should_break and not override_ahead:
+            break
     if len(resolved) < len(tokens):
         missing = [tok for tok in tokens if tok not in resolved]
         if missing:

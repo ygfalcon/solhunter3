@@ -6,9 +6,9 @@ def test_compact_summary_report(golden_harness):
 
     assert summary["discoveries_by_source"] == {"das": 2}
     assert summary["snapshots_by_hash"] == {
-        "abded387b62174dd99cc6653cbb52c4f5a2ea62fd02e65153c2adde717622fbd": 1,
-        "c0cc8f83bb275ce9fbc8342249a38288cdbd625bdda5e388fa51ab19f435d485": 1,
-        "b0a26be535aed6a1c9e605cfcf3f965495e5593099b649bf573921dec0191f11": 1,
+        "19c3c76dc1d836df63a8883650ca943ec965bf59fb057aa96417d99730aed2aa": 1,
+        "842a1f1710fb0ec196302cf94ccb28a591ced001b46d23c55f6edb145edb515b": 1,
+        "1c296bfbaf73fb81116630271ba34c633a60ef2dbd2d6c47bfccee2d6dd2b93e": 1,
     }
     assert summary["suggestions_by_agent"] == {"momentum_v1": 3, "meanrev_v1": 3}
     assert summary["decisions_by_side"] == {"buy": 3}

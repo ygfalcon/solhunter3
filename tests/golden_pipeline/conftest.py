@@ -801,23 +801,29 @@ class GoldenPipelineHarness:
     async def _simulate_price_failures(self) -> None:
         tokens = (self.price_probe_token,)
         delays = [16.0, 16.0, 16.0, 0.0]
-        for idx, delay in enumerate(delays):
-            self.price_stub.begin_request()
-            self._reset_price_caches()
-            quotes: Dict[str, PriceQuote] = {}
-            try:
-                quotes = await prices.fetch_price_quotes_async(tokens)
-            finally:
-                self.price_stub.end_request()
-            self.price_quotes.append(quotes)
-            self.price_quote_sources.append({token: quote.source for token, quote in quotes.items()})
-            snapshot = prices.get_provider_health_snapshot()
-            self.price_health_snapshots.append(snapshot)
-            blend_snapshot = prices.get_price_blend_diagnostics(tokens)
-            self.price_blend_diagnostics.append(blend_snapshot)
-            await self._publish_price_metrics(idx, snapshot, blend_snapshot)
-            if delay > 0:
-                self.clock.tick(delay)
+        original_limit = prices.PRICE_BLEND_PROVIDER_LIMIT
+        diag_limits = [3, 1, 1, 2]
+        try:
+            for idx, delay in enumerate(delays):
+                self.price_stub.begin_request()
+                self._reset_price_caches()
+                prices.PRICE_BLEND_PROVIDER_LIMIT = diag_limits[min(idx, len(diag_limits) - 1)]
+                quotes: Dict[str, PriceQuote] = {}
+                try:
+                    quotes = await prices.fetch_price_quotes_async(tokens)
+                finally:
+                    self.price_stub.end_request()
+                self.price_quotes.append(quotes)
+                self.price_quote_sources.append({token: quote.source for token, quote in quotes.items()})
+                snapshot = prices.get_provider_health_snapshot()
+                self.price_health_snapshots.append(snapshot)
+                blend_snapshot = prices.get_price_blend_diagnostics(tokens)
+                self.price_blend_diagnostics.append(blend_snapshot)
+                await self._publish_price_metrics(idx, snapshot, blend_snapshot)
+                if delay > 0:
+                    self.clock.tick(delay)
+        finally:
+            prices.PRICE_BLEND_PROVIDER_LIMIT = original_limit
 
     async def _publish_price_metrics(
         self,
@@ -907,7 +913,8 @@ def run_golden_harness(
     monkeypatch.setattr(prices, "_monotonic", clock.time, raising=False)
     monkeypatch.setattr(prices, "_now_ms", lambda: int(clock.time() * 1000), raising=False)
     monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
-    monkeypatch.setenv("PRICE_PROVIDERS", "jupiter,pyth,dexscreener,synthetic")
+    monkeypatch.setenv("PRICE_PROVIDERS", "birdeye,jupiter,dexscreener,synthetic")
+    monkeypatch.setenv("BIRDEYE_API_KEY", "test_birdeye_api_key_placeholder")
     if env:
         for key, value in env.items():
             if value is None:
@@ -920,6 +927,15 @@ def run_golden_harness(
         return {}
 
     price_stub = PriceProviderStub(clock)
+    price_stub.configure(
+        "birdeye",
+        [
+            {"kind": "timeout"},
+            {"kind": "http", "status": 502},
+            {"kind": "disconnect"},
+            {"kind": "success", "price": 1.006},
+        ],
+    )
     price_stub.configure(
         "jupiter",
         [
@@ -954,6 +970,9 @@ def run_golden_harness(
     if configure_prices is not None:
         configure_prices(price_stub)
 
+    async def stubbed_birdeye(session, tokens):
+        return await price_stub.execute("birdeye", tokens)
+
     async def stubbed_jupiter(session, tokens):
         return await price_stub.execute("jupiter", tokens)
 
@@ -963,6 +982,7 @@ def run_golden_harness(
     async def stubbed_dexscreener(session, tokens):
         return await price_stub.execute("dexscreener", tokens)
 
+    monkeypatch.setattr(prices, "_fetch_quotes_birdeye", stubbed_birdeye)
     monkeypatch.setattr(prices, "_fetch_quotes_jupiter", stubbed_jupiter)
     monkeypatch.setattr(prices, "_fetch_quotes_pyth", stubbed_pyth)
     monkeypatch.setattr(prices, "_fetch_quotes_dexscreener", stubbed_dexscreener)
@@ -1011,7 +1031,11 @@ def price_provider_stub(golden_harness: GoldenPipelineHarness) -> PriceProviderS
 
 
 @pytest.fixture
-def chaos_replay(runtime, monkeypatch: pytest.MonkeyPatch):
+def chaos_replay(
+    runtime,
+    price_provider_stub: PriceProviderStub,
+    monkeypatch: pytest.MonkeyPatch,
+):
     from solhunter_zero import event_bus, ui
 
     if ui.websockets is None:
@@ -1149,3 +1173,12 @@ def chaos_replay(runtime, monkeypatch: pytest.MonkeyPatch):
     finally:
         runtime.ui_state.summary_provider = original_summary_provider
         ui.stop_websockets()
+        price_provider_stub.configure(
+            "birdeye",
+            [
+                {"kind": "timeout"},
+                {"kind": "http", "status": 502},
+                {"kind": "disconnect"},
+                {"kind": "success", "price": 1.006},
+            ],
+        )

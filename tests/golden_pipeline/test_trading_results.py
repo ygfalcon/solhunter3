@@ -3,30 +3,30 @@ from tests.golden_pipeline.conftest import BASE58_MINTS, SCENARIO_PAYLOADS, appr
 
 EXPECTED_FILLS = [
     {
-        "order_id": "045f185d043f32c54d82af2166f9f0707d6591972fabced678107f8b97785fe8",
+        "order_id": "ae15944204ffcda40a7bb5fbc3b5b62844ed42cfd787e78e54f85c6801e270ee",
         "qty_base": 2569.7211155378486,
         "price_usd": 1.0056817,
         "fees_usd": 1.032,
         "slippage_bps": 16.75,
-        "snapshot_hash": "abded387b62174dd99cc6653cbb52c4f5a2ea62fd02e65153c2adde717622fbd",
+        "snapshot_hash": "19c3c76dc1d836df63a8883650ca943ec965bf59fb057aa96417d99730aed2aa",
         "ts": 1_700_000_380.755,
     },
     {
-        "order_id": "7adc3c8df93b910e5327ba2a8f143ea8214371f51b706ac34f67787e6cdd7219",
+        "order_id": "8eb685e7739201917246bbaac6276d643a73d0c9a9d0ec4d38e807f16e074070",
         "qty_base": 4289.704708699122,
         "price_usd": 1.00407902,
         "fees_usd": 1.72,
         "slippage_bps": 16.75,
-        "snapshot_hash": "c0cc8f83bb275ce9fbc8342249a38288cdbd625bdda5e388fa51ab19f435d485",
+        "snapshot_hash": "842a1f1710fb0ec196302cf94ccb28a591ced001b46d23c55f6edb145edb515b",
         "ts": 1_700_000_380.755,
     },
     {
-        "order_id": "ee393b8aaf7191ed20ba7a5736704e018eabe5d5e8bb6426745821849855136f",
+        "order_id": "4078629059bddc52aa538fcf7320628146211927e2026fd091146e8f232eb46b",
         "qty_base": 4269.261318506751,
         "price_usd": 1.0088870600000002,
         "fees_usd": 1.72,
         "slippage_bps": 16.75,
-        "snapshot_hash": "b0a26be535aed6a1c9e605cfcf3f965495e5593099b649bf573921dec0191f11",
+        "snapshot_hash": "1c296bfbaf73fb81116630271ba34c633a60ef2dbd2d6c47bfccee2d6dd2b93e",
         "ts": 1_700_000_381.425,
     },
 ]
@@ -34,22 +34,22 @@ EXPECTED_FILLS = [
 
 EXPECTED_PNLS = [
     {
-        "order_id": "045f185d043f32c54d82af2166f9f0707d6591972fabced678107f8b97785fe8",
-        "snapshot_hash": "abded387b62174dd99cc6653cbb52c4f5a2ea62fd02e65153c2adde717622fbd",
+        "order_id": "ae15944204ffcda40a7bb5fbc3b5b62844ed42cfd787e78e54f85c6801e270ee",
+        "snapshot_hash": "19c3c76dc1d836df63a8883650ca943ec965bf59fb057aa96417d99730aed2aa",
         "realized_usd": -5.353500000000021,
         "unrealized_usd": -9.481500000000047,
         "ts": 1_700_000_380.755,
     },
     {
-        "order_id": "7adc3c8df93b910e5327ba2a8f143ea8214371f51b706ac34f67787e6cdd7219",
-        "snapshot_hash": "c0cc8f83bb275ce9fbc8342249a38288cdbd625bdda5e388fa51ab19f435d485",
+        "order_id": "8eb685e7739201917246bbaac6276d643a73d0c9a9d0ec4d38e807f16e074070",
+        "snapshot_hash": "842a1f1710fb0ec196302cf94ccb28a591ced001b46d23c55f6edb145edb515b",
         "realized_usd": -8.922500000000372,
         "unrealized_usd": -28.01379760956416,
         "ts": 1_700_000_380.755,
     },
     {
-        "order_id": "ee393b8aaf7191ed20ba7a5736704e018eabe5d5e8bb6426745821849855136f",
-        "snapshot_hash": "b0a26be535aed6a1c9e605cfcf3f965495e5593099b649bf573921dec0191f11",
+        "order_id": "4078629059bddc52aa538fcf7320628146211927e2026fd091146e8f232eb46b",
+        "snapshot_hash": "1c296bfbaf73fb81116630271ba34c633a60ef2dbd2d6c47bfccee2d6dd2b93e",
         "realized_usd": -8.922500000000314,
         "unrealized_usd": -10.077148994763776,
         "ts": 1_700_000_381.425,

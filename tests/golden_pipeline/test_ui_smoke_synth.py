@@ -1,11 +1,16 @@
 import asyncio
+import hashlib
+import json
 import re
 from html.parser import HTMLParser
 
 import pytest
 
 from solhunter_zero.golden_pipeline.contracts import STREAMS
-from solhunter_zero.golden_pipeline.types import GOLDEN_SNAPSHOT_SCHEMA_VERSION
+from solhunter_zero.golden_pipeline.types import (
+    GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    OHLCV_BAR_SCHEMA_VERSION,
+)
 
 pytest_plugins = ["tests.golden_pipeline.synth_seed"]
 
@@ -190,9 +195,23 @@ def test_golden_snapshot_nested_payload(runtime, bus):
             "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
             "asof": 1_704_000_000.0,
         },
-        "px": {"mid_usd": mid_usd, "spread_bps": spread_bps},
+        "px": {
+            "mid_usd": mid_usd,
+            "spread_bps": spread_bps,
+            "bid_usd": mid_usd - (mid_usd * (spread_bps / 20000.0)),
+            "ask_usd": mid_usd + (mid_usd * (spread_bps / 20000.0)),
+            "ts": 1_704_000_000.0,
+        },
         "liq": {
             "depth_pct": depth_map,
+            "depth_usd_by_pct": {
+                "1": depth_map["1"],
+                "0.02": depth_map["2"],
+            },
+            "bands": [
+                {"pct": 1.0, "usd": depth_map["1"]},
+                {"pct": 0.02, "usd": depth_map["2"]},
+            ],
             "liquidity_usd": liquidity_total,
             "asof": 1_704_000_000.0,
         },
@@ -202,17 +221,35 @@ def test_golden_snapshot_nested_payload(runtime, bus):
             "h": 2.8,
             "l": 2.6,
             "c": 2.75,
+            "close": 2.75,
             "vol_usd": 12_000.0,
+            "volume": 12_000.0,
+            "volume_usd": 12_000.0,
             "trades": 42,
             "buyers": 20,
             "zret": 0.0,
             "zvol": 0.0,
             "asof_close": 1_703_999_700.0,
+            "schema_version": OHLCV_BAR_SCHEMA_VERSION,
         },
         "hash": "nested-hash-001",
         "metrics": {"latency_ms": 42.0},
         "schema_version": GOLDEN_SNAPSHOT_SCHEMA_VERSION,
     }
+    payload["content_hash"] = hashlib.sha1(
+        json.dumps(
+            {
+                "mint": payload["mint"],
+                "asof": payload["asof"],
+                "meta": payload["meta"],
+                "px": payload["px"],
+                "liq": payload["liq"],
+                "ohlcv5m": payload["ohlcv5m"],
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    payload["idempotency_key"] = "nested-idempotency-001"
 
     asyncio.run(bus.publish(STREAMS.golden_snapshot, payload))
     asyncio.run(runtime.wait_for_golden())

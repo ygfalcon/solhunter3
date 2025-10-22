@@ -862,21 +862,31 @@ class GoldenPipelineService:
     def _spawn(self, coro: Awaitable[Any]) -> None:
         if not self._running:
             return
+        gate = getattr(self, "_pending_gate", None)
+        if gate is None:
+            gate = asyncio.Semaphore(_MAX_IN_FLIGHT_SPAWN_TASKS)
+            setattr(self, "_pending_gate", gate)
         async def _runner() -> Any:
             acquired = False
             try:
-                await self._pending_gate.acquire()
+                await gate.acquire()
                 acquired = True
                 return await coro
             finally:
                 if acquired:
-                    self._pending_gate.release()
+                    gate.release()
 
         task = asyncio.create_task(_runner())
-        self._pending.add(task)
+        pending_tasks = getattr(self, "_pending", None)
+        if pending_tasks is None:
+            pending_tasks = set()
+            setattr(self, "_pending", pending_tasks)
+        pending_tasks.add(task)
 
         def _on_done(completed: asyncio.Task) -> None:
-            self._pending.discard(completed)
+            pending_set = getattr(self, "_pending", None)
+            if isinstance(pending_set, set):
+                pending_set.discard(completed)
             if completed.cancelled():
                 return
             try:
@@ -1038,8 +1048,10 @@ class GoldenPipelineService:
         if not token or price is None or price <= 0:
             return
         mint = canonical_mint(str(token))
-        if self._depth_flag:
-            self._depth_adapter.record_activity(mint)
+        depth_flag = getattr(self, "_depth_flag", False)
+        depth_adapter = getattr(self, "_depth_adapter", None)
+        if depth_flag and depth_adapter is not None:
+            depth_adapter.record_activity(mint)
         self._last_price[mint] = price
         try:
             self.portfolio.record_prices({mint: float(price)})
@@ -1069,6 +1081,8 @@ class GoldenPipelineService:
         if not self._running or not isinstance(payload, dict):
             return
         now = time.time()
+        depth_flag = getattr(self, "_depth_flag", False)
+        depth_adapter = getattr(self, "_depth_adapter", None)
         for token, entry in payload.items():
             if not isinstance(entry, Mapping):
                 continue
@@ -1076,8 +1090,8 @@ class GoldenPipelineService:
                 mint = canonical_mint(str(token))
             except Exception:
                 continue
-            if self._depth_flag:
-                self._depth_adapter.record_activity(mint, weight=2.0)
+            if depth_flag and depth_adapter is not None:
+                depth_adapter.record_activity(mint, weight=2.0)
             bids = _coerce_float(entry.get("bids")) or 0.0
             asks = _coerce_float(entry.get("asks")) or 0.0
             depth_val = _coerce_float(entry.get("depth")) or max(bids + asks, 0.0)
