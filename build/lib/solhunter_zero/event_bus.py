@@ -56,6 +56,17 @@ if not _EVENT_SERIALIZATION:
 _EVENT_SERIALIZATION = _EVENT_SERIALIZATION.lower()
 _USE_MSGPACK = msgpack is not None and _EVENT_SERIALIZATION == "msgpack"
 
+logger = logging.getLogger(__name__)
+
+_EVENT_SCHEMA_VERSION = os.getenv("EVENT_SCHEMA_VERSION") or "v3"
+_ACCEPTED_SCHEMA = os.getenv("EVENT_SCHEMA_VERSION_ACCEPT")
+if _ACCEPTED_SCHEMA:
+    _EXPECTED_EVENT_SCHEMA_VERSIONS = tuple(
+        v.strip() for v in _ACCEPTED_SCHEMA.split(",") if v.strip()
+    )
+else:
+    _EXPECTED_EVENT_SCHEMA_VERSIONS = (_EVENT_SCHEMA_VERSION,)
+
 DEFAULT_WS_URL = "ws://127.0.0.1:8769"
 _DEFAULT_WS = urlparse(DEFAULT_WS_URL)
 _WS_LISTEN_HOST = _DEFAULT_WS.hostname or "127.0.0.1"
@@ -786,6 +797,8 @@ def _encode_event(topic: str, payload: Any, dedupe_key: str | None = None) -> An
             event = pb.Event(topic=topic, depth_update=pb.DepthUpdate(entries=entries))
         else:
             event = pb.Event(topic=topic, depth_diff=pb.DepthDiff(entries=entries))
+        if hasattr(event, "schema_version"):
+            event.schema_version = _EVENT_SCHEMA_VERSION
         if dedupe_key:
             event.dedupe_key = dedupe_key
         data = event.SerializeToString()
@@ -1126,6 +1139,8 @@ def _encode_event(topic: str, payload: Any, dedupe_key: str | None = None) -> An
             topic=topic,
             memory_sync_response=pb.MemorySyncResponse(trades=trades, index=data.get("index") or b""),
         )
+    if hasattr(event, "schema_version"):
+        event.schema_version = _EVENT_SCHEMA_VERSION
     if dedupe_key:
         event.dedupe_key = dedupe_key
     data = event.SerializeToString()
@@ -1680,6 +1695,14 @@ async def _redis_listener(pubsub) -> None:
                     _broadcast=False,
                 )
                 continue
+            schema_version = getattr(ev, "schema_version", None)
+            if _EXPECTED_EVENT_SCHEMA_VERSIONS and schema_version not in _EXPECTED_EVENT_SCHEMA_VERSIONS:
+                logger.error(
+                    "Schema mismatch: got=%s expected=%s",
+                    schema_version,
+                    ",".join(_EXPECTED_EVENT_SCHEMA_VERSIONS),
+                )
+                raise RuntimeError("Incompatible protobuf schema on event bus")
             dedupe = getattr(ev, "dedupe_key", None) or None
             publish(
                 ev.topic,
