@@ -3,17 +3,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import functools
+import hashlib
 import json
 import logging
 import math
 import os
+import subprocess
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from queue import Queue
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import urlparse, urlunparse
 
 from flask import Flask, Request, Response, jsonify, render_template_string, request
@@ -111,11 +115,698 @@ def _maybe_float(value: Any) -> Optional[float]:
     return number
 
 
+def _maybe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _env_or_default(name: str) -> Optional[str]:
+    value = os.getenv(name)
+    if value is not None:
+        return value
+    try:
+        from .env_defaults import DEFAULTS
+    except Exception:
+        return None
+    return DEFAULTS.get(name)
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_app_version() -> Optional[str]:
+    try:
+        from . import __version__ as version  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    return str(version)
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_build_git() -> Optional[str]:
+    for key in ("BUILD_GIT", "GIT_COMMIT", "HEROKU_SLUG_COMMIT", "SOURCE_COMMIT"):
+        candidate = os.getenv(key)
+        if candidate:
+            text = candidate.strip()
+            if text:
+                return text
+    git_dir = Path(__file__).resolve().parents[1] / ".git"
+    if not git_dir.exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    text = (result.stdout or "").strip()
+    return text or None
+
+
+@functools.lru_cache(maxsize=1)
+def _compute_schema_hash() -> str:
+    try:
+        from .schemas.golden_pipeline import STREAM_SCHEMAS
+    except Exception:
+        return "unknown"
+    records: List[Dict[str, Any]] = []
+    for topic in sorted(STREAM_SCHEMAS.keys()):
+        schema = STREAM_SCHEMAS.get(topic) or {}
+        schema_version = None
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            version_prop = properties.get("schema_version")
+            if isinstance(version_prop, dict):
+                schema_version = version_prop.get("const")
+        required = schema.get("required")
+        if isinstance(required, (list, tuple)):
+            required_fields = sorted(str(field) for field in required)
+        else:
+            required_fields = []
+        records.append(
+            {
+                "topic": topic,
+                "schema_version": schema_version,
+                "required": required_fields,
+            }
+        )
+    payload = {"ui_schema_version": UI_SCHEMA_VERSION, "schemas": records}
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return digest
+
+
+def _price_provider_order() -> List[str]:
+    try:
+        from . import prices
+    except Exception:
+        return []
+    try:
+        providers = list(prices.PROVIDER_CONFIGS.keys())
+    except Exception:
+        return []
+    return [str(name) for name in providers]
+
+
+def _discover_seed_tokens() -> List[str]:
+    try:
+        from . import seed_token_publisher
+    except Exception:
+        return []
+    try:
+        tokens = seed_token_publisher.configured_seed_tokens()
+    except Exception:
+        return []
+    return [str(token) for token in tokens if token]
+
+
+def _pyth_price_hints() -> List[Dict[str, Any]]:
+    try:
+        from . import prices
+    except Exception:
+        return []
+    try:
+        mapping, extras = prices._parse_pyth_mapping()  # type: ignore[attr-defined]
+    except Exception:
+        return []
+    hints: List[Dict[str, Any]] = []
+    for mint, identifier in mapping.items():
+        if identifier is None:
+            continue
+        hint: Dict[str, Any] = {
+            "mint": str(mint),
+            "kind": getattr(identifier, "kind", None),
+            "id": getattr(identifier, "feed_id", None),
+        }
+        account = getattr(identifier, "account", None)
+        if account:
+            hint["account"] = account
+        hint = {key: value for key, value in hint.items() if value}
+        if hint:
+            hints.append(hint)
+    for identifier in extras:
+        if identifier is None:
+            continue
+        hint = {
+            "mint": getattr(identifier, "canonical_mint", None) or getattr(identifier, "mint", None),
+            "kind": getattr(identifier, "kind", None),
+            "id": getattr(identifier, "feed_id", None),
+        }
+        account = getattr(identifier, "account", None)
+        if account:
+            hint["account"] = account
+        hint = {key: value for key, value in hint.items() if value}
+        if hint:
+            hints.append(hint)
+    return hints
+
+
+def _discovery_hint_sources(state: "UIState" | None) -> List[str]:
+    if state is None:
+        return []
+    try:
+        console = state.snapshot_discovery_console()
+    except Exception:
+        return []
+    candidates = console.get("candidates") if isinstance(console, Mapping) else None
+    sources: Set[str] = set()
+    if isinstance(candidates, Iterable):
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            origin = candidate.get("source") or candidate.get("origin")
+            if isinstance(origin, str) and origin:
+                sources.add(origin)
+            elif isinstance(origin, (list, tuple, set)):
+                for item in origin:
+                    if isinstance(item, str) and item:
+                        sources.add(item)
+            extra_sources = candidate.get("sources")
+            if isinstance(extra_sources, (list, tuple, set)):
+                for item in extra_sources:
+                    if isinstance(item, str) and item:
+                        sources.add(item)
+    if not sources:
+        sources.update(["pump_fun", "birdeye_trending", "raydium_new_pairs"])
+    return sorted(sources)
+
+
+def _resolve_depth_ttl() -> float:
+    for key in ("GOLDEN_DEPTH_TTL_SECONDS", "GOLDEN_DEPTH_CACHE_TTL"):
+        raw = os.getenv(key)
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except Exception:
+            continue
+        if value > 0:
+            return max(0.5, value)
+    return 10.0
+
+
+def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
+    try:
+        from .golden_pipeline.contracts import STREAMS
+        from .golden_pipeline.types import (
+            DECISION_SCHEMA_VERSION,
+            DEPTH_SNAPSHOT_SCHEMA_VERSION,
+            GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+            OHLCV_BAR_SCHEMA_VERSION,
+            TRADE_SUGGESTION_SCHEMA_VERSION,
+            VIRTUAL_FILL_SCHEMA_VERSION,
+        )
+        from .schemas.golden_pipeline import STREAM_SCHEMAS
+    except Exception:
+        return [
+            {
+                "name": "discovery",
+                "topics": ["x:discovery.candidates", "x:mint.discovered"],
+                "schema_id": "discovery@1",
+                "required": ["mint", "asof"],
+            },
+            {
+                "name": "market_ohlcv",
+                "topics": ["x:market.ohlcv.5m"],
+                "schema_id": "ohlcv_5m@2.0",
+                "required": [
+                    "mint",
+                    "o",
+                    "h",
+                    "l",
+                    "c",
+                    "close",
+                    "vol_usd",
+                    "volume",
+                    "volume_usd",
+                    "trades",
+                    "buyers",
+                    "zret",
+                    "zvol",
+                    "asof_close",
+                    "schema_version",
+                    "content_hash",
+                ],
+                "aliases": {
+                    "open": "o",
+                    "high": "h",
+                    "low": "l",
+                    "close": "c",
+                    "volume_usd": "vol_usd",
+                    "volume_base": "vol_base",
+                },
+                "ttl_seconds": ttl_info.get("ohlcv_5m_s"),
+            },
+            {
+                "name": "market_depth",
+                "topics": ["x:market.depth"],
+                "schema_id": "depth_snapshot@1.0",
+                "required": ["mint", "venue", "mid_usd", "spread_bps", "depth_pct", "asof", "schema_version"],
+                "ttl_seconds": ttl_info.get("depth_s"),
+            },
+            {
+                "name": "golden_snapshot",
+                "topics": ["x:mint.golden"],
+                "schema_id": "golden_snapshot@2.0",
+                "required": ["mint", "asof", "meta", "px", "liq", "ohlcv5m", "hash", "content_hash", "idempotency_key", "schema_version"],
+                "ttl_seconds": ttl_info.get("golden_s"),
+            },
+            {
+                "name": "agent_suggestions",
+                "topics": ["x:trade.suggested"],
+                "schema_id": "trade_suggested@1.0",
+                "required": [
+                    "agent",
+                    "mint",
+                    "side",
+                    "notional_usd",
+                    "max_slippage_bps",
+                    "risk",
+                    "confidence",
+                    "inputs_hash",
+                    "ttl_sec",
+                    "asof",
+                    "schema_version",
+                ],
+                "ttl_seconds": ttl_info.get("suggestions_s"),
+            },
+            {
+                "name": "vote_decisions",
+                "topics": ["x:vote.decisions"],
+                "schema_id": "vote_decision@1.0",
+                "required": ["mint", "side", "snapshot_hash", "clientOrderId", "schema_version"],
+                "ttl_seconds": ttl_info.get("votes_s"),
+            },
+            {
+                "name": "shadow_execution",
+                "topics": ["x:virt.fills"],
+                "schema_id": "shadow_fill@1.0",
+                "required": ["mint", "schema_version"],
+            },
+            {
+                "name": "rl_weights",
+                "topics": ["rl_weights", "rl:weights.applied"],
+                "schema_id": "rl_weights@1",
+                "required": ["weights"],
+            },
+        ]
+
+    def _required(stream: str) -> List[str]:
+        schema = STREAM_SCHEMAS.get(stream)
+        if not isinstance(schema, Mapping):
+            return []
+        required = schema.get("required")
+        if isinstance(required, (list, tuple)):
+            return sorted(str(field) for field in required)
+        return []
+
+    entries: List[Dict[str, Any]] = []
+    discovery_topics = [STREAMS.discovery_candidates]
+    mint_discovered = getattr(STREAMS, "mint_discovered", "x:mint.discovered")
+    if mint_discovered not in discovery_topics:
+        discovery_topics.append(mint_discovered)
+    entries.append(
+        {
+            "name": "discovery",
+            "topics": discovery_topics,
+            "schema_id": "discovery@1",
+            "required": _required(STREAMS.discovery_candidates),
+        }
+    )
+    entries.append(
+        {
+            "name": "market_ohlcv",
+            "topics": [STREAMS.market_ohlcv],
+            "schema_id": f"ohlcv_5m@{OHLCV_BAR_SCHEMA_VERSION}",
+            "required": _required(STREAMS.market_ohlcv),
+            "aliases": {
+                "open": "o",
+                "high": "h",
+                "low": "l",
+                "close": "c",
+                "volume_usd": "vol_usd",
+                "volume_base": "vol_base",
+            },
+            "ttl_seconds": ttl_info.get("ohlcv_5m_s"),
+        }
+    )
+    entries.append(
+        {
+            "name": "market_depth",
+            "topics": [STREAMS.market_depth],
+            "schema_id": f"depth_snapshot@{DEPTH_SNAPSHOT_SCHEMA_VERSION}",
+            "required": _required(STREAMS.market_depth),
+            "ttl_seconds": ttl_info.get("depth_s"),
+        }
+    )
+    entries.append(
+        {
+            "name": "golden_snapshot",
+            "topics": [STREAMS.golden_snapshot],
+            "schema_id": f"golden_snapshot@{GOLDEN_SNAPSHOT_SCHEMA_VERSION}",
+            "required": _required(STREAMS.golden_snapshot),
+            "ttl_seconds": ttl_info.get("golden_s"),
+        }
+    )
+    entries.append(
+        {
+            "name": "agent_suggestions",
+            "topics": [STREAMS.trade_suggested],
+            "schema_id": f"trade_suggested@{TRADE_SUGGESTION_SCHEMA_VERSION}",
+            "required": _required(STREAMS.trade_suggested),
+            "ttl_seconds": ttl_info.get("suggestions_s"),
+        }
+    )
+    entries.append(
+        {
+            "name": "vote_decisions",
+            "topics": [STREAMS.vote_decisions],
+            "schema_id": f"vote_decision@{DECISION_SCHEMA_VERSION}",
+            "required": _required(STREAMS.vote_decisions),
+            "ttl_seconds": ttl_info.get("votes_s"),
+        }
+    )
+    entries.append(
+        {
+            "name": "shadow_execution",
+            "topics": [STREAMS.virtual_fills],
+            "schema_id": f"shadow_fill@{VIRTUAL_FILL_SCHEMA_VERSION}",
+            "required": _required(STREAMS.virtual_fills),
+        }
+    )
+    entries.append(
+        {
+            "name": "rl_weights",
+            "topics": ["rl_weights", "rl:weights.applied"],
+            "schema_id": "rl_weights@1",
+            "required": ["weights"],
+        }
+    )
+    return entries
+
+
+def _provider_status_snapshot() -> Dict[str, Dict[str, Any]]:
+    providers: Dict[str, Dict[str, Any]] = {}
+    try:
+        from . import prices
+    except Exception:
+        prices = None  # type: ignore
+    if prices is not None:
+        try:
+            health = prices.get_provider_health_snapshot()
+        except Exception:
+            health = {}
+        try:
+            active = {str(name) for name in prices.PROVIDER_CONFIGS.keys()}
+        except Exception:
+            active = set()
+    else:
+        health = {}
+        active = set()
+
+    def _health_status(name: str) -> str:
+        info = health.get(name) or {}
+        if info.get("healthy") is True:
+            return "ok"
+        failures = _maybe_int(info.get("consecutive_failures")) or 0
+        cooldown = _maybe_float(info.get("cooldown_remaining")) or 0.0
+        if info.get("last_error_status") or info.get("last_error"):
+            return "down"
+        if failures > 0 or cooldown > 0:
+            return "degraded"
+        if info.get("healthy") is False:
+            return "down"
+        return "degraded" if name in health else "ok"
+
+    def _entry(
+        *,
+        enabled: bool,
+        status: str,
+        auth_mode: str,
+        base_url: str | None = None,
+        ws_url: str | None = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "enabled": bool(enabled),
+            "status": status,
+            "auth_mode": auth_mode or "none",
+        }
+        if base_url:
+            payload["base_url"] = base_url
+        if ws_url:
+            payload["ws_url"] = ws_url
+        return payload
+
+    solana_url = (_env_or_default("SOLANA_RPC_URL") or "").strip()
+    solana_enabled = bool(solana_url)
+    solana_status = "ok" if solana_enabled else "down"
+    if not solana_enabled and os.getenv("SOLANA_RPC_URL") is None:
+        fallback = _env_or_default("HELIUS_RPC_URL") or ""
+        if fallback:
+            solana_url = fallback.strip()
+            solana_enabled = bool(solana_url)
+            solana_status = "ok" if solana_enabled else "down"
+    solana_auth = "api-key" if ("api-key" in solana_url.lower()) or os.getenv("HELIUS_API_KEY") else "none"
+    providers["solana_rpc"] = _entry(
+        enabled=solana_enabled,
+        status=solana_status,
+        auth_mode=solana_auth,
+        base_url=solana_url or None,
+    )
+
+    try:
+        from .clients import helius_das as helius_client
+    except Exception:
+        helius_client = None
+    if helius_client is not None:
+        das_base = getattr(helius_client, "DAS_BASE", None)
+    else:
+        das_base = None
+    if not das_base:
+        das_base = (_env_or_default("DAS_BASE_URL") or "").strip()
+    das_enabled = parse_bool_env("USE_DAS_DISCOVERY", True)
+    try:
+        from . import token_scanner
+    except Exception:
+        circuit_until = 0.0
+    else:
+        circuit_until = float(getattr(token_scanner, "_DAS_CIRCUIT_OPEN_UNTIL", 0.0) or 0.0)
+    now = time.monotonic()
+    if not das_enabled:
+        das_status = "down"
+    elif circuit_until > now:
+        das_status = "degraded"
+    else:
+        das_status = "ok"
+    das_auth = "api-key" if os.getenv("HELIUS_API_KEY") or (das_base and "api-key" in das_base.lower()) else "none"
+    providers["helius_das"] = _entry(
+        enabled=das_enabled,
+        status=das_status,
+        auth_mode=das_auth,
+        base_url=das_base or None,
+    )
+
+    try:
+        from .scanner_common import JUPITER_WS_URL as DEFAULT_JUPITER_WS_URL
+    except Exception:
+        DEFAULT_JUPITER_WS_URL = None
+    jupiter_url = (os.getenv("JUPITER_WS_URL") or DEFAULT_JUPITER_WS_URL or "").strip()
+    jupiter_enabled = bool(jupiter_url)
+    jupiter_status = _health_status("jupiter") if jupiter_enabled else "down"
+    providers["jupiter_ws"] = _entry(
+        enabled=jupiter_enabled,
+        status=jupiter_status,
+        auth_mode="none",
+        ws_url=jupiter_url or None,
+    )
+
+    pyth_enabled = "pyth" in active or bool(health.get("pyth"))
+    pyth_status = _health_status("pyth") if pyth_enabled else "down"
+    providers["pyth_prices"] = _entry(
+        enabled=pyth_enabled,
+        status=pyth_status,
+        auth_mode="none",
+    )
+
+    birdeye_url = None
+    if prices is not None:
+        birdeye_url = getattr(prices, "BIRDEYE_PRICE_URL", None)
+    if not birdeye_url:
+        birdeye_url = (_env_or_default("BIRDEYE_PRICE_URL") or "").strip()
+    birdeye_enabled = parse_bool_env("BIRDEYE_ENABLED", True) and ("birdeye" in active or bool(birdeye_url))
+    birdeye_status = _health_status("birdeye") if birdeye_enabled else "down"
+    birdeye_auth = "api-key" if os.getenv("BIRDEYE_API_KEY") else "none"
+    providers["bird_eye"] = _entry(
+        enabled=birdeye_enabled,
+        status=birdeye_status,
+        auth_mode=birdeye_auth,
+        base_url=birdeye_url or None,
+    )
+
+    dexscreener_enabled = ("dexscreener" in active) and not parse_bool_env("DEXSCREENER_DISABLED", False)
+    dexscreener_status = _health_status("dexscreener") if dexscreener_enabled else "down"
+    providers["dexscreener"] = _entry(
+        enabled=dexscreener_enabled,
+        status=dexscreener_status,
+        auth_mode="none",
+    )
+
+    for provider_name, env_key in (
+        ("raydium", "RAYDIUM_API_URL"),
+        ("meteora", "METEORA_API_URL"),
+        ("phoenix", "PHOENIX_API_URL"),
+    ):
+        url = (_env_or_default(env_key) or "").strip()
+        enabled = bool(url)
+        providers[provider_name] = _entry(
+            enabled=enabled,
+            status="ok" if enabled else "down",
+            auth_mode="none",
+            base_url=url or None,
+        )
+
+    pump_url = (_env_or_default("PUMP_LEADERBOARD_URL") or "").strip()
+    enabled = bool(pump_url)
+    providers["pump_fun"] = _entry(
+        enabled=enabled,
+        status="ok" if enabled else "down",
+        auth_mode="none",
+        base_url=pump_url or None,
+    )
+
+    return providers
+
+
+def _resolve_keypair_mode(paper_mode: bool) -> str:
+    keypair_path = os.getenv("KEYPAIR_PATH")
+    if keypair_path:
+        candidate = Path(keypair_path).expanduser()
+    else:
+        keypair_dir = os.getenv("KEYPAIR_DIR", "keypairs")
+        candidate = Path(keypair_dir).expanduser() / "default.json"
+    if candidate.exists():
+        return "persistent"
+    return "ephemeral" if paper_mode else "missing"
+
+
+def _depth_service_info(status: Mapping[str, Any]) -> Dict[str, Any]:
+    enabled = bool(status.get("depth_service"))
+    info: Dict[str, Any] = {"enabled": enabled}
+    version = os.getenv("DEPTH_SERVICE_VERSION")
+    if version:
+        info["version"] = version
+    rpc_url = os.getenv("DEPTH_SERVICE_RPC_URL") or os.getenv("DEPTH_SERVICE_URL")
+    if rpc_url:
+        info["rpc_url"] = rpc_url
+    addr = (os.getenv("DEPTH_WS_ADDR") or "").strip()
+    port = (os.getenv("DEPTH_WS_PORT") or "").strip()
+    if addr and port:
+        info["ws_url"] = f"ws://{addr}:{port}"
+    return info
+
+
+def _resolve_execution_snapshot(status: Mapping[str, Any]) -> Dict[str, Any]:
+    paper = bool(status.get("paper_mode"))
+    rate_interval = _maybe_float(os.getenv("EVENT_EXECUTOR_RATE_LIMIT"))
+    if rate_interval is None or rate_interval <= 0:
+        rate_interval = 0.05
+    rate_limit_per_s = 1.0 / max(rate_interval, 1e-6)
+    concurrency = _maybe_int(os.getenv("EVENT_EXECUTOR_LIMIT")) or 64
+    priority_env = os.getenv("PRIORITY_RPC") or ""
+    priority_rpc = [value.strip() for value in priority_env.split(",") if value.strip()]
+    return {
+        "paper": paper,
+        "rate_limit_per_s": rate_limit_per_s,
+        "concurrency": concurrency,
+        "priority_rpc": priority_rpc,
+        "keypair_mode": _resolve_keypair_mode(paper),
+        "depth_service": _depth_service_info(status),
+    }
+
+
+def _resilience_snapshot() -> Dict[str, Any]:
+    resilience: Dict[str, Any] = {}
+    try:
+        from .clients import helius_das as helius_client
+    except Exception:
+        helius_client = None
+    if helius_client is not None:
+        rate_limiter = getattr(helius_client, "_rl", None)
+        das_rps = getattr(rate_limiter, "rps", None) if rate_limiter else None
+        timeout_total = getattr(helius_client, "_SESSION_TIMEOUT", None)
+        timeout_connect = getattr(helius_client, "_CONNECT_TIMEOUT", None)
+    else:
+        das_rps = None
+        timeout_total = None
+        timeout_connect = None
+    try:
+        from . import token_scanner
+    except Exception:
+        degraded_cooldown = None
+        timeout_threshold = None
+        backoff_base = None
+        backoff_cap = None
+        request_interval = None
+        max_attempts = None
+    else:
+        degraded_cooldown = getattr(token_scanner, "_DAS_DEGRADED_COOLDOWN", None)
+        timeout_threshold = getattr(token_scanner, "_DAS_TIMEOUT_THRESHOLD", None)
+        backoff_base = getattr(token_scanner, "_DAS_BACKOFF_BASE", None)
+        backoff_cap = getattr(token_scanner, "_DAS_BACKOFF_CAP", None)
+        request_interval = getattr(token_scanner, "_DAS_REQUEST_INTERVAL", None)
+        max_attempts = getattr(token_scanner, "_DAS_MAX_ATTEMPTS", None)
+    resilience["das"] = {
+        "rps": das_rps,
+        "timeout_connect_s": timeout_connect,
+        "timeout_total_s": timeout_total,
+        "timeout_threshold": timeout_threshold,
+        "backoff_base_s": backoff_base,
+        "backoff_cap_s": backoff_cap,
+        "circuit_open_s": degraded_cooldown,
+        "request_interval_s": request_interval,
+        "max_attempts": max_attempts,
+    }
+    try:
+        from . import prices
+    except Exception:
+        price_attempts = None
+        price_backoff = None
+    else:
+        price_attempts = getattr(prices, "PRICE_RETRY_ATTEMPTS", None)
+        price_backoff = getattr(prices, "PRICE_RETRY_BACKOFF", None)
+    resilience["birdeye_retry"] = {
+        "attempts": price_attempts,
+        "backoff_s": price_backoff,
+    }
+    ping_interval = _maybe_float(os.getenv("UI_WS_PING_INTERVAL") or os.getenv("WS_PING_INTERVAL"))
+    if ping_interval is None or ping_interval <= 0:
+        ping_interval = 20.0
+    ping_timeout = _maybe_float(os.getenv("UI_WS_PING_TIMEOUT") or os.getenv("WS_PING_TIMEOUT"))
+    if ping_timeout is None or ping_timeout <= 0:
+        ping_timeout = 20.0
+    resilience["ws"] = {
+        "ping_interval_s": ping_interval,
+        "ping_timeout_s": ping_timeout,
+    }
+    return resilience
+
 def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
     state = state or _get_active_ui_state()
     summary: Dict[str, Any] = {}
     status: Dict[str, Any] = {}
     settings: Dict[str, Any] = {}
+    rl_status: Mapping[str, Any] | None = None
     if state is not None:
         try:
             summary = dict(state.snapshot_summary())
@@ -129,38 +820,203 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
             settings = dict(state.snapshot_settings())
         except Exception:
             log.debug("Failed to build settings snapshot for UI_META", exc_info=True)
+        try:
+            rl_status = state.snapshot_rl_status()
+        except Exception:
+            rl_status = None
+    if rl_status is None and isinstance(status.get("rl_daemon_status"), Mapping):
+        rl_status = status.get("rl_daemon_status")
+
     lag_snapshot = summary.get("lag") if isinstance(summary.get("lag"), dict) else {}
     golden_info = summary.get("golden") if isinstance(summary.get("golden"), dict) else {}
-    lag_metrics = {
+    lag_metrics: Dict[str, Optional[float]] = {
         "bus": _maybe_float(status.get("bus_latency_ms")),
         "ohlcv": _maybe_float(lag_snapshot.get("ohlcv_ms")),
         "depth": _maybe_float(lag_snapshot.get("depth_ms")),
         "golden": _maybe_float(golden_info.get("lag_ms")),
+        "suggestions": _maybe_float(lag_snapshot.get("suggestion_ms")),
+        "decisions": _maybe_float(lag_snapshot.get("decision_ms")),
     }
+    rl_updated = None
+    if isinstance(rl_status, Mapping):
+        rl_updated = _maybe_float(rl_status.get("updated_at"))
+    if rl_updated is not None:
+        lag_metrics["rl"] = max(0.0, (time.time() - rl_updated) * 1000.0)
+    else:
+        lag_metrics["rl"] = None
+
     redis_url = _discover_broker_url()
     channel = getattr(event_bus, "_BROKER_CHANNEL", None) or os.getenv("BROKER_CHANNEL")
-    features = {
-        "sentiment": parse_bool_env("SENTIMENT_ENABLED", False),
+
+    features: Dict[str, Any] = {
+        "sentiment_enabled": parse_bool_env("SENTIMENT_ENABLED", False),
+        "rl_shadow_enabled": str(status.get("rl_mode") or "").lower() == "shadow",
+        "depth_service_enabled": bool(status.get("depth_service")) or parse_bool_env("USE_DEPTH_STREAM", True),
+        "golden_pipeline_enabled": parse_bool_env("GOLDEN_PIPELINE", True),
+        "discovery_enabled": parse_bool_env("MINT_STREAM_ENABLE", True),
+        "use_mev_bundles": parse_bool_env("USE_MEV_BUNDLES", False),
         "golden_depth": bool(getattr(state, "golden_depth_enabled", False)) if state else False,
         "golden_momentum": bool(getattr(state, "golden_momentum_enabled", False)) if state else False,
     }
+    # Backwards compatibility for legacy keys used by older dashboards
+    features["sentiment"] = features["sentiment_enabled"]
+
     staleness = {}
     if isinstance(settings.get("staleness"), dict):
         staleness = dict(settings["staleness"])
+
+    ttl_info = {
+        "depth_s": _resolve_depth_ttl(),
+        "ohlcv_5m_s": 600.0,
+        "golden_s": 60.0,
+        "suggestions_s": 15.0,
+        "votes_s": 30.0,
+    }
+
+    version_info: Dict[str, Any] = {
+        "app_version": _resolve_app_version(),
+        "schema_version": UI_SCHEMA_VERSION,
+        "schema_hash": _compute_schema_hash(),
+        "build_git": _resolve_build_git(),
+        "workflow": status.get("workflow"),
+        "mode": "paper" if status.get("paper_mode") else "live",
+    }
+    version_info = {key: value for key, value in version_info.items() if value is not None}
+
+    redis_info = _parse_redis_url(redis_url)
+    broker_kind = "redis"
+    try:
+        broker_types = getattr(event_bus, "_BROKER_TYPES", None)
+    except Exception:
+        broker_types = None
+    if broker_types:
+        try:
+            broker_kind = str(broker_types[0])
+        except Exception:
+            broker_kind = "redis"
+    broker_info: Dict[str, Any] = {
+        "kind": broker_kind,
+        "channel": channel,
+    }
+    broker_url = redis_info.get("url") if isinstance(redis_info, Mapping) else None
+    if not broker_url:
+        broker_url = redis_url
+    if broker_url:
+        broker_info["url"] = broker_url
+    if isinstance(redis_info, Mapping) and redis_info.get("db") is not None:
+        broker_info["db"] = redis_info.get("db")
+
+    event_bus_url = os.getenv("EVENT_BUS_URL") or getattr(event_bus, "DEFAULT_WS_URL", None)
+    event_bus_payload = {"url_ws": event_bus_url}
+
+    streams_contracts = _schema_entries(ttl_info)
+    schemas_listing: List[Dict[str, Any]] = []
+    for entry in streams_contracts:
+        topics = entry.get("topics") or []
+        topic = topics[0] if topics else None
+        schema_item = {
+            "topic": topic,
+            "schema_id": entry.get("schema_id"),
+            "required": entry.get("required"),
+        }
+        if entry.get("aliases"):
+            schema_item["aliases"] = entry["aliases"]
+        schema_item = {key: value for key, value in schema_item.items() if value}
+        if schema_item:
+            schemas_listing.append(schema_item)
+
+    bootstrap = {
+        "seed_tokens": _discover_seed_tokens(),
+        "pyth_price_hints": _pyth_price_hints(),
+        "price_providers": _price_provider_order(),
+        "discovery": {"sources": _discovery_hint_sources(state)},
+    }
+
+    execution = _resolve_execution_snapshot(status)
+
+    try:
+        from .golden_pipeline.contracts import STREAMS
+    except Exception:
+        pipeline_topics = None
+    else:
+        pipeline_topics = STREAMS
+
+    stages: Dict[str, Any] = {}
+    if pipeline_topics is not None:
+        discovery_topics = [pipeline_topics.discovery_candidates]
+        mint_discovered = getattr(pipeline_topics, "mint_discovered", "x:mint.discovered")
+        if mint_discovered not in discovery_topics:
+            discovery_topics.append(mint_discovered)
+        stages["discovery"] = {
+            "enabled": bool(features.get("discovery_enabled")),
+            "topics": discovery_topics,
+        }
+        stages["golden"] = {
+            "enabled": bool(features.get("golden_pipeline_enabled")),
+            "topics": [pipeline_topics.golden_snapshot],
+        }
+        stages["agents"] = {
+            "enabled": bool(features.get("golden_pipeline_enabled")),
+            "topics": [pipeline_topics.trade_suggested],
+        }
+    else:
+        stages["discovery"] = {
+            "enabled": bool(features.get("discovery_enabled")),
+            "topics": ["x:discovery.candidates", "x:mint.discovered"],
+        }
+        stages["golden"] = {
+            "enabled": bool(features.get("golden_pipeline_enabled")),
+            "topics": ["x:mint.golden"],
+        }
+        stages["agents"] = {
+            "enabled": bool(features.get("golden_pipeline_enabled")),
+            "topics": ["x:trade.suggested"],
+        }
+    pipeline_payload = {
+        "stages": stages,
+        "expectations": (
+            "Discovery mints publish to x:mint.discovered; fresh depth+price generates "
+            "Golden hashes on x:mint.golden; valid Golden snapshots unlock x:trade.suggested "
+            "suggestions and x:vote.decisions windows."
+        ),
+    }
+
     payload: Dict[str, Any] = {
         "type": "UI_META",
         "v": UI_SCHEMA_VERSION,
         "channel": channel,
-        "redis": _parse_redis_url(redis_url),
+        "redis": redis_info,
+        "broker": broker_info,
+        "event_bus": event_bus_payload,
+        "version": version_info,
         "lag": lag_metrics,
         "features": features,
         "staleness": staleness,
+        "heartbeat_epoch": _maybe_float(status.get("heartbeat")),
+        "ttl": ttl_info,
+        "bootstrap": bootstrap,
+        "providers": _provider_status_snapshot(),
+        "streams": streams_contracts,
+        "schemas": schemas_listing,
+        "execution": execution,
+        "pipeline": pipeline_payload,
+        "resilience": _resilience_snapshot(),
+        "test_contracts": {
+            "handshake": "tests/test_ui_meta_ws.py",
+            "golden_pipeline": [
+                "tests/golden_pipeline/test_bootstrap.py",
+                "tests/golden_pipeline/test_discovery.py",
+                "tests/golden_pipeline/test_ui_smoke_synth.py",
+                "tests/golden_pipeline/test_validation.py",
+            ],
+        },
         "generated_ts": time.time(),
     }
+
     if status.get("environment"):
         payload["environment"] = status.get("environment")
-    if status.get("workflow"):
-        payload["workflow"] = status.get("workflow")
+    if version_info.get("workflow"):
+        payload["workflow"] = version_info.get("workflow")
     return payload
 
 
