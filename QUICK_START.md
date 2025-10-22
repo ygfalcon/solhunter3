@@ -1,22 +1,50 @@
 # Quick Start
 
- - A default keypair (`keypairs/default.json`) and configuration (`config.toml`) are bundled for immediate runs.
- - To customize, copy `config/default.toml` to `config.toml` and edit the values.
-- `make start` runs `scripts/startup.py` for guided setup and launches `depth_service` automatically.
-- Use `solhunter-start` to launch the same startup routine with `--one-click` by default while still accepting additional flags.
-- Pass `--min-delay` or `--max-delay` to enforce minimum or maximum delay between trade iterations when running the bot.
-- Run `python -m solhunter_zero.launcher --auto` for a fully automated launch. On macOS, double-click `start.command` for the same effect. It ensures the `solhunter-wallet` CLI is present, auto-selects the sole keypair and active config, verifies RPC endpoints, and warns if the wallet balance is below `min_portfolio_value`.
-- `scripts/quick_setup.py --auto` populates `config.toml` with defaults. Use `--non-interactive` to rely on environment variables only. Set `AUTO_SELECT_KEYPAIR=1` to have the sole keypair chosen without prompts.
-- Setup scripts write the `.env` file to your current working directory, keeping environment settings alongside the source tree.
-- `EVENT_BUS_URL` sets a single websocket broker. `BROKER_WS_URLS` accepts a
-  comma‑separated list for clustering. If `BROKER_WS_URLS` is unset,
-  `EVENT_BUS_URL` is used. Both default to `ws://127.0.0.1:8769`.
-- On macOS, run `scripts/mac_setup.py` to install the Xcode command line tools if needed. The script exits after starting the installation; rerun it once the tools are installed before continuing.
-- Launch the Web UI with `python -m solhunter_zero.ui`.
-- Toggle **Full Auto Mode** in the UI to start trading with the active config.
-- Or start everything at once with `python scripts/start_all.py` (includes `depth_service`).
-- Programmatic consumers can call `solhunter_zero.bootstrap.bootstrap()` to
-  perform the same setup steps before interacting with the library.
+## Canonical runtime launch
+
+1. Copy `etc/solhunter/env.production` and fill in the three required API keys.
+   The file is wired for the shared event bus (`ws://127.0.0.1:8779`), Redis
+   (`redis://localhost:6379/1`), and the production Solana providers.  Seed
+   tokens (SOL, USDC, USDT) are preloaded with their Pyth price IDs so depth and
+   prices hydrate immediately.
+
+2. From the repository root, run the golden-path launcher.  It provisions
+   `.venv/`, installs runtime and test dependencies, pins the JSON schema
+   validator, performs Redis and event-bus sanity checks, runs the golden schema
+   smoke tests, and then boots the paper runtime followed by live mode:
+
+   ```bash
+   source .venv/bin/activate && \
+   bash scripts/launch_live.sh \
+     --env etc/solhunter/env.production \
+     --micro 1 --canary --budget 25 --risk 0.25 \
+     --preflight 2 --soak 180
+   ```
+
+   The launcher prints a consolidated manifest such as
+   `RUNTIME_MANIFEST channel=solhunter-events-v3 redis=redis://localhost:6379/1 …`
+   so you can confirm every component shares the same broker.  If any Redis URL
+   or broker channel diverges, the launcher aborts with guidance on which
+   environment variables to align.
+
+3. During startup the console will surface the readiness handshake in order:
+
+   - `UI_READY url=http://127.0.0.1:XXXX …`
+   - `Event bus: connected redis broker redis://localhost:6379/1 channel=solhunter-events-v3`
+   - `GOLDEN_READY topic=x:mint.golden providers=<n>`
+   - `RUNTIME_READY mode=paper` / `RUNTIME_READY mode=live`
+
+   As soon as all lines appear the launcher issues a `GET /ui/meta` request to
+   verify the UI is serving and prints a bold banner with the URL.
+
+4. To stop the runtime without disturbing Redis, run `bash scripts/stop.sh`.
+   Use `bash scripts/clean_session.sh` to remove the previous session’s
+   `artifacts/prelaunch/` data if you want a pristine restart.  Both scripts are
+   idempotent and safe to run multiple times.
+
+The UI will display **Event Bus: connected**, **Trading Loop: running**, and the
+lag metrics as soon as the pipeline warms up.  Golden snapshots begin with the
+seed tokens and expand as discovery finds new candidates.
 
 ## Investor Demo
 

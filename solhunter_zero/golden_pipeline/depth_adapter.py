@@ -180,6 +180,10 @@ class GoldenDepthAdapter:
         self._pyth_mapping_expiry = 0.0
         self._pyth_lock = asyncio.Lock()
 
+    @property
+    def cache_ttl(self) -> float:
+        return self._cache_ttl
+
     def _record_cache_age(self, mint: str, age: float) -> None:
         if DEPTH_CACHE_AGE_SECONDS is not None:
             try:
@@ -193,7 +197,7 @@ class GoldenDepthAdapter:
         if last_warn is not None and now - last_warn < max(self._cache_ttl, 5.0):
             return
         self._cache_warned[mint] = now
-        logger.warning(
+        logger.debug(
             "depth cache for %s stale (age=%.2fs, ttl=%.2fs)",
             mint,
             age,

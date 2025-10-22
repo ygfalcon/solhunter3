@@ -440,6 +440,14 @@ class RuntimeOrchestrator:
                 raise SystemExit(1)
         else:
             await self._publish_stage("bus:verify", True)
+            broker_url = (
+                os.getenv("REDIS_URL")
+                or os.getenv("BROKER_URL")
+                or os.getenv("BROKER_URLS")
+                or "redis://localhost:6379/1"
+            )
+            channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v3")
+            log.info("Event bus: connected redis broker %s channel=%s", broker_url, channel)
         # continue even if local ws failed (peers may still be available)
         await asyncio.gather(
             self._maybe_start_mint_stream(),

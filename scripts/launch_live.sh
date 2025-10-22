@@ -20,8 +20,12 @@ EXIT_PREFLIGHT=2
 EXIT_CONNECTIVITY=3
 EXIT_HEALTH=4
 EXIT_DEPS=5
+EXIT_SCHEMA=6
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+VENV_DIR="$ROOT_DIR/.venv"
+PYTHON_BIN="$VENV_DIR/bin/python3"
+PIP_BIN="$VENV_DIR/bin/pip"
 DEFAULT_ARTIFACT_ROOT="$ROOT_DIR/artifacts"
 DEFAULT_RUN_ID="prelaunch"
 export RUNTIME_ARTIFACT_ROOT="${RUNTIME_ARTIFACT_ROOT:-$DEFAULT_ARTIFACT_ROOT}"
@@ -54,6 +58,376 @@ else
   export PYTHONPATH="$ROOT_DIR"
 fi
 
+ensure_virtualenv() {
+  if [[ ! -x $PYTHON_BIN ]]; then
+    log_info "Creating Python virtual environment at $VENV_DIR"
+    python3 -m venv "$VENV_DIR"
+  fi
+  # shellcheck disable=SC1090
+  source "$VENV_DIR/bin/activate"
+  DEPS_LOG="$LOG_DIR/deps_install.log"
+  log_info "Installing Python dependencies (see $DEPS_LOG for details)"
+  {
+    "$PIP_BIN" install -U pip setuptools wheel &&
+      "$PIP_BIN" install -U -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-tests.txt" \
+        "jsonschema[format-nongpl]==4.23.0"
+  } 2>&1 | tee "$DEPS_LOG" >/dev/null
+  if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
+    log_warn "Failed to install Python dependencies (see $DEPS_LOG)"
+    exit $EXIT_DEPS
+  fi
+}
+
+log_python_environment() {
+  local interpreter version
+  interpreter=$("$PYTHON_BIN" -c 'import sys; print(sys.executable)')
+  version=$("$PYTHON_BIN" -c 'import sys; print(f"Python {sys.version.split()[0]}")')
+  log_info "Python interpreter: $interpreter"
+  log_info "$version"
+  log_info "Pinned packages (jsonschema/protobuf/aioredis):"
+  "$PIP_BIN" list | grep -E 'jsonschema|protobuf|aioredis' || true
+  if [[ $(uname -s) == "Darwin" ]]; then
+    export TORCH_METAL_VERSION="${TORCH_METAL_VERSION:-2.8.0}"
+    export TORCHVISION_METAL_VERSION="${TORCHVISION_METAL_VERSION:-0.23.0}"
+    local metal_report
+    metal_report=$("$PYTHON_BIN" - <<'PY'
+import json
+info = {"torch": None, "torchvision": None, "mps_available": False, "mps_built": False, "error": None}
+try:
+    import torch  # type: ignore
+    info["torch"] = getattr(torch, "__version__", "unknown")
+    if hasattr(torch.backends, "mps"):
+        try:
+            info["mps_available"] = bool(torch.backends.mps.is_available())
+            info["mps_built"] = bool(torch.backends.mps.is_built())
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            info["error"] = f"mps probe failed: {exc}"
+except Exception as exc:  # pragma: no cover - torch optional
+    info["error"] = str(exc)
+try:
+    import torchvision  # type: ignore
+    info["torchvision"] = getattr(torchvision, "__version__", "unknown")
+except Exception:
+    pass
+print(json.dumps(info))
+PY
+)
+    log_info "Metal detection: env torch=${TORCH_METAL_VERSION:-unset} torchvision=${TORCHVISION_METAL_VERSION:-unset} report=${metal_report}"
+  fi
+}
+
+run_schema_smoke_tests() {
+  log_info "Running golden schema smoke tests"
+  if ! "$PYTHON_BIN" -m pytest -q \
+    tests/golden_pipeline/test_validation.py::test_schema_validation_smoke \
+    tests/golden_pipeline/test_end_to_end_schema.py::test_end_to_end_golden_snapshot_contract; then
+    log_warn "Golden schema smoke tests failed"
+    echo "Golden schema validation failed; agent suggestions will not appear until schemas are fixed" >&2
+    exit $EXIT_SCHEMA
+  fi
+}
+
+normalize_bus_configuration() {
+  "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import socket
+import sys
+from urllib.parse import urlparse
+
+DEFAULT_REDIS = "redis://localhost:6379/1"
+DEFAULT_BUS = "ws://127.0.0.1:8779"
+
+channel = os.environ.setdefault("BROKER_CHANNEL", "solhunter-events-v3")
+bus_url = os.environ.setdefault("EVENT_BUS_URL", DEFAULT_BUS)
+
+redis_keys = [
+    "REDIS_URL",
+    "MINT_STREAM_REDIS_URL",
+    "MEMPOOL_STREAM_REDIS_URL",
+    "AMM_WATCH_REDIS_URL",
+]
+
+def _canonical(url: str) -> tuple[str, str, int, int]:
+    candidate = url if "://" in url else f"redis://{url}"
+    parsed = urlparse(candidate)
+    scheme = parsed.scheme or "redis"
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 6379
+    path = (parsed.path or "/").lstrip("/")
+    segment = path.split("/", 1)[0]
+    db = int(segment) if segment else 0
+    return scheme, host, port, db
+
+errors: list[str] = []
+manifest: dict[str, str] = {}
+target_url: str | None = None
+
+for key in redis_keys:
+    raw = os.environ.get(key) or DEFAULT_REDIS
+    os.environ[key] = raw
+    try:
+        scheme, host, port, db = _canonical(raw)
+    except Exception:
+        errors.append(f"{key} has invalid Redis URL: {raw}")
+        continue
+    if db != 1:
+        errors.append(
+            f"{key} targets database {db}; configure database 1 for all runtime services "
+            "(export {key}=redis://localhost:6379/1 or update your env file)."
+        )
+    canonical = f"{scheme}://{host}:{port}/{db}"
+    os.environ[key] = canonical
+    manifest[key] = canonical
+    if target_url is None:
+        target_url = canonical
+    elif canonical != target_url:
+        errors.append(
+            "All Redis URLs must match. Use identical redis://host:port/1 values for "
+            "REDIS_URL, MINT_STREAM_REDIS_URL, MEMPOOL_STREAM_REDIS_URL, and AMM_WATCH_REDIS_URL "
+            "(adjust exports or pass --env with the canonical settings)."
+        )
+
+channel_keys = [
+    "MINT_STREAM_BROKER_CHANNEL",
+    "MEMPOOL_STREAM_BROKER_CHANNEL",
+    "AMM_WATCH_BROKER_CHANNEL",
+]
+
+for key in channel_keys:
+    value = os.environ.get(key)
+    if value and value != channel:
+        errors.append(
+            f"{key} is set to {value} but BROKER_CHANNEL={channel}. Use the same channel for all producers."
+        )
+    else:
+        os.environ.setdefault(key, channel)
+
+if errors:
+    print("\n".join(dict.fromkeys(errors)), file=sys.stderr)
+    sys.exit(1)
+
+manifest_line = (
+    "RUNTIME_MANIFEST "
+    f"channel={channel} "
+    f"redis={manifest.get('REDIS_URL', DEFAULT_REDIS)} "
+    f"mint_stream={manifest.get('MINT_STREAM_REDIS_URL', DEFAULT_REDIS)} "
+    f"mempool={manifest.get('MEMPOOL_STREAM_REDIS_URL', DEFAULT_REDIS)} "
+    f"amm_watch={manifest.get('AMM_WATCH_REDIS_URL', DEFAULT_REDIS)} "
+    f"bus={bus_url}"
+)
+print(manifest_line)
+PY
+}
+
+wait_for_socket_release() {
+  "$PYTHON_BIN" - <<'PY'
+import os
+import socket
+import time
+from urllib.parse import urlparse
+
+bus_url = os.environ.get("EVENT_BUS_URL", "ws://127.0.0.1:8779")
+parsed = urlparse(bus_url)
+host = parsed.hostname or "127.0.0.1"
+port = parsed.port or 8779
+
+def port_busy() -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+for attempt in range(5):
+    if not port_busy():
+        print("free")
+        break
+    time.sleep(1.0)
+else:
+    print("busy")
+PY
+}
+
+acquire_runtime_lock() {
+  local output
+  output=$("$PYTHON_BIN" - <<'PY'
+import json
+import os
+import socket
+import sys
+import time
+import uuid
+
+try:
+    import redis  # type: ignore
+except Exception as exc:  # pragma: no cover - dependency issue
+    print(f"Unable to import redis client: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+redis_url = os.environ.get("REDIS_URL") or "redis://localhost:6379/1"
+channel = os.environ.get("BROKER_CHANNEL") or "solhunter-events-v3"
+client = redis.Redis.from_url(redis_url, socket_timeout=1.0)
+key = f"solhunter:runtime:lock:{channel}"
+token = str(uuid.uuid4())
+payload = {
+    "pid": os.getpid(),
+    "channel": channel,
+    "host": socket.gethostname(),
+    "token": token,
+    "ts": time.time(),
+}
+
+def _describe(data: dict[str, object]) -> str:
+    pid = data.get("pid")
+    host = data.get("host") or "unknown"
+    return f"pid={pid} host={host}"
+
+existing = client.get(key)
+if existing:
+    try:
+        data = json.loads(existing.decode("utf-8"))
+    except Exception:
+        data = {"raw": existing.decode("utf-8", "ignore")}
+    pid = data.get("pid")
+    alive = False
+    if isinstance(pid, int):
+        try:
+            os.kill(pid, 0)
+        except Exception:
+            alive = False
+        else:
+            alive = True
+    if alive:
+        print(
+            "Another runtime is already using this channel (" + _describe(data) + ").",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Attempt best-effort cleanup of stale lock
+    client.delete(key)
+    time.sleep(0.2)
+
+if not client.set(key, json.dumps(payload), nx=True):
+    existing = client.get(key)
+    if existing:
+        try:
+            data = json.loads(existing.decode("utf-8"))
+        except Exception:
+            data = {"raw": existing.decode("utf-8", "ignore")}
+        print(
+            "Another runtime is already using this channel (" + _describe(data) + ").",
+            file=sys.stderr,
+        )
+    else:
+        print("Unable to acquire runtime lock", file=sys.stderr)
+    sys.exit(1)
+
+print(f"{key} {token}")
+PY
+)
+  RUNTIME_LOCK_KEY=$(echo "$output" | awk '{print $1}')
+  RUNTIME_LOCK_TOKEN=$(echo "$output" | awk '{print $2}')
+  if [[ -z ${RUNTIME_LOCK_KEY:-} || -z ${RUNTIME_LOCK_TOKEN:-} ]]; then
+    log_warn "Failed to acquire runtime lock"
+    exit $EXIT_HEALTH
+  fi
+  log_info "Acquired runtime lock key=$RUNTIME_LOCK_KEY"
+}
+
+release_runtime_lock() {
+  if [[ -z ${RUNTIME_LOCK_KEY:-} || -z ${RUNTIME_LOCK_TOKEN:-} ]]; then
+    return
+  fi
+  RUNTIME_LOCK_KEY="$RUNTIME_LOCK_KEY" RUNTIME_LOCK_TOKEN="$RUNTIME_LOCK_TOKEN" \
+    "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import sys
+
+try:
+    import redis  # type: ignore
+except Exception:
+    sys.exit(0)
+
+key = os.environ.get("RUNTIME_LOCK_KEY")
+token = os.environ.get("RUNTIME_LOCK_TOKEN")
+redis_url = os.environ.get("REDIS_URL") or "redis://localhost:6379/1"
+if not key or not token:
+    sys.exit(0)
+
+client = redis.Redis.from_url(redis_url, socket_timeout=1.0)
+existing = client.get(key)
+if not existing:
+    sys.exit(0)
+
+try:
+    data = json.loads(existing.decode("utf-8"))
+except Exception:
+    data = {"token": None}
+
+if data.get("token") == token:
+    client.delete(key)
+PY
+  RUNTIME_LOCK_KEY=""
+  RUNTIME_LOCK_TOKEN=""
+}
+
+extract_ui_url() {
+  "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import re
+import sys
+
+log_path = os.environ.get("RUNTIME_LOG_PATH")
+if not log_path or not os.path.exists(log_path):
+    sys.exit(0)
+
+pattern = re.compile(r"UI_READY .*url=([^ ]+)")
+with open(log_path, "r", encoding="utf-8", errors="ignore") as handle:
+    for line in handle:
+        match = pattern.search(line)
+        if match:
+            print(match.group(1))
+            break
+PY
+}
+
+check_ui_health() {
+  local log=$1
+  local url=""
+  RUNTIME_LOG_PATH="$log" url=$(extract_ui_url)
+  if [[ -z $url ]]; then
+    log_warn "UI readiness URL not yet available for health check"
+    return 1
+  fi
+  local target="${url%/}/ui/meta"
+  log_info "UI health check GET $target"
+  if UI_HEALTH_URL="$target" "$PYTHON_BIN" - <<'PY'
+import os
+import sys
+import urllib.request
+
+url = os.environ.get("UI_HEALTH_URL")
+if not url:
+    sys.exit(1)
+
+req = urllib.request.Request(url, headers={"User-Agent": "solhunter-launcher"})
+with urllib.request.urlopen(req, timeout=5) as resp:
+    if getattr(resp, "status", 200) >= 400:
+        sys.exit(1)
+sys.exit(0)
+PY
+  then
+    log_info "UI health endpoint responded successfully"
+    return 0
+  else
+    log_warn "UI health endpoint check failed"
+    return 1
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage: bash scripts/launch_live.sh --env <env-file> --micro <0|1> [--canary] --budget <usd> --risk <ratio> --preflight <runs> --soak <seconds> [--config <path>]
@@ -77,6 +451,8 @@ CANARY_RISK=""
 PREFLIGHT_RUNS=2
 SOAK_DURATION=180
 CONFIG_PATH=""
+RUNTIME_LOCK_KEY=""
+RUNTIME_LOCK_TOKEN=""
 
 declare -a POSITIONAL=()
 while [[ $# -gt 0 ]]; do
@@ -180,16 +556,12 @@ fi
 
 log_info "Starting launch_live with env=$ENV_FILE micro=$MICRO_FLAG canary=$CANARY_MODE preflight_runs=$PREFLIGHT_RUNS soak=${SOAK_DURATION}s"
 
-log_info "Ensuring Python dependencies are installed"
-DEPS_LOG="$LOG_DIR/deps_install.log"
-if ! python3 -m scripts.deps 2>&1 | tee "$DEPS_LOG" >/dev/null; then
-  log_warn "Failed to install Python dependencies (see $DEPS_LOG)"
-  exit $EXIT_DEPS
-fi
+ensure_virtualenv
+log_python_environment
 
 MANIFEST_RAW=""
 validate_env_file() {
-  python3 - "$ENV_FILE" <<'PY'
+  "$PYTHON_BIN" - "$ENV_FILE" <<'PY'
 import json
 import os
 import re
@@ -259,7 +631,7 @@ fi
 
 PROVIDER_STATUS=""
 log_info "Checking configured provider credentials and connectivity"
-if ! PROVIDER_STATUS=$(python3 - <<'PY'
+if ! PROVIDER_STATUS=$("$PYTHON_BIN" - <<'PY'
 from solhunter_zero.production import Provider, assert_providers_ok, format_configured_providers
 import sys
 providers = [
@@ -285,8 +657,40 @@ printf '%s\n' "$MANIFEST_RAW"
 log_info "Provider status"
 printf '%s\n' "$PROVIDER_STATUS"
 
+log_info "Standardising event bus and Redis configuration"
+if ! BUS_MANIFEST=$(normalize_bus_configuration); then
+  log_warn "Inconsistent Redis or broker configuration detected"
+  exit $EXIT_KEYS
+fi
+log_info "$BUS_MANIFEST"
+
+SOCKET_STATE=$(wait_for_socket_release)
+if [[ $SOCKET_STATE == "busy" ]]; then
+  log_warn "Event bus port appears to be in use; waiting grace window has expired, continuing with launch"
+else
+  log_info "Event bus port ready"
+fi
+
+acquire_runtime_lock
+
+ORIG_SOLHUNTER_MODE=${SOLHUNTER_MODE-}
+ORIG_MODE=${MODE-}
+export SOLHUNTER_MODE="${SOLHUNTER_MODE:-paper}"
+export MODE="${MODE:-paper}"
+run_schema_smoke_tests
+if [[ -n ${ORIG_SOLHUNTER_MODE:-} ]]; then
+  export SOLHUNTER_MODE="$ORIG_SOLHUNTER_MODE"
+else
+  unset SOLHUNTER_MODE
+fi
+if [[ -n ${ORIG_MODE:-} ]]; then
+  export MODE="$ORIG_MODE"
+else
+  unset MODE
+fi
+
 ensure_redis() {
-  python3 - <<'PY'
+  "$PYTHON_BIN" - <<'PY'
 import os
 from solhunter_zero.redis_util import ensure_local_redis_if_needed
 urls = []
@@ -311,7 +715,7 @@ redis_health() {
   if command -v redis-cli >/dev/null 2>&1; then
     redis-cli -u "$REDIS_URL" PING >/dev/null 2>&1
   else
-    python3 - <<'PY'
+    "$PYTHON_BIN" - <<'PY'
 import os
 import asyncio
 from solhunter_zero.production import ConnectivityChecker
@@ -363,6 +767,7 @@ start_log_stream() {
 }
 
 cleanup() {
+  release_runtime_lock
   if [[ -z ${CHILD_PIDS+x} ]]; then
     return
   fi
@@ -392,7 +797,7 @@ start_controller() {
   if [[ -n $notify ]]; then
     args+=("--notify" "$notify")
   fi
-  python3 "${args[@]}" >"$log" 2>&1 &
+  "$PYTHON_BIN" "${args[@]}" >"$log" 2>&1 &
   local pid=$!
   register_child "$pid"
   printf '%s\n' "$pid"
@@ -446,11 +851,27 @@ wait_for_ready() {
   local notify=$2
   local pid=${3:-}
   local waited=0
+  local ui_seen=0
+  local bus_seen=0
+  local golden_seen=0
+  local runtime_seen=0
   while [[ $waited -lt $READY_TIMEOUT ]]; do
     if [[ -n $notify && -f $notify ]]; then
-      return 0
+      runtime_seen=1
     fi
-    if grep -q "RUNTIME_READY" "$log" 2>/dev/null; then
+    if [[ $ui_seen -eq 0 ]] && grep -q "UI_READY" "$log" 2>/dev/null; then
+      ui_seen=1
+    fi
+    if [[ $bus_seen -eq 0 ]] && grep -q "Event bus: connected" "$log" 2>/dev/null; then
+      bus_seen=1
+    fi
+    if [[ $golden_seen -eq 0 ]] && grep -q "GOLDEN_READY" "$log" 2>/dev/null; then
+      golden_seen=1
+    fi
+    if [[ $runtime_seen -eq 0 ]] && grep -q "RUNTIME_READY" "$log" 2>/dev/null; then
+      runtime_seen=1
+    fi
+    if [[ $ui_seen -eq 1 && $bus_seen -eq 1 && $golden_seen -eq 1 && $runtime_seen -eq 1 ]]; then
       return 0
     fi
     if [[ -n $pid ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -460,7 +881,20 @@ wait_for_ready() {
     sleep 2
     waited=$((waited + 2))
   done
-  print_log_excerpt "$log" "Timed out waiting for runtime readiness"
+  local missing=""
+  if [[ $ui_seen -eq 0 ]]; then
+    missing+=" UI_READY"
+  fi
+  if [[ $bus_seen -eq 0 ]]; then
+    missing+=" Event bus"
+  fi
+  if [[ $golden_seen -eq 0 ]]; then
+    missing+=" GOLDEN_READY"
+  fi
+  if [[ $runtime_seen -eq 0 ]]; then
+    missing+=" RUNTIME_READY"
+  fi
+  print_log_excerpt "$log" "Timed out waiting for runtime readiness (missing:${missing:- none})"
   return 1
 }
 
@@ -478,6 +912,10 @@ fi
 
 log_info "Paper runtime ready (PID=$PAPER_PID)"
 print_ui_location "$PAPER_LOG" "$ART_DIR"
+if ! check_ui_health "$PAPER_LOG"; then
+  log_warn "Paper runtime UI health check failed"
+  exit $EXIT_HEALTH
+fi
 
 run_preflight() {
   MODE=paper MICRO_MODE=1 bash "$ROOT_DIR/scripts/preflight/run_all.sh"
@@ -496,7 +934,7 @@ log_info "Paper runtime stopped after preflight"
 
 log_info "Starting connectivity soak for ${SOAK_DURATION}s"
 connectivity_soak() {
-  python3 - <<'PY'
+  "$PYTHON_BIN" - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -553,6 +991,10 @@ fi
 
 log_info "Live runtime ready (PID=$LIVE_PID)"
 print_ui_location "$LIVE_LOG" "$ART_DIR"
+if ! check_ui_health "$LIVE_LOG"; then
+  log_warn "Live runtime UI health check failed"
+  exit $EXIT_HEALTH
+fi
 micro_label=$([[ "$MICRO_FLAG" == "1" ]] && echo "on" || echo "off")
 canary_label=$([[ $CANARY_MODE -eq 1 ]] && echo " | Canary limits applied" || echo "")
 GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (2/2) | Soak PASSED | MODE=live | MICRO=${micro_label}${canary_label}"

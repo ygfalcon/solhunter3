@@ -39,6 +39,11 @@ jobs:
           pytest tests/test_full_system_integration.py \
                  tests/test_investor_demo_cli.py \
                  tests/test_wallet_cli.py
+      - name: Golden schema smoke
+        run: |
+          pytest \
+            tests/golden_pipeline/test_validation.py::test_schema_validation_smoke \
+            tests/golden_pipeline/test_end_to_end_schema.py::test_end_to_end_golden_snapshot_contract
       - name: macOS startup sanity
         run: |
           pytest tests/test_startup.py::test_mac_startup_prereqs \
