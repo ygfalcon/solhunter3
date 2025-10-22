@@ -17,6 +17,22 @@ from .schema_adapters import read_golden, read_ohlcv
 from ..util import parse_bool_env
 
 
+DEFAULT_RUNTIME_WORKFLOW = "golden-multi-stage-golden-stream"
+_WORKFLOW_ENV_CANDIDATES = ("RUNTIME_WORKFLOW", "SOLHUNTER_WORKFLOW", "WORKFLOW")
+
+
+def _resolve_runtime_workflow(env: Mapping[str, str] | None = None) -> str:
+    env_map: Mapping[str, str] = env or os.environ
+    for key in _WORKFLOW_ENV_CANDIDATES:
+        raw = env_map.get(key)
+        if not raw:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value
+    return DEFAULT_RUNTIME_WORKFLOW
+
+
 log = __import__("logging").getLogger(__name__)
 
 
@@ -457,6 +473,7 @@ class RuntimeEventCollectors:
             or os.getenv("ENVIRONMENT")
             or os.getenv("ENV")
         )
+        self._workflow = _resolve_runtime_workflow()
         self._control_status: Dict[str, Any] = {
             "paused": False,
             "paper_mode": parse_bool_env("PAPER_TRADING", False),
@@ -1096,6 +1113,9 @@ class RuntimeEventCollectors:
         with self._status_lock:
             info = dict(self._status_info)
             control = dict(self._control_status)
+        workflow = _resolve_runtime_workflow()
+        if workflow != self._workflow:
+            self._workflow = workflow
         heartbeat_ts = info.get("heartbeat_ts")
         latency_ms: Optional[float] = None
         if heartbeat_ts is not None:
@@ -1113,6 +1133,7 @@ class RuntimeEventCollectors:
             "last_stage_detail": info.get("last_stage_detail"),
             "last_stage_ts": info.get("last_stage_ts"),
             "environment": (self._environment or "dev"),
+            "workflow": workflow,
             "paused": bool(control.get("paused")),
             "paper_mode": bool(control.get("paper_mode")),
             "rl_mode": control.get("rl_mode", "shadow"),
