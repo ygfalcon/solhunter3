@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,14 +19,161 @@ from urllib.parse import urlparse, urlunparse
 from flask import Flask, Request, Response, jsonify, render_template_string, request
 from werkzeug.serving import BaseWSGIServer, make_server
 
+from . import event_bus
 from .agents.discovery import (
     DEFAULT_DISCOVERY_METHOD,
     DISCOVERY_METHODS,
     resolve_discovery_method,
 )
+from .util import parse_bool_env
 
 
 log = logging.getLogger(__name__)
+
+
+UI_SCHEMA_VERSION: int = 3
+_UI_META_CACHE_TTL = 1.0
+_ui_meta_cache: tuple[float, Dict[str, Any]] | None = None
+_active_ui_state: "UIState" | None = None
+
+
+def _set_active_ui_state(state: "UIState" | None) -> None:
+    global _active_ui_state
+    _active_ui_state = state
+
+
+def _get_active_ui_state() -> "UIState" | None:
+    return _active_ui_state
+
+
+def _select_first_url(*candidates: Any) -> str | None:
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if isinstance(candidate, (list, tuple, set)):
+            selected = _select_first_url(*candidate)
+            if selected:
+                return selected
+            continue
+        text = str(candidate).strip()
+        if text:
+            return text
+    return None
+
+
+def _discover_broker_url() -> str | None:
+    urls = getattr(event_bus, "_BROKER_URLS", None) or []
+    selected = _select_first_url(urls)
+    if selected:
+        return selected
+    env_urls = os.getenv("BROKER_URLS") or os.getenv("BROKER_URLS_JSON")
+    if env_urls:
+        parts = [part.strip() for part in env_urls.replace("[", "").replace("]", "").split(",")]
+        selected = _select_first_url([part for part in parts if part])
+        if selected:
+            return selected
+    single = os.getenv("BROKER_URL")
+    if single and single.strip():
+        return single.strip()
+    redis_env = os.getenv("REDIS_URL")
+    if redis_env and redis_env.strip():
+        return redis_env.strip()
+    return None
+
+
+def _parse_redis_url(url: str | None) -> Dict[str, Any]:
+    if not url:
+        return {}
+    parsed = urlparse(url)
+    info: Dict[str, Any] = {"url": url}
+    if parsed.hostname:
+        info["host"] = parsed.hostname
+    if parsed.port is not None:
+        info["port"] = parsed.port
+    path = (parsed.path or "").strip("/")
+    if path:
+        try:
+            info["db"] = int(path)
+        except ValueError:
+            pass
+    return info
+
+
+def _maybe_float(value: Any) -> Optional[float]:
+    if value in (None, "", False):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number):
+        return None
+    return number
+
+
+def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
+    state = state or _get_active_ui_state()
+    summary: Dict[str, Any] = {}
+    status: Dict[str, Any] = {}
+    settings: Dict[str, Any] = {}
+    if state is not None:
+        try:
+            summary = dict(state.snapshot_summary())
+        except Exception:
+            log.debug("Failed to build summary snapshot for UI_META", exc_info=True)
+        try:
+            status = dict(state.snapshot_status())
+        except Exception:
+            log.debug("Failed to build status snapshot for UI_META", exc_info=True)
+        try:
+            settings = dict(state.snapshot_settings())
+        except Exception:
+            log.debug("Failed to build settings snapshot for UI_META", exc_info=True)
+    lag_snapshot = summary.get("lag") if isinstance(summary.get("lag"), dict) else {}
+    golden_info = summary.get("golden") if isinstance(summary.get("golden"), dict) else {}
+    lag_metrics = {
+        "bus": _maybe_float(status.get("bus_latency_ms")),
+        "ohlcv": _maybe_float(lag_snapshot.get("ohlcv_ms")),
+        "depth": _maybe_float(lag_snapshot.get("depth_ms")),
+        "golden": _maybe_float(golden_info.get("lag_ms")),
+    }
+    redis_url = _discover_broker_url()
+    channel = getattr(event_bus, "_BROKER_CHANNEL", None) or os.getenv("BROKER_CHANNEL")
+    features = {
+        "sentiment": parse_bool_env("SENTIMENT_ENABLED", False),
+        "golden_depth": bool(getattr(state, "golden_depth_enabled", False)) if state else False,
+        "golden_momentum": bool(getattr(state, "golden_momentum_enabled", False)) if state else False,
+    }
+    staleness = {}
+    if isinstance(settings.get("staleness"), dict):
+        staleness = dict(settings["staleness"])
+    payload: Dict[str, Any] = {
+        "type": "UI_META",
+        "v": UI_SCHEMA_VERSION,
+        "channel": channel,
+        "redis": _parse_redis_url(redis_url),
+        "lag": lag_metrics,
+        "features": features,
+        "staleness": staleness,
+        "generated_ts": time.time(),
+    }
+    if status.get("environment"):
+        payload["environment"] = status.get("environment")
+    if status.get("workflow"):
+        payload["workflow"] = status.get("workflow")
+    return payload
+
+
+def get_ui_meta_snapshot(force: bool = False) -> Dict[str, Any]:
+    global _ui_meta_cache
+    now = time.monotonic()
+    if not force and _ui_meta_cache is not None:
+        cached_ts, cached_payload = _ui_meta_cache
+        if now - cached_ts <= _UI_META_CACHE_TTL:
+            return dict(cached_payload)
+    payload = _build_ui_meta_snapshot()
+    _ui_meta_cache = (now, dict(payload))
+    return payload
 
 
 try:  # pragma: no cover - imported lazily in tests
@@ -498,21 +646,92 @@ def _start_channel(
                 return
             with state.lock:
                 state.clients.add(websocket)
-            hello = json.dumps({"channel": channel, "event": "hello"})
+            hello = json.dumps({"channel": channel, "event": "hello", "schema": UI_SCHEMA_VERSION})
             try:
                 await websocket.send(hello)
             except Exception:
                 with state.lock:
                     state.clients.discard(websocket)
                 return
-            try:
-                for cached in list(backlog):
+
+            handshake_event = asyncio.Event()
+            send_lock = asyncio.Lock()
+            meta_sent = False
+            backlog_snapshot = list(backlog)
+
+            async def _send_meta(reason: str = "hello") -> None:
+                nonlocal meta_sent
+                if meta_sent:
+                    handshake_event.set()
+                    return
+                async with send_lock:
+                    if meta_sent:
+                        handshake_event.set()
+                        return
+                    payload = get_ui_meta_snapshot()
+                    meta_frame = json.dumps(payload)
                     try:
-                        await websocket.send(cached)
+                        await websocket.send(meta_frame)
                     except Exception:
-                        break
-                await websocket.wait_closed()
+                        meta_sent = True
+                        handshake_event.set()
+                        return
+                    meta_sent = True
+                    handshake_event.set()
+                    for cached in backlog_snapshot:
+                        try:
+                            await websocket.send(cached)
+                        except Exception:
+                            break
+
+            async def _handshake_timeout() -> None:
+                try:
+                    await asyncio.wait_for(handshake_event.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    await _send_meta("timeout")
+
+            timeout_task = asyncio.create_task(_handshake_timeout())
+
+            async def _decode_client_message(raw: Any) -> Dict[str, Any] | None:
+                if isinstance(raw, bytes):
+                    try:
+                        raw = raw.decode("utf-8", errors="ignore")
+                    except Exception:
+                        return None
+                if isinstance(raw, str):
+                    candidate = raw.strip()
+                    if not candidate:
+                        return None
+                    if candidate.startswith("{"):
+                        try:
+                            obj = json.loads(candidate)
+                        except Exception:
+                            return None
+                        if isinstance(obj, dict):
+                            return obj
+                    return None
+                if isinstance(raw, dict):
+                    return raw
+                return None
+
+            try:
+                async for incoming in websocket:
+                    message_obj = await _decode_client_message(incoming)
+                    if message_obj is None:
+                        continue
+                    event_name = str(message_obj.get("event") or message_obj.get("type") or "").lower()
+                    if event_name in {"hello", "ui_hello", "client_hello"}:
+                        await _send_meta("client")
+                    elif event_name == "request_meta":
+                        await _send_meta("request")
+                await _send_meta("close")
+            except Exception:
+                await _send_meta("error")
             finally:
+                handshake_event.set()
+                timeout_task.cancel()
+                with contextlib.suppress(Exception):
+                    await timeout_task
                 with state.lock:
                     state.clients.discard(websocket)
                     state.recent_close_codes.append(getattr(websocket, "close_code", None))
@@ -1049,6 +1268,28 @@ _PAGE_TEMPLATE = """
             background: rgba(255,123,114,0.18);
             border-color: rgba(255,123,114,0.4);
         }
+        .schema-banner {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            border-radius: 12px;
+            padding: 10px 14px;
+            background: rgba(255,123,114,0.12);
+            border: 1px solid rgba(255,123,114,0.35);
+            color: var(--danger);
+            font-size: 0.85rem;
+        }
+        .schema-banner.visible { display: flex; }
+        .schema-banner code {
+            background: rgba(0,0,0,0.35);
+            padding: 2px 6px;
+            border-radius: 6px;
+            color: var(--muted);
+        }
+        .schema-banner .schema-detail {
+            color: var(--muted);
+            font-size: 0.78rem;
+        }
         .connection-detail {
             display: flex;
             flex-wrap: wrap;
@@ -1487,6 +1728,10 @@ _PAGE_TEMPLATE = """
                     <span class=\"muted\">Fetching runtime metadata…</span>
                     {% endif %}
                 </div>
+            </div>
+            <div id=\"schema-banner\" class=\"schema-banner\" role=\"alert\">
+                <strong>Schema mismatch</strong>
+                <span id=\"schema-banner-detail\" class=\"schema-detail\"></span>
             </div>
             <div class=\"header-top\">
                 <div class=\"section-title\">
@@ -2475,6 +2720,12 @@ _PAGE_TEMPLATE = """
                 const connectionBanner = document.getElementById('connection-banner');
                 const connectionLabel = document.getElementById('connection-status-label');
                 const connectionDetail = document.getElementById('connection-status-detail');
+                const schemaBanner = document.getElementById('schema-banner');
+                const schemaBannerDetail = document.getElementById('schema-banner-detail');
+                const UI_SCHEMA_VERSION = 3;
+                let latestMeta = null;
+                let schemaCompatible = true;
+                const pendingEventFrames = [];
                 const channelOrder = ['events', 'market', 'golden', 'agents', 'rl', 'logs'];
                 const websocketChannels = ['events', 'rl', 'logs'];
                 const channelLabels = {
@@ -2505,6 +2756,97 @@ _PAGE_TEMPLATE = """
                     rl: createChannel('Waiting for metadata…'),
                     logs: createChannel('Waiting for metadata…')
                 };
+
+                function updateSchemaBanner(meta) {
+                    if (!schemaBanner || !schemaBannerDetail) {
+                        schemaCompatible = true;
+                        return;
+                    }
+                    if (!meta || typeof meta !== 'object') {
+                        schemaBanner.classList.remove('visible');
+                        schemaBannerDetail.textContent = '';
+                        schemaCompatible = true;
+                        return;
+                    }
+                    const rawVersion = meta.v;
+                    const version = typeof rawVersion === 'number' ? rawVersion : Number(rawVersion);
+                    if (Number.isFinite(version) && version !== UI_SCHEMA_VERSION) {
+                        schemaBanner.classList.add('visible');
+                        schemaBannerDetail.textContent = 'Expected v' + UI_SCHEMA_VERSION + ' · Received ' + version;
+                        schemaCompatible = false;
+                    } else {
+                        schemaBanner.classList.remove('visible');
+                        schemaBannerDetail.textContent = '';
+                        schemaCompatible = true;
+                    }
+                }
+
+                function applyMeta(meta) {
+                    latestMeta = meta && typeof meta === 'object' ? meta : null;
+                    updateSchemaBanner(latestMeta);
+                    if (!latestMeta) {
+                        return;
+                    }
+                    if (connectionBanner) {
+                        const lag = latestMeta.lag || {};
+                        connectionBanner.dataset.ohlcvLag = typeof lag.ohlcv === 'number' ? String(lag.ohlcv) : '';
+                        connectionBanner.dataset.depthLag = typeof lag.depth === 'number' ? String(lag.depth) : '';
+                        connectionBanner.dataset.goldenLag = typeof lag.golden === 'number' ? String(lag.golden) : '';
+                    }
+                    const detailParts = [];
+                    if (latestMeta.channel) {
+                        detailParts.push('Channel ' + latestMeta.channel);
+                    }
+                    const redisInfo = latestMeta.redis || {};
+                    if (redisInfo && Object.prototype.hasOwnProperty.call(redisInfo, 'db')) {
+                        detailParts.push('DB ' + redisInfo.db);
+                    }
+                    const detailText = schemaCompatible
+                        ? (detailParts.join(' · ') || 'Streaming')
+                        : ('Schema mismatch (expected v' + UI_SCHEMA_VERSION + ')');
+                    setChannelState('events', schemaCompatible ? 'open' : 'error', detailText);
+                    updateDataChannelsFromBanner();
+                    renderConnectionSummary();
+                }
+
+                function processPendingEventFrames() {
+                    if (!schemaCompatible || !latestMeta) {
+                        return;
+                    }
+                    while (pendingEventFrames.length) {
+                        const frame = pendingEventFrames.shift();
+                        handleEventFrame(frame);
+                    }
+                }
+
+                function handleEventFrame(frame) {
+                    if (!frame) {
+                        return;
+                    }
+                    // Realtime event handling is populated by downstream modules.
+                }
+
+                function parseMessagePayload(data) {
+                    if (typeof data === 'string') {
+                        const trimmed = data.trim();
+                        if (!trimmed) {
+                            return null;
+                        }
+                        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                            try {
+                                return JSON.parse(trimmed);
+                            } catch (err) {
+                                console.error('ui-msg-error', err, {payload: data});
+                                return {__raw__: data};
+                            }
+                        }
+                        return trimmed;
+                    }
+                    if (data && typeof data === 'object' && (typeof Blob === 'undefined' || !(data instanceof Blob))) {
+                        return data;
+                    }
+                    return null;
+                }
 
                 function normalizeStatus(status) {
                     switch (status) {
@@ -2750,32 +3092,57 @@ _PAGE_TEMPLATE = """
                     info.socket = socket;
                     socket.addEventListener('open', () => {
                         setChannelState(name, 'open', 'Connected');
+                        try {
+                            const helloFrame = JSON.stringify({event: 'hello', client: 'solhunter-ui', version: UI_SCHEMA_VERSION});
+                            socket.send(helloFrame);
+                        } catch (err) {
+                            // ignore handshake send errors
+                        }
                     });
                     socket.addEventListener('message', (event) => {
                         if (!event || typeof event.data === 'undefined') {
                             return;
                         }
-                        const data = event.data;
-                        if (typeof data === 'string') {
-                            const trimmed = data.trim();
-                            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-                                try {
-                                    JSON.parse(trimmed);
-                                } catch (err) {
-                                    console.error('ui-msg-error', err, {channel: name, payload: data});
-                                    setChannelState(name, 'warn', 'Bad frame skipped');
-                                    return;
-                                }
+                        const payload = parseMessagePayload(event.data);
+                        if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, '__raw__')) {
+                            setChannelState(name, 'warn', 'Bad frame skipped');
+                            return;
+                        }
+                        if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+                            const frameType = String(payload.type || payload.event || '').toLowerCase();
+                            if (frameType === 'hello') {
+                                return;
+                            }
+                            if (frameType === 'ui_meta' && name === 'events') {
+                                applyMeta(payload);
+                                processPendingEventFrames();
+                                return;
                             }
                         }
+                        if (name === 'events') {
+                            if (!latestMeta || !schemaCompatible) {
+                                pendingEventFrames.push(payload);
+                                if (pendingEventFrames.length > 500) {
+                                    pendingEventFrames.shift();
+                                }
+                                return;
+                            }
+                            handleEventFrame(payload);
+                        }
                         if (info.status !== 'open' || info.detail === 'Connected') {
-                            setChannelState(name, 'open', 'Streaming');
+                            const detail = schemaCompatible ? 'Streaming' : (info.detail || 'Streaming');
+                            setChannelState(name, 'open', detail);
                         }
                     });
                     socket.addEventListener('close', (event) => {
                         const code = event && typeof event.code === 'number' ? event.code : 1000;
                         const reason = event && event.reason ? event.reason : '';
                         info.socket = null;
+                        if (name === 'events') {
+                            latestMeta = null;
+                            updateSchemaBanner(null);
+                            pendingEventFrames.length = 0;
+                        }
                         const reasonText = 'closed (' + code + (reason ? ' ' + reason : '') + ')';
                         scheduleReconnect(name, url, reasonText);
                     });
@@ -2795,6 +3162,10 @@ _PAGE_TEMPLATE = """
                             throw new Error('HTTP ' + response.status);
                         }
                         meta = await response.json();
+                        if (meta && typeof meta.meta === 'object') {
+                            applyMeta(meta.meta);
+                            processPendingEventFrames();
+                        }
                     } catch (err) {
                         const message = err && err.message ? err.message : 'failed to load meta';
                         websocketChannels.forEach((name) => {
@@ -3102,6 +3473,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
     if state is None:
         state = UIState()
+    _set_active_ui_state(state)
 
     app = Flask(__name__)  # type: ignore[arg-type]
 
@@ -3404,11 +3776,13 @@ def create_app(state: UIState | None = None) -> Flask:
             if not host:
                 host = f"127.0.0.1:{manifest.get('ui_port', 5000)}"
             base_url = f"{scheme}://{host}"
+        meta_snapshot = get_ui_meta_snapshot()
         return {
             "url": base_url,
             "rl_ws": manifest["rl_ws"],
             "events_ws": manifest["events_ws"],
             "logs_ws": manifest["logs_ws"],
+            "meta": meta_snapshot,
         }
 
     def _probe_ws(url: str | None, *, timeout: float = 1.5) -> tuple[str, Optional[str]]:
@@ -3642,7 +4016,6 @@ def create_app(state: UIState | None = None) -> Flask:
         return {"ok": True}
 
     return app
-
 
 class UIServer:
     """Utility wrapper that runs the Flask app in a background thread."""
