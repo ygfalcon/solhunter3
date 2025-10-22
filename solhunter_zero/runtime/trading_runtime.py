@@ -37,6 +37,7 @@ from ..loop import (
 )
 from .. import resource_monitor
 from ..pipeline import PipelineCoordinator
+from ..paths import ROOT
 from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory

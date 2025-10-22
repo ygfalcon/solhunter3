@@ -57,12 +57,28 @@ class TTLCache:
 class CircuitBreaker:
     """Simple circuit breaker used to guard external integrations."""
 
-    def __init__(self, *, threshold: int, window_sec: float, cooldown_sec: float) -> None:
+    def __init__(
+        self,
+        *,
+        threshold: int,
+        window_sec: float,
+        cooldown_sec: float,
+        on_open: Callable[[float], None] | None = None,
+    ) -> None:
         self.threshold = threshold
         self.window_sec = window_sec
         self.cooldown_sec = cooldown_sec
         self._failures: Deque[float] = deque()
         self._opened_until: float = 0.0
+        self._on_open = on_open
+
+    def _notify_open(self, duration: float) -> None:
+        if self._on_open is None:
+            return
+        try:
+            self._on_open(max(0.0, float(duration)))
+        except Exception:
+            pass
 
     def _prune(self) -> None:
         """Discard failures that fall outside the rolling window."""
@@ -81,7 +97,25 @@ class CircuitBreaker:
         self._failures.append(now)
         self._prune()
         if len(self._failures) >= self.threshold:
-            self._opened_until = now + self.cooldown_sec
+            was_open = self._opened_until > now
+            opened_until = max(self._opened_until, now + self.cooldown_sec)
+            self._opened_until = opened_until
+            if not was_open and opened_until > now:
+                self._notify_open(opened_until - now)
+
+    def open_for(self, duration: float) -> None:
+        """Force the breaker open for ``duration`` seconds."""
+
+        duration = max(0.0, float(duration))
+        if duration <= 0:
+            return
+        self._failures.clear()
+        now = now_ts()
+        was_open = self._opened_until > now
+        opened_until = max(self._opened_until, now + duration)
+        self._opened_until = opened_until
+        if not was_open and opened_until > now:
+            self._notify_open(opened_until - now)
 
     @property
     def is_open(self) -> bool:

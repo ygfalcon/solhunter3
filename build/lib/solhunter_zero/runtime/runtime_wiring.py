@@ -13,6 +13,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 
 from ..event_bus import subscribe
 from ..ui import UIState, get_ws_channel_metrics
+from .schema_adapters import read_golden, read_ohlcv
 from ..util import parse_bool_env
 
 
@@ -126,6 +127,71 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
     if not math.isfinite(result):
         return default
     return result
+
+
+def _extract_nested_float(
+    value: Any, preferred_keys: Iterable[str] = ()
+) -> Optional[float]:
+    if isinstance(value, Mapping):
+        for key in preferred_keys:
+            if key in value:
+                numeric = _maybe_float(value.get(key))
+                if numeric is not None:
+                    return numeric
+        for candidate in value.values():
+            numeric = _extract_nested_float(candidate)
+            if numeric is not None:
+                return numeric
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            numeric = _extract_nested_float(item)
+            if numeric is not None:
+                return numeric
+        return None
+    return _maybe_float(value)
+
+
+def _extract_golden_spread(snapshot: Mapping[str, Any]) -> Optional[float]:
+    return _extract_nested_float(
+        snapshot.get("px"),
+        (
+            "spread_bps",
+            "spreadBps",
+            "spread",
+            "spread_pct",
+            "spreadPct",
+        ),
+    )
+
+
+def _extract_golden_depths(snapshot: Mapping[str, Any]) -> Dict[str, float]:
+    liq = snapshot.get("liq")
+    depth_source: Any = None
+    if isinstance(liq, Mapping):
+        depth_source = liq.get("depth_pct") or liq.get("depth")
+    result: Dict[str, float] = {}
+    if isinstance(depth_source, Mapping):
+        for key, raw in depth_source.items():
+            numeric = _maybe_float(raw)
+            if numeric is None:
+                continue
+            label = str(key).strip()
+            if label.endswith("bps"):
+                label = label[: -3]
+            label = label.strip("% ")
+            if not label:
+                continue
+            result[label] = numeric
+    return result
+def _maybe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    numeric = _maybe_float(value)
+    if numeric is None:
+        return default
+    try:
+        return int(numeric)
+    except Exception:
+        return default
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
@@ -463,6 +529,7 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            read_ohlcv(payload, reader="runtime_wiring")
             with self._swarm_lock:
                 self._market_ohlcv[str(mint)] = payload
 
@@ -481,6 +548,7 @@ class RuntimeEventCollectors:
             if not mint:
                 return
             payload["_received"] = time.time()
+            read_golden(payload, reader="runtime_wiring")
             hash_value = payload.get("hash")
             with self._swarm_lock:
                 self._golden_snapshots[str(mint)] = payload
@@ -1111,11 +1179,29 @@ class RuntimeEventCollectors:
                 stale = True
             if age_depth is not None and age_depth > 6.0:
                 stale = True
+            normalized_candle = read_ohlcv(candle, reader="runtime_wiring")
+            close_value = normalized_candle.get("close")
+            volume_value = normalized_candle.get("volume_usd")
+            volume_base_value = normalized_candle.get("volume_base")
+            buyers_value = normalized_candle.get("buyers")
+            if buyers_value is None:
+                buyers_value = _maybe_int(depth_entry.get("buyers"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(depth_entry.get("buyer_count"))
+            if buyers_value is None:
+                buyers_value = _maybe_int(depth_entry.get("num_buyers"))
+            sellers_value = normalized_candle.get("sellers")
+            if sellers_value is None:
+                sellers_value = _maybe_int(depth_entry.get("sellers"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(depth_entry.get("seller_count"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(depth_entry.get("num_sellers"))
             markets.append(
                 {
                     "mint": mint,
-                    "close": _maybe_float(candle.get("close")),
-                    "volume": _maybe_float(candle.get("volume")),
+                    "close": close_value,
+                    "volume": volume_value,
                     "spread_bps": _maybe_float(depth_entry.get("spread_bps")),
                     "depth_pct": depth_pct,
                     "age_close": age_close,
@@ -1124,6 +1210,9 @@ class RuntimeEventCollectors:
                     "lag_depth_ms": age_depth * 1000.0 if age_depth is not None else None,
                     "stale": stale,
                     "updated_label": _format_age(combined_age),
+                    "buyers": buyers_value,
+                    "sellers": sellers_value,
+                    "volume_base": volume_base_value,
                 }
             )
         summary = {
@@ -1141,6 +1230,7 @@ class RuntimeEventCollectors:
         lag_samples: List[float] = []
         for mint in sorted(golden.keys()):
             payload = dict(golden[mint])
+            normalized_golden = read_golden(payload, reader="runtime_wiring")
             timestamp = _entry_timestamp(payload, "asof")
             age = _age_seconds(timestamp, now)
             if age is None and payload.get("_received") is not None:
@@ -1181,13 +1271,98 @@ class RuntimeEventCollectors:
                     stale_flag = age > stale_threshold
                 else:
                     stale_flag = age > 60.0
+            px_mid = normalized_golden.get("mid_usd")
+            spread_bps = _extract_golden_spread(payload)
+            px_payload = payload.get("px")
+            px_detail = _serialize(px_payload) if isinstance(px_payload, Mapping) else None
+            liq_payload = payload.get("liq")
+            liq_detail = _serialize(liq_payload) if isinstance(liq_payload, Mapping) else None
+            px_bid = _maybe_float(payload.get("px_bid_usd"))
+            px_ask = _maybe_float(payload.get("px_ask_usd"))
+            liq_total_usd = None
+            if isinstance(liq_payload, Mapping):
+                liq_total_usd = _extract_nested_float(
+                    liq_payload,
+                    (
+                        "liquidity_usd",
+                        "usd_total",
+                        "usd",
+                        "notional_usd",
+                        "notional",
+                    ),
+                )
+            if liq_total_usd is None:
+                liq_total_usd = _maybe_float(liq_payload)
+            primary_liq = normalized_golden.get("depth_1pct_usd")
+            if primary_liq is None:
+                primary_liq = liq_total_usd
+            depth_pct = _extract_golden_depths(payload)
+            depth_0_1 = _maybe_float(payload.get("liq_depth_0_1pct_usd"))
+            depth_0_5 = _maybe_float(payload.get("liq_depth_0_5pct_usd"))
+            depth_1_0 = _maybe_float(payload.get("liq_depth_1_0pct_usd"))
+            degraded_flag = bool(payload.get("degraded"))
+            if not degraded_flag and isinstance(liq_payload, Mapping):
+                degraded_flag = bool(liq_payload.get("degraded"))
+            source_label = payload.get("source")
+            if not source_label and isinstance(liq_payload, Mapping):
+                source_label = liq_payload.get("source")
+            staleness_ms = _maybe_float(payload.get("staleness_ms"))
+            if staleness_ms is None and isinstance(liq_payload, Mapping):
+                staleness_ms = _maybe_float(liq_payload.get("staleness_ms"))
+            route_meta = None
+            if isinstance(liq_payload, Mapping):
+                raw_meta = liq_payload.get("route_meta")
+                if isinstance(raw_meta, Mapping):
+                    hops_value = _maybe_float(raw_meta.get("hops"))
+                    route_meta = {
+                        "hops": int(hops_value or 0),
+                        "dexes": [str(item) for item in raw_meta.get("dexes") or []],
+                    }
+                    latency_value = _maybe_float(raw_meta.get("latency_ms"))
+                    if latency_value is not None:
+                        route_meta["latency_ms"] = latency_value
+                    sweeps_value = raw_meta.get("sweeps")
+                    if isinstance(sweeps_value, list):
+                        sweeps: list[Dict[str, Any]] = []
+                        for sweep in sweeps_value:
+                            if not isinstance(sweep, Mapping):
+                                continue
+                            entry: Dict[str, Any] = {}
+                            direction = sweep.get("direction")
+                            if isinstance(direction, str):
+                                entry["direction"] = direction
+                            usd_val = _maybe_float(sweep.get("usd"))
+                            if usd_val is not None:
+                                entry["usd"] = usd_val
+                            impact_val = _maybe_float(sweep.get("impact_bps"))
+                            if impact_val is not None:
+                                entry["impact_bps"] = impact_val
+                            if entry:
+                                sweeps.append(entry)
+                        if sweeps:
+                            route_meta["sweeps"] = sweeps
             snapshots.append(
                 {
                     "mint": mint,
                     "hash": hash_text,
                     "hash_short": _short_hash(hash_text),
-                    "px": _maybe_float(payload.get("px")),
-                    "liq": _maybe_float(payload.get("liq")),
+                    "px": px_mid,
+                    "px_mid_usd": px_mid,
+                    "px_bid_usd": px_bid,
+                    "px_ask_usd": px_ask,
+                    "px_detail": px_detail,
+                    "spread_bps": spread_bps,
+                    "liq": primary_liq,
+                    "liq_total_usd": liq_total_usd,
+                    "liq_depth_pct": depth_pct if depth_pct else None,
+                    "liq_detail": liq_detail,
+                    "liq_depth_0_1pct_usd": depth_0_1,
+                    "liq_depth_0_5pct_usd": depth_0_5,
+                    "liq_depth_1_0pct_usd": depth_1_0,
+                    "degraded": degraded_flag,
+                    "source": source_label,
+                    "staleness_ms": staleness_ms,
+                    "route_meta": route_meta,
                     "age_seconds": age,
                     "age_label": _format_age(age),
                     "stale": stale_flag,

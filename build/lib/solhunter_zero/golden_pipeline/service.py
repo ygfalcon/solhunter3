@@ -22,6 +22,9 @@ from ..token_scanner import TRENDING_METADATA
 from .agents import BaseAgent
 from .bus import EventBusAdapter, MessageBus
 from .contracts import STREAMS
+from .depth_adapter import GoldenDepthAdapter
+from .flags import resolve_depth_flag, resolve_momentum_flag
+from .momentum import MomentumAgent
 from .pipeline import GoldenPipeline
 from .types import (
     Decision,
@@ -37,6 +40,59 @@ from .types import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _parse_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_depth_cache_ttl(config: Mapping[str, Any] | None) -> float:
+    default = 10.0
+    env_name = None
+    env_value = None
+    for candidate_env in ("GOLDEN_DEPTH_TTL_SECONDS", "GOLDEN_DEPTH_CACHE_TTL"):
+        value = os.getenv(candidate_env)
+        if value is not None:
+            env_name = candidate_env
+            env_value = value
+            break
+    if env_value is not None:
+        parsed_env = _parse_float(env_value)
+        if parsed_env is not None and parsed_env > 0:
+            return max(0.5, parsed_env)
+        log.warning(
+            "Invalid %s=%r; falling back to default %.1f s",
+            env_name,
+            env_value,
+            default,
+        )
+    candidate: Any = None
+    if isinstance(config, Mapping):
+        golden_cfg = config.get("golden")
+        if isinstance(golden_cfg, Mapping):
+            depth_cfg = golden_cfg.get("depth")
+            if isinstance(depth_cfg, Mapping):
+                candidate = depth_cfg.get("cache_ttl") or depth_cfg.get("depth_cache_ttl")
+            if candidate is None:
+                candidate = golden_cfg.get("depth_cache_ttl")
+        legacy_cfg = config.get("golden_pipeline")
+        if candidate is None and isinstance(legacy_cfg, Mapping):
+            depth_cfg = legacy_cfg.get("depth")
+            if isinstance(depth_cfg, Mapping):
+                candidate = depth_cfg.get("cache_ttl") or depth_cfg.get("depth_cache_ttl")
+    parsed = _parse_float(candidate)
+    if parsed is not None and parsed > 0:
+        return max(0.5, parsed)
+    if candidate is not None:
+        log.warning(
+            "Invalid depth_cache_ttl=%r in config; using default %.1f s",
+            candidate,
+            default,
+        )
+    return default
 
 
 _GLOBAL_CAP_ENV = "SWARM_AGENT_GLOBAL_CAP_USD"
@@ -652,10 +708,14 @@ class GoldenPipelineService:
         portfolio: Portfolio,
         enrichment_fetcher: Optional[Callable[[Iterable[str]], Awaitable[Dict[str, TokenSnapshot]]]] = None,
         event_bus: EventBus | None = None,
+        config: Mapping[str, Any] | None = None,
     ) -> None:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
         self._event_bus = event_bus or RUNTIME_EVENT_BUS
+        self._config = config
+        self._depth_flag = resolve_depth_flag(config)
+        self._momentum_flag = resolve_momentum_flag(config)
         if enrichment_fetcher is None:
             enrichment_fetcher = self._default_enrichment_fetcher
         shared_bus = EventBusAdapter(self._event_bus)
@@ -674,6 +734,21 @@ class GoldenPipelineService:
             on_virtual_fill=self._handle_virtual_fill,
             on_virtual_pnl=self._handle_virtual_pnl,
             bus=shared_bus,
+            depth_extensions_enabled=self._depth_flag,
+        )
+        self._momentum_agent: MomentumAgent | None = None
+        if self._momentum_flag:
+            self._momentum_agent = MomentumAgent(
+                pipeline=self.pipeline,
+                publish=self.pipeline.publish_momentum,
+                config=config,
+            )
+        depth_cache_ttl = _resolve_depth_cache_ttl(config)
+        self._depth_adapter = GoldenDepthAdapter(
+            enabled=self._depth_flag,
+            submit_depth=self.pipeline.submit_depth,
+            decimals_resolver=self._resolve_decimals,
+            cache_ttl=depth_cache_ttl,
         )
 
         self._subscriptions: List[Callable[[], None]] = []
@@ -682,6 +757,14 @@ class GoldenPipelineService:
         self._pending_gate = asyncio.Semaphore(_MAX_IN_FLIGHT_SPAWN_TASKS)
         self._running = False
         self._last_price: Dict[str, float] = {}
+
+    def _resolve_decimals(self, mint: str) -> int:
+        coalescer = getattr(self.pipeline, "_coalescer", None)
+        if coalescer is not None:
+            snapshot = coalescer.get_metadata(mint)  # type: ignore[attr-defined]
+            if snapshot is not None:
+                return int(getattr(snapshot, "decimals", 6))
+        return 6
 
     async def start(self) -> None:
         if self._running:
@@ -700,6 +783,9 @@ class GoldenPipelineService:
             self._event_bus.subscribe("depth_update", self._on_depth)
         )
         await self.pipeline.flush_market()
+        await self._depth_adapter.start()
+        if self._momentum_agent:
+            await self._momentum_agent.start()
         self._tasks.append(asyncio.create_task(self._market_flush_loop(), name="golden_market_flush"))
         self._tasks.append(asyncio.create_task(self._heartbeat_loop(), name="golden_heartbeat"))
         if bootstrapped:
@@ -729,6 +815,9 @@ class GoldenPipelineService:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+        await self._depth_adapter.stop()
+        if self._momentum_agent:
+            await self._momentum_agent.stop()
 
         pending = list(self._pending)
         for task in pending:
@@ -916,6 +1005,8 @@ class GoldenPipelineService:
 
             if accepted:
                 bootstrapped += 1
+                if self._momentum_agent:
+                    self._momentum_agent.record_candidate(canonical, ts=now)
 
         return bootstrapped
 
@@ -936,6 +1027,8 @@ class GoldenPipelineService:
             mint = canonical_mint(str(raw))
             candidate = DiscoveryCandidate(mint=mint, asof=now)
             self._spawn(self.pipeline.submit_discovery(candidate))
+            if self._momentum_agent and mint:
+                self._momentum_agent.record_candidate(mint, ts=now)
 
     def _on_price(self, payload: Any) -> None:
         if not self._running or not isinstance(payload, dict):
@@ -945,6 +1038,8 @@ class GoldenPipelineService:
         if not token or price is None or price <= 0:
             return
         mint = canonical_mint(str(token))
+        if self._depth_flag:
+            self._depth_adapter.record_activity(mint)
         self._last_price[mint] = price
         try:
             self.portfolio.record_prices({mint: float(price)})
@@ -981,6 +1076,8 @@ class GoldenPipelineService:
                 mint = canonical_mint(str(token))
             except Exception:
                 continue
+            if self._depth_flag:
+                self._depth_adapter.record_activity(mint, weight=2.0)
             bids = _coerce_float(entry.get("bids")) or 0.0
             asks = _coerce_float(entry.get("asks")) or 0.0
             depth_val = _coerce_float(entry.get("depth")) or max(bids + asks, 0.0)
@@ -1069,6 +1166,8 @@ class GoldenPipelineService:
                 "detail": f"snapshot:{snapshot.mint}:{snapshot.hash[:6]}",
             },
         )
+        if self._momentum_agent:
+            self._momentum_agent.record_snapshot(snapshot)
 
     async def _handle_suggestion(self, suggestion: TradeSuggestion) -> None:
         self._event_bus.publish(

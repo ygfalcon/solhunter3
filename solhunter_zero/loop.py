@@ -6,16 +6,18 @@ import os
 import random
 import time
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from . import resource_monitor
 from .event_bus import publish
 from .schemas import Heartbeat, RuntimeLog, WeightsUpdated
 from .agents.execution import ExecutionAgent
-from .agent_manager import EvaluationContext
 from .strategy_manager import StrategyManager
 from .swarm_pipeline import SwarmPipeline
 from .util import parse_bool_env
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .agent_manager import EvaluationContext
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +96,9 @@ class _LegacyStrategyAdapter:
         self.depth_service = False
         self.skip_simulation = True
 
-    async def evaluate_with_swarm(self, token: str, portfolio: Any) -> EvaluationContext:
+    async def evaluate_with_swarm(self, token: str, portfolio: Any) -> "EvaluationContext":
+        from .agent_manager import EvaluationContext
+
         result = await self.strategy_manager.evaluate(token, portfolio)
         actions: list[Dict[str, Any]] = []
         for action in result or []:

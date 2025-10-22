@@ -7,7 +7,7 @@ not fail simply because those optional packages are missing. To avoid that we
 lazily import the heavy modules when the relevant attributes are accessed.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.7"
 
 __all__ = [
     "load_keypair",

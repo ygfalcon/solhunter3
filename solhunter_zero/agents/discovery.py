@@ -19,10 +19,41 @@ from ..scanner_common import (
 )
 from ..scanner_onchain import scan_tokens_onchain
 from ..schemas import RuntimeLog
-from ..token_scanner import enrich_tokens_async, scan_tokens_async
 from ..news import fetch_token_mentions_async
 
 logger = logging.getLogger(__name__)
+
+try:
+    from ..token_scanner import enrich_tokens_async, scan_tokens_async
+except ImportError as exc:  # pragma: no cover - optional dependency guard
+    logger.warning(
+        "token_scanner unavailable (%s); falling back to stubbed discovery helpers",
+        exc,
+    )
+
+    async def scan_tokens_async(
+        *,
+        rpc_url: str = DEFAULT_SOLANA_RPC,
+        limit: int = 50,
+        enrich: bool = True,
+        api_key: str | None = None,
+    ) -> List[str]:
+        del rpc_url, api_key
+        seeds = list(_STATIC_FALLBACK)
+        return seeds[: max(0, limit)]
+
+    async def enrich_tokens_async(
+        mints: Iterable[str],
+        *,
+        rpc_url: str = DEFAULT_SOLANA_RPC,
+    ) -> List[str]:
+        del rpc_url
+        enriched: List[str] = []
+        for candidate in mints:
+            canonical = canonical_mint(candidate)
+            if canonical and validate_mint(canonical):
+                enriched.append(canonical)
+        return enriched
 
 _CACHE: dict[str, object] = {"tokens": [], "ts": 0.0, "limit": 0, "method": ""}
 _STATIC_FALLBACK = [

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import logging
 import socket
-from typing import Any
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Dict
+from urllib.parse import urlparse
 import aiohttp
 from aiohttp.abc import AbstractResolver
 from aiohttp.resolver import DefaultResolver
@@ -253,13 +258,164 @@ async def close_session() -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Host-level concurrency guards and retry hints
+# ---------------------------------------------------------------------------
+
+
+class HostCircuitOpenError(RuntimeError):
+    """Raised when a host circuit breaker blocks new requests."""
+
+
+@dataclass(slots=True)
+class _HostConfig:
+    host: str
+    limit: int
+    threshold: int
+    cooldown: float
+    max_attempts: int
+    backoff: float
+
+
+_HOST_RULES: tuple[_HostConfig, ...] = (
+    _HostConfig("lite-api.jup.ag", limit=6, threshold=3, cooldown=20.0, max_attempts=2, backoff=0.25),
+    _HostConfig("api.dexscreener.com", limit=8, threshold=3, cooldown=20.0, max_attempts=2, backoff=0.3),
+    _HostConfig("public-api.birdeye.so", limit=6, threshold=3, cooldown=30.0, max_attempts=2, backoff=0.35),
+    _HostConfig("api.meteora.ag", limit=4, threshold=3, cooldown=20.0, max_attempts=2, backoff=0.3),
+    _HostConfig("api.dexlab.space", limit=2, threshold=2, cooldown=30.0, max_attempts=2, backoff=0.4),
+    _HostConfig("pro-api.solscan.io", limit=4, threshold=3, cooldown=30.0, max_attempts=2, backoff=0.35),
+    _HostConfig("public-api.solscan.io", limit=4, threshold=3, cooldown=30.0, max_attempts=2, backoff=0.35),
+    _HostConfig("api.helius.xyz", limit=4, threshold=3, cooldown=20.0, max_attempts=2, backoff=0.25),
+    _HostConfig("mainnet.helius-rpc.com", limit=4, threshold=3, cooldown=20.0, max_attempts=2, backoff=0.25),
+    _HostConfig("hermes.pyth.network", limit=6, threshold=3, cooldown=20.0, max_attempts=2, backoff=0.25),
+)
+
+
+class _HostController:
+    """Track concurrency and failures for a particular host."""
+
+    __slots__ = ("config", "semaphore", "_failures", "_opened_until")
+
+    def __init__(self, config: _HostConfig) -> None:
+        self.config = config
+        limit = max(1, config.limit) if config.limit > 0 else 1
+        self.semaphore: asyncio.Semaphore = asyncio.Semaphore(limit)
+        self._failures: list[float] = []
+        self._opened_until: float = 0.0
+
+    def allow(self) -> bool:
+        now = time.monotonic()
+        if self._opened_until and now < self._opened_until:
+            return False
+        if self._opened_until and now >= self._opened_until:
+            self._opened_until = 0.0
+            self._failures.clear()
+        return True
+
+    def record_success(self) -> None:
+        self._failures.clear()
+        self._opened_until = 0.0
+
+    def record_failure(self) -> None:
+        now = time.monotonic()
+        self._failures.append(now)
+        window_start = now - self.config.cooldown
+        self._failures = [ts for ts in self._failures if ts >= window_start]
+        if len(self._failures) >= self.config.threshold:
+            self._opened_until = now + self.config.cooldown
+
+
+_HOST_CONTROLLERS: Dict[str, _HostController] = {}
+
+
+def _match_host_config(host: str) -> _HostConfig:
+    host = host.lower()
+    for rule in _HOST_RULES:
+        if host == rule.host or host.endswith("." + rule.host):
+            return rule
+    default_limit = CONNECTOR_LIMIT_PER_HOST or 4
+    return _HostConfig(host, limit=max(1, default_limit), threshold=3, cooldown=30.0, max_attempts=2, backoff=0.3)
+
+
+def _controller_for(host: str) -> _HostController:
+    controller = _HOST_CONTROLLERS.get(host)
+    if controller is None:
+        controller = _HostController(_match_host_config(host))
+        _HOST_CONTROLLERS[host] = controller
+    return controller
+
+
+@asynccontextmanager
+async def host_request(url: str) -> AsyncIterator[_HostConfig]:
+    """Context manager guarding a request to *url*'s host."""
+
+    parsed = urlparse(url)
+    host = parsed.hostname or parsed.netloc
+    if not host:
+        yield _match_host_config("unknown")
+        return
+    controller = _controller_for(host)
+    if not controller.allow():
+        raise HostCircuitOpenError(f"circuit open for host {host}")
+    async with controller.semaphore:
+        try:
+            yield controller.config
+        except Exception:
+            controller.record_failure()
+            raise
+        else:
+            controller.record_success()
+
+
+def host_retry_config(url: str) -> tuple[int, float]:
+    """Return ``(max_attempts, backoff_seconds)`` for *url*."""
+
+    parsed = urlparse(url)
+    host = parsed.hostname or parsed.netloc
+    if not host:
+        return 1, 0.0
+    config = _controller_for(host).config
+    return max(1, config.max_attempts), max(0.0, config.backoff)
+
+
 async def fetch_json(url: str, method: str = "GET", **kwargs: Any) -> Any:
     """Fetch *url* using *method* and return the parsed JSON body."""
 
     sess = await get_session()
-    async with sess.request(method, url, **kwargs) as response:
-        if response.status >= 400:
-            text = await response.text()
-            raise HTTPError(f"{method} {url} -> {response.status}: {text[:300]}")
-        raw = await response.read()
-        return loads(raw)
+    attempts, backoff = host_retry_config(url)
+    attempt = 0
+    last_error: Exception | None = None
+    while attempt < attempts:
+        try:
+            async with host_request(url):
+                async with sess.request(method, url, **kwargs) as response:
+                    if response.status >= 400:
+                        text = await response.text()
+                        raise HTTPError(f"{method} {url} -> {response.status}: {text[:300]}")
+                    raw = await response.read()
+                    return loads(raw)
+        except HostCircuitOpenError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            attempt += 1
+            if attempt >= attempts:
+                break
+            await asyncio.sleep(backoff * (2 ** (attempt - 1)))
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"failed to fetch {url}")
+
+
+__all__ = [
+    "HTTPError",
+    "dumps",
+    "loads",
+    "check_endpoint",
+    "get_session",
+    "close_session",
+    "fetch_json",
+    "host_request",
+    "host_retry_config",
+    "HostCircuitOpenError",
+]

@@ -1,18 +1,29 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
 import aiohttp
+from aiohttp import ClientResponseError, ClientTimeout
 
 from ..http import get_session
+from ..lru import TTLCache
+from ..token_aliases import canonical_mint, validate_mint
 
-DEFAULT_JUP_BASE = "https://quote-api.jup.ag"
-DEFAULT_QUOTE_PATH = "/v6/quote"
-DEFAULT_SWAP_PATH = "/v6/swap"
+DEFAULT_JUP_BASE = "https://lite-api.jup.ag"
+DEFAULT_QUOTE_PATH = "/swap/v1/quote"
+DEFAULT_SWAP_PATH = "/swap/v1/swap"
+DEFAULT_TOKEN_SEARCH_PATH = "/tokens/v2/search"
+
+DEFAULT_CONNECT_TIMEOUT = float(os.getenv("JUPITER_SWAP_CONNECT_TIMEOUT", "0.3") or 0.3)
+DEFAULT_READ_TIMEOUT = float(os.getenv("JUPITER_SWAP_READ_TIMEOUT", "0.7") or 0.7)
+DEFAULT_TOTAL_TIMEOUT = float(os.getenv("JUPITER_SWAP_TOTAL_TIMEOUT", "1.5") or 1.5)
+TOKEN_CACHE_TTL = float(os.getenv("JUPITER_TOKEN_CACHE_TTL", "900") or 900)
+TOKEN_CACHE_SIZE = max(64, int(os.getenv("JUPITER_TOKEN_CACHE_SIZE", "256") or 256))
+
+_TOKEN_CACHE: TTLCache = TTLCache(maxsize=TOKEN_CACHE_SIZE, ttl=TOKEN_CACHE_TTL)
 
 
 class JupiterSwapError(RuntimeError):
@@ -23,25 +34,46 @@ class JupiterSwapError(RuntimeError):
 class JupiterConfig:
     quote_url: str
     swap_url: str
+    token_search_url: str
     slippage_bps: int
-    timeout: float
+    timeout: ClientTimeout
 
 
 def load_config() -> JupiterConfig:
     base = os.getenv("JUPITER_API_BASE", DEFAULT_JUP_BASE).rstrip("/")
     quote_url = os.getenv("JUPITER_QUOTE_URL") or f"{base}{DEFAULT_QUOTE_PATH}"
     swap_url = os.getenv("JUPITER_SWAP_URL") or f"{base}{DEFAULT_SWAP_PATH}"
+    token_search_url = os.getenv("JUPITER_TOKEN_SEARCH_URL") or f"{base}{DEFAULT_TOKEN_SEARCH_PATH}"
     try:
-        slippage = int(os.getenv("JUPITER_SLIPPAGE_BPS", "100") or "100")
+        slippage = int(os.getenv("JUPITER_SLIPPAGE_BPS", "50") or "50")
     except ValueError:
-        slippage = 100
+        slippage = 50
     try:
-        timeout = float(os.getenv("JUPITER_HTTP_TIMEOUT", "20") or 20)
+        connect = float(
+            os.getenv("JUPITER_SWAP_CONNECT_TIMEOUT", str(DEFAULT_CONNECT_TIMEOUT))
+            or DEFAULT_CONNECT_TIMEOUT
+        )
     except ValueError:
-        timeout = 20.0
+        connect = DEFAULT_CONNECT_TIMEOUT
+    try:
+        read = float(
+            os.getenv("JUPITER_SWAP_READ_TIMEOUT", str(DEFAULT_READ_TIMEOUT))
+            or DEFAULT_READ_TIMEOUT
+        )
+    except ValueError:
+        read = DEFAULT_READ_TIMEOUT
+    try:
+        total = float(
+            os.getenv("JUPITER_SWAP_TOTAL_TIMEOUT", str(DEFAULT_TOTAL_TIMEOUT))
+            or DEFAULT_TOTAL_TIMEOUT
+        )
+    except ValueError:
+        total = DEFAULT_TOTAL_TIMEOUT
+    timeout = ClientTimeout(total=total, sock_connect=connect, sock_read=read)
     return JupiterConfig(
         quote_url=quote_url,
         swap_url=swap_url,
+        token_search_url=token_search_url,
         slippage_bps=slippage,
         timeout=timeout,
     )
@@ -54,8 +86,9 @@ async def _request_json(
     method: str = "GET",
     params: Dict[str, Any] | None = None,
     payload: Dict[str, Any] | None = None,
-    timeout: float = 20.0,
-) -> Dict[str, Any]:
+    timeout: ClientTimeout,
+    expect_mapping: bool = True,
+) -> Any:
     request = session.request(
         method,
         url,
@@ -63,12 +96,60 @@ async def _request_json(
         json=payload,
         timeout=timeout,
     )
-    async with request as resp:
-        resp.raise_for_status()
-        data = await resp.json(content_type=None)
-    if not isinstance(data, dict):
-        raise JupiterSwapError(f"{url} returned non-JSON payload")
+    try:
+        async with request as resp:
+            resp.raise_for_status()
+            data = await resp.json(content_type=None)
+    except ClientResponseError as exc:
+        raise JupiterSwapError(
+            f"{method} {url} failed with HTTP {exc.status}: {exc.message}"
+        ) from exc
+    if expect_mapping and not isinstance(data, dict):
+        raise JupiterSwapError(f"{url} returned non-JSON mapping payload")
     return data
+
+
+def _cache_key(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+async def _resolve_token_mint(
+    session: aiohttp.ClientSession,
+    value: str,
+    *,
+    token_search_url: str,
+    timeout: ClientTimeout,
+) -> str:
+    candidate = canonical_mint(value)
+    if validate_mint(candidate):
+        return candidate
+    key = _cache_key(value)
+    cached = _TOKEN_CACHE.get(key)
+    if isinstance(cached, str) and validate_mint(cached):
+        return canonical_mint(cached)
+    payload = await _request_json(
+        session,
+        token_search_url,
+        params={"query": value},
+        timeout=timeout,
+        expect_mapping=False,
+    )
+    resolved: str | None = None
+    if isinstance(payload, list):
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            mint = entry.get("address") or entry.get("id")
+            if not isinstance(mint, str):
+                continue
+            canonical = canonical_mint(mint)
+            if validate_mint(canonical):
+                resolved = canonical
+                break
+    if resolved is None:
+        raise JupiterSwapError(f"Unable to resolve mint '{value}' via Jupiter token search")
+    _TOKEN_CACHE.set(key, resolved)
+    return resolved
 
 
 async def request_swap_transaction(
@@ -92,11 +173,25 @@ async def request_swap_transaction(
 
     cfg = config or load_config()
     session = await get_session()
+    resolved_input = await _resolve_token_mint(
+        session,
+        input_mint,
+        token_search_url=cfg.token_search_url,
+        timeout=cfg.timeout,
+    )
+    resolved_output = await _resolve_token_mint(
+        session,
+        output_mint,
+        token_search_url=cfg.token_search_url,
+        timeout=cfg.timeout,
+    )
+
     quote_params = {
-        "inputMint": input_mint,
-        "outputMint": output_mint,
+        "inputMint": resolved_input,
+        "outputMint": resolved_output,
         "amount": str(amount),
         "slippageBps": str(cfg.slippage_bps),
+        "swapMode": "ExactIn",
     }
 
     quote = await _request_json(

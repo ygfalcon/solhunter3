@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 Timestamp = float
 
-GOLDEN_SNAPSHOT_SCHEMA_VERSION = "1.0"
+OHLCV_BAR_SCHEMA_VERSION = "2.0"
+GOLDEN_SNAPSHOT_SCHEMA_VERSION = "2.0"
 TOKEN_SNAPSHOT_SCHEMA_VERSION = "1.0"
 DEPTH_SNAPSHOT_SCHEMA_VERSION = "1.0"
 TRADE_SUGGESTION_SCHEMA_VERSION = "1.0"
@@ -73,12 +74,14 @@ class OHLCVBar:
     low: float
     close: float
     vol_usd: float
+    vol_base: float
     trades: int
     buyers: int
     flow_usd: float
     zret: float
     zvol: float
     asof_close: Timestamp
+    schema_version: str = field(default=OHLCV_BAR_SCHEMA_VERSION)
 
 
 @dataclass(slots=True)
@@ -91,6 +94,13 @@ class DepthSnapshot:
     spread_bps: float
     depth_pct: Dict[str, float]
     asof: Timestamp
+    px_bid_usd: float | None = None
+    px_ask_usd: float | None = None
+    depth_bands_usd: Dict[str, float] | None = None
+    degraded: bool = False
+    source: str | None = None
+    route_meta: Dict[str, Any] | None = None
+    staleness_ms: float | None = None
     schema_version: str = field(default=DEPTH_SNAPSHOT_SCHEMA_VERSION)
 
 
@@ -105,7 +115,19 @@ class GoldenSnapshot:
     liq: Dict[str, Any]
     ohlcv5m: Dict[str, Any]
     hash: str
+    content_hash: str = ""
+    idempotency_key: str = ""
     metrics: Dict[str, Any] = field(default_factory=dict)
+    momentum_score: float | None = None
+    pump_intensity: float | None = None
+    pump_score: float | None = None
+    social_score: float | None = None
+    social_sentiment: float | None = None
+    tweets_per_min: float | None = None
+    momentum_sources: tuple[str, ...] = field(default_factory=tuple)
+    momentum_breakdown: Dict[str, Any] = field(default_factory=dict)
+    momentum_partial: bool = False
+    momentum_stale: bool = False
     schema_version: str = field(default=GOLDEN_SNAPSHOT_SCHEMA_VERSION)
 
 

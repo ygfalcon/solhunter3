@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import asdict
-from typing import Awaitable, Callable, Dict, Iterable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
 
 from .agents import AgentStage, BaseAgent
 from .bus import InMemoryBus, MessageBus
@@ -17,6 +17,7 @@ from .enrichment import EnrichmentStage, EnrichmentFetcher
 from .execution import ExecutionContext, LiveExecutor, ShadowExecutor
 from .kv import InMemoryKeyValueStore, KeyValueStore
 from .market import MarketDataStage
+from .momentum import MomentumComputation
 from .metrics import GoldenMetrics
 from .types import (
     Decision,
@@ -32,7 +33,7 @@ from .types import (
     VirtualPnL,
 )
 from .voting import VotingStage
-from .utils import now_ts
+from .utils import canonical_hash, now_ts
 
 
 class _PaperPositionState:
@@ -99,6 +100,7 @@ class GoldenPipeline:
         vote_quorum: int = 2,
         vote_min_score: float = 0.04,
         allow_inmemory_bus_for_tests: bool = False,
+        depth_extensions_enabled: bool = False,
     ) -> None:
         mode = (os.getenv("SOLHUNTER_MODE") or "test").strip().lower() or "test"
         if bus is None:
@@ -127,17 +129,51 @@ class GoldenPipeline:
         self._on_virtual_pnl = on_virtual_pnl
         self.metrics = GoldenMetrics()
 
+        def _capture_discovery_metrics(snapshot: Mapping[str, int]) -> None:
+            self.metrics.record_discovery(snapshot)
+
         async def _emit_golden(snapshot: GoldenSnapshot) -> None:
             self._context.record(snapshot)
             self._latest_snapshots[snapshot.mint] = snapshot
             self.metrics.record(snapshot)
-            await self._publish(STREAMS.golden_snapshot, asdict(snapshot))
+            payload = asdict(snapshot)
+            px = snapshot.px or {}
+            if isinstance(px, Mapping):
+                payload.setdefault("px_mid_usd", px.get("mid_usd"))
+            liq = snapshot.liq or {}
+            depth_map: Mapping[str, Any] | None = None
+            if isinstance(liq, Mapping):
+                depth_map = liq.get("depth_usd_by_pct") or liq.get("depth_pct")
+                if depth_map is None:
+                    depth_map = None
+            depth_1pct = None
+            if isinstance(depth_map, Mapping):
+                for key in ("1", "1.0", "100", "100bps"):
+                    if key in depth_map:
+                        try:
+                            depth_1pct = float(depth_map[key])
+                        except Exception:
+                            depth_1pct = None
+                        else:
+                            break
+            payload.setdefault("liq_depth_1pct_usd", depth_1pct)
+            payload.setdefault(
+                "content_hash", snapshot.content_hash or snapshot.hash
+            )
+            dedupe_key = snapshot.idempotency_key or snapshot.content_hash or snapshot.hash
+            if dedupe_key:
+                dedupe_key = f"{STREAMS.golden_snapshot}:{dedupe_key}"
+            await self._publish(STREAMS.golden_snapshot, payload, dedupe_key=dedupe_key)
             await self._publish_metrics(snapshot)
             if self._on_golden:
                 await self._on_golden(snapshot)
             await self._agent_stage.submit(snapshot)
 
-        self._coalescer = SnapshotCoalescer(_emit_golden, kv=self._kv)
+        self._coalescer = SnapshotCoalescer(
+            _emit_golden,
+            kv=self._kv,
+            depth_extensions_enabled=depth_extensions_enabled,
+        )
 
         async def _emit_suggestion(suggestion: TradeSuggestion) -> None:
             mint_key = str(suggestion.mint)
@@ -265,22 +301,28 @@ class GoldenPipeline:
             await self._coalescer.update_metadata(snapshot)
 
         async def _on_bar(bar: OHLCVBar) -> None:
-            await self._publish(
-                STREAMS.market_ohlcv,
-                {
-                    "mint": bar.mint,
-                    "o": bar.open,
-                    "h": bar.high,
-                    "l": bar.low,
-                    "c": bar.close,
-                    "vol_usd": bar.vol_usd,
-                    "trades": bar.trades,
-                    "buyers": bar.buyers,
-                    "zret": bar.zret,
-                    "zvol": bar.zvol,
-                    "asof_close": bar.asof_close,
-                },
-            )
+            payload = {
+                "mint": bar.mint,
+                "o": bar.open,
+                "h": bar.high,
+                "l": bar.low,
+                "c": bar.close,
+                "close": bar.close,
+                "vol_usd": bar.vol_usd,
+                "volume": bar.vol_usd,
+                "volume_usd": bar.vol_usd,
+                "vol_base": bar.vol_base,
+                "volume_base": bar.vol_base,
+                "trades": bar.trades,
+                "buyers": bar.buyers,
+                "zret": bar.zret,
+                "zvol": bar.zvol,
+                "asof_close": bar.asof_close,
+                "schema_version": bar.schema_version,
+            }
+            payload_for_hash = dict(payload)
+            payload["content_hash"] = canonical_hash(payload_for_hash)
+            await self._publish(STREAMS.market_ohlcv, payload)
             await self._coalescer.update_bar(bar)
 
         async def _on_depth(depth: DepthSnapshot) -> None:
@@ -309,7 +351,11 @@ class GoldenPipeline:
             await self._publish(STREAMS.discovery_candidates, asdict(candidate))
             await self._enrichment_stage.submit([candidate])
 
-        self._discovery_stage = DiscoveryStage(_on_discovery, kv=self._kv)
+        self._discovery_stage = DiscoveryStage(
+            _on_discovery,
+            kv=self._kv,
+            on_metrics=_capture_discovery_metrics,
+        )
 
     async def submit_discovery(self, candidate: DiscoveryCandidate) -> bool:
         """Submit a discovery candidate."""
@@ -341,9 +387,50 @@ class GoldenPipeline:
             await self._on_golden(snapshot)
         await self._agent_stage.submit(snapshot)
 
+    async def publish_momentum(self, mint: str, computation: MomentumComputation) -> None:
+        snapshot = self._latest_snapshots.get(mint)
+        if snapshot is None:
+            return
+        snapshot.momentum_score = computation.momentum_score
+        snapshot.pump_intensity = computation.pump_intensity
+        snapshot.pump_score = computation.pump_score
+        snapshot.social_score = computation.social_score
+        snapshot.social_sentiment = computation.social_sentiment
+        snapshot.tweets_per_min = computation.tweets_per_min
+        snapshot.momentum_sources = computation.momentum_sources
+        snapshot.momentum_breakdown = dict(computation.momentum_breakdown)
+        snapshot.momentum_partial = computation.momentum_partial
+        snapshot.momentum_stale = computation.momentum_stale
+        snapshot.metrics.setdefault("momentum", {})
+        momentum_metrics = snapshot.metrics.get("momentum")
+        if isinstance(momentum_metrics, dict):
+            momentum_metrics.update(
+                score=snapshot.momentum_score,
+                partial=bool(snapshot.momentum_partial),
+                stale=bool(snapshot.momentum_stale),
+                latency_ms=computation.latency_ms,
+            )
+        payload = asdict(snapshot)
+        payload["momentum_sources"] = list(snapshot.momentum_sources)
+        payload["momentum_breakdown"] = dict(snapshot.momentum_breakdown)
+        payload["momentum_partial"] = bool(snapshot.momentum_partial)
+        payload["momentum_stale"] = bool(snapshot.momentum_stale)
+        payload.setdefault("metrics", {})
+        if isinstance(payload["metrics"], dict):
+            payload["metrics"].setdefault("momentum", momentum_metrics or {})
+        payload["momentum_latency_ms"] = computation.latency_ms
+        dedupe = snapshot.idempotency_key or snapshot.content_hash or snapshot.hash
+        dedupe_key = None
+        if dedupe:
+            dedupe_key = f"{STREAMS.golden_snapshot}:{dedupe}:momentum"
+        await self._publish(STREAMS.golden_snapshot, payload, dedupe_key=dedupe_key)
+
     @property
     def context(self) -> ExecutionContext:
         return self._context
+
+    def latest_snapshot(self, mint: str) -> GoldenSnapshot | None:
+        return self._latest_snapshots.get(mint)
 
     def set_rl_weights(self, weights: Mapping[str, float]) -> None:
         """Update reinforcement learning weights for voting."""

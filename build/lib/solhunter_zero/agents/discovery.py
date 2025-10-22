@@ -20,6 +20,7 @@ from ..scanner_common import (
 from ..scanner_onchain import scan_tokens_onchain
 from ..schemas import RuntimeLog
 from ..token_scanner import enrich_tokens_async, scan_tokens_async
+from ..news import fetch_token_mentions_async
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,18 @@ class DiscoveryAgent:
             os.getenv("DISCOVERY_FILTER_PREFIX_11", "1").strip().lower()
             in {"1", "true", "yes", "on"}
         )
+        self.social_limit = max(
+            0, int(os.getenv("DISCOVERY_SOCIAL_LIMIT", "12") or 12)
+        )
+        self.social_min_mentions = max(
+            1, int(os.getenv("DISCOVERY_SOCIAL_MIN_MENTIONS", "2") or 2)
+        )
+        self.social_sample_limit = max(
+            1, int(os.getenv("DISCOVERY_SOCIAL_SAMPLE_LIMIT", "3") or 3)
+        )
+        self.news_feeds = self._split_env_list("NEWS_FEEDS")
+        self.twitter_feeds = self._split_env_list("TWITTER_FEEDS")
+        self.discord_feeds = self._split_env_list("DISCORD_FEEDS")
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -223,6 +236,7 @@ class DiscoveryAgent:
                 token_file=token_file,
             )
             tokens = self._normalise(tokens)
+            tokens, details = await self._apply_social_mentions(tokens, details)
             if tokens:
                 break
             if attempt < attempts - 1:
@@ -476,6 +490,165 @@ class DiscoveryAgent:
         if token in _FILTER_WHITELIST:
             return False
         return token.startswith("11") and len(token) >= 8
+
+    @staticmethod
+    def _split_env_list(name: str) -> List[str]:
+        raw = os.getenv(name, "")
+        if not raw:
+            return []
+        return [item.strip() for item in raw.split(",") if item.strip()]
+
+    @staticmethod
+    def _source_set(value: Any) -> set[str]:
+        if isinstance(value, set):
+            return {str(v) for v in value if isinstance(v, str) and v}
+        if isinstance(value, (list, tuple)):
+            return {str(v) for v in value if isinstance(v, str) and v}
+        if isinstance(value, str):
+            value = value.strip()
+            return {value} if value else set()
+        return set()
+
+    async def _collect_social_mentions(self) -> Dict[str, Dict[str, Any]]:
+        if self.social_limit == 0:
+            return {}
+        feeds = list(self.news_feeds)
+        twitter = list(self.twitter_feeds)
+        discord = list(self.discord_feeds)
+        if not (feeds or twitter or discord):
+            return {}
+        limit = self.social_limit or self.limit
+        if limit <= 0:
+            limit = self.limit
+        try:
+            mentions = await fetch_token_mentions_async(
+                feeds,
+                allowed=feeds or None,
+                twitter_urls=twitter or None,
+                discord_urls=discord or None,
+                limit=limit,
+                min_mentions=self.social_min_mentions,
+                sample_limit=self.social_sample_limit,
+            )
+        except Exception as exc:  # pragma: no cover - social feeds best effort
+            logger.debug("Social mention fetch failed: %s", exc)
+            return {}
+
+        results: Dict[str, Dict[str, Any]] = {}
+        for payload in mentions:
+            token = payload.get("token")
+            if not isinstance(token, str):
+                continue
+            canonical = canonical_mint(token)
+            if not validate_mint(canonical):
+                continue
+            if self._should_skip_token(canonical):
+                continue
+            mentions_raw = payload.get("mentions")
+            try:
+                mention_count = int(mentions_raw)
+            except (TypeError, ValueError):
+                continue
+            if mention_count <= 0:
+                continue
+            entry: Dict[str, Any] = {
+                "sources": {"social"},
+                "social_mentions": mention_count,
+            }
+            rank_value = payload.get("rank")
+            if isinstance(rank_value, int) and rank_value > 0:
+                entry["social_rank"] = rank_value
+            samples = payload.get("samples")
+            if isinstance(samples, list):
+                collected: List[str] = []
+                for sample in samples:
+                    if not isinstance(sample, str):
+                        continue
+                    text = sample.strip()
+                    if not text:
+                        continue
+                    collected.append(text)
+                    if len(collected) >= self.social_sample_limit:
+                        break
+                if collected:
+                    entry["social_samples"] = collected
+            results[canonical] = entry
+        return results
+
+    async def _apply_social_mentions(
+        self,
+        tokens: List[str],
+        details: Dict[str, Dict[str, Any]] | None,
+    ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
+        social_details = await self._collect_social_mentions()
+        if not social_details:
+            return tokens, details or {}
+
+        base_details: Dict[str, Dict[str, Any]] = {
+            mint: dict(payload) for mint, payload in (details or {}).items()
+        }
+        base_order = {mint: idx for idx, mint in enumerate(tokens)}
+        new_order_index: Dict[str, int] = {}
+
+        for mint, payload in social_details.items():
+            entry = base_details.get(mint, {})
+            entry = dict(entry)
+            sources = self._source_set(entry.get("sources"))
+            sources.update(self._source_set(payload.get("sources")))
+            sources.add("social")
+            entry["sources"] = sources
+
+            mention_val = payload.get("social_mentions")
+            try:
+                mention_count = int(mention_val)
+            except (TypeError, ValueError):
+                mention_count = 0
+            if mention_count > 0:
+                prev = entry.get("social_mentions")
+                try:
+                    prev_count = int(prev)
+                except (TypeError, ValueError):
+                    prev_count = 0
+                entry["social_mentions"] = max(prev_count, mention_count)
+
+            if "social_rank" in payload and payload["social_rank"]:
+                entry["social_rank"] = payload["social_rank"]
+            if "social_samples" in payload and payload["social_samples"]:
+                entry["social_samples"] = list(payload["social_samples"])
+
+            base_details[mint] = entry
+            if mint not in base_order and mint not in new_order_index:
+                new_order_index[mint] = len(new_order_index)
+
+        def _mention_count(mint: str) -> int:
+            value = base_details.get(mint, {}).get("social_mentions")
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+
+        all_tokens = list(dict.fromkeys(tokens + list(social_details)))
+
+        def sort_key(mint: str) -> tuple[int, int, str]:
+            mentions = _mention_count(mint)
+            if mint in base_order:
+                order = base_order[mint]
+            else:
+                order = len(base_order) + new_order_index.get(mint, 0)
+            return (-mentions, order, mint)
+
+        ranked_tokens = sorted(all_tokens, key=sort_key)
+
+        if self.limit:
+            ranked_tokens = ranked_tokens[: self.limit]
+
+        final_details: Dict[str, Dict[str, Any]] = {
+            mint: base_details[mint]
+            for mint in ranked_tokens
+            if mint in base_details
+        }
+
+        return ranked_tokens, final_details
 
 
 __all__ = [

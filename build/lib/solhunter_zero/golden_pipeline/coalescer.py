@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Mapping
 
 from .contracts import golden_hash_key
 from .kv import KeyValueStore
-from .types import DepthSnapshot, GoldenSnapshot, OHLCVBar, TokenSnapshot
+from .types import (
+    DepthSnapshot,
+    GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    GoldenSnapshot,
+    OHLCVBar,
+    TokenSnapshot,
+)
 from .utils import canonical_hash, now_ts
 from ..lru import TTLCache
 
@@ -29,6 +37,7 @@ class SnapshotCoalescer:
         kv: KeyValueStore | None = None,
         hash_ttl: float = 90.0,
         hash_cache_size: int = 4096,
+        depth_extensions_enabled: bool = False,
     ) -> None:
         self._emit = emit
         self._meta: Dict[str, TokenSnapshot] = {}
@@ -44,6 +53,7 @@ class SnapshotCoalescer:
         self._kv = kv
         self._hash_ttl = hash_ttl
         self._prewarm_task: asyncio.Task[None] | None = None
+        self._depth_extensions_enabled = depth_extensions_enabled
         self._schedule_hash_prewarm()
 
     def _schedule_hash_prewarm(self) -> None:
@@ -98,6 +108,9 @@ class SnapshotCoalescer:
     async def update_depth(self, depth: DepthSnapshot) -> None:
         await self._update_and_maybe_emit(depth.mint, depth=depth)
 
+    def get_metadata(self, mint: str) -> TokenSnapshot | None:
+        return self._meta.get(mint)
+
     async def _get_mint_lock(self, mint: str) -> asyncio.Lock:
         async with self._locks_guard:
             lock = self._mint_locks.get(mint)
@@ -149,6 +162,98 @@ class SnapshotCoalescer:
         if not (meta and bar and depth):
             return
         now = now_ts()
+        depth_pct = dict(depth.depth_pct)
+
+        def _normalize_pct(value: Any) -> float | None:
+            if value is None:
+                return None
+            raw = str(value).strip().lower()
+            if not raw:
+                return None
+            if raw.endswith("bps"):
+                raw = raw[:-3]
+                try:
+                    return float(raw) / 100.0
+                except Exception:
+                    return None
+            if raw.endswith("%"):
+                raw = raw[:-1]
+            try:
+                numeric = float(raw)
+            except Exception:
+                return None
+            if numeric > 1.0:
+                numeric = numeric / 100.0
+            if numeric < 0:
+                return None
+            return numeric
+
+        bands = []
+        depth_usd_by_pct: Dict[str, float] = {}
+        for key, value in depth_pct.items():
+            pct_value = _normalize_pct(key)
+            if pct_value is None:
+                continue
+            try:
+                usd_value = float(value)
+            except Exception:
+                continue
+            bands.append({"pct": pct_value, "usd": usd_value})
+            label = f"{pct_value:.3f}".rstrip("0").rstrip(".")
+            depth_usd_by_pct[label] = usd_value
+        bands.sort(key=lambda item: item["pct"])
+        ohlcv_payload = {
+            "o": bar.open,
+            "h": bar.high,
+            "l": bar.low,
+            "c": bar.close,
+            "close": bar.close,
+            "vol_usd": bar.vol_usd,
+            "volume": bar.vol_usd,
+            "volume_usd": bar.vol_usd,
+            "vol_base": bar.vol_base,
+            "volume_base": bar.vol_base,
+            "buyers": bar.buyers,
+            "flow_usd": bar.flow_usd,
+            "zret": bar.zret,
+            "zvol": bar.zvol,
+            "asof_close": bar.asof_close,
+            "schema_version": bar.schema_version,
+        }
+        ohlcv_payload["content_hash"] = canonical_hash(dict(ohlcv_payload))
+        depth_band_values: Dict[str, float] = {}
+        if depth.depth_bands_usd:
+            for key, value in depth.depth_bands_usd.items():
+                try:
+                    depth_band_values[str(key)] = float(value)
+                except Exception:
+                    continue
+        liq_payload = {
+            "depth_pct": depth_pct,
+            "depth_usd_by_pct": {**depth_usd_by_pct, **depth_band_values} if depth_band_values else depth_usd_by_pct,
+            "bands": bands,
+            "asof": depth.asof,
+        }
+        if self._depth_extensions_enabled:
+            liq_payload.setdefault("depth_usd_by_pct", depth_usd_by_pct)
+            if depth_band_values:
+                liq_payload["depth_usd_by_pct"].update(depth_band_values)
+            liq_payload["degraded"] = bool(depth.degraded)
+            if depth.source:
+                liq_payload["source"] = depth.source
+            if depth.route_meta:
+                liq_payload["route_meta"] = depth.route_meta
+        mid_price = float(depth.mid_usd)
+        spread_bps = float(depth.spread_bps)
+        half_spread = 0.0
+        if mid_price > 0 and spread_bps > 0:
+            half_spread = mid_price * (spread_bps / 20000.0)
+        bid_usd = depth.px_bid_usd
+        ask_usd = depth.px_ask_usd
+        if bid_usd is None:
+            bid_usd = max(0.0, mid_price - half_spread)
+        if ask_usd is None:
+            ask_usd = max(0.0, mid_price + half_spread)
         payload = {
             "mint": mint,
             "meta": {
@@ -158,26 +263,102 @@ class SnapshotCoalescer:
                 "asof": meta.asof,
             },
             "px": {
-                "mid_usd": depth.mid_usd,
+                "mid_usd": mid_price,
                 "spread_bps": depth.spread_bps,
+                "bid_usd": bid_usd,
+                "ask_usd": ask_usd,
+                "ts": depth.asof,
             },
-            "liq": {
-                "depth_pct": depth.depth_pct,
-                "asof": depth.asof,
-            },
-            "ohlcv5m": {
-                "o": bar.open,
-                "h": bar.high,
-                "l": bar.low,
-                "c": bar.close,
-                "vol_usd": bar.vol_usd,
-                "buyers": bar.buyers,
-                "flow_usd": bar.flow_usd,
-                "zret": bar.zret,
-                "zvol": bar.zvol,
-                "asof_close": bar.asof_close,
-            },
+            "liq": liq_payload,
+            "ohlcv5m": ohlcv_payload,
+            "schema_version": GOLDEN_SNAPSHOT_SCHEMA_VERSION,
         }
+        if payload["px"]["ts"] > now:
+            payload["px"]["ts"] = now
+        if liq_payload["asof"] > now:
+            liq_payload["asof"] = now
+        payload["px_mid_usd"] = mid_price
+
+        if self._depth_extensions_enabled:
+            depth_lookup = liq_payload.get("depth_usd_by_pct") if isinstance(liq_payload, dict) else {}
+            def _get_band(label: str) -> float | None:
+                if not isinstance(depth_lookup, Mapping):
+                    return None
+                value = depth_lookup.get(label)
+                if value is None and label.endswith("%"):
+                    value = depth_lookup.get(label[:-1])
+                if value is None:
+                    return None
+                try:
+                    return float(value)
+                except Exception:
+                    return None
+
+            payload["liq_depth_0_1pct_usd"] = _get_band("0.1")
+            payload["liq_depth_0_5pct_usd"] = _get_band("0.5")
+            payload["liq_depth_1_0pct_usd"] = _get_band("1.0") or _get_band("1")
+            payload["px_bid_usd"] = bid_usd
+            payload["px_ask_usd"] = ask_usd
+            payload["degraded"] = bool(depth.degraded)
+            source_value = depth.source or (
+                liq_payload.get("source") if isinstance(liq_payload, Mapping) else None
+            )
+            if source_value:
+                payload["source"] = str(source_value)
+            if payload.get("liq_depth_0_5pct_usd") is not None and payload.get("liq_depth_0_1pct_usd") is not None:
+                payload["liq_depth_0_5pct_usd"] = max(
+                    float(payload["liq_depth_0_5pct_usd"]), float(payload["liq_depth_0_1pct_usd"])
+                )
+            if payload.get("liq_depth_1_0pct_usd") is not None and payload.get("liq_depth_0_5pct_usd") is not None:
+                payload["liq_depth_1_0pct_usd"] = max(
+                    float(payload["liq_depth_1_0pct_usd"]), float(payload["liq_depth_0_5pct_usd"])
+                )
+            if payload.get("px_bid_usd") is not None and payload.get("px_ask_usd") is not None:
+                if payload["px_ask_usd"] < payload["px_bid_usd"]:
+                    midpoint = (float(payload["px_bid_usd"]) + float(payload["px_ask_usd"])) / 2.0
+                    payload["px_bid_usd"] = midpoint
+                    payload["px_ask_usd"] = midpoint
+
+        def _lookup_depth(target: float) -> float | None:
+            for band in bands:
+                if abs(band["pct"] - target) <= 1e-6:
+                    return band["usd"]
+            return None
+
+        depth_1pct = _lookup_depth(1.0)
+        payload["liq_depth_1pct_usd"] = depth_1pct
+        payload["content_hash"] = canonical_hash({k: v for k, v in payload.items() if k != "content_hash"})
+        band_rounds: Dict[str, float] | None = None
+        if self._depth_extensions_enabled:
+            band_rounds = {}
+            for label, field_name in (
+                ("0.1", "liq_depth_0_1pct_usd"),
+                ("0.5", "liq_depth_0_5pct_usd"),
+                ("1.0", "liq_depth_1_0pct_usd"),
+            ):
+                value = payload.get(field_name)
+                if value is None:
+                    continue
+                try:
+                    band_rounds[label] = round(float(value), 2)
+                except Exception:
+                    continue
+            if not band_rounds:
+                band_rounds = None
+
+        idempotency_source = {
+            "mint": mint,
+            "meta": payload["meta"],
+            "px": payload["px"],
+            "liq": payload["liq"],
+            "ohlcv5m": payload["ohlcv5m"],
+            "schema_version": payload["schema_version"],
+        }
+        if band_rounds:
+            idempotency_source["depth_band_cents"] = band_rounds
+        payload["idempotency_key"] = hashlib.sha1(
+            json.dumps(idempotency_source, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         snapshot_hash = canonical_hash(payload)
         async with lock:
             if self._versions.get(mint, 0) != version:
@@ -196,6 +377,8 @@ class SnapshotCoalescer:
         depth_staleness_ms = max(0.0, (now - depth.asof) * 1000.0)
         candle_age_ms = max(0.0, (now - bar.asof_close) * 1000.0)
         payload["liq"]["staleness_ms"] = depth_staleness_ms
+        if self._depth_extensions_enabled:
+            payload["staleness_ms"] = depth_staleness_ms
         golden = GoldenSnapshot(
             mint=mint,
             asof=asof,
@@ -204,6 +387,8 @@ class SnapshotCoalescer:
             liq=payload["liq"],
             ohlcv5m=payload["ohlcv5m"],
             hash=snapshot_hash,
+            content_hash=payload.get("content_hash", snapshot_hash),
+            idempotency_key=payload.get("idempotency_key", ""),
             metrics={
                 "emitted_at": now,
                 "latency_ms": latency_ms,

@@ -37,6 +37,7 @@ from ..loop import (
 )
 from .. import resource_monitor
 from ..pipeline import PipelineCoordinator
+from ..paths import ROOT
 from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory
@@ -45,12 +46,18 @@ from ..exit_management import ExitManager
 from ..schemas import RuntimeLog
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..golden_pipeline.flags import (
+        resolve_depth_flag,
+        resolve_momentum_flag,
+    )
     from ..golden_pipeline.service import GoldenPipelineService
-from ..paths import ROOT
-from ..redis_util import ensure_local_redis_if_needed
-from ..ui import UIState, UIServer
-from ..util import parse_bool_env
-from .tuning import analyse_evaluation
+    from ..paths import ROOT
+    from ..redis_util import ensure_local_redis_if_needed
+    from ..ui import UIState, UIServer
+    from ..util import parse_bool_env
+    from .runtime_wiring import resolve_golden_enabled
+    from .schema_adapters import read_golden, read_ohlcv
+    from .tuning import analyse_evaluation
 
 
 log = logging.getLogger(__name__)
@@ -492,6 +499,8 @@ class TradingRuntime:
         )
 
         self.cfg = cfg
+        self.ui_state.golden_depth_enabled = resolve_depth_flag(self.cfg)
+        self.ui_state.golden_momentum_enabled = resolve_momentum_flag(self.cfg)
         self.runtime_cfg = runtime_cfg
         self.depth_proc = depth_proc
         self.status.depth_service = bool(
@@ -532,13 +541,7 @@ class TradingRuntime:
         if os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is None:
             os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
-        cfg_flag = bool(
-            cfg.get("use_golden_pipeline")
-            or cfg.get("golden_pipeline")
-            or cfg.get("golden_pipeline_enabled")
-        )
-        env_flag = parse_bool_env("GOLDEN_PIPELINE", False)
-        self._use_golden_pipeline = bool(cfg_flag or env_flag)
+        self._use_golden_pipeline = bool(resolve_golden_enabled(cfg))
 
     async def _start_event_bus(self) -> None:
         broker_urls = get_broker_urls(self.cfg) if self.cfg else []
@@ -634,6 +637,7 @@ class TradingRuntime:
             if not mint:
                 return
             payload["_received"] = time.time()
+            read_ohlcv(payload, reader="runtime")
             with self._swarm_lock:
                 self._market_ohlcv[str(mint)] = payload
 
@@ -652,6 +656,7 @@ class TradingRuntime:
             if not mint:
                 return
             payload["_received"] = time.time()
+            read_golden(payload, reader="runtime")
             hash_value = payload.get("hash")
             with self._swarm_lock:
                 self._golden_snapshots[str(mint)] = payload
@@ -926,6 +931,7 @@ class TradingRuntime:
                 self._golden_service = GoldenPipelineService(
                     agent_manager=self.agent_manager,
                     portfolio=self.portfolio,
+                    config=self.cfg,
                 )
                 await self._golden_service.start()
                 self.activity.add("golden_pipeline", "enabled")
@@ -1628,11 +1634,25 @@ class TradingRuntime:
                 stale = True
             if age_depth is not None and age_depth > 6.0:
                 stale = True
+            normalized_candle = read_ohlcv(candle, reader="runtime")
+            close_value = normalized_candle.get("close")
+            volume_value = normalized_candle.get("volume_usd")
+            volume_base_value = normalized_candle.get("volume_base")
+            buyers_value = normalized_candle.get("buyers")
+            if buyers_value is None:
+                buyers_value = _maybe_int(depth_entry.get("buyers"))
+            sellers_value = normalized_candle.get("sellers")
+            if sellers_value is None:
+                sellers_value = _maybe_int(candle.get("seller_count"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(candle.get("sellers"))
+            if sellers_value is None:
+                sellers_value = _maybe_int(depth_entry.get("sellers"))
             markets.append(
                 {
                     "mint": mint,
-                    "close": _maybe_float(candle.get("close")),
-                    "volume": _maybe_float(candle.get("volume")),
+                    "close": close_value,
+                    "volume": volume_value,
                     "spread_bps": _maybe_float(depth_entry.get("spread_bps")),
                     "depth_pct": depth_pct,
                     "age_close": age_close,
@@ -1641,6 +1661,9 @@ class TradingRuntime:
                     "lag_depth_ms": age_depth * 1000.0 if age_depth is not None else None,
                     "stale": stale,
                     "updated_label": _format_age(combined_age),
+                    "buyers": buyers_value,
+                    "sellers": sellers_value,
+                    "volume_base": volume_base_value,
                 }
             )
         summary = {
@@ -1656,8 +1679,34 @@ class TradingRuntime:
             hash_map = dict(self._latest_golden_hash)
         snapshots: List[Dict[str, Any]] = []
         lag_samples: List[float] = []
+
+        def _normalize_momentum_breakdown(value: Any) -> Any:
+            if isinstance(value, bool) or value is None:
+                return value
+            if isinstance(value, Mapping):
+                return {
+                    str(key): _normalize_momentum_breakdown(val)
+                    for key, val in value.items()
+                }
+            if isinstance(value, (list, tuple, set)):
+                return [_normalize_momentum_breakdown(val) for val in value]
+            numeric = _maybe_float(value)
+            if numeric is not None:
+                return numeric
+            return value
+
+        def _as_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+            if isinstance(value, (int, float)):
+                return bool(value)
+            return False
+
         for mint in sorted(golden.keys()):
             payload = dict(golden[mint])
+            normalized_golden = read_golden(payload, reader="runtime")
             timestamp = _entry_timestamp(payload, "asof")
             age = _age_seconds(timestamp, now)
             if age is None and payload.get("_received") is not None:
@@ -1698,19 +1747,67 @@ class TradingRuntime:
                     stale_flag = age > stale_threshold
                 else:
                     stale_flag = age > 60.0
+            momentum_score = _maybe_float(payload.get("momentum_score"))
+            pump_intensity = _maybe_float(payload.get("pump_intensity"))
+            pump_score = _maybe_float(payload.get("pump_score"))
+            if pump_intensity is None and pump_score is not None:
+                pump_intensity = pump_score
+            social_score = _maybe_float(payload.get("social_score"))
+            social_sentiment = _maybe_float(payload.get("social_sentiment"))
+            tweets_per_min = _maybe_float(payload.get("tweets_per_min"))
+            buyers_last_hour = _maybe_int(payload.get("buyers_last_hour"))
+            momentum_latency = _maybe_float(payload.get("momentum_latency_ms"))
+            raw_sources = payload.get("momentum_sources")
+            if isinstance(raw_sources, (list, tuple, set)):
+                candidate_sources = list(raw_sources)
+            elif isinstance(raw_sources, str):
+                candidate_sources = [raw_sources]
+            else:
+                candidate_sources = []
+            momentum_sources: List[str] = []
+            seen_sources: set[str] = set()
+            for source in candidate_sources:
+                if source is None:
+                    continue
+                source_text = str(source).strip()
+                if not source_text or source_text in seen_sources:
+                    continue
+                seen_sources.add(source_text)
+                momentum_sources.append(source_text)
+            raw_breakdown = payload.get("momentum_breakdown")
+            momentum_breakdown: Dict[str, Any] = {}
+            if isinstance(raw_breakdown, Mapping):
+                momentum_breakdown = {
+                    str(key): _normalize_momentum_breakdown(value)
+                    for key, value in raw_breakdown.items()
+                }
+            momentum_stale = _as_bool(payload.get("momentum_stale"))
+            momentum_partial = _as_bool(payload.get("momentum_partial"))
             snapshots.append(
                 {
                     "mint": mint,
                     "hash": hash_text,
                     "hash_short": _short_hash(hash_text),
-                    "px": _maybe_float(payload.get("px")),
-                    "liq": _maybe_float(payload.get("liq")),
+                    "px": normalized_golden.get("mid_usd"),
+                    "liq": normalized_golden.get("depth_1pct_usd"),
                     "age_seconds": age,
                     "age_label": _format_age(age),
                     "stale": stale_flag,
                     "coalesce_window_s": coalesce,
                     "lag_ms": age * 1000.0 if age is not None else None,
                     "stale_threshold_s": stale_threshold,
+                    "momentum_score": momentum_score,
+                    "momentum_stale": momentum_stale,
+                    "momentum_partial": momentum_partial,
+                    "momentum_sources": momentum_sources,
+                    "momentum_breakdown": momentum_breakdown,
+                    "pump_intensity": pump_intensity,
+                    "pump_score": pump_score,
+                    "social_score": social_score,
+                    "social_sentiment": social_sentiment,
+                    "tweets_per_min": tweets_per_min,
+                    "buyers_last_hour": buyers_last_hour,
+                    "momentum_latency_ms": momentum_latency,
                 }
             )
         return {
@@ -2023,10 +2120,10 @@ class TradingRuntime:
         with self._swarm_lock:
             fills = list(self._virtual_fills)
             golden_hashes = dict(self._latest_golden_hash)
-            golden_prices = {
-                mint: _maybe_float(payload.get("px"))
-                for mint, payload in self._golden_snapshots.items()
-            }
+            golden_prices = {}
+            for mint, payload in self._golden_snapshots.items():
+                normalized = read_golden(payload, reader="runtime.shadow")
+                golden_prices[mint] = normalized.get("mid_usd")
         items: List[Dict[str, Any]] = []
         for payload in fills:
             mint = payload.get("mint")
@@ -2676,6 +2773,19 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
     except Exception:
         return default
     if not math.isfinite(result):
+        return default
+    return result
+
+
+def _maybe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    numeric = _maybe_float(value)
+    if numeric is None:
+        return default
+    try:
+        result = int(numeric)
+    except Exception:
+        return default
+    if result < 0:
         return default
     return result
 

@@ -25,6 +25,7 @@ class _BarState:
     low: float
     close: float
     vol_usd: float = 0.0
+    vol_base: float = 0.0
     trades: int = 0
     buyers: set[str] = field(default_factory=set)
     flow_usd: float = 0.0
@@ -40,6 +41,7 @@ class _BarState:
             self.low = min(self.low, price)
         self.close = price
         self.vol_usd += abs(event.amount_quote)
+        self.vol_base += abs(event.amount_base)
         self.trades += 1
         if event.buyer:
             self.buyers.add(event.buyer)
@@ -54,6 +56,7 @@ class _BarState:
             low=self.low,
             close=self.close,
             vol_usd=self.vol_usd,
+            vol_base=self.vol_base,
             trades=self.trades,
             buyers=buyers,
             flow_usd=self.flow_usd,
