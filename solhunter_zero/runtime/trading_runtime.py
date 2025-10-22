@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Mapping, Optional, Tuple
 
+ROOT = Path(__file__).resolve().parent.parent
+
 from ..agent_manager import AgentManager
 from ..config import get_broker_urls, load_selected_config, set_env_from_config
 from ..event_bus import (
@@ -37,7 +39,6 @@ from ..loop import (
 )
 from .. import resource_monitor
 from ..pipeline import PipelineCoordinator
-from ..paths import ROOT
 from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory
@@ -51,7 +52,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         resolve_momentum_flag,
     )
     from ..golden_pipeline.service import GoldenPipelineService
-    from ..paths import ROOT
     from ..redis_util import ensure_local_redis_if_needed
     from ..ui import UIState, UIServer
     from ..util import parse_bool_env
