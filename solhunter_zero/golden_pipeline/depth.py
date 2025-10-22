@@ -35,6 +35,7 @@ class DepthStage:
         weighted_mid = 0.0
         min_spread: float | None = None
         asof = 0.0
+        freshest: DepthSnapshot | None = None
         for snap in snapshots:
             asof = max(asof, snap.asof)
             min_spread = snap.spread_bps if min_spread is None else min(min_spread, snap.spread_bps)
@@ -45,11 +46,14 @@ class DepthStage:
             if depth1 > 0:
                 weighted_mid += snap.mid_usd * depth1
                 weight_sum += depth1
+            if freshest is None or snap.asof >= freshest.asof:
+                freshest = snap
         if weight_sum <= 0:
             weighted_mid = sum(snap.mid_usd for snap in snapshots) / len(snapshots)
         else:
             weighted_mid /= weight_sum
         aggregate_depth = {bucket: float(value) for bucket, value in totals.items()}
+        depth_bands = dict(freshest.depth_bands_usd) if freshest and freshest.depth_bands_usd else None
         return DepthSnapshot(
             mint=mint,
             venue="aggregated",
@@ -57,4 +61,11 @@ class DepthStage:
             spread_bps=min_spread or 0.0,
             depth_pct=aggregate_depth,
             asof=asof,
+            px_bid_usd=freshest.px_bid_usd if freshest else None,
+            px_ask_usd=freshest.px_ask_usd if freshest else None,
+            depth_bands_usd=depth_bands,
+            degraded=freshest.degraded if freshest else False,
+            source=freshest.source if freshest else None,
+            route_meta=freshest.route_meta if freshest else None,
+            staleness_ms=freshest.staleness_ms if freshest else None,
         )

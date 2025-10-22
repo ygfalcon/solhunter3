@@ -47,6 +47,22 @@ archives the `docs/observability` bundle, while the chaos job publishes both
 `artifacts/chaos` and the generated runbook so investigators can download the
 latest remediation bundle from the Actions UI even when tests fail.
 
+## Golden depth adapter checks
+
+The routed Golden depth adapter has a pair of focused tests that exercise the
+synthetic fallback logic and the monotonicity guards on the interpolated depth
+bands. Run them directly when iterating on the adapter to avoid triggering the
+full regression suite:
+
+```bash
+pytest tests/golden_pipeline/test_depth_adapter_invariants.py \
+       tests/golden_pipeline/test_depth_adapter_chaos.py
+```
+
+Both tests rely on recorded quotes and local timeouts; no external network
+access is required. Install the core project dependencies (including
+`jsonschema`) before running them so the adapter wiring imports cleanly.
+
 ## Canary promotion flow
 
 Once the test jobs pass, the `staging-canary` job builds a staging wheel via

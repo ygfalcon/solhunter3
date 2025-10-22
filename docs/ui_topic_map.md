@@ -44,7 +44,8 @@ staleness rules.
 
 ### Golden Panel
 - **Topic:** `x:mint.golden`
-- **Fields:** `hash`, `meta`, `px_mid_usd`, `liq_depth_1pct_usd`, nested `px`/`liq`, embedded `ohlcv5m`, `asof`
+- **Fields:** `hash`, `meta`, `px_mid_usd`, `px_bid_usd`, `px_ask_usd`, `liq_depth_0_1pct_usd`, `liq_depth_0_5pct_usd`, `liq_depth_1_0pct_usd`, nested `px`/`liq` (with depth bands + `route_meta`), embedded `ohlcv5m`, `asof`, `source`, `degraded`
+- **Route badge tooltip:** When `source=jup_route`, the badge hover shows recent sweep notionals and their observed impact from `liq.route_meta.sweeps`; synthetic (`source=pyth_synthetic`) rows show the confidence-derived spread. `liq.route_meta.latency_ms` is rendered in the detail line to surface adapter latency.
 - **Badges:** Publish cadence stats (emit rate, change ratio).  Flag if `now - asof > 60s`.
 
 ## Agents

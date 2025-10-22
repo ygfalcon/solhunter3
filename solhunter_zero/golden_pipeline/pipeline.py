@@ -99,6 +99,7 @@ class GoldenPipeline:
         vote_quorum: int = 2,
         vote_min_score: float = 0.04,
         allow_inmemory_bus_for_tests: bool = False,
+        depth_extensions_enabled: bool = False,
     ) -> None:
         mode = (os.getenv("SOLHUNTER_MODE") or "test").strip().lower() or "test"
         if bus is None:
@@ -167,7 +168,11 @@ class GoldenPipeline:
                 await self._on_golden(snapshot)
             await self._agent_stage.submit(snapshot)
 
-        self._coalescer = SnapshotCoalescer(_emit_golden, kv=self._kv)
+        self._coalescer = SnapshotCoalescer(
+            _emit_golden,
+            kv=self._kv,
+            depth_extensions_enabled=depth_extensions_enabled,
+        )
 
         async def _emit_suggestion(suggestion: TradeSuggestion) -> None:
             mint_key = str(suggestion.mint)

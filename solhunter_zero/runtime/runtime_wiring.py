@@ -1277,6 +1277,8 @@ class RuntimeEventCollectors:
             px_detail = _serialize(px_payload) if isinstance(px_payload, Mapping) else None
             liq_payload = payload.get("liq")
             liq_detail = _serialize(liq_payload) if isinstance(liq_payload, Mapping) else None
+            px_bid = _maybe_float(payload.get("px_bid_usd"))
+            px_ask = _maybe_float(payload.get("px_ask_usd"))
             liq_total_usd = None
             if isinstance(liq_payload, Mapping):
                 liq_total_usd = _extract_nested_float(
@@ -1295,6 +1297,50 @@ class RuntimeEventCollectors:
             if primary_liq is None:
                 primary_liq = liq_total_usd
             depth_pct = _extract_golden_depths(payload)
+            depth_0_1 = _maybe_float(payload.get("liq_depth_0_1pct_usd"))
+            depth_0_5 = _maybe_float(payload.get("liq_depth_0_5pct_usd"))
+            depth_1_0 = _maybe_float(payload.get("liq_depth_1_0pct_usd"))
+            degraded_flag = bool(payload.get("degraded"))
+            if not degraded_flag and isinstance(liq_payload, Mapping):
+                degraded_flag = bool(liq_payload.get("degraded"))
+            source_label = payload.get("source")
+            if not source_label and isinstance(liq_payload, Mapping):
+                source_label = liq_payload.get("source")
+            staleness_ms = _maybe_float(payload.get("staleness_ms"))
+            if staleness_ms is None and isinstance(liq_payload, Mapping):
+                staleness_ms = _maybe_float(liq_payload.get("staleness_ms"))
+            route_meta = None
+            if isinstance(liq_payload, Mapping):
+                raw_meta = liq_payload.get("route_meta")
+                if isinstance(raw_meta, Mapping):
+                    hops_value = _maybe_float(raw_meta.get("hops"))
+                    route_meta = {
+                        "hops": int(hops_value or 0),
+                        "dexes": [str(item) for item in raw_meta.get("dexes") or []],
+                    }
+                    latency_value = _maybe_float(raw_meta.get("latency_ms"))
+                    if latency_value is not None:
+                        route_meta["latency_ms"] = latency_value
+                    sweeps_value = raw_meta.get("sweeps")
+                    if isinstance(sweeps_value, list):
+                        sweeps: list[Dict[str, Any]] = []
+                        for sweep in sweeps_value:
+                            if not isinstance(sweep, Mapping):
+                                continue
+                            entry: Dict[str, Any] = {}
+                            direction = sweep.get("direction")
+                            if isinstance(direction, str):
+                                entry["direction"] = direction
+                            usd_val = _maybe_float(sweep.get("usd"))
+                            if usd_val is not None:
+                                entry["usd"] = usd_val
+                            impact_val = _maybe_float(sweep.get("impact_bps"))
+                            if impact_val is not None:
+                                entry["impact_bps"] = impact_val
+                            if entry:
+                                sweeps.append(entry)
+                        if sweeps:
+                            route_meta["sweeps"] = sweeps
             snapshots.append(
                 {
                     "mint": mint,
@@ -1302,12 +1348,21 @@ class RuntimeEventCollectors:
                     "hash_short": _short_hash(hash_text),
                     "px": px_mid,
                     "px_mid_usd": px_mid,
+                    "px_bid_usd": px_bid,
+                    "px_ask_usd": px_ask,
                     "px_detail": px_detail,
                     "spread_bps": spread_bps,
                     "liq": primary_liq,
                     "liq_total_usd": liq_total_usd,
                     "liq_depth_pct": depth_pct if depth_pct else None,
                     "liq_detail": liq_detail,
+                    "liq_depth_0_1pct_usd": depth_0_1,
+                    "liq_depth_0_5pct_usd": depth_0_5,
+                    "liq_depth_1_0pct_usd": depth_1_0,
+                    "degraded": degraded_flag,
+                    "source": source_label,
+                    "staleness_ms": staleness_ms,
+                    "route_meta": route_meta,
                     "age_seconds": age,
                     "age_label": _format_age(age),
                     "stale": stale_flag,
