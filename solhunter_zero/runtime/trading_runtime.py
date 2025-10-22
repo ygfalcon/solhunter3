@@ -60,6 +60,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .tuning import analyse_evaluation
 
 
+# Compute ROOT locally to avoid circular imports during module import time.
+ROOT = Path(__file__).resolve().parent.parent
+
+
 log = logging.getLogger(__name__)
 
 _RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
