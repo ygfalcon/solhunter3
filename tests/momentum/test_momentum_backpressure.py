@@ -56,6 +56,7 @@ def test_momentum_backpressure() -> None:
             "MintA": {"volume_1h_usd": 1500.0, "volume_24h_usd": 6200.0},
             "MintB": {"volume_1h_usd": 300.0, "volume_24h_usd": 900.0},
         },
+        "birdeye_trending": {},
         "dexscreener": {
             "MintA": {
                 "priceChange": {"m5": 8.0, "h1": 24.0},
@@ -71,6 +72,7 @@ def test_momentum_backpressure() -> None:
                 "tweetsLastHour": 90,
             }
         },
+        "social": {},
     }
 
     limiter = agent._limiters["pump.fun"]
@@ -81,6 +83,7 @@ def test_momentum_backpressure() -> None:
     sources_with_error = dict(base_sources)
     sources_with_error["pumpfun"] = {}
     sources_with_error["_errors"] = {"pumpfun": error}
+    sources_with_error["social"] = {}
 
     for _ in range(3):
         breaker.record_failure()

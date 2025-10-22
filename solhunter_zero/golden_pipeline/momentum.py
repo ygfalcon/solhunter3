@@ -9,10 +9,22 @@ import logging
 import math
 import os
 import random
+import re
 import time
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping, Optional, Sequence
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterable,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+)
 
 import aiohttp
 
@@ -66,8 +78,11 @@ _DEXTOOLS_POOL_META = "https://www.dextools.io/shared/data/pool/"
 _DEFAULT_SOCIAL_MIN = 0.0
 _DEFAULT_SOCIAL_MAX = 2.0
 
-_CACHE_TTL_SEC = 90.0
+_CACHE_TTL_SEC = 60.0
 _SOCIAL_CACHE_TTL_SEC = 300.0
+_NITTER_HOSTS = ("nitter.net", "www.nitter.net", "nitter.pufe.org")
+_BIRDEYE_MAX_PAGES = 5
+_PUMP_BUYERS_MAX = 200.0
 
 _WEIGHTS_DEFAULT = {
     "volume_rank_1h": 0.40,
@@ -205,6 +220,8 @@ class MomentumConfig:
     weights: MomentumWeights = field(default_factory=MomentumWeights)
     social_min: float = _DEFAULT_SOCIAL_MIN
     social_max: float = _DEFAULT_SOCIAL_MAX
+    birdeye_volume_floor_1h: float = 0.0
+    birdeye_volume_floor_24h: float = 0.0
 
 
 @dataclass(slots=True)
@@ -282,6 +299,16 @@ def load_momentum_config(config: Mapping[str, Any] | None = None) -> MomentumCon
     except Exception:
         top_n_active = 250
 
+    floors_cfg = weights_cfg.get("floors") if isinstance(weights_cfg, Mapping) else {}
+    try:
+        floor_1h = float(floors_cfg.get("volume_1h_usd", 0.0)) if isinstance(floors_cfg, Mapping) else 0.0
+    except Exception:
+        floor_1h = 0.0
+    try:
+        floor_24h = float(floors_cfg.get("volume_24h_usd", 0.0)) if isinstance(floors_cfg, Mapping) else 0.0
+    except Exception:
+        floor_24h = 0.0
+
     resolved_weights = MomentumWeights()
     for key, value in (weights_data or {}).items():
         if not hasattr(resolved_weights, key):
@@ -329,6 +356,8 @@ def load_momentum_config(config: Mapping[str, Any] | None = None) -> MomentumCon
         weights=resolved_weights,
         social_min=social_min,
         social_max=social_max if social_max > social_min else social_min + 2.0,
+        birdeye_volume_floor_1h=max(0.0, floor_1h),
+        birdeye_volume_floor_24h=max(0.0, floor_24h),
     )
 
 
@@ -402,6 +431,9 @@ class MomentumAgent:
         self._candidate_seen: Dict[str, float] = {}
         self._cache: Dict[str, tuple[float, Any]] = {}
         self._etag_cache: Dict[str, tuple[str, Any, float]] = {}
+        self._social_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+        self._symbol_cache: Dict[str, str] = {}
+        self._recent_ticks: deque[OrderedDict[str, MomentumComputation]] = deque(maxlen=2)
         self._limiters: Dict[str, TokenBucket] = {}
         self._breakers: Dict[str, CircuitBreaker] = {}
         self._session_timeout = aiohttp.ClientTimeout(
@@ -423,6 +455,11 @@ class MomentumAgent:
 
     def update_config(self, config: Mapping[str, Any] | None) -> None:
         self._config = load_momentum_config(config)
+
+    def recent_ticks(self) -> Sequence[Mapping[str, MomentumComputation]]:
+        """Return a snapshot of the last two momentum computations."""
+
+        return list(self._recent_ticks)
 
     async def start(self) -> None:
         if not self.enabled or self._running:
@@ -461,6 +498,8 @@ class MomentumAgent:
             await self._execute_cycle()
 
     async def _run_loop(self) -> None:
+        cadence = self._interval
+        next_tick = time.monotonic()
         try:
             while self._running:
                 start = time.monotonic()
@@ -470,9 +509,10 @@ class MomentumAgent:
                     raise
                 except Exception:
                     logger.exception("Momentum agent cycle failed")
-                elapsed = time.monotonic() - start
-                delay = max(5.0, self._interval - elapsed)
-                await asyncio.sleep(delay)
+                next_tick = max(next_tick + cadence, time.monotonic())
+                delay = max(0.0, next_tick - time.monotonic())
+                if delay:
+                    await asyncio.sleep(delay)
         except asyncio.CancelledError:
             raise
 
@@ -490,36 +530,54 @@ class MomentumAgent:
         active.sort(key=lambda item: item[1], reverse=True)
         top_n = min(self._config.top_n_active, len(active))
         selected = active[:top_n]
-        sources_snapshot = await self._collect_sources([mint for mint, _depth, _snap in selected])
-        tasks = []
-        for mint, _depth, snapshot in selected:
-            tasks.append(asyncio.create_task(self._process_mint(mint, snapshot, sources_snapshot)))
+        selected_pairs = [(mint, snapshot) for mint, _depth, snapshot in selected]
+        sources_snapshot = await self._collect_sources(selected_pairs)
+        tasks = [
+            asyncio.create_task(self._process_mint(mint, snapshot, sources_snapshot))
+            for mint, snapshot in selected_pairs
+        ]
         if not tasks:
             return
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        tick_map: OrderedDict[str, MomentumComputation] = OrderedDict()
+        for (mint, _snapshot), outcome in zip(selected_pairs, results):
+            if isinstance(outcome, MomentumComputation):
+                tick_map[mint] = outcome
+        if tick_map:
+            self._recent_ticks.append(tick_map)
 
-    async def _collect_sources(self, mints: Sequence[str]) -> Dict[str, Any]:
+    async def _collect_sources(
+        self, selected: Sequence[tuple[str, GoldenSnapshot]]
+    ) -> Dict[str, Any]:
         tasks = [
             asyncio.create_task(self._fetch_birdeye_snapshot()),
+            asyncio.create_task(self._fetch_birdeye_trending()),
             asyncio.create_task(self._fetch_dexscreener_trending()),
             asyncio.create_task(self._fetch_pumpfun()),
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         volumes: Mapping[str, Mapping[str, Any]] = {}
+        birdeye_trending: Mapping[str, Mapping[str, Any]] = {}
         trending: Mapping[str, Mapping[str, Any]] = {}
         pump: Mapping[str, Mapping[str, Any]] = {}
         errors: Dict[str, Exception] = {}
-        for task, label in zip(results, ("birdeye", "dexscreener", "pumpfun")):
+        for task, label in zip(
+            results,
+            ("birdeye", "birdeye_trending", "dexscreener", "pumpfun"),
+        ):
             if isinstance(task, Exception):
                 self._record_error(label, task)
                 errors[label] = task
                 continue
             if label == "birdeye":
                 volumes = task or {}
+            elif label == "birdeye_trending":
+                birdeye_trending = task or {}
             elif label == "dexscreener":
                 trending = task or {}
             else:
                 pump = task or {}
+        mints = [mint for mint, _snapshot in selected]
         extra_price: Mapping[str, Mapping[str, Any]] = {}
         if mints:
             try:
@@ -528,11 +586,20 @@ class MomentumAgent:
                 self._record_error("dexscreener", exc)
                 errors.setdefault("dexscreener", exc)
                 extra_price = {}
+        social: Mapping[str, Mapping[str, Any]] = {}
+        if selected:
+            try:
+                social = await self._fetch_social_batch(selected, pump, extra_price)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._record_error("social", exc)
+                errors.setdefault("social", exc)
         return {
             "birdeye": volumes,
+            "birdeye_trending": birdeye_trending,
             "dexscreener": trending,
             "dexscreener_tokens": extra_price,
             "pumpfun": pump,
+            "social": social,
             "_errors": errors,
         }
 
@@ -605,6 +672,7 @@ class MomentumAgent:
                 MOMENTUM_LATENCY_MS.observe(result.latency_ms)
             except Exception:  # pragma: no cover - metrics optional
                 pass
+        return result
 
     async def _compute_momentum(
         self,
@@ -644,12 +712,16 @@ class MomentumAgent:
                 momentum_partial = True
 
         volumes = sources.get("birdeye") or {}
+        birdeye_trending = sources.get("birdeye_trending") or {}
         trending = sources.get("dexscreener") or {}
         extra_price = sources.get("dexscreener_tokens") or {}
         pumpfun = sources.get("pumpfun") or {}
+        social_inputs = sources.get("social") or {}
 
         volume_1h_map = {k: (v or {}).get("volume_1h_usd") for k, v in volumes.items()}
         volume_24h_map = {k: (v or {}).get("volume_24h_usd") for k, v in volumes.items()}
+        breakdown["volume_1h_usd_raw"] = volume_1h_map.get(mint)
+        breakdown["volume_24h_usd_raw"] = volume_24h_map.get(mint)
         ranks_1h = _normalize_rank(volume_1h_map)
         ranks_24h = _normalize_rank(volume_24h_map)
         volume_rank_1h = ranks_1h.get(mint)
@@ -667,22 +739,34 @@ class MomentumAgent:
             breakdown["missing_volume_rank_24h"] = True
             momentum_partial = True
 
-        price_entry = {}  # type: ignore[var-annotated]
-        if mint in trending:
+        trend_entry = birdeye_trending.get(mint) if isinstance(birdeye_trending, Mapping) else None
+        if isinstance(trend_entry, Mapping):
+            if "score" in trend_entry:
+                breakdown["birdeye_trending_score"] = trend_entry.get("score")
+            if "rank" in trend_entry:
+                breakdown["birdeye_trending_rank"] = trend_entry.get("rank")
+            sources_used.add("birdeye_trending")
+
+        price_entry: Mapping[str, Any] | None = None
+        if isinstance(trending, Mapping) and mint in trending:
             price_entry = trending[mint]
-        elif mint in extra_price:
+        elif isinstance(extra_price, Mapping) and mint in extra_price:
             price_entry = extra_price[mint]
 
         def _extract_price(field: str) -> Optional[float]:
-            value = price_entry.get(field) if isinstance(price_entry, Mapping) else None
-            if value is None and isinstance(price_entry, Mapping):
+            if isinstance(price_entry, Mapping) and field in price_entry:
+                try:
+                    return float(price_entry[field])
+                except Exception:
+                    return None
+            if isinstance(price_entry, Mapping):
                 price_change = price_entry.get("priceChange")
                 if isinstance(price_change, Mapping):
-                    value = price_change.get(field)
-            try:
-                return float(value)
-            except Exception:
-                return None
+                    try:
+                        return float(price_change.get(field))
+                    except Exception:
+                        return None
+            return None
 
         price_5m = _extract_price("m5")
         price_1h = _extract_price("h1") or _extract_price("h60")
@@ -698,8 +782,10 @@ class MomentumAgent:
             except Exception:
                 pass
 
-        price_norm_5m = _logistic((price_5m or 0.0) / 100.0) if price_5m is not None else 0.0
-        price_norm_1h = _logistic((price_1h or 0.0) / 100.0) if price_1h is not None else 0.0
+        breakdown["price_change_5m_raw"] = price_5m
+        breakdown["price_change_1h_raw"] = price_1h
+        price_norm_5m = _logistic(price_5m or 0.0) if price_5m is not None else 0.0
+        price_norm_1h = _logistic(price_1h or 0.0) if price_1h is not None else 0.0
         if price_5m is not None:
             sources_used.add("dexscreener")
         else:
@@ -714,35 +800,122 @@ class MomentumAgent:
         breakdown["price_momentum_1h"] = price_norm_1h
 
         pump_entry = pumpfun.get(mint) if isinstance(pumpfun, Mapping) else None
-        pump_score = None
+        social_entry = social_inputs.get(mint) if isinstance(social_inputs, Mapping) else None
         pump_rank = None
-        tweets_per_min = None
-        social_sentiment = None
+        pump_score_raw: float | None = None
+        buyers_last_hour_raw: float | None = None
+        tweets_per_min: float | None = None
+        social_sentiment: float | None = None
+        community_score: float | None = None
         if isinstance(pump_entry, Mapping):
             pump_rank = pump_entry.get("rank")
-            buyers_last_hour = pump_entry.get("buyersLastHour")
-            pump_score = pump_entry.get("score")
+            buyers_last_hour_raw = pump_entry.get("buyersLastHour")
+            score_val = pump_entry.get("score")
+            if score_val is not None:
+                try:
+                    pump_score_raw = float(score_val)
+                except Exception:
+                    pump_score_raw = None
             tweets_last_hour = pump_entry.get("tweetsLastHour")
             if tweets_last_hour is not None:
                 try:
                     tweets_per_min = float(tweets_last_hour) / 60.0
                 except Exception:
                     tweets_per_min = None
-            social_sentiment = pump_entry.get("sentiment")
+            if pump_entry.get("sentiment") is not None:
+                try:
+                    social_sentiment = float(pump_entry.get("sentiment"))
+                except Exception:
+                    social_sentiment = None
             sources_used.add("pumpfun")
-        if buyers_last_hour is not None:
-            try:
-                breakdown["buyers_last_hour"] = int(float(buyers_last_hour))
-            except Exception:
-                breakdown["buyers_last_hour"] = buyers_last_hour
 
-        pump_intensity = _pump_intensity_from_rank(
-            int(pump_rank) if pump_rank is not None else None
-        )
-        breakdown["pump_intensity"] = pump_intensity
-        if pump_rank is None:
+        if isinstance(social_entry, Mapping):
+            if tweets_per_min is None and social_entry.get("tweets_per_min") is not None:
+                try:
+                    tweets_per_min = float(social_entry.get("tweets_per_min"))
+                except Exception:
+                    tweets_per_min = None
+            community = social_entry.get("community_score")
+            if community is not None:
+                try:
+                    community_score = clamp(float(community), 0.0, 1.0)
+                except Exception:
+                    community_score = None
+            if pump_score_raw is None and social_entry.get("pump_score") is not None:
+                try:
+                    pump_score_raw = float(social_entry.get("pump_score"))
+                except Exception:
+                    pump_score_raw = None
+            if social_entry.get("social_source"):
+                breakdown["social_source"] = social_entry.get("social_source")
+            sources_used.add("social")
+
+        if community_score is not None:
+            breakdown["community_score"] = community_score
+
+        breakdown["pump_rank_raw"] = pump_rank
+        breakdown["buyers_last_hour_raw"] = buyers_last_hour_raw
+        breakdown["pump_score_raw"] = pump_score_raw
+        breakdown["tweets_per_min_raw"] = tweets_per_min
+        buyers_last_hour = None
+        if buyers_last_hour_raw is not None:
+            try:
+                buyers_last_hour = int(float(buyers_last_hour_raw))
+            except Exception:
+                try:
+                    buyers_last_hour = int(buyers_last_hour_raw)
+                except Exception:
+                    buyers_last_hour = None
+        if buyers_last_hour is not None:
+            breakdown["buyers_last_hour"] = buyers_last_hour
+
+        pump_components: list[float] = []
+        if pump_rank is not None:
+            try:
+                rank_val = float(pump_rank)
+                if rank_val <= 0:
+                    raise ValueError("invalid rank")
+                denom = math.log(rank_val + 1.0)
+                if denom <= 0:
+                    raise ValueError("invalid rank")
+                rank_norm = clamp(1.0 / denom, 0.0, 1.0)
+                pump_components.append(rank_norm)
+                breakdown["pump_rank_norm"] = rank_norm
+            except Exception:
+                breakdown["missing_pump_rank"] = True
+                momentum_partial = True
+        else:
             breakdown["missing_pump_rank"] = True
             momentum_partial = True
+
+        if buyers_last_hour_raw is not None:
+            try:
+                buyers_norm = clamp(
+                    math.log1p(float(buyers_last_hour_raw)) / math.log1p(_PUMP_BUYERS_MAX),
+                    0.0,
+                    1.0,
+                )
+                pump_components.append(buyers_norm)
+                breakdown["buyers_last_hour_norm"] = buyers_norm
+            except Exception:
+                breakdown["buyers_last_hour_norm"] = 0.0
+        else:
+            breakdown["missing_buyers_last_hour"] = True
+            momentum_partial = True
+
+        score_norm = None
+        if pump_score_raw is not None:
+            try:
+                score_norm = clamp(float(pump_score_raw), 0.0, 1.0)
+                pump_components.append(score_norm)
+            except Exception:
+                score_norm = None
+        if score_norm is None and social_sentiment is not None:
+            score_norm = clamp(float(social_sentiment), 0.0, 1.0)
+        pump_intensity = sum(pump_components) / len(pump_components) if pump_components else 0.0
+        breakdown["pump_intensity"] = pump_intensity
+        if score_norm is not None:
+            breakdown["pump_score_norm"] = score_norm
 
         social_min = self._config.social_min
         social_max = self._config.social_max
@@ -751,8 +924,13 @@ class MomentumAgent:
         if tweets_per_min is None:
             breakdown["missing_tweets_per_min"] = True
             momentum_partial = True
+
         if social_sentiment is None:
-            social_sentiment = pump_score
+            social_sentiment = community_score
+        if social_sentiment is None:
+            social_sentiment = score_norm
+        if social_sentiment is None and tweets_per_min is not None:
+            social_sentiment = tweets_norm
         if social_sentiment is None:
             breakdown["missing_social_sentiment"] = True
             momentum_partial = True
@@ -760,21 +938,11 @@ class MomentumAgent:
             try:
                 social_sentiment = clamp(float(social_sentiment), 0.0, 1.0)
             except Exception:
-                social_sentiment = clamp(float(pump_score or 0.0), 0.0, 1.0)
+                social_sentiment = clamp(float(score_norm or 0.0), 0.0, 1.0)
             breakdown["social_sentiment"] = social_sentiment
 
-        community_score = None
-        if pump_score is not None:
-            try:
-                community_score = clamp(float(pump_score), 0.0, 1.0)
-            except Exception:
-                community_score = None
-        if community_score is None:
-            community_score = social_sentiment
-        if community_score is None:
-            community_score = tweets_norm
-        social_base = community_score if community_score is not None else 0.0
-        social_denominator = 2.0 if community_score is not None else 1.0
+        social_base = social_sentiment if social_sentiment is not None else 0.0
+        social_denominator = 2.0 if social_sentiment is not None else 1.0
         if social_denominator <= 0:
             social_denominator = 1.0
         social_score = clamp((social_base + tweets_norm) / social_denominator, 0.0, 1.0)
@@ -812,11 +980,13 @@ class MomentumAgent:
             stale_due_to_errors = True
             momentum_partial = True
 
+        pump_score_out = community_score if community_score is not None else score_norm
+
         return MomentumComputation(
             mint=mint,
             momentum_score=momentum_score,
             pump_intensity=pump_intensity,
-            pump_score=community_score,
+            pump_score=pump_score_out,
             social_score=social_score,
             social_sentiment=social_sentiment,
             tweets_per_min=tweets_norm,
@@ -850,45 +1020,132 @@ class MomentumAgent:
                     pass
         return 0.0
 
+    def _resolve_symbol(self, snapshot: GoldenSnapshot) -> str:
+        meta = snapshot.meta or {}
+        symbol = None
+        if isinstance(meta, Mapping):
+            symbol = meta.get("symbol") or meta.get("ticker") or meta.get("shortName")
+        if not isinstance(symbol, str) or not symbol.strip():
+            symbol = snapshot.mint[:4]
+        return str(symbol).strip().upper()
+
     async def _fetch_birdeye_snapshot(self) -> Mapping[str, Mapping[str, Any]]:
         cache_key = "birdeye_snapshot"
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
-        params = {
-            "sort_by": "volume_24h_usd",
-            "sort_type": "desc",
-            "page": 1,
-            "per_page": 250,
-            "chain": "solana",
-        }
-        headers = {"accept": "application/json", "x-chain": "solana"}
-        payload = await self._request_json(
-            _BIRDEYE_TOKEN_LIST,
-            host="public-api.birdeye.so",
-            params=params,
-            headers=headers,
+        floors = (
+            self._config.birdeye_volume_floor_1h,
+            self._config.birdeye_volume_floor_24h,
         )
-        tokens = []
+        headers = {"accept": "application/json", "x-chain": "solana"}
+        aggregated: Dict[str, Dict[str, Any]] = {}
+
+        async def _fetch_page(sort_field: str, page: int) -> Sequence[Mapping[str, Any]]:
+            params = {
+                "sort_by": sort_field,
+                "sort_type": "desc",
+                "page": page,
+                "per_page": 200,
+                "chain": "solana",
+            }
+            payload = await self._request_json(
+                _BIRDEYE_TOKEN_LIST,
+                host="public-api.birdeye.so",
+                params=params,
+                headers=headers,
+            )
+            if isinstance(payload, Mapping):
+                data = payload.get("data")
+                if isinstance(data, Mapping):
+                    tokens = data.get("tokens")
+                    if isinstance(tokens, list):
+                        return [token for token in tokens if isinstance(token, Mapping)]
+            return []
+
+        def _coerce(value: Any) -> float | None:
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        for sort_field in ("volume_24h_usd", "volume_1h_usd"):
+            page = 1
+            while page <= _BIRDEYE_MAX_PAGES:
+                try:
+                    entries = await _fetch_page(sort_field, page)
+                except MomentumError as exc:
+                    self._record_error("birdeye", exc)
+                    break
+                if not entries:
+                    break
+                trailing_below = True
+                for token in entries:
+                    address = token.get("address") or token.get("mint")
+                    if not isinstance(address, str):
+                        continue
+                    address = canonical_mint(address)
+                    if not address:
+                        continue
+                    bucket = aggregated.setdefault(address, {})
+                    vol1 = _coerce(token.get("volume_1h_usd"))
+                    vol24 = _coerce(token.get("volume_24h_usd"))
+                    if vol1 is not None:
+                        bucket["volume_1h_usd"] = max(
+                            vol1,
+                            bucket.get("volume_1h_usd", 0.0),
+                        )
+                    if vol24 is not None:
+                        bucket["volume_24h_usd"] = max(
+                            vol24,
+                            bucket.get("volume_24h_usd", 0.0),
+                        )
+                    rank = token.get("rank")
+                    if rank is not None:
+                        bucket.setdefault("rank", rank)
+                    if (
+                        (floors[0] and vol1 is not None and vol1 >= floors[0])
+                        or (floors[1] and vol24 is not None and vol24 >= floors[1])
+                        or (not floors[0] and not floors[1])
+                    ):
+                        trailing_below = False
+                if trailing_below:
+                    break
+                page += 1
+
+        self._cache_set(cache_key, aggregated)
+        return aggregated
+
+    async def _fetch_birdeye_trending(self) -> Mapping[str, Mapping[str, Any]]:
+        cache_key = "birdeye_trending"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+        payload = await self._request_json(
+            _BIRDEYE_TRENDING,
+            host="public-api.birdeye.so",
+            params={"sort": "trending", "chain": "solana"},
+            headers={"x-chain": "solana"},
+        )
+        result: Dict[str, Dict[str, Any]] = {}
         if isinstance(payload, Mapping):
             data = payload.get("data")
             if isinstance(data, Mapping):
-                tokens = data.get("tokens") or []
-        result: Dict[str, Dict[str, Any]] = {}
-        for token in tokens or []:
-            if not isinstance(token, Mapping):
-                continue
-            address = token.get("address") or token.get("mint")
-            if not isinstance(address, str):
-                continue
-            address = canonical_mint(address)
-            if not address:
-                continue
-            result[address] = {
-                "volume_1h_usd": token.get("volume_1h_usd"),
-                "volume_24h_usd": token.get("volume_24h_usd"),
-                "rank": token.get("rank"),
-            }
+                tokens = data.get("tokens") or data.get("items")
+                if isinstance(tokens, list):
+                    for entry in tokens:
+                        if not isinstance(entry, Mapping):
+                            continue
+                        address = entry.get("address") or entry.get("mint")
+                        if not isinstance(address, str):
+                            continue
+                        address = canonical_mint(address)
+                        if not address:
+                            continue
+                        result[address] = {
+                            "score": entry.get("score") or entry.get("trending_score"),
+                            "rank": entry.get("rank"),
+                        }
         self._cache_set(cache_key, result)
         return result
 
@@ -965,6 +1222,131 @@ class MomentumAgent:
                     result[mint] = entry
         return result
 
+    async def _fetch_social_batch(
+        self,
+        selected: Sequence[tuple[str, GoldenSnapshot]],
+        pump: Mapping[str, Mapping[str, Any]],
+        extra_price: Mapping[str, Mapping[str, Any]],
+    ) -> Mapping[str, Mapping[str, Any]]:
+        now = now_ts()
+        symbol_context: Dict[str, Dict[str, Any]] = {}
+        for mint, snapshot in selected:
+            symbol = self._resolve_symbol(snapshot)
+            self._symbol_cache[mint] = symbol
+            context = symbol_context.setdefault(symbol, {"mints": [], "pairs": set()})
+            context["mints"].append(mint)
+            entry = extra_price.get(mint) if isinstance(extra_price, Mapping) else None
+            if isinstance(entry, Mapping):
+                pair = entry.get("pairAddress") or entry.get("pair_address") or entry.get("pair")
+                if isinstance(pair, str) and pair:
+                    context["pairs"].add(pair)
+        fetch_tasks: Dict[str, asyncio.Task[Mapping[str, Any]]] = {}
+        for symbol, ctx in symbol_context.items():
+            cached = self._social_cache.get(symbol)
+            if cached is not None:
+                cached_at, _data = cached
+                if now - cached_at <= _SOCIAL_CACHE_TTL_SEC:
+                    continue
+            pairs = sorted(ctx.get("pairs") or [])
+            fetch_tasks[symbol] = asyncio.create_task(self._fetch_social_symbol(symbol, pairs))
+        if fetch_tasks:
+            fetched = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
+            for (symbol, task), value in zip(fetch_tasks.items(), fetched):
+                if isinstance(value, Exception):
+                    self._record_error("social", value)
+                    continue
+                self._social_cache[symbol] = (now_ts(), dict(value or {}))
+        result: Dict[str, Dict[str, Any]] = {}
+        for symbol, ctx in symbol_context.items():
+            cached = self._social_cache.get(symbol)
+            payload = dict(cached[1]) if cached else {}
+            for mint in ctx.get("mints", []):
+                entry = dict(payload)
+                pump_entry = pump.get(mint) if isinstance(pump, Mapping) else None
+                if isinstance(pump_entry, Mapping):
+                    score = pump_entry.get("score") or pump_entry.get("pumpScore")
+                    if score is not None:
+                        entry.setdefault("pump_score", score)
+                result[mint] = entry
+        return result
+
+    async def _fetch_social_symbol(
+        self, symbol: str, pairs: Sequence[str]
+    ) -> Mapping[str, Any]:
+        community_score = None
+        community_source = None
+        for pair in pairs:
+            try:
+                payload = await self._request_json(
+                    f"{_DEXTOOLS_POOL_META}{pair}",
+                    host="www.dextools.io",
+                    params={"chain": "solana"},
+                )
+            except MomentumError as exc:
+                self._record_error("dextools", exc)
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
+            community = None
+            if isinstance(data, Mapping):
+                meta = data.get("community")
+                if isinstance(meta, Mapping):
+                    community = meta.get("score") or meta.get("value")
+                if community is None:
+                    community = data.get("communityScore")
+            if community is not None:
+                try:
+                    community_score = clamp(float(community), 0.0, 1.0)
+                except Exception:
+                    continue
+                community_source = f"dextools:{pair}"
+                break
+        tweets_per_min = None
+        social_source = community_source
+        if community_score is None:
+            tweets_per_min, nitter_source = await self._fetch_nitter_mentions(symbol)
+            if nitter_source:
+                social_source = nitter_source
+        elif community_source is None:
+            social_source = None
+        payload: Dict[str, Any] = {}
+        if community_score is not None:
+            payload["community_score"] = community_score
+        if tweets_per_min is not None:
+            payload["tweets_per_min"] = tweets_per_min
+        if social_source:
+            payload["social_source"] = social_source
+        return payload
+
+    async def _fetch_nitter_mentions(self, symbol: str) -> tuple[float | None, str | None]:
+        query = f"${symbol}" if symbol else symbol
+        for host in _NITTER_HOSTS:
+            url = f"https://{host}/search"
+            try:
+                html = await self._request_text(
+                    url,
+                    host=host,
+                    params={"f": "tweets", "q": query},
+                    headers={"accept": "text/html,application/xhtml+xml"},
+                )
+            except MomentumError as exc:
+                self._record_error(host, exc)
+                continue
+            if not html:
+                continue
+            timestamps = [
+                float(match.group(1))
+                for match in re.finditer(r"data-time=\"(\d+)\"", html)
+            ]
+            now = now_ts()
+            recent = [ts for ts in timestamps if now - ts <= 3600]
+            if not recent:
+                return 0.0, f"nitter:{host}"
+            tweets_per_min = min(5.0, len(recent) / 60.0)
+            return tweets_per_min, f"nitter:{host}"
+        return None, None
+
     async def _fetch_pumpfun(self) -> Mapping[str, Mapping[str, Any]]:
         cache_key = "pumpfun_trending"
         cached = self._cache_get(cache_key, ttl=_SOCIAL_CACHE_TTL_SEC)
@@ -1038,6 +1420,7 @@ class MomentumAgent:
                         if resp.status == 429:
                             if breaker:
                                 breaker.record_failure()
+                                breaker.open_for(30.0)
                             if MOMENTUM_ERROR_TOTAL is not None:
                                 try:
                                     MOMENTUM_ERROR_TOTAL.labels(host=host, reason="429").inc()
@@ -1068,6 +1451,86 @@ class MomentumAgent:
             except HostCircuitOpenError as exc:
                 raise MomentumRateLimitError(str(exc)) from exc
             except asyncio.TimeoutError as exc:
+                last_error = MomentumTimeoutError(f"timeout contacting {host}")
+            except MomentumError as exc:
+                last_error = exc
+            except Exception as exc:  # pragma: no cover - defensive network guard
+                last_error = MomentumError(str(exc))
+        if last_error is None:
+            last_error = MomentumError(f"failed to fetch {url}")
+        raise last_error
+
+    async def _request_text(
+        self,
+        url: str,
+        *,
+        host: str,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> str:
+        limiter = self._limiters.get(host)
+        breaker = self._breakers.get(host)
+        if breaker and breaker.is_open:
+            raise MomentumRateLimitError(f"circuit open for {host}")
+        if limiter:
+            acquired = await limiter.acquire(timeout=_TOTAL_TIMEOUT_SEC)
+            if not acquired:
+                raise MomentumTimeoutError(f"token bucket unavailable for {host}")
+        request_headers = {"accept": "text/html,application/xhtml+xml,application/json"}
+        if headers:
+            request_headers.update(headers)
+        cache_entry = self._etag_cache.get(url)
+        if cache_entry is not None:
+            etag, data, cached_at = cache_entry
+            if now_ts() - cached_at <= _SOCIAL_CACHE_TTL_SEC and etag:
+                request_headers.setdefault("If-None-Match", etag)
+            request_headers.setdefault("Accept-Encoding", "gzip, deflate")
+        attempts = 2
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            if attempt and _RETRY_BACKOFF_SEC > 0:
+                await asyncio.sleep(_RETRY_BACKOFF_SEC + random.random() * 0.05)
+            try:
+                async with host_request(url):
+                    session = await get_session()
+                    async with session.get(
+                        url,
+                        params=dict(params or {}),
+                        headers=request_headers,
+                        timeout=self._session_timeout,
+                    ) as resp:
+                        if resp.status == 304 and cache_entry is not None:
+                            return cache_entry[1]
+                        if resp.status == 429:
+                            if breaker:
+                                breaker.record_failure()
+                                breaker.open_for(30.0)
+                            if MOMENTUM_ERROR_TOTAL is not None:
+                                try:
+                                    MOMENTUM_ERROR_TOTAL.labels(host=host, reason="429").inc()
+                                except Exception:
+                                    pass
+                            raise MomentumRateLimitError(f"429 from {host}")
+                        if resp.status in {400, 401, 403, 404, 422}:
+                            if MOMENTUM_ERROR_TOTAL is not None:
+                                try:
+                                    MOMENTUM_ERROR_TOTAL.labels(host=host, reason=str(resp.status)).inc()
+                                except Exception:
+                                    pass
+                            raise MomentumParameterError(f"HTTP {resp.status} from {host}")
+                        if 500 <= resp.status < 600:
+                            text = await resp.text()
+                            raise MomentumError(f"HTTP {resp.status} {text[:120]}")
+                        body = await resp.text()
+                        etag = resp.headers.get("ETag")
+                        if etag:
+                            self._etag_cache[url] = (etag, body, now_ts())
+                        if breaker:
+                            breaker.record_success()
+                        return body
+            except HostCircuitOpenError as exc:
+                raise MomentumRateLimitError(str(exc)) from exc
+            except asyncio.TimeoutError:
                 last_error = MomentumTimeoutError(f"timeout contacting {host}")
             except MomentumError as exc:
                 last_error = exc

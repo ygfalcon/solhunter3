@@ -42,3 +42,17 @@ additional instrumentation.
   credentials as part of bring-up.
 * `scripts/bus_smoke.py` proves the event bus can create streams, publish
   messages, and respect TTLs.
+
+## Momentum tuning
+
+Momentum enrichment exposes a small number of knobs through
+`configs/discovery_score_weights.yaml` so operators can adjust sensitivity without
+shipping new code:
+
+* `momentum.top_n_active` – number of mints evaluated on each 60-second cadence
+  (default `250`).
+* `momentum.weights` – six additive weights applied to the composite score:
+  `volume_rank_1h`, `volume_rank_24h`, `price_momentum_5m`,
+  `price_momentum_1h`, `pump_intensity`, and `social_sentiment`.
+* `momentum.social.min_max` – minimum and maximum tweet rates used for min–max
+  normalisation of the social feed (default `[0.0, 2.0]`).

@@ -66,3 +66,49 @@ canvas {
     background-color: #1e1e1e;
     margin-bottom: var(--space-md);
 }
+
+.momentum-cell {
+    min-width: 140px;
+}
+
+.momentum-cell .momentum-bar {
+    position: relative;
+    height: 0.75rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.momentum-cell .momentum-bar .fill {
+    position: absolute;
+    inset: 0;
+    width: 0;
+    background: linear-gradient(90deg, #1dd1a1 0%, #feca57 55%, #ff6b6b 100%);
+    transition: width 0.3s ease;
+}
+
+.momentum-cell .momentum-bar.stale {
+    opacity: 0.55;
+}
+
+.momentum-cell .momentum-bar .momentum-indicator {
+    position: absolute;
+    right: 0.35rem;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.7rem;
+    color: #feca57;
+}
+
+.momentum-cell .momentum-value {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-top: 0.35rem;
+}
+
+.momentum-card small.raw {
+    display: block;
+    font-size: 0.7rem;
+    color: rgba(224, 224, 224, 0.6);
+    margin-top: 0.15rem;
+}

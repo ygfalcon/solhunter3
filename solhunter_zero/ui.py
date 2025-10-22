@@ -1892,31 +1892,66 @@ _PAGE_TEMPLATE = """
                             <td class="momentum-cell">
                                 {% set momentum_score = snap.momentum_score %}
                                 <div class="momentum-bar {{ 'stale' if snap.momentum_stale else '' }}" title="Composite momentum from liquidity rank, short-horizon price velocity, Pump.fun heat, and social mentions; updated ~60 seconds; lower is cooler, higher is hotter.">
-                                    <div class="fill" style="width: {{ (momentum_score * 100) | round(1) if momentum_score is not none else 0 }}%;"></div>
+                                    <div class="fill" style="width: {{ ((momentum_score or 0) * 100) | round(1) }}%;"></div>
                                     {% if snap.momentum_stale %}<span class="momentum-indicator">⏱</span>{% endif %}
                                 </div>
-                                <div class="momentum-value">{{ momentum_score | round(3) if momentum_score is not none else '—' }}</div>
+                                <div class="momentum-value">{{ momentum_score | round(3) if momentum_score is not none else '—'}}</div>
                                 {% set breakdown = snap.momentum_breakdown or {} %}
                                 {% if breakdown or snap.momentum_sources or snap.momentum_partial or snap.social_score is not none %}
                                 <details class="momentum-breakdown">
                                     <summary>Breakdown</summary>
                                     <div class="momentum-card">
                                         {% set vol1 = breakdown.get('volume_rank_1h') %}
-                                        <div><span>Vol 1h</span><strong>{{ vol1 | round(3) if vol1 is not none else '—' }}</strong></div>
+                                        {% set vol1_raw = breakdown.get('volume_1h_usd_raw') %}
+                                        <div>
+                                            <span>Vol 1h</span><strong>{{ vol1 | round(3) if vol1 is not none else '—' }}</strong>
+                                            {% if vol1_raw is not none %}<small class="raw">Raw {{ vol1_raw | round(0) }}</small>{% endif %}
+                                        </div>
                                         {% set price5 = breakdown.get('price_momentum_5m') %}
-                                        <div><span>Price 5m</span><strong>{{ price5 | round(3) if price5 is not none else '—' }}</strong></div>
+                                        {% set price5_raw = breakdown.get('price_change_5m_raw') %}
+                                        <div>
+                                            <span>Price 5m</span><strong>{{ price5 | round(3) if price5 is not none else '—' }}</strong>
+                                            {% if price5_raw is not none %}<small class="raw">Δ {{ price5_raw | round(3) }}%</small>{% endif %}
+                                        </div>
                                         {% set price1 = breakdown.get('price_momentum_1h') %}
-                                        <div><span>Price 1h</span><strong>{{ price1 | round(3) if price1 is not none else '—' }}</strong></div>
+                                        {% set price1_raw = breakdown.get('price_change_1h_raw') %}
+                                        <div>
+                                            <span>Price 1h</span><strong>{{ price1 | round(3) if price1 is not none else '—' }}</strong>
+                                            {% if price1_raw is not none %}<small class="raw">Δ {{ price1_raw | round(3) }}%</small>{% endif %}
+                                        </div>
                                         {% set pump = breakdown.get('pump_intensity') %}
-                                        <div><span>Pump</span><strong>{{ pump | round(3) if pump is not none else '—' }}</strong></div>
+                                        {% set pump_raw = breakdown.get('pump_score_raw') %}
+                                        {% set pump_rank_raw = breakdown.get('pump_rank_raw') %}
+                                        {% set buyers_raw = breakdown.get('buyers_last_hour_raw') %}
+                                        <div>
+                                            <span>Pump</span><strong>{{ pump | round(3) if pump is not none else '—' }}</strong>
+                                            {% if pump_raw is not none or pump_rank_raw is not none or buyers_raw is not none %}
+                                            <small class="raw">
+                                                {% if pump_raw is not none %}Score {{ pump_raw | round(3) }}{% endif %}
+                                                {% if pump_rank_raw is not none %}{% if pump_raw is not none %} · {% endif %}Rank {{ pump_rank_raw }}{% endif %}
+                                                {% if buyers_raw is not none %}{% if pump_raw is not none or pump_rank_raw is not none %} · {% endif %}Buyers {{ buyers_raw | round(0) }}{% endif %}
+                                            </small>
+                                            {% endif %}
+                                        </div>
                                         {% set tweets = breakdown.get('tweets_per_min') %}
-                                        <div><span>Tweets/min</span><strong>{{ tweets | round(3) if tweets is not none else '—' }}</strong></div>
+                                        {% set tweets_raw = breakdown.get('tweets_per_min_raw') %}
+                                        <div>
+                                            <span>Tweets/min</span><strong>{{ tweets | round(3) if tweets is not none else '—'}}</strong>
+                                            {% if tweets_raw is not none %}<small class="raw">Raw {{ tweets_raw | round(3) }}</small>{% endif %}
+                                        </div>
                                         {% set social_sent = snap.social_sentiment if snap.social_sentiment is not none else breakdown.get('social_sentiment') %}
-                                        <div><span>Social Sent.</span><strong>{{ social_sent | round(3) if social_sent is not none else '—' }}</strong></div>
+                                        {% set community_score = breakdown.get('community_score') %}
+                                        <div>
+                                            <span>Social Sent.</span><strong>{{ social_sent | round(3) if social_sent is not none else '—' }}</strong>
+                                            {% if community_score is not none %}<small class="raw">Community {{ community_score | round(3) }}</small>{% endif %}
+                                        </div>
                                         {% set social_score = snap.social_score if snap.social_score is not none else breakdown.get('social_score') %}
                                         <div><span>Social Score</span><strong>{{ social_score | round(3) if social_score is not none else '—' }}</strong></div>
                                         {% set buyers = breakdown.get('buyers_last_hour') %}
                                         <div><span>Buyers (1h)</span><strong>{{ buyers if buyers is not none else '—' }}</strong></div>
+                                        {% if breakdown.get('social_source') %}
+                                            <div><span>Social Source</span><strong>{{ breakdown.get('social_source') }}</strong></div>
+                                        {% endif %}
                                         {% set errors = breakdown.get('error_hosts') %}
                                         {% if errors %}
                                             <div><span>Errors</span><strong>{{ errors | join(', ') if errors is iterable else errors }}</strong></div>

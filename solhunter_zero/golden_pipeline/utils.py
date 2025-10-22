@@ -83,6 +83,15 @@ class CircuitBreaker:
         if len(self._failures) >= self.threshold:
             self._opened_until = now + self.cooldown_sec
 
+    def open_for(self, duration: float) -> None:
+        """Force the breaker open for ``duration`` seconds."""
+
+        duration = max(0.0, float(duration))
+        if duration <= 0:
+            return
+        self._failures.clear()
+        self._opened_until = max(self._opened_until, now_ts() + duration)
+
     @property
     def is_open(self) -> bool:
         self._prune()
