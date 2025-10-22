@@ -42,6 +42,7 @@ def test_collectors_status_snapshot_updates(monkeypatch):
     assert status["last_stage_ok"] is True
     assert status["bus_latency_ms"] is not None
     assert "environment" in status
+    assert status["workflow"] == runtime_wiring.DEFAULT_RUNTIME_WORKFLOW
 
     collectors.stop()
 
