@@ -19,7 +19,7 @@ This directory contains a drop-in preflight harness that exercises the live Solh
    export EXIT_FEATURES_ON=1
    export RL_WEIGHTS_DISABLED=1
    export MICRO_MODE=1           # toggle between 1 and 0 to cover both modes
-   export REDIS_URL=redis://127.0.0.1:6379/0
+   export REDIS_URL=redis://127.0.0.1:6379/1
    export SOLANA_RPC_URL=...     # your RPC endpoint
    export HELIUS_API_KEY=...     # for DAS
    ```

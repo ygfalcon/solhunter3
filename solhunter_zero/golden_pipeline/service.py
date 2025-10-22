@@ -890,7 +890,7 @@ class GoldenPipelineService:
         task.add_done_callback(_on_done)
 
     async def _ensure_bus_visible(self) -> None:
-        channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v2")
+        channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v3")
         max_attempts = 5
         base_delay = 0.5
         ack = asyncio.Event()
@@ -935,7 +935,7 @@ class GoldenPipelineService:
             unsubscribe()
 
     def _log_bus_configuration(self) -> None:
-        channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v2")
+        channel = os.getenv("BROKER_CHANNEL", "solhunter-events-v3")
         url = (
             os.getenv("EVENT_BUS_URL")
             or os.getenv("BROKER_URL")

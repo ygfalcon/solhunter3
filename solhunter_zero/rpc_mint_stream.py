@@ -149,8 +149,8 @@ async def run_rpc_mint_stream() -> None:
 
     ws_url = os.getenv("MINT_STREAM_WS_URL")
     http_url = os.getenv("MINT_STREAM_HTTP_URL")
-    redis_url = os.getenv("MINT_STREAM_REDIS_URL", "redis://localhost:6379/0")
-    channel = os.getenv("MINT_STREAM_BROKER_CHANNEL", "solhunter-events-v2")
+    redis_url = os.getenv("MINT_STREAM_REDIS_URL", "redis://localhost:6379/1")
+    channel = os.getenv("MINT_STREAM_BROKER_CHANNEL", "solhunter-events-v3")
     base_programs = _parse_program_list("MINT_STREAM_PROGRAM_IDS", DEFAULT_STREAM_PROGRAMS)
     pump_ids = _parse_program_list("PUMP_FUN_PROGRAM_IDS", ())
     if not pump_ids:

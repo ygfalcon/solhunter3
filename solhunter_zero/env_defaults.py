@@ -91,7 +91,7 @@ DEFAULTS: dict[str, str] = {
     "EVENT_MMAP_BATCH_MS": "5",
     "EVENT_MMAP_BATCH_SIZE": "16",
     "EVENT_BATCH_MS": "10",
-    "BROKER_CHANNEL": "solhunter-events-v2",
+    "BROKER_CHANNEL": "solhunter-events-v3",
 
     # Order book service
     "ORDERBOOK_CACHE_TTL": "5",

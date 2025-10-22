@@ -134,7 +134,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--channel",
-        default=os.getenv("BROKER_CHANNEL") or "solhunter-events-v2",
+        default=os.getenv("BROKER_CHANNEL") or "solhunter-events-v3",
         help="Channel/subject to subscribe to",
     )
     parser.add_argument(

@@ -158,7 +158,7 @@ Prove the whole system keeps rolling in paper mode:
 ```bash
 RL_HEALTH_URL=http://127.0.0.1:7070/health \
 CHECK_UI_HEALTH=1 UI_HEALTH_URL=http://127.0.0.1:3000/healthz \
-USE_REDIS=1 EVENT_BUS_URL=redis://127.0.0.1:6379/0 \
+USE_REDIS=1 EVENT_BUS_URL=redis://127.0.0.1:6379/1 \
 SELFTEST_SKIP_ARTIFACTS=1 CI=true DURATION_SEC=180 \
 python scripts/soak_runtime.py
 ```

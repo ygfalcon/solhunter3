@@ -116,10 +116,10 @@ async def run_seed_token_publisher() -> None:
         raise RuntimeError("SEED_TOKENS must contain at least one mint")
 
     redis_url = os.getenv("SEED_PUBLISH_REDIS_URL") or os.getenv("AMM_WATCH_REDIS_URL") or os.getenv(
-        "EVENT_BUS_URL", "redis://localhost:6379/0"
+        "EVENT_BUS_URL", "redis://localhost:6379/1"
     )
     channel = os.getenv("SEED_PUBLISH_BROKER_CHANNEL") or os.getenv("AMM_WATCH_BROKER_CHANNEL") or os.getenv(
-        "BROKER_CHANNEL", "solhunter-events-v2"
+        "BROKER_CHANNEL", "solhunter-events-v3"
     )
     interval = _parse_float_env("SEED_PUBLISH_INTERVAL", 180.0, minimum=30.0)
 

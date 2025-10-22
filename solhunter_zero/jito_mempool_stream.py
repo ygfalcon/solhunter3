@@ -268,8 +268,8 @@ async def run_jito_mempool_stream() -> None:
     if not ws_url or not auth_token:
         raise RuntimeError("MEMPOOL_STREAM_WS_URL and MEMPOOL_STREAM_AUTH must be configured")
 
-    redis_url = os.getenv("MEMPOOL_STREAM_REDIS_URL", "redis://localhost:6379/0")
-    channel = os.getenv("MEMPOOL_STREAM_BROKER_CHANNEL", "solhunter-events-v2")
+    redis_url = os.getenv("MEMPOOL_STREAM_REDIS_URL", "redis://localhost:6379/1")
+    channel = os.getenv("MEMPOOL_STREAM_BROKER_CHANNEL", "solhunter-events-v3")
     base_programs = _parse_program_list("MEMPOOL_STREAM_PROGRAM_IDS", DEFAULT_STREAM_PROGRAMS)
     pump_ids = _parse_program_list("PUMP_FUN_PROGRAM_IDS", ())
     if not pump_ids:

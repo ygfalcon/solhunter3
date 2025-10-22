@@ -20,7 +20,7 @@ def fail(msg: str) -> int:
 
 
 def main() -> int:
-    EVENT_BUS_URL = os.getenv("EVENT_BUS_URL", "redis://127.0.0.1:6379/0")
+    EVENT_BUS_URL = os.getenv("EVENT_BUS_URL", "redis://127.0.0.1:6379/1")
     RL_HEALTH_URL = os.getenv("RL_HEALTH_URL", "http://127.0.0.1:7070/health")
     UI_HEALTH_URL = os.getenv("UI_HEALTH_URL")
 
@@ -44,4 +44,3 @@ def main() -> int:
 
 if __name__ == "__main__":  # pragma: no cover - script entry point
     raise SystemExit(main())
-
