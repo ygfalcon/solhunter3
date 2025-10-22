@@ -17,6 +17,9 @@ momentum:
     price_momentum_1h: 0.1
     pump_intensity: 0.05
     social_sentiment: 0.05
+  floors:
+    volume_1h_usd: 500.0
+    volume_24h_usd: 2500.0
   social:
     min_max:
       - 0.0
