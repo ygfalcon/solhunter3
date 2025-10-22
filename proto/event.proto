@@ -266,4 +266,5 @@ message Event {
     VirtualPnL virtual_pnl = 33;
   }
   string dedupe_key = 34;
+  string schema_version = 35;
 }
