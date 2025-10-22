@@ -144,8 +144,23 @@ class ConnectivityChecker:
             targets.append({"name": "helius-rest", "type": "http", "url": rest})
         if redis_url:
             targets.append({"name": "redis", "type": "redis", "url": redis_url})
+        ui_http = env.get("UI_HEALTH_URL")
+        if not ui_http:
+            host = env.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
+            if host in {"0.0.0.0", "::"}:
+                host = "127.0.0.1"
+            port = env.get("UI_PORT", env.get("PORT", "5001") or "5001")
+            scheme = (env.get("UI_HTTP_SCHEME") or env.get("UI_SCHEME") or "http").strip().lower()
+            if scheme not in {"http", "https"}:
+                scheme = "http"
+            path = env.get("UI_HEALTH_PATH") or "/health"
+            if not path.startswith("/"):
+                path = "/" + path
+            ui_http = f"{scheme}://{host}:{port}{path}"
         if ui_ws:
             targets.append({"name": "ui-ws", "type": "ws", "url": ui_ws})
+        if ui_http:
+            targets.append({"name": "ui-http", "type": "http", "url": ui_http})
         if ws_gateway:
             targets.append({"name": "ws-gateway", "type": "ws", "url": ws_gateway})
         return targets
@@ -239,6 +254,74 @@ class ConnectivityChecker:
                 else:
                     session = await get_session()
                 assert session is not None
+                if name == "ui-http":
+                    async with aiohttp.ClientSession() as session_local:
+                        session = session_local
+                        close_session = False
+                        async with session.get(url, timeout=self.http_timeout) as resp:
+                            latency = (time.perf_counter() - start) * 1000
+                            self._record_latency(name, latency)
+                            self._record_status(name, resp.status)
+                            text: str | None = None
+                            try:
+                                text = await resp.text()
+                            except Exception:
+                                text = None
+                            if resp.status >= 400:
+                                self._record_error(name, f"HTTP_{resp.status}")
+                                return ConnectivityResult(
+                                    name=name,
+                                    target=url,
+                                    ok=False,
+                                    latency_ms=latency,
+                                    status="error",
+                                    status_code=resp.status,
+                                    error=f"HTTP {resp.status}",
+                                    attempts=1,
+                                )
+                            data: Dict[str, Any] | None = None
+                            if text:
+                                try:
+                                    data = json.loads(text)
+                                except Exception:
+                                    data = None
+                            bus_ok = bool(data and data.get("status", {}).get("event_bus"))
+                            loop_ok = bool(data and data.get("status", {}).get("trading_loop"))
+                            explicit_ok = None
+                            if data is not None and "ok" in data:
+                                explicit_ok = bool(data.get("ok"))
+                            ok = resp.status < 400 and bus_ok and loop_ok
+                            if explicit_ok is not None:
+                                ok = ok and explicit_ok
+                            if not ok:
+                                self._record_error(name, "ui-health")
+                                if not bus_ok and loop_ok:
+                                    detail = "event bus offline"
+                                elif loop_ok is False and bus_ok:
+                                    detail = "trading loop inactive"
+                                elif loop_ok is False and not bus_ok:
+                                    detail = "event bus offline; trading loop inactive"
+                                else:
+                                    detail = "missing status payload"
+                                return ConnectivityResult(
+                                    name=name,
+                                    target=url,
+                                    ok=False,
+                                    latency_ms=latency,
+                                    status="error",
+                                    status_code=resp.status,
+                                    error=f"ui-health: {detail}",
+                                    attempts=1,
+                                )
+                            return ConnectivityResult(
+                                name=name,
+                                target=url,
+                                ok=True,
+                                latency_ms=latency,
+                                status="ok",
+                                status_code=resp.status,
+                                attempts=1,
+                            )
                 try:
                     async with session.head(url, timeout=self.http_timeout) as resp:
                         latency = (time.perf_counter() - start) * 1000
@@ -326,6 +409,22 @@ class ConnectivityChecker:
                     close_timeout=self.http_timeout,
                 ) as ws:
                     await ws.ping()
+                    if name == "ui-ws":
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=self.redis_timeout)
+                        except asyncio.TimeoutError as exc:
+                            raise RuntimeError("ui-hello-timeout") from exc
+                        except Exception as exc:  # pragma: no cover - defensive
+                            raise RuntimeError(f"ui-hello-error: {exc}") from exc
+                        try:
+                            payload = json.loads(raw)
+                        except Exception as exc:
+                            raise RuntimeError("ui-hello-invalid-json") from exc
+                        if payload.get("event") != "hello":
+                            raise RuntimeError("ui-hello-missing")
+                        channel = payload.get("channel")
+                        if channel not in {"events", "rl", "logs"}:
+                            raise RuntimeError("ui-hello-unknown-channel")
                     await asyncio.sleep(0.1)
                     latency = (time.perf_counter() - started) * 1000
                     self._record_latency(name, latency)

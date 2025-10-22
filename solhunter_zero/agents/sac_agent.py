@@ -115,6 +115,7 @@ class SACAgent(BaseAgent):
         self._last_id: int = 0
         self._task: asyncio.Task | None = None
         self._logger = logging.getLogger(__name__)
+        self._missing_logged = False
 
         self.actor = GaussianPolicy(4, hidden_size)
         self.q1 = QNetwork(4, hidden_size)
@@ -149,15 +150,26 @@ class SACAgent(BaseAgent):
 
     # --------------------------------------------------------------
     def _load_weights(self) -> None:
+        if not self.model_path.exists():
+            if not self._missing_logged:
+                level = self._logger.warning if self._fitted else self._logger.info
+                level("SAC model missing; skipping load (%s)", self.model_path)
+                self._missing_logged = True
+            self._fitted = False
+            self._jit = None
+            return
         script_path = self.model_path.with_suffix(".ptc")
         if script_path.exists():
             try:
                 self._jit = torch.jit.load(script_path, map_location=self.device)
                 self._last_mtime = os.path.getmtime(script_path)
                 self._fitted = True
+                self._missing_logged = False
                 return
             except Exception:
                 self._jit = None
+        if not self.model_path.exists():
+            return
         data = torch.load(self.model_path, map_location=self.device)
         self.actor.load_state_dict(data.get("actor", {}))
         self.q1.load_state_dict(data.get("q1", {}))
@@ -173,6 +185,7 @@ class SACAgent(BaseAgent):
         self._last_mtime = os.path.getmtime(self.model_path)
         self._fitted = True
         self._jit = None
+        self._missing_logged = False
 
     def reload_weights(self) -> None:
         self._load_weights()
