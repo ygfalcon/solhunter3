@@ -250,6 +250,9 @@ set -a
 source "$ENV_FILE"
 set +a
 
+# Ensure Jupiter websocket uses the stats endpoint unless explicitly overridden.
+export JUPITER_WS_URL="${JUPITER_WS_URL:-wss://stats.jup.ag/ws}"
+
 if [[ -n $CONFIG_PATH ]]; then
   export CONFIG_PATH
 fi

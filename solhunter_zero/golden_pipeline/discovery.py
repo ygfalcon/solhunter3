@@ -103,17 +103,6 @@ class DiscoveryStage:
 
             if self._breaker.is_open:
                 log.debug("Discovery circuit breaker open; dropping %s", candidate.mint)
-                self._bloom.add(candidate.mint)
-                self._seen.add(candidate.mint, self._dedupe_ttl)
-                if self._kv:
-                    try:
-                        await self._kv.set_if_absent(
-                            discovery_seen_key(candidate.mint),
-                            "1",
-                            ttl=self._dedupe_ttl,
-                        )
-                    except Exception:  # pragma: no cover - kv backend failure
-                        log.debug("Failed to persist breaker dedupe for %s", candidate.mint)
             elif not self._validate(candidate.mint):
                 log.debug("Rejected discovery candidate %s", candidate.mint)
                 self._record_failure()
