@@ -67,10 +67,10 @@ if _ACCEPTED_SCHEMA:
 else:
     _EXPECTED_EVENT_SCHEMA_VERSIONS = (_EVENT_SCHEMA_VERSION,)
 
-DEFAULT_WS_URL = "ws://127.0.0.1:8769"
+DEFAULT_WS_URL = "ws://127.0.0.1:8779"
 _DEFAULT_WS = urlparse(DEFAULT_WS_URL)
 _WS_LISTEN_HOST = _DEFAULT_WS.hostname or "127.0.0.1"
-_WS_LISTEN_PORT = _DEFAULT_WS.port or 8769
+_WS_LISTEN_PORT = _DEFAULT_WS.port or 8779
 
 try:  # optional redis / nats support
     import redis.asyncio as aioredis  # type: ignore
@@ -1945,7 +1945,7 @@ async def verify_broker_connection(
     return ok
 
 
-async def start_ws_server(host: str = "localhost", port: int = 8769):
+async def start_ws_server(host: str = "localhost", port: int = 8779):
     """Start websocket server broadcasting published events."""
     global _ws_server, _flush_task, _outgoing_queue, _WS_LISTEN_HOST, _WS_LISTEN_PORT, DEFAULT_WS_URL
 
@@ -2353,7 +2353,7 @@ def _reload_bus(cfg) -> None:
                 else:
                     parsed = urlparse(DEFAULT_WS_URL)
                     host = parsed.hostname or "127.0.0.1"
-                    port = parsed.port or 8769
+                    port = parsed.port or 8779
                     await start_ws_server(host, port)
                     reachable = {DEFAULT_WS_URL}
             else:

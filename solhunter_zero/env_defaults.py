@@ -13,19 +13,38 @@ DEFAULTS: dict[str, str] = {
     "BIRDEYE_ENABLED": "1",
     "HELIUS_API_KEY": "af30888b-b79f-4b12-b3fd-c5375d5bad2d",
     "USE_DAS_DISCOVERY": "1",
+    "DAS_RPS": "1.0",
+    "DAS_TIMEOUT_THRESHOLD": "3",
+    "DAS_TIMEOUT_TOTAL": "9",
+    "DAS_DEGRADED_COOLDOWN": "90",
     "DEXSCREENER_DISABLED": "0",
     "SYNTHETIC_PRICE_HINTS": '{"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 1.0}',
+    "PRICE_PROVIDERS": "pyth,dexscreener,birdeye,synthetic",
+    "SEED_TOKENS": (
+        "So11111111111111111111111111111111111111112,"
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9,"
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+    ),
+    "PYTH_PRICE_IDS": (
+        '{"So11111111111111111111111111111111111111112":"J83JdAq8FDeC8v2WFE2QyXkJhtCmvYzu3d6PvMfo4WwS",'
+        '"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9":"GkzKf5qcF6edCbnMD4HzyBbs6k8ZZrVSu2Ce279b9EcT",'
+        '"Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB":"7sxNXmAf6oMzFxLpyR4V6kRDeo63HgNbUsVTNff7kX2Z"}'
+    ),
     "REDIS_URL": "redis://localhost:6379/1",
+    "USE_REDIS": "1",
     "MINT_STREAM_REDIS_URL": "redis://localhost:6379/1",
     "MEMPOOL_STREAM_REDIS_URL": "redis://localhost:6379/1",
     "AMM_WATCH_REDIS_URL": "redis://localhost:6379/1",
     "EVENT_BUS_URL": "ws://127.0.0.1:8779",
+    "EVENT_BUS_DISABLE_LOCAL": "0",
     # Core service toggles
     "DEPTH_SERVICE": "true",
     "USE_DEPTH_STREAM": "1",
     "USE_DEPTH_FEED": "0",
     "USE_RUST_EXEC": "True",
     "USE_SERVICE_EXEC": "True",
+    "GOLDEN_PIPELINE": "1",
+    "MINT_STREAM_ENABLE": "1",
 
     # Solana RPC endpoints
     "SOLANA_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",

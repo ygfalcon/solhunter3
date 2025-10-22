@@ -286,7 +286,7 @@ async def test_websocket_publish_and_receive():
 
 @pytest.mark.asyncio
 async def test_websocket_client_publish(monkeypatch):
-    port = 8769
+    port = 8779
     await start_ws_server("localhost", port)
     received = []
     subscribe("weights_updated", lambda p: received.append(p))
@@ -470,7 +470,7 @@ async def test_reload_bus_requires_ws_urls(monkeypatch):
     ev._reload_bus(None)
     await asyncio.sleep(0)
 
-    assert called == {"host": "127.0.0.1", "port": 8769}
+    assert called == {"host": "127.0.0.1", "port": 8779}
     assert connected == [ev.DEFAULT_WS_URL]
 
     importlib.reload(ev)

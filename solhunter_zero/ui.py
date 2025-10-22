@@ -213,22 +213,39 @@ def _price_provider_order() -> List[str]:
     except Exception:
         return []
     try:
-        providers = list(prices.PROVIDER_CONFIGS.keys())
+        providers = [str(name) for name in prices.PROVIDER_CONFIGS.keys()]
     except Exception:
-        return []
-    return [str(name) for name in providers]
+        providers = []
+    preferred = ["pyth", "dexscreener", "birdeye", "synthetic"]
+    ordered: List[str] = []
+    for name in preferred:
+        if name in providers and name not in ordered:
+            ordered.append(name)
+    for name in providers:
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
 
 
 def _discover_seed_tokens() -> List[str]:
     try:
         from . import seed_token_publisher
     except Exception:
-        return []
-    try:
-        tokens = seed_token_publisher.configured_seed_tokens()
-    except Exception:
-        return []
-    return [str(token) for token in tokens if token]
+        seed_tokens: Sequence[str] = ()
+    else:
+        try:
+            seed_tokens = seed_token_publisher.configured_seed_tokens()
+        except Exception:
+            seed_tokens = ()
+    tokens: List[str] = [str(token) for token in (seed_tokens or ()) if token]
+    if not tokens:
+        fallback = _env_or_default("SEED_TOKENS") or ""
+        if fallback:
+            for raw in str(fallback).split(","):
+                candidate = raw.strip()
+                if candidate:
+                    tokens.append(candidate)
+    return tokens
 
 
 def _pyth_price_hints() -> List[Dict[str, Any]]:
@@ -431,6 +448,46 @@ def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
             return sorted(str(field) for field in required)
         return []
 
+    def _field_types(stream: str | None, fields: Sequence[str]) -> Dict[str, Any]:
+        if not stream:
+            return {}
+        schema = STREAM_SCHEMAS.get(stream)
+        if not isinstance(schema, Mapping):
+            return {}
+        properties = schema.get("properties")
+        if not isinstance(properties, Mapping):
+            return {}
+        result: Dict[str, Any] = {}
+        for field in fields:
+            prop = properties.get(field) if isinstance(properties, Mapping) else None
+            if not isinstance(prop, Mapping):
+                continue
+            types: list[str] = []
+            primary = prop.get("type")
+            if isinstance(primary, str):
+                types.append(primary)
+            elif isinstance(primary, (list, tuple)):
+                types.extend(str(item) for item in primary if item)
+            for alt_key in ("anyOf", "oneOf", "allOf"):
+                alternatives = prop.get(alt_key)
+                if not isinstance(alternatives, (list, tuple)):
+                    continue
+                for option in alternatives:
+                    if not isinstance(option, Mapping):
+                        continue
+                    opt_type = option.get("type")
+                    if isinstance(opt_type, str):
+                        types.append(opt_type)
+                    elif isinstance(opt_type, (list, tuple)):
+                        types.extend(str(item) for item in opt_type if item)
+            if not types:
+                continue
+            normalized = sorted({candidate for candidate in types if candidate})
+            if not normalized:
+                continue
+            result[field] = normalized[0] if len(normalized) == 1 else normalized
+        return result
+
     entries: List[Dict[str, Any]] = []
     discovery_topics = [STREAMS.discovery_candidates]
     mint_discovered = getattr(STREAMS, "mint_discovered", "x:mint.discovered")
@@ -442,6 +499,7 @@ def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
             "topics": discovery_topics,
             "schema_id": "discovery@1",
             "required": _required(STREAMS.discovery_candidates),
+            "_schema_key": STREAMS.discovery_candidates,
         }
     )
     entries.append(
@@ -459,6 +517,7 @@ def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
                 "volume_base": "vol_base",
             },
             "ttl_seconds": ttl_info.get("ohlcv_5m_s"),
+            "_schema_key": STREAMS.market_ohlcv,
         }
     )
     entries.append(
@@ -468,6 +527,7 @@ def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
             "schema_id": f"depth_snapshot@{DEPTH_SNAPSHOT_SCHEMA_VERSION}",
             "required": _required(STREAMS.market_depth),
             "ttl_seconds": ttl_info.get("depth_s"),
+            "_schema_key": STREAMS.market_depth,
         }
     )
     entries.append(
@@ -477,6 +537,7 @@ def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
             "schema_id": f"golden_snapshot@{GOLDEN_SNAPSHOT_SCHEMA_VERSION}",
             "required": _required(STREAMS.golden_snapshot),
             "ttl_seconds": ttl_info.get("golden_s"),
+            "_schema_key": STREAMS.golden_snapshot,
         }
     )
     entries.append(
@@ -486,6 +547,7 @@ def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
             "schema_id": f"trade_suggested@{TRADE_SUGGESTION_SCHEMA_VERSION}",
             "required": _required(STREAMS.trade_suggested),
             "ttl_seconds": ttl_info.get("suggestions_s"),
+            "_schema_key": STREAMS.trade_suggested,
         }
     )
     entries.append(
@@ -495,6 +557,7 @@ def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
             "schema_id": f"vote_decision@{DECISION_SCHEMA_VERSION}",
             "required": _required(STREAMS.vote_decisions),
             "ttl_seconds": ttl_info.get("votes_s"),
+            "_schema_key": STREAMS.vote_decisions,
         }
     )
     entries.append(
@@ -503,6 +566,7 @@ def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
             "topics": [STREAMS.virtual_fills],
             "schema_id": f"shadow_fill@{VIRTUAL_FILL_SCHEMA_VERSION}",
             "required": _required(STREAMS.virtual_fills),
+            "_schema_key": STREAMS.virtual_fills,
         }
     )
     entries.append(
@@ -511,8 +575,15 @@ def _schema_entries(ttl_info: Mapping[str, float]) -> List[Dict[str, Any]]:
             "topics": ["rl_weights", "rl:weights.applied"],
             "schema_id": "rl_weights@1",
             "required": ["weights"],
+            "_schema_key": None,
+            "_field_types": {"weights": "array"},
         }
     )
+    for entry in entries:
+        schema_key = entry.get("_schema_key")
+        required_fields = entry.get("required") or []
+        if "_field_types" not in entry:
+            entry["_field_types"] = _field_types(schema_key, required_fields)
     return entries
 
 
@@ -688,31 +759,47 @@ def _provider_status_snapshot() -> Dict[str, Dict[str, Any]]:
     return providers
 
 
-def _resolve_keypair_mode(paper_mode: bool) -> str:
-    keypair_path = os.getenv("KEYPAIR_PATH")
-    if keypair_path:
-        candidate = Path(keypair_path).expanduser()
-    else:
-        keypair_dir = os.getenv("KEYPAIR_DIR", "keypairs")
-        candidate = Path(keypair_dir).expanduser() / "default.json"
-    if candidate.exists():
-        return "persistent"
-    return "ephemeral" if paper_mode else "missing"
+def _resolve_keypair_mode(_paper_mode: bool) -> str:
+    explicit_path = os.getenv("KEYPAIR_PATH") or os.getenv("SOLANA_KEYPAIR")
+    if explicit_path:
+        candidate = Path(explicit_path).expanduser()
+        if candidate.exists():
+            return "persistent"
+        return "missing"
+    # Without an explicit keypair path treat the runtime as ephemeral/paper
+    # so the UI can describe the reduced risk posture.
+    return "ephemeral"
 
 
-def _depth_service_info(status: Mapping[str, Any]) -> Dict[str, Any]:
-    enabled = bool(status.get("depth_service"))
-    info: Dict[str, Any] = {"enabled": enabled}
+def _depth_service_info(
+    status: Mapping[str, Any], *, keypair_mode: str | None = None, paper_mode: bool = False
+) -> Dict[str, Any]:
+    requested = parse_bool_env("DEPTH_SERVICE", True) and parse_bool_env("USE_DEPTH_STREAM", True)
+    ready = bool(status.get("depth_service"))
+    info: Dict[str, Any] = {"enabled": bool(requested), "ready": ready}
     version = os.getenv("DEPTH_SERVICE_VERSION")
     if version:
         info["version"] = version
-    rpc_url = os.getenv("DEPTH_SERVICE_RPC_URL") or os.getenv("DEPTH_SERVICE_URL")
+    rpc_url = (
+        os.getenv("DEPTH_SERVICE_RPC_URL")
+        or os.getenv("DEPTH_SERVICE_URL")
+        or os.getenv("SOLANA_RPC_URL")
+    )
     if rpc_url:
         info["rpc_url"] = rpc_url
     addr = (os.getenv("DEPTH_WS_ADDR") or "").strip()
     port = (os.getenv("DEPTH_WS_PORT") or "").strip()
     if addr and port:
         info["ws_url"] = f"ws://{addr}:{port}"
+    if not ready:
+        reason = None
+        if not requested:
+            reason = "disabled"
+        elif paper_mode or (keypair_mode in {"ephemeral", "missing"}):
+            reason = "paper-mode"
+        else:
+            reason = "starting"
+        info["reason"] = reason
     return info
 
 
@@ -725,13 +812,18 @@ def _resolve_execution_snapshot(status: Mapping[str, Any]) -> Dict[str, Any]:
     concurrency = _maybe_int(os.getenv("EVENT_EXECUTOR_LIMIT")) or 64
     priority_env = os.getenv("PRIORITY_RPC") or ""
     priority_rpc = [value.strip() for value in priority_env.split(",") if value.strip()]
+    keypair_mode = _resolve_keypair_mode(paper)
+    effective_paper = paper or keypair_mode in {"ephemeral", "missing"}
+    if keypair_mode == "missing" and effective_paper:
+        keypair_mode = "ephemeral"
+    depth_info = _depth_service_info(status, keypair_mode=keypair_mode, paper_mode=effective_paper)
     return {
-        "paper": paper,
+        "paper": effective_paper,
         "rate_limit_per_s": rate_limit_per_s,
         "concurrency": concurrency,
         "priority_rpc": priority_rpc,
-        "keypair_mode": _resolve_keypair_mode(paper),
-        "depth_service": _depth_service_info(status),
+        "keypair_mode": keypair_mode,
+        "depth_service": depth_info,
     }
 
 
@@ -766,6 +858,22 @@ def _resilience_snapshot() -> Dict[str, Any]:
         backoff_cap = getattr(token_scanner, "_DAS_BACKOFF_CAP", None)
         request_interval = getattr(token_scanner, "_DAS_REQUEST_INTERVAL", None)
         max_attempts = getattr(token_scanner, "_DAS_MAX_ATTEMPTS", None)
+    env_rps = _maybe_float(os.getenv("DAS_RPS"))
+    if env_rps is not None:
+        das_rps = env_rps
+    else:
+        das_rps = 1.0
+    env_timeout_total = _maybe_float(os.getenv("DAS_TIMEOUT_TOTAL"))
+    if env_timeout_total is not None:
+        timeout_total = env_timeout_total
+    else:
+        timeout_total = 9.0
+    if timeout_connect is None:
+        timeout_connect = _maybe_float(os.getenv("DAS_TIMEOUT_CONNECT")) or 1.5
+    if timeout_threshold is None:
+        timeout_threshold = _maybe_float(os.getenv("DAS_TIMEOUT_THRESHOLD")) or 3.0
+    if degraded_cooldown is None:
+        degraded_cooldown = _maybe_float(os.getenv("DAS_DEGRADED_COOLDOWN")) or 90.0
     resilience["das"] = {
         "rps": das_rps,
         "timeout_connect_s": timeout_connect,
@@ -830,28 +938,37 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
     lag_snapshot = summary.get("lag") if isinstance(summary.get("lag"), dict) else {}
     golden_info = summary.get("golden") if isinstance(summary.get("golden"), dict) else {}
     lag_metrics: Dict[str, Optional[float]] = {
-        "bus": _maybe_float(status.get("bus_latency_ms")),
-        "ohlcv": _maybe_float(lag_snapshot.get("ohlcv_ms")),
-        "depth": _maybe_float(lag_snapshot.get("depth_ms")),
-        "golden": _maybe_float(golden_info.get("lag_ms")),
-        "suggestions": _maybe_float(lag_snapshot.get("suggestion_ms")),
-        "decisions": _maybe_float(lag_snapshot.get("decision_ms")),
+        "bus_ms": _maybe_float(status.get("bus_latency_ms")),
+        "ohlcv_ms": _maybe_float(lag_snapshot.get("ohlcv_ms")),
+        "depth_ms": _maybe_float(lag_snapshot.get("depth_ms")),
+        "golden_ms": _maybe_float(golden_info.get("lag_ms")),
+        "suggestions_ms": _maybe_float(lag_snapshot.get("suggestion_ms")),
+        "votes_ms": _maybe_float(lag_snapshot.get("decision_ms")),
     }
     rl_updated = None
     if isinstance(rl_status, Mapping):
         rl_updated = _maybe_float(rl_status.get("updated_at"))
     if rl_updated is not None:
-        lag_metrics["rl"] = max(0.0, (time.time() - rl_updated) * 1000.0)
+        lag_metrics["rl_ms"] = max(0.0, (time.time() - rl_updated) * 1000.0)
     else:
-        lag_metrics["rl"] = None
+        lag_metrics["rl_ms"] = None
 
-    redis_url = _discover_broker_url()
-    channel = getattr(event_bus, "_BROKER_CHANNEL", None) or os.getenv("BROKER_CHANNEL")
+    execution = _resolve_execution_snapshot(status)
+    paper_mode = bool(execution.get("paper"))
 
+    redis_url = _discover_broker_url() or (_env_or_default("REDIS_URL") or "redis://localhost:6379/1")
+    channel = (
+        getattr(event_bus, "_BROKER_CHANNEL", None)
+        or os.getenv("BROKER_CHANNEL")
+        or _env_or_default("BROKER_CHANNEL")
+        or "solhunter-events-v3"
+    )
+
+    depth_info = execution.get("depth_service") if isinstance(execution.get("depth_service"), Mapping) else {}
     features: Dict[str, Any] = {
         "sentiment_enabled": parse_bool_env("SENTIMENT_ENABLED", False),
         "rl_shadow_enabled": str(status.get("rl_mode") or "").lower() == "shadow",
-        "depth_service_enabled": bool(status.get("depth_service")) or parse_bool_env("USE_DEPTH_STREAM", True),
+        "depth_service_enabled": bool(depth_info.get("enabled")),
         "golden_pipeline_enabled": parse_bool_env("GOLDEN_PIPELINE", True),
         "discovery_enabled": parse_bool_env("MINT_STREAM_ENABLE", True),
         "use_mev_bundles": parse_bool_env("USE_MEV_BUNDLES", False),
@@ -873,13 +990,18 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         "votes_s": 30.0,
     }
 
+    workflow = (
+        status.get("workflow")
+        or os.getenv("SOLHUNTER_WORKFLOW")
+        or os.getenv("RUNTIME_WORKFLOW")
+    )
     version_info: Dict[str, Any] = {
         "app_version": _resolve_app_version(),
         "schema_version": UI_SCHEMA_VERSION,
         "schema_hash": _compute_schema_hash(),
         "build_git": _resolve_build_git(),
-        "workflow": status.get("workflow"),
-        "mode": "paper" if status.get("paper_mode") else "live",
+        "workflow": workflow,
+        "mode": "paper" if paper_mode else "live",
     }
     version_info = {key: value for key, value in version_info.items() if value is not None}
 
@@ -906,19 +1028,35 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
     if isinstance(redis_info, Mapping) and redis_info.get("db") is not None:
         broker_info["db"] = redis_info.get("db")
 
-    event_bus_url = os.getenv("EVENT_BUS_URL") or getattr(event_bus, "DEFAULT_WS_URL", None)
+    event_bus_url = (
+        os.getenv("EVENT_BUS_URL")
+        or getattr(event_bus, "DEFAULT_WS_URL", None)
+        or "ws://127.0.0.1:8779"
+    )
     event_bus_payload = {"url_ws": event_bus_url}
 
-    streams_contracts = _schema_entries(ttl_info)
+    raw_schema_entries = _schema_entries(ttl_info)
+    streams_contracts: List[Dict[str, Any]] = []
     schemas_listing: List[Dict[str, Any]] = []
-    for entry in streams_contracts:
+    for raw_entry in raw_schema_entries:
+        schema_key = raw_entry.get("_schema_key")
+        field_types = raw_entry.get("_field_types")
+        entry = {
+            key: value
+            for key, value in raw_entry.items()
+            if key not in {"_schema_key", "_field_types"}
+        }
+        streams_contracts.append(entry)
         topics = entry.get("topics") or []
         topic = topics[0] if topics else None
-        schema_item = {
+        required_fields = entry.get("required") or []
+        schema_item: Dict[str, Any] = {
             "topic": topic,
             "schema_id": entry.get("schema_id"),
-            "required": entry.get("required"),
+            "required": required_fields,
         }
+        if isinstance(field_types, Mapping) and field_types:
+            schema_item["types"] = dict(field_types)
         if entry.get("aliases"):
             schema_item["aliases"] = entry["aliases"]
         schema_item = {key: value for key, value in schema_item.items() if value}
@@ -974,12 +1112,10 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         }
     pipeline_payload = {
         "stages": stages,
-        "expectations": (
-            "Discovery mints publish to x:mint.discovered; fresh depth+price generates "
-            "Golden hashes on x:mint.golden; valid Golden snapshots unlock x:trade.suggested "
-            "suggestions and x:vote.decisions windows."
-        ),
+        "expectations": "discovery → golden → suggestions → votes",
     }
+
+    heartbeat_ts = _maybe_float(status.get("heartbeat"))
 
     payload: Dict[str, Any] = {
         "type": "UI_META",
@@ -992,7 +1128,7 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         "lag": lag_metrics,
         "features": features,
         "staleness": staleness,
-        "heartbeat_epoch": _maybe_float(status.get("heartbeat")),
+        "heartbeat_epoch": time.monotonic(),
         "ttl": ttl_info,
         "bootstrap": bootstrap,
         "providers": _provider_status_snapshot(),
@@ -1012,6 +1148,9 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         },
         "generated_ts": time.time(),
     }
+
+    if heartbeat_ts is not None:
+        payload["heartbeat_ts"] = heartbeat_ts
 
     if status.get("environment"):
         payload["environment"] = status.get("environment")
@@ -1502,13 +1641,6 @@ def _start_channel(
                 return
             with state.lock:
                 state.clients.add(websocket)
-            hello = json.dumps({"channel": channel, "event": "hello", "schema": UI_SCHEMA_VERSION})
-            try:
-                await websocket.send(hello)
-            except Exception:
-                with state.lock:
-                    state.clients.discard(websocket)
-                return
 
             handshake_event = asyncio.Event()
             send_lock = asyncio.Lock()
@@ -1547,6 +1679,27 @@ def _start_channel(
                     await _send_meta("timeout")
 
             timeout_task = asyncio.create_task(_handshake_timeout())
+
+            try:
+                await _send_meta("connect")
+            except Exception:
+                with state.lock:
+                    state.clients.discard(websocket)
+                timeout_task.cancel()
+                with contextlib.suppress(Exception):
+                    await timeout_task
+                return
+
+            hello = json.dumps({"channel": channel, "event": "hello", "schema": UI_SCHEMA_VERSION})
+            try:
+                await websocket.send(hello)
+            except Exception:
+                with state.lock:
+                    state.clients.discard(websocket)
+                timeout_task.cancel()
+                with contextlib.suppress(Exception):
+                    await timeout_task
+                return
 
             async def _decode_client_message(raw: Any) -> Dict[str, Any] | None:
                 if isinstance(raw, bytes):
@@ -3651,9 +3804,12 @@ _PAGE_TEMPLATE = """
                     }
                     if (connectionBanner) {
                         const lag = latestMeta.lag || {};
-                        connectionBanner.dataset.ohlcvLag = typeof lag.ohlcv === 'number' ? String(lag.ohlcv) : '';
-                        connectionBanner.dataset.depthLag = typeof lag.depth === 'number' ? String(lag.depth) : '';
-                        connectionBanner.dataset.goldenLag = typeof lag.golden === 'number' ? String(lag.golden) : '';
+                        const ohlcvLag = typeof lag.ohlcv_ms === 'number' ? lag.ohlcv_ms : null;
+                        const depthLag = typeof lag.depth_ms === 'number' ? lag.depth_ms : null;
+                        const goldenLag = typeof lag.golden_ms === 'number' ? lag.golden_ms : null;
+                        connectionBanner.dataset.ohlcvLag = ohlcvLag === null ? '' : String(ohlcvLag);
+                        connectionBanner.dataset.depthLag = depthLag === null ? '' : String(depthLag);
+                        connectionBanner.dataset.goldenLag = goldenLag === null ? '' : String(goldenLag);
                     }
                     const detailParts = [];
                     if (latestMeta.channel) {

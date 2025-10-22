@@ -259,8 +259,8 @@ def test_writes_bus_urls(monkeypatch, tmp_path):
     script.main([])
 
     env_text = (tmp_path / ".env").read_text()
-    assert "EVENT_BUS_URL=ws://127.0.0.1:8769" in env_text
-    assert "BROKER_WS_URLS=ws://127.0.0.1:8769" in env_text
+    assert "EVENT_BUS_URL=ws://127.0.0.1:8779" in env_text
+    assert "BROKER_WS_URLS=ws://127.0.0.1:8779" in env_text
 
     dummy_cfg = types.ModuleType("solhunter_zero.config")
     dummy_cfg.get_event_bus_peers = lambda cfg=None: []
@@ -268,7 +268,7 @@ def test_writes_bus_urls(monkeypatch, tmp_path):
     sys.modules["solhunter_zero.config"] = dummy_cfg
     import solhunter_zero.event_bus as event_bus
     urls = event_bus._resolve_ws_urls({})
-    assert urls == {"ws://127.0.0.1:8769"}
+    assert urls == {"ws://127.0.0.1:8779"}
 
 
 def test_respects_active_venv(monkeypatch, tmp_path):

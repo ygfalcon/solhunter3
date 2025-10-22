@@ -72,7 +72,7 @@ async def main() -> None:
     parser.add_argument("--path", default="/tmp/events.mmap")
     parser.add_argument("--size", type=int, default=1 << 20)
     parser.add_argument("--host", default="localhost")
-    parser.add_argument("--port", type=int, default=8769)
+    parser.add_argument("--port", type=int, default=8779)
     args = parser.parse_args()
 
     if args.mmap:
