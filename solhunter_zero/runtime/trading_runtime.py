@@ -1783,6 +1783,33 @@ class TradingRuntime:
                 }
             momentum_stale = _as_bool(payload.get("momentum_stale"))
             momentum_partial = _as_bool(payload.get("momentum_partial"))
+            social_source_value = payload.get("social_source")
+            if isinstance(social_source_value, str):
+                social_source_value = social_source_value.strip() or None
+            else:
+                social_source_value = None
+            if social_source_value is None and isinstance(momentum_breakdown, dict):
+                candidate_source = momentum_breakdown.get("social_source")
+                if isinstance(candidate_source, str):
+                    candidate_source = candidate_source.strip()
+                    if candidate_source:
+                        social_source_value = candidate_source
+            lunarcrush_applied = False
+            if social_source_value and "lunarcrush" in social_source_value.lower():
+                lunarcrush_applied = True
+            elif isinstance(momentum_breakdown, dict):
+                for key in ("lunarcrush_sentiment", "lunarcrush_delta"):
+                    if key in momentum_breakdown:
+                        lunarcrush_applied = True
+                        break
+            sentiment_label = None
+            sentiment_class = None
+            if lunarcrush_applied:
+                sentiment_label = "boosted"
+                sentiment_class = "boosted"
+            elif social_sentiment is not None:
+                sentiment_label = "baseline"
+                sentiment_class = "baseline"
             snapshots.append(
                 {
                     "mint": mint,
@@ -1808,6 +1835,9 @@ class TradingRuntime:
                     "tweets_per_min": tweets_per_min,
                     "buyers_last_hour": buyers_last_hour,
                     "momentum_latency_ms": momentum_latency,
+                    "sentiment_label": sentiment_label,
+                    "sentiment_class": sentiment_class,
+                    "sentiment_source": social_source_value,
                 }
             )
         return {

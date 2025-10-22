@@ -1235,6 +1235,11 @@ _PAGE_TEMPLATE = """
         .pill.depth { color: var(--muted); border-color: rgba(110,118,129,0.35); }
         .pill.source { font-weight: 600; border-color: rgba(88,166,255,0.35); }
         .pill.source.synthetic { border-color: rgba(242,204,96,0.45); color: var(--warning); }
+        .pill.sentiment { border-color: rgba(88,166,255,0.35); letter-spacing: 0.08em; }
+        .pill.sentiment.boosted { color: #f59e0b; border-color: rgba(245,158,11,0.5); }
+        .pill.sentiment.baseline { color: var(--accent); border-color: rgba(88,166,255,0.45); }
+        .sentiment-cell { display: flex; flex-direction: column; gap: 4px; }
+        .sentiment-cell small { font-size: 12px; color: var(--muted); }
         .pill.faded { opacity: 0.6; }
         .price-wrapper { display: flex; gap: 0.35rem; align-items: center; flex-wrap: wrap; }
         .depth-group { display: flex; gap: 0.35rem; flex-wrap: wrap; }
@@ -1820,6 +1825,7 @@ _PAGE_TEMPLATE = """
                             {% if golden_momentum_enabled %}
                             <th>Momentum</th>
                             {% endif %}
+                            <th>Sentiment</th>
                             <th>Lag (ms)</th>
                             <th>Published</th>
                         </tr>
@@ -1968,13 +1974,28 @@ _PAGE_TEMPLATE = """
                                 {% endif %}
                             </td>
                             {% endif %}
+                            <td class=\"sentiment-cell\">
+                                {% if snap.sentiment_label %}
+                                    <span class=\"pill sentiment {{ snap.sentiment_class or 'baseline' }}\">{{ snap.sentiment_label }}</span>
+                                {% elif snap.social_sentiment is not none %}
+                                    <span class=\"pill sentiment baseline\">{{ snap.social_sentiment | round(3) }}</span>
+                                {% else %}
+                                    —
+                                {% endif %}
+                                {% if snap.social_sentiment is not none %}
+                                    <small>Score {{ snap.social_sentiment | round(3) }}</small>
+                                {% endif %}
+                                {% if snap.sentiment_source %}
+                                    <small>{{ snap.sentiment_source }}</small>
+                                {% endif %}
+                            </td>
                             <td>
                                 <span class=\"pill {{ 'stale' if snap.stale else 'fresh' }}\">{{ snap.lag_ms | round(0) if snap.lag_ms is not none else '—' }}</span>
                             </td>
                             <td>{{ snap.age_label }}</td>
                         </tr>
                         {% else %}
-                        <tr class=\"skeleton-row\"><td colspan=\"{{ 7 if golden_momentum_enabled else 6 }}\" class=\"muted\">Golden pipeline idle.</td></tr>
+                        <tr class=\"skeleton-row\"><td colspan=\"{{ 8 if golden_momentum_enabled else 7 }}\" class=\"muted\">Golden pipeline idle.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
