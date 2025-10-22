@@ -1602,6 +1602,10 @@ class SwarmPipeline:
 
     async def _run_execution(self, simulation: SimulationStage) -> ExecutionStage:
         stage = ExecutionStage()
+        try:
+            from .agent_manager import EvaluationContext as _EvaluationContext
+        except ImportError:  # pragma: no cover - optional dependency guard
+            _EvaluationContext = None
         if not simulation.records:
             return stage
 
@@ -1959,7 +1963,7 @@ class SwarmPipeline:
                 continue
             swarm = self.agent_manager.consume_swarm(
                 record.token,
-                ctx.swarm if isinstance(ctx, EvaluationContext) else None,
+                ctx.swarm if (_EvaluationContext and isinstance(ctx, _EvaluationContext)) else None,
             )
             if swarm is None:
                 continue
