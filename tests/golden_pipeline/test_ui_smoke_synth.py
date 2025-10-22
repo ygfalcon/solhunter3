@@ -1,11 +1,17 @@
 import asyncio
+import hashlib
+import json
 import re
 from html.parser import HTMLParser
 
 import pytest
 
 from solhunter_zero.golden_pipeline.contracts import STREAMS
-from solhunter_zero.golden_pipeline.types import GOLDEN_SNAPSHOT_SCHEMA_VERSION
+from solhunter_zero.golden_pipeline.types import (
+    GOLDEN_SNAPSHOT_SCHEMA_VERSION,
+    OHLCV_BAR_SCHEMA_VERSION,
+)
+from solhunter_zero.golden_pipeline.utils import canonical_hash
 
 pytest_plugins = ["tests.golden_pipeline.synth_seed"]
 
@@ -179,7 +185,7 @@ def test_golden_snapshot_nested_payload(runtime, bus):
     mint = "NestedMint111111111111111111111111111111111111111"
     mid_usd = 2.75
     spread_bps = 14.5
-    depth_map = {"1": 1_500.0, "2": 2_750.0}
+    depth_map = {"0.1": 350.0, "0.5": 900.0, "1": 1_500.0, "2": 2_750.0}
     liquidity_total = 5_500.0
     payload = {
         "mint": mint,
@@ -213,6 +219,69 @@ def test_golden_snapshot_nested_payload(runtime, bus):
         "metrics": {"latency_ms": 42.0},
         "schema_version": GOLDEN_SNAPSHOT_SCHEMA_VERSION,
     }
+
+    half_spread = mid_usd * (spread_bps / 20000.0) if mid_usd > 0 else 0.0
+    bid_usd = max(0.0, mid_usd - half_spread)
+    ask_usd = max(mid_usd, mid_usd + half_spread)
+    depth_usd_by_pct = {key: float(value) for key, value in depth_map.items()}
+    bands = [{"pct": float(key), "usd": float(value)} for key, value in depth_usd_by_pct.items()]
+    ohlcv_snapshot = dict(payload["ohlcv5m"])
+    ohlcv_snapshot.pop("mint", None)
+    ohlcv_snapshot.update(
+        {
+            "open": ohlcv_snapshot["o"],
+            "high": ohlcv_snapshot["h"],
+            "low": ohlcv_snapshot["l"],
+            "close": ohlcv_snapshot["c"],
+            "volume": ohlcv_snapshot["vol_usd"],
+            "volume_usd": ohlcv_snapshot["vol_usd"],
+            "volume_base": ohlcv_snapshot["vol_usd"] / mid_usd,
+            "schema_version": OHLCV_BAR_SCHEMA_VERSION,
+        }
+    )
+    ohlcv_snapshot["content_hash"] = canonical_hash(
+        {key: value for key, value in ohlcv_snapshot.items() if key != "content_hash"}
+    )
+    payload["ohlcv5m"] = ohlcv_snapshot
+    payload["px"].update({"bid_usd": bid_usd, "ask_usd": ask_usd, "ts": payload["asof"]})
+    payload["liq"].update(
+        {
+            "depth_usd_by_pct": depth_usd_by_pct,
+            "bands": bands,
+            "staleness_ms": 42.0,
+            "degraded": False,
+            "source": "synthetic",
+        }
+    )
+    payload.update(
+        {
+            "px_mid_usd": mid_usd,
+            "px_bid_usd": bid_usd,
+            "px_ask_usd": ask_usd,
+            "liq_depth_0_1pct_usd": depth_usd_by_pct["0.1"],
+            "liq_depth_0_5pct_usd": depth_usd_by_pct["0.5"],
+            "liq_depth_1_0pct_usd": depth_usd_by_pct["1"],
+            "liq_depth_1pct_usd": depth_usd_by_pct["1"],
+            "degraded": False,
+            "source": "synthetic",
+            "staleness_ms": 42.0,
+        }
+    )
+    content_source = {
+        key: value for key, value in payload.items() if key not in {"content_hash", "idempotency_key"}
+    }
+    payload["content_hash"] = canonical_hash(content_source)
+    idempotency_source = {
+        "mint": payload["mint"],
+        "meta": payload["meta"],
+        "px": payload["px"],
+        "liq": payload["liq"],
+        "ohlcv5m": payload["ohlcv5m"],
+        "schema_version": payload["schema_version"],
+    }
+    payload["idempotency_key"] = hashlib.sha1(
+        json.dumps(idempotency_source, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
     asyncio.run(bus.publish(STREAMS.golden_snapshot, payload))
     asyncio.run(runtime.wait_for_golden())

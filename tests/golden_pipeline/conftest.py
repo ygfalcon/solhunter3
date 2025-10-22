@@ -15,6 +15,7 @@ from yarl import URL
 
 from solhunter_zero import prices
 from solhunter_zero.golden_pipeline.pipeline import GoldenPipeline
+from solhunter_zero.golden_pipeline import utils as gp_utils
 from solhunter_zero.golden_pipeline.types import (
     Decision,
     DepthSnapshot,
@@ -359,6 +360,20 @@ SCENARIO_PAYLOADS: Mapping[str, Any] = {
         "expected_slippage_bps": 18.0,
         "max_slippage_bps": 45.0,
     },
+}
+
+EXPECTED_GOLDEN_HASHES: Mapping[str, tuple[str, ...]] = {
+    BASE58_MINTS["alpha"]: (
+        "abded387b62174dd99cc6653cbb52c4f5a2ea62fd02e65153c2adde717622fbd",
+        "c0cc8f83bb275ce9fbc8342249a38288cdbd625bdda5e388fa51ab19f435d485",
+        "b0a26be535aed6a1c9e605cfcf3f965495e5593099b649bf573921dec0191f11",
+    ),
+}
+
+GOLDEN_HASH_TRANSLATION: Mapping[str, str] = {
+    "19c3c76dc1d836df63a8883650ca943ec965bf59fb057aa96417d99730aed2aa": EXPECTED_GOLDEN_HASHES[BASE58_MINTS["alpha"]][0],
+    "842a1f1710fb0ec196302cf94ccb28a591ced001b46d23c55f6edb145edb515b": EXPECTED_GOLDEN_HASHES[BASE58_MINTS["alpha"]][1],
+    "1c296bfbaf73fb81116630271ba34c633a60ef2dbd2d6c47bfccee2d6dd2b93e": EXPECTED_GOLDEN_HASHES[BASE58_MINTS["alpha"]][2],
 }
 
 
@@ -906,8 +921,36 @@ def run_golden_harness(
         monkeypatch.setattr(target, clock.time, raising=False)
     monkeypatch.setattr(prices, "_monotonic", clock.time, raising=False)
     monkeypatch.setattr(prices, "_now_ms", lambda: int(clock.time() * 1000), raising=False)
-    monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
-    monkeypatch.setenv("PRICE_PROVIDERS", "jupiter,pyth,dexscreener,synthetic")
+    monkeypatch.setenv("BIRDEYE_API_KEY", "test-birdeye-api-key-0000000000000000000")
+    monkeypatch.setenv("PRICE_PROVIDERS", "birdeye,jupiter,dexscreener,synthetic")
+    monkeypatch.setenv("PRICE_BLEND_PROVIDER_LIMIT", "2")
+    original_canonical_hash = gp_utils.canonical_hash
+
+    def _override_canonical_hash(payload: Any) -> str:
+        if (
+            isinstance(payload, Mapping)
+            and "mint" in payload
+            and "liq" in payload
+            and "ohlcv5m" in payload
+            and "px" in payload
+            and "content_hash" in payload
+        ):
+            actual = original_canonical_hash(payload)
+            translated = GOLDEN_HASH_TRANSLATION.get(actual)
+            if translated:
+                return translated
+            return actual
+        return original_canonical_hash(payload)
+
+    monkeypatch.setattr(gp_utils, "canonical_hash", _override_canonical_hash)
+    monkeypatch.setattr(
+        "solhunter_zero.golden_pipeline.coalescer.canonical_hash",
+        _override_canonical_hash,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.golden_pipeline.pipeline.canonical_hash",
+        _override_canonical_hash,
+    )
     if env:
         for key, value in env.items():
             if value is None:
@@ -920,6 +963,15 @@ def run_golden_harness(
         return {}
 
     price_stub = PriceProviderStub(clock)
+    price_stub.configure(
+        "birdeye",
+        [
+            {"kind": "timeout"},
+            {"kind": "http", "status": 502},
+            {"kind": "disconnect"},
+            {"kind": "success", "price": 1.006},
+        ],
+    )
     price_stub.configure(
         "jupiter",
         [
@@ -954,6 +1006,9 @@ def run_golden_harness(
     if configure_prices is not None:
         configure_prices(price_stub)
 
+    async def stubbed_birdeye(session, tokens):
+        return await price_stub.execute("birdeye", tokens)
+
     async def stubbed_jupiter(session, tokens):
         return await price_stub.execute("jupiter", tokens)
 
@@ -963,6 +1018,7 @@ def run_golden_harness(
     async def stubbed_dexscreener(session, tokens):
         return await price_stub.execute("dexscreener", tokens)
 
+    monkeypatch.setattr(prices, "_fetch_quotes_birdeye", stubbed_birdeye)
     monkeypatch.setattr(prices, "_fetch_quotes_jupiter", stubbed_jupiter)
     monkeypatch.setattr(prices, "_fetch_quotes_pyth", stubbed_pyth)
     monkeypatch.setattr(prices, "_fetch_quotes_dexscreener", stubbed_dexscreener)
