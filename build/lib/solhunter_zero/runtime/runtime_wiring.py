@@ -9,7 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ..event_bus import subscribe
 from ..ui import UIState, get_ws_channel_metrics
@@ -465,6 +465,8 @@ class RuntimeEventCollectors:
             "last_stage_detail": None,
             "last_stage_ts": None,
         }
+        self._topic_lock = threading.Lock()
+        self._topic_activity: Dict[str, float] = {}
         self._environment = (
             os.getenv("SOLHUNTER_ENV")
             or os.getenv("DEPLOY_ENV")
@@ -479,6 +481,36 @@ class RuntimeEventCollectors:
             "paper_mode": parse_bool_env("PAPER_TRADING", False),
             "rl_mode": "shadow" if parse_bool_env("RL_WEIGHTS_DISABLED", True) else "applied",
         }
+
+    def _record_topic(self, topic: str) -> None:
+        if not topic:
+            return
+        try:
+            key = str(topic)
+        except Exception:
+            return
+        with self._topic_lock:
+            self._topic_activity[key] = time.time()
+
+    def topic_seen(self, topic: str) -> bool:
+        try:
+            key = str(topic)
+        except Exception:
+            return False
+        with self._topic_lock:
+            return key in self._topic_activity
+
+    async def wait_for_topics(self, topics: Sequence[str], timeout: float = 5.0) -> List[str]:
+        deadline = time.time() + max(0.0, timeout)
+        remaining = {str(topic) for topic in topics if str(topic).strip()}
+        while remaining and time.time() < deadline:
+            with self._topic_lock:
+                seen = {topic for topic in remaining if topic in self._topic_activity}
+            remaining.difference_update(seen)
+            if not remaining:
+                break
+            await asyncio.sleep(0.1)
+        return sorted(remaining)
 
     def _parse_sequence(self, value: Any) -> Optional[int]:
         if value in (None, "", False):
@@ -715,7 +747,11 @@ class RuntimeEventCollectors:
             ("runtime.stage_changed", _on_stage),
             ("heartbeat", _on_heartbeat),
         ):
-            unsub = subscribe(topic, handler)
+            async def _wrapped(event: Any, _topic: str = topic, _handler: Callable[[Any], Awaitable[None]] = handler) -> None:
+                self._record_topic(_topic)
+                await _handler(event)
+
+            unsub = subscribe(topic, _wrapped)
             self._subscriptions.append(unsub)
 
     def stop(self) -> None:
@@ -1257,6 +1293,31 @@ class RuntimeEventCollectors:
             hash_map = dict(self._latest_golden_hash)
         snapshots: List[Dict[str, Any]] = []
         lag_samples: List[float] = []
+
+        def _normalize_momentum_breakdown(value: Any) -> Any:
+            if isinstance(value, bool) or value is None:
+                return value
+            if isinstance(value, Mapping):
+                return {
+                    str(key): _normalize_momentum_breakdown(val)
+                    for key, val in value.items()
+                }
+            if isinstance(value, (list, tuple, set)):
+                return [_normalize_momentum_breakdown(val) for val in value]
+            numeric = _maybe_float(value)
+            if numeric is not None:
+                return numeric
+            return value
+
+        def _as_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+            if isinstance(value, (int, float)):
+                return bool(value)
+            return False
+
         for mint in sorted(golden.keys()):
             payload = dict(golden[mint])
             normalized_golden = read_golden(payload, reader="runtime_wiring")
@@ -1300,6 +1361,42 @@ class RuntimeEventCollectors:
                     stale_flag = age > stale_threshold
                 else:
                     stale_flag = age > 60.0
+            momentum_score = _maybe_float(payload.get("momentum_score"))
+            pump_intensity = _maybe_float(payload.get("pump_intensity"))
+            pump_score = _maybe_float(payload.get("pump_score"))
+            if pump_intensity is None and pump_score is not None:
+                pump_intensity = pump_score
+            social_score = _maybe_float(payload.get("social_score"))
+            social_sentiment = _maybe_float(payload.get("social_sentiment"))
+            tweets_per_min = _maybe_float(payload.get("tweets_per_min"))
+            buyers_last_hour = _maybe_int(payload.get("buyers_last_hour"))
+            momentum_latency = _maybe_float(payload.get("momentum_latency_ms"))
+            raw_sources = payload.get("momentum_sources")
+            if isinstance(raw_sources, (list, tuple, set)):
+                candidate_sources = list(raw_sources)
+            elif isinstance(raw_sources, str):
+                candidate_sources = [raw_sources]
+            else:
+                candidate_sources = []
+            momentum_sources: List[str] = []
+            seen_sources: set[str] = set()
+            for source in candidate_sources:
+                if source is None:
+                    continue
+                source_text = str(source).strip()
+                if not source_text or source_text in seen_sources:
+                    continue
+                seen_sources.add(source_text)
+                momentum_sources.append(source_text)
+            raw_breakdown = payload.get("momentum_breakdown")
+            momentum_breakdown: Dict[str, Any] = {}
+            if isinstance(raw_breakdown, Mapping):
+                momentum_breakdown = {
+                    str(key): _normalize_momentum_breakdown(value)
+                    for key, value in raw_breakdown.items()
+                }
+            momentum_stale = _as_bool(payload.get("momentum_stale"))
+            momentum_partial = _as_bool(payload.get("momentum_partial"))
             px_mid = normalized_golden.get("mid_usd")
             spread_bps = _extract_golden_spread(payload)
             px_payload = payload.get("px")
@@ -1398,6 +1495,18 @@ class RuntimeEventCollectors:
                     "coalesce_window_s": coalesce,
                     "lag_ms": age * 1000.0 if age is not None else None,
                     "stale_threshold_s": stale_threshold,
+                    "momentum_score": momentum_score,
+                    "momentum_stale": momentum_stale,
+                    "momentum_partial": momentum_partial,
+                    "momentum_sources": momentum_sources,
+                    "momentum_breakdown": momentum_breakdown,
+                    "pump_intensity": pump_intensity,
+                    "pump_score": pump_score,
+                    "social_score": social_score,
+                    "social_sentiment": social_sentiment,
+                    "tweets_per_min": tweets_per_min,
+                    "buyers_last_hour": buyers_last_hour,
+                    "momentum_latency_ms": momentum_latency,
                 }
             )
         return {
@@ -1646,7 +1755,11 @@ class RuntimeWiring:
     async def wait_for_topic(self, topic: str, timeout: float = 5.0) -> bool:
         if topic == "x:mint.golden":
             return await self.collectors.wait_for_golden(timeout)
-        return True
+        missing = await self.collectors.wait_for_topics([topic], timeout)
+        return not missing
+
+    async def wait_for_topics(self, topics: Sequence[str], timeout: float = 5.0) -> List[str]:
+        return await self.collectors.wait_for_topics(topics, timeout)
 
 
 def initialise_runtime_wiring(ui_state: UIState) -> RuntimeWiring:
