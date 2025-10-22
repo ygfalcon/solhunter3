@@ -806,6 +806,7 @@ class UIState:
         default=lambda: {"controls": {}, "overrides": {}, "staleness": {}}
     )
     health_provider: DictProvider = field(default=lambda: {})
+    golden_depth_enabled: bool = False
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -1228,6 +1229,16 @@ _PAGE_TEMPLATE = """
         .pill.pass { color: var(--success); border-color: rgba(63,185,80,0.35); }
         .pill.blocked { color: var(--danger); border-color: rgba(255,123,114,0.45); }
         .pill.neutral { color: var(--muted); border-color: rgba(110,118,129,0.35); }
+        .pill.bid { color: var(--success); border-color: rgba(63,185,80,0.35); }
+        .pill.ask { color: var(--danger); border-color: rgba(255,123,114,0.45); }
+        .pill.depth { color: var(--muted); border-color: rgba(110,118,129,0.35); }
+        .pill.source { font-weight: 600; border-color: rgba(88,166,255,0.35); }
+        .pill.source.synthetic { border-color: rgba(242,204,96,0.45); color: var(--warning); }
+        .pill.faded { opacity: 0.6; }
+        .price-wrapper { display: flex; gap: 0.35rem; align-items: center; flex-wrap: wrap; }
+        .depth-group { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+        .depth-meta { font-size: 0.7rem; margin-top: 0.25rem; }
+        .mid-price { font-weight: 600; }
         .grid-two {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
@@ -1760,8 +1771,65 @@ _PAGE_TEMPLATE = """
                         <tr class=\"{{ 'stale' if snap.stale else '' }}\" data-mint=\"{{ snap.mint }}\">
                             <td>{{ snap.mint }}</td>
                             <td class=\"muted\">{{ snap.hash_short }}</td>
-                            <td>{{ snap.px or '—' }}</td>
-                            <td>{{ snap.liq or '—' }}</td>
+                            <td>
+                                {% if golden_depth_enabled %}
+                                    <div class="price-wrapper">
+                                        <span class="mid-price">{{ snap.px | round(4) if snap.px is not none else '—' }}</span>
+                                        {% if snap.px_bid_usd is not none %}
+                                            <span class="pill bid {{ 'faded' if snap.degraded else '' }}">Bid {{ snap.px_bid_usd | round(4) }}</span>
+                                        {% endif %}
+                                        {% if snap.px_ask_usd is not none %}
+                                            <span class="pill ask {{ 'faded' if snap.degraded else '' }}">Ask {{ snap.px_ask_usd | round(4) }}</span>
+                                        {% endif %}
+                                        {% if snap.source %}
+                                            {% set badge = 'J' if snap.source == 'jup_route' else 'P' %}
+                                            {% if snap.source == 'jup_route' %}
+                                                {% set sweeps = snap.route_meta.sweeps if snap.route_meta and snap.route_meta.sweeps else [] %}
+                                                {% if sweeps %}
+                                                    {% set sweep_tooltip = namespace(parts=[]) %}
+                                                    {% for sweep in sweeps %}
+                                                        {% set direction = sweep.direction if sweep.direction is not none else 'sell' %}
+                                                        {% set label = direction[0]|upper ~ direction[1:] if direction else 'Sweep' %}
+                                                        {% set usd_val = sweep.usd if sweep.usd is not none else 0 %}
+                                                        {% set impact_val = sweep.impact_bps if sweep.impact_bps is not none else 0 %}
+                                                        {% set sweep_tooltip.parts = sweep_tooltip.parts + [label ~ ' $' ~ (usd_val|round(0)) ~ ' @ ' ~ (impact_val|round(2)) ~ ' bps'] %}
+                                                    {% endfor %}
+                                                    {% set tooltip = 'Routed sweeps: ' ~ (sweep_tooltip.parts | join('; ')) %}
+                                                {% else %}
+                                                    {% set tooltip = 'Routed depth via Jupiter' %}
+                                                {% endif %}
+                                            {% else %}
+                                                {% set spread = None %}
+                                                {% if snap.px is not none and snap.px_bid_usd is not none and snap.px_ask_usd is not none and snap.px > 0 %}
+                                                    {% set spread = ((snap.px_ask_usd - snap.px_bid_usd) / snap.px) * 10000 %}
+                                                {% endif %}
+                                                {% if spread is not none %}
+                                                    {% set tooltip = 'Synthetic ±' ~ (spread|round(2)) ~ ' bps (Pyth confidence)' %}
+                                                {% else %}
+                                                    {% set tooltip = 'Synthetic spread derived from oracle confidence' %}
+                                                {% endif %}
+                                            {% endif %}
+                                            <span class="pill source {{ 'synthetic' if snap.source != 'jup_route' else '' }}" title="{{ tooltip }}">{{ badge }}</span>
+                                        {% endif %}
+                                    </div>
+                                {% else %}
+                                    {{ snap.px or '—' }}
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if golden_depth_enabled %}
+                                    <div class="depth-group">
+                                        <span class="pill depth" title="Liquidity available within 10 bps">0.1% {{ snap.liq_depth_0_1pct_usd | round(0) if snap.liq_depth_0_1pct_usd is not none else '—' }}</span>
+                                        <span class="pill depth" title="Liquidity available within 50 bps">0.5% {{ snap.liq_depth_0_5pct_usd | round(0) if snap.liq_depth_0_5pct_usd is not none else '—' }}</span>
+                                        <span class="pill depth" title="Liquidity available within 100 bps">1% {{ snap.liq_depth_1_0pct_usd | round(0) if snap.liq_depth_1_0pct_usd is not none else '—' }}</span>
+                                    </div>
+                                    {% if snap.route_meta %}
+                                        <div class="muted depth-meta">Route: {{ snap.route_meta.dexes | join(' → ') if snap.route_meta.dexes else '—' }} · {{ snap.route_meta.hops }} hops{% if snap.route_meta.latency_ms is not none %} · Adapter {{ snap.route_meta.latency_ms | round(0) }} ms{% endif %}</div>
+                                    {% endif %}
+                                {% else %}
+                                    {{ snap.liq or '—' }}
+                                {% endif %}
+                            </td>
                             <td>
                                 <span class=\"pill {{ 'stale' if snap.stale else 'fresh' }}\">{{ snap.lag_ms | round(0) if snap.lag_ms is not none else '—' }}</span>
                             </td>
@@ -3156,6 +3224,7 @@ def create_app(state: UIState | None = None) -> Flask:
             golden_lag_value=golden_lag_value,
             agent_is_stale=agent_is_stale,
             agent_age_label=agent_age_label,
+            golden_depth_enabled=state.golden_depth_enabled,
         )
 
     def _ws_config_payload() -> Dict[str, str]:

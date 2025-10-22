@@ -22,6 +22,8 @@ from ..token_scanner import TRENDING_METADATA
 from .agents import BaseAgent
 from .bus import EventBusAdapter, MessageBus
 from .contracts import STREAMS
+from .depth_adapter import GoldenDepthAdapter
+from .flags import resolve_depth_flag
 from .pipeline import GoldenPipeline
 from .types import (
     Decision,
@@ -652,10 +654,13 @@ class GoldenPipelineService:
         portfolio: Portfolio,
         enrichment_fetcher: Optional[Callable[[Iterable[str]], Awaitable[Dict[str, TokenSnapshot]]]] = None,
         event_bus: EventBus | None = None,
+        config: Mapping[str, Any] | None = None,
     ) -> None:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
         self._event_bus = event_bus or RUNTIME_EVENT_BUS
+        self._config = config
+        self._depth_flag = resolve_depth_flag(config)
         if enrichment_fetcher is None:
             enrichment_fetcher = self._default_enrichment_fetcher
         shared_bus = EventBusAdapter(self._event_bus)
@@ -674,6 +679,12 @@ class GoldenPipelineService:
             on_virtual_fill=self._handle_virtual_fill,
             on_virtual_pnl=self._handle_virtual_pnl,
             bus=shared_bus,
+            depth_extensions_enabled=self._depth_flag,
+        )
+        self._depth_adapter = GoldenDepthAdapter(
+            enabled=self._depth_flag,
+            submit_depth=self.pipeline.submit_depth,
+            decimals_resolver=self._resolve_decimals,
         )
 
         self._subscriptions: List[Callable[[], None]] = []
@@ -682,6 +693,14 @@ class GoldenPipelineService:
         self._pending_gate = asyncio.Semaphore(_MAX_IN_FLIGHT_SPAWN_TASKS)
         self._running = False
         self._last_price: Dict[str, float] = {}
+
+    def _resolve_decimals(self, mint: str) -> int:
+        coalescer = getattr(self.pipeline, "_coalescer", None)
+        if coalescer is not None:
+            snapshot = coalescer.get_metadata(mint)  # type: ignore[attr-defined]
+            if snapshot is not None:
+                return int(getattr(snapshot, "decimals", 6))
+        return 6
 
     async def start(self) -> None:
         if self._running:
@@ -700,6 +719,7 @@ class GoldenPipelineService:
             self._event_bus.subscribe("depth_update", self._on_depth)
         )
         await self.pipeline.flush_market()
+        await self._depth_adapter.start()
         self._tasks.append(asyncio.create_task(self._market_flush_loop(), name="golden_market_flush"))
         self._tasks.append(asyncio.create_task(self._heartbeat_loop(), name="golden_heartbeat"))
         if bootstrapped:
@@ -729,6 +749,7 @@ class GoldenPipelineService:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+        await self._depth_adapter.stop()
 
         pending = list(self._pending)
         for task in pending:
@@ -945,6 +966,8 @@ class GoldenPipelineService:
         if not token or price is None or price <= 0:
             return
         mint = canonical_mint(str(token))
+        if self._depth_flag:
+            self._depth_adapter.record_activity(mint)
         self._last_price[mint] = price
         try:
             self.portfolio.record_prices({mint: float(price)})
@@ -981,6 +1004,8 @@ class GoldenPipelineService:
                 mint = canonical_mint(str(token))
             except Exception:
                 continue
+            if self._depth_flag:
+                self._depth_adapter.record_activity(mint, weight=2.0)
             bids = _coerce_float(entry.get("bids")) or 0.0
             asks = _coerce_float(entry.get("asks")) or 0.0
             depth_val = _coerce_float(entry.get("depth")) or max(bids + asks, 0.0)

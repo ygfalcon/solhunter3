@@ -94,6 +94,13 @@ class DepthSnapshot:
     spread_bps: float
     depth_pct: Dict[str, float]
     asof: Timestamp
+    px_bid_usd: float | None = None
+    px_ask_usd: float | None = None
+    depth_bands_usd: Dict[str, float] | None = None
+    degraded: bool = False
+    source: str | None = None
+    route_meta: Dict[str, Any] | None = None
+    staleness_ms: float | None = None
     schema_version: str = field(default=DEPTH_SNAPSHOT_SCHEMA_VERSION)
 
 

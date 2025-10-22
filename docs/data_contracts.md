@@ -71,14 +71,24 @@ service synthesises the standard 1/2/5% buckets using the aggregate `depth`,
 | `meta` | `TokenSnapshot` | Token metadata reference. |
 | `asof` | `str` | Publication timestamp. |
 | `px_mid_usd` | `float` | Flattened mid price (`px.mid_usd`). |
+| `px_bid_usd` | `float` | Flattened executable bid (`px.bid_usd`). |
+| `px_ask_usd` | `float` | Flattened executable ask (`px.ask_usd`). |
+| `liq_depth_0_1pct_usd` | `float` | Liquidity within 10 bps (`liq.depth_usd_by_pct["0.1"]`). |
+| `liq_depth_0_5pct_usd` | `float` | Liquidity within 50 bps (`liq.depth_usd_by_pct["0.5"]`). |
+| `liq_depth_1_0pct_usd` | `float` | Liquidity within 100 bps (`liq.depth_usd_by_pct["1.0"]`). |
 | `liq_depth_1pct_usd` | `float` | Flattened 1% depth (`liq.depth_usd_by_pct["1"]`). |
+| `degraded` | `bool` | True when falling back to synthetic (Pyth-derived) spreads. |
+| `source` | `str` | Depth source identifier (`"jup_route"` or `"pyth_synthetic"`). |
+| `staleness_ms` | `float` | Milliseconds since depth was observed. |
 | `schema_version` | `str` | Contract version identifier (`x:mint.golden@v2`). |
 | `content_hash` | `str` | Canonical hash of the payload contents. |
+
+When `liq.route_meta` is present it includes the routed hop count, the ordered list of DEX venues, the adapter latency (`latency_ms`), and a compact `sweeps` array describing the most recent notional probes with their observed slippage.
 
 ### Field alias map
 
 - `x:market.ohlcv.5m`: `close` mirrors `c`; `volume` and `volume_usd` mirror `vol_usd`; `volume_base` mirrors `vol_base`.
-- `x:mint.golden`: `px_mid_usd` mirrors `px.mid_usd`; `liq_depth_1pct_usd` mirrors `liq.depth_usd_by_pct["1"]`.
+- `x:mint.golden`: `px_mid_usd` mirrors `px.mid_usd`; `px_bid_usd` mirrors `px.bid_usd`; `px_ask_usd` mirrors `px.ask_usd`; liquidity aliases mirror the corresponding `liq.depth_usd_by_pct` entries.
 
 ### `x:trade.suggested` — `TradeSuggestion`
 

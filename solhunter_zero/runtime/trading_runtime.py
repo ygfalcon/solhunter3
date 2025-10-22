@@ -45,7 +45,8 @@ from ..exit_management import ExitManager
 from ..schemas import RuntimeLog
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from ..golden_pipeline.service import GoldenPipelineService
+from ..golden_pipeline.flags import resolve_depth_flag
+from ..golden_pipeline.service import GoldenPipelineService
 from ..paths import ROOT
 from ..redis_util import ensure_local_redis_if_needed
 from ..ui import UIState, UIServer
@@ -494,6 +495,7 @@ class TradingRuntime:
         )
 
         self.cfg = cfg
+        self.ui_state.golden_depth_enabled = resolve_depth_flag(self.cfg)
         self.runtime_cfg = runtime_cfg
         self.depth_proc = depth_proc
         self.status.depth_service = bool(
@@ -924,6 +926,7 @@ class TradingRuntime:
                 self._golden_service = GoldenPipelineService(
                     agent_manager=self.agent_manager,
                     portfolio=self.portfolio,
+                    config=self.cfg,
                 )
                 await self._golden_service.start()
                 self.activity.add("golden_pipeline", "enabled")
