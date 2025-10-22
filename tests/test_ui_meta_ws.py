@@ -141,6 +141,11 @@ def test_ui_meta_websocket_smoke(monkeypatch):
             bootstrap = meta_obj.get("bootstrap") or {}
             providers_list = bootstrap.get("price_providers") or []
             assert providers_list[:4] == ["pyth", "dexscreener", "birdeye", "synthetic"]
+            assert bootstrap.get("price_provider_order") == providers_list
+            timeouts_ms = bootstrap.get("price_provider_timeouts_ms") or {}
+            for provider_name in providers_list[:4]:
+                assert timeouts_ms.get(provider_name), f"timeout missing for {provider_name}"
+                assert timeouts_ms[provider_name] > 0
             seeds = bootstrap.get("seed_tokens") or []
             assert {"So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}.issubset(set(seeds))
             resilience = meta_obj.get("resilience") or {}
@@ -152,6 +157,10 @@ def test_ui_meta_websocket_smoke(monkeypatch):
             assert das_resilience.get("timeout_threshold") == pytest.approx(3.0, rel=1e-6)
             assert das_resilience.get("timeout_total_s") == pytest.approx(9.0, rel=1e-6)
             assert das_resilience.get("circuit_open_s") == pytest.approx(90.0, rel=1e-6)
+            provider_resilience = resilience.get("price_providers") or {}
+            for provider_name in providers_list[:3]:
+                assert provider_resilience.get(provider_name)
+                assert provider_resilience[provider_name]["timeout_ms"] > 0
             contracts = meta_obj.get("test_contracts") or {}
             assert contracts.get("handshake") == "tests/test_ui_meta_ws.py"
             execution_block = meta_obj.get("execution") or {}

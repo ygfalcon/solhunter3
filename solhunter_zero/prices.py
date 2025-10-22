@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - lightweight fallback
     base58 = _Base58Fallback()  # type: ignore[assignment]
 
 from solhunter_zero.lru import TTLCache
+from solhunter_zero.providers import dexscreener as dexscreener_provider
 
 from .async_utils import run_async
 from .http import get_session
@@ -158,15 +159,13 @@ DEXSCREENER_MIN_LIQUIDITY = float(
     os.getenv("DEXSCREENER_MIN_LIQUIDITY_USD", "5000") or 5000
 )
 DEXSCREENER_MIN_VOLUME = float(os.getenv("DEXSCREENER_MIN_VOLUME_USD", "20000") or 20000)
-DEXSCREENER_CONNECT_TIMEOUT = float(
-    os.getenv("DEXSCREENER_CONNECT_TIMEOUT", "0.3") or 0.3
-)
-DEXSCREENER_READ_TIMEOUT = float(os.getenv("DEXSCREENER_READ_TIMEOUT", "0.7") or 0.7)
-DEXSCREENER_TOTAL_TIMEOUT = float(os.getenv("DEXSCREENER_TOTAL_TIMEOUT", "1.2") or 1.2)
+DEXSCREENER_TIMEOUT = float(os.getenv("DEXSCREENER_TIMEOUT", "2.0") or 2.0)
 
 BIRDEYE_PRICE_URL = os.getenv("BIRDEYE_PRICE_URL", "https://api.birdeye.so")
 BIRDEYE_CHAIN = os.getenv("BIRDEYE_CHAIN", "solana")
 BIRDEYE_MAX_BATCH = max(1, int(os.getenv("BIRDEYE_BATCH_SIZE", "20") or 20))
+BIRDEYE_TIMEOUT = float(os.getenv("BIRDEYE_TIMEOUT", "1.8") or 1.8)
+BIRDEYE_RETRIES = max(1, int(os.getenv("BIRDEYE_RETRIES", "2") or 2))
 
 if not os.getenv("HTTP_FORCE_IPV4"):
     os.environ.setdefault("HTTP_FORCE_IPV4", "1")
@@ -177,6 +176,7 @@ PYTH_PRICE_URL = os.getenv(
 PYTH_CONNECT_TIMEOUT = float(os.getenv("PYTH_CONNECT_TIMEOUT", "0.3") or 0.3)
 PYTH_READ_TIMEOUT = float(os.getenv("PYTH_READ_TIMEOUT", "0.7") or 0.7)
 PYTH_TOTAL_TIMEOUT = float(os.getenv("PYTH_TOTAL_TIMEOUT", "1.2") or 1.2)
+SYNTHETIC_TIMEOUT = float(os.getenv("SYNTHETIC_TIMEOUT", "0.5") or 0.5)
 
 SYNTHETIC_HINTS_ENV = "SYNTHETIC_PRICE_HINTS"
 LEGACY_SYNTHETIC_HINTS_ENV = "SYNTHETIC_HINTS"
@@ -374,6 +374,8 @@ class PriceQuote:
     degraded: bool = False
     staleness_ms: float | None = None
     confidence: float | None = None
+    venues: Sequence[Mapping[str, Any]] | None = None
+    spread_bps: float | None = None
 
 
 @dataclass(slots=True)
@@ -440,9 +442,10 @@ class ProviderConfig:
     label: str
     overrides: bool = False
     requires_key: Callable[[], str | None] | None = None
+    timeout: float | None = None
 
 
-_DEFAULT_PROVIDER_ORDER = ["birdeye", "jupiter", "dexscreener", "pyth", "synthetic"]
+_DEFAULT_PROVIDER_ORDER = ["pyth", "dexscreener", "birdeye", "synthetic", "jupiter"]
 
 
 def _parse_provider_roster(raw: str | None) -> List[str]:
@@ -477,6 +480,7 @@ _ALL_PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
         name="helius",
         fetcher="_fetch_quotes_helius",
         label="Helius",
+        timeout=None,
     ),
     "birdeye": ProviderConfig(
         name="birdeye",
@@ -484,27 +488,32 @@ _ALL_PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
         label="Birdeye",
         overrides=False,
         requires_key=lambda: _get_birdeye_api_key(),
+        timeout=BIRDEYE_TIMEOUT,
     ),
     "jupiter": ProviderConfig(
         name="jupiter",
         fetcher="_fetch_quotes_jupiter",
         label="Jupiter",
+        timeout=JUPITER_TOTAL_TIMEOUT,
     ),
     "dexscreener": ProviderConfig(
         name="dexscreener",
         fetcher="_fetch_quotes_dexscreener",
         label="Dexscreener",
+        timeout=DEXSCREENER_TIMEOUT,
     ),
     "pyth": ProviderConfig(
         name="pyth",
         fetcher="_fetch_quotes_pyth",
         label="Pyth",
         overrides=False,
+        timeout=PYTH_TOTAL_TIMEOUT,
     ),
     "synthetic": ProviderConfig(
         name="synthetic",
         fetcher="_fetch_quotes_synthetic",
         label="Synthetic",
+        timeout=SYNTHETIC_TIMEOUT,
     ),
 }
 
@@ -589,6 +598,20 @@ def get_provider_health_snapshot() -> Dict[str, Dict[str, Any]]:
             "last_error": stats.last_error,
         }
     return snapshot
+
+
+def get_provider_timeouts() -> Dict[str, float]:
+    """Expose the configured timeout per price provider in seconds."""
+
+    timeouts: Dict[str, float] = {}
+    for name, config in PROVIDER_CONFIGS.items():
+        if config.timeout is None:
+            continue
+        try:
+            timeouts[name] = float(config.timeout)
+        except (TypeError, ValueError):
+            continue
+    return timeouts
 
 
 def _canonical_mint_from_value(value: Any) -> str | None:
@@ -691,9 +714,11 @@ async def _request_json(
     json: Any | None = None,
     method: str = "GET",
     timeout: aiohttp.ClientTimeout | float | None = None,
+    retries: int | None = None,
 ) -> Any:
     last_error: BaseException | None = None
-    for attempt in range(PRICE_RETRY_ATTEMPTS):
+    attempts = max(1, int(retries) if isinstance(retries, int) and retries > 0 else PRICE_RETRY_ATTEMPTS)
+    for attempt in range(attempts):
         try:
             if isinstance(timeout, (int, float)):
                 request_timeout: aiohttp.ClientTimeout | float | None = aiohttp.ClientTimeout(
@@ -715,14 +740,14 @@ async def _request_json(
             last_error = exc
             if exc.status is not None and exc.status >= 400:
                 break
-            if attempt == PRICE_RETRY_ATTEMPTS - 1:
+            if attempt == attempts - 1:
                 break
             delay = PRICE_RETRY_BACKOFF * (2 ** attempt)
             jitter = random.uniform(0.05, 0.25)
             await asyncio.sleep(delay + jitter)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             last_error = exc
-            if attempt == PRICE_RETRY_ATTEMPTS - 1:
+            if attempt == attempts - 1:
                 break
             delay = PRICE_RETRY_BACKOFF * (2 ** attempt)
             if isinstance(exc, aiohttp.ClientConnectorError):
@@ -889,61 +914,70 @@ async def _fetch_quotes_dexscreener(
     session: aiohttp.ClientSession, tokens: Sequence[str]
 ) -> Dict[str, PriceQuote]:
     quotes: Dict[str, PriceQuote] = {}
-    timeout = _make_timeout(
-        connect=DEXSCREENER_CONNECT_TIMEOUT,
-        read=DEXSCREENER_READ_TIMEOUT,
-        total=DEXSCREENER_TOTAL_TIMEOUT,
-    )
     for token in tokens:
-        url = f"{DEXSCREENER_PRICE_URL.rstrip('/')}/{token}"
-        payload = await _request_json(
-            session,
-            url,
-            "Dexscreener",
-            timeout=timeout,
+        payload = await dexscreener_provider.fetch(
+            token,
+            timeout=DEXSCREENER_TIMEOUT,
+            session=session,
         )
-        if not isinstance(payload, MutableMapping):
+        if not isinstance(payload, Mapping):
             continue
-        pairs = payload.get("pairs")
-        best_pair: MutableMapping[str, Any] | None = None
-        if isinstance(pairs, list):
-            for candidate in pairs:
-                if isinstance(candidate, MutableMapping) and _extract_price(candidate.get("priceUsd")):
-                    best_pair = candidate
-                    break
-                if isinstance(candidate, MutableMapping) and best_pair is None:
-                    best_pair = candidate
-        liquidity_hint = None
-        volume_hint = None
-        if isinstance(best_pair, MutableMapping):
-            price = _extract_price(best_pair.get("priceUsd")) or _extract_price(
-                best_pair.get("price")
-            )
-            liquidity = best_pair.get("liquidity")
-            if isinstance(liquidity, MutableMapping):
-                liquidity_hint = _extract_price(liquidity.get("usd"))
-            volume = best_pair.get("volume")
-            if isinstance(volume, MutableMapping):
-                volume_hint = _extract_price(volume.get("h24"))
-        else:
-            price = _extract_price(payload)
+        price_value = payload.get("price")
+        price = _extract_price(price_value)
         if price is None:
             continue
-        if volume_hint is not None and volume_hint < DEXSCREENER_MIN_VOLUME:
-            continue
+        liquidity_hint = _extract_price(payload.get("liquidity_usd"))
         if (
             liquidity_hint is not None
             and liquidity_hint < DEXSCREENER_MIN_LIQUIDITY
         ):
             continue
+        best_pair: Mapping[str, Any] | None = None
+        pairs = payload.get("pairs")
+        if isinstance(pairs, Sequence) and pairs:
+            candidate = pairs[0]
+            if isinstance(candidate, Mapping):
+                best_pair = candidate
+        volume_hint = None
+        if isinstance(best_pair, Mapping):
+            volume_block = best_pair.get("volume") or best_pair.get("volume24h")
+            if volume_block is not None:
+                volume_hint = _extract_price(volume_block)
+            if volume_hint is None and isinstance(volume_block, Mapping):
+                for key in ("h24", "24h", "day"):
+                    if key in volume_block:
+                        volume_hint = _extract_price(volume_block.get(key))
+                        if volume_hint is not None:
+                            break
+        if volume_hint is not None and volume_hint < DEXSCREENER_MIN_VOLUME:
+            continue
+        as_of = payload.get("as_of")
+        if not isinstance(as_of, (int, float)):
+            as_of = _now_ms()
+        else:
+            as_of = int(as_of)
+            if as_of < 1_000_000_000_000:
+                as_of = _now_ms()
+        now_ms = _now_ms()
+        staleness = max(0.0, float(now_ms - as_of))
+        venues_raw = payload.get("venues")
+        venue_list: Sequence[Mapping[str, Any]] | None = None
+        if isinstance(venues_raw, Sequence):
+            clean = [dict(venue) for venue in venues_raw if isinstance(venue, Mapping)]
+            if clean:
+                venue_list = tuple(clean)
+        spread_hint = payload.get("spread_bps")
+        spread_bps = _extract_price(spread_hint)
         quotes[token] = PriceQuote(
-            price_usd=price,
+            price_usd=float(price),
             source="dexscreener",
-            asof=_now_ms(),
+            asof=as_of,
             quality="aggregate",
-            liquidity_hint=liquidity_hint,
+            liquidity_hint=float(liquidity_hint) if liquidity_hint is not None else None,
             degraded=True,
-            staleness_ms=0.0,
+            staleness_ms=staleness,
+            venues=venue_list,
+            spread_bps=spread_bps,
         )
     return quotes
 
@@ -963,7 +997,15 @@ async def _fetch_quotes_birdeye(
     quotes: Dict[str, PriceQuote] = {}
     for chunk in _chunked(tokens, min(BIRDEYE_MAX_BATCH, 100)):
         params = {"list_address": ",".join(chunk), "chain": BIRDEYE_CHAIN}
-        payload = await _request_json(session, url, "Birdeye", params=params, headers=headers)
+        payload = await _request_json(
+            session,
+            url,
+            "Birdeye",
+            params=params,
+            headers=headers,
+            timeout=BIRDEYE_TIMEOUT,
+            retries=BIRDEYE_RETRIES,
+        )
         if not isinstance(payload, MutableMapping):
             continue
         data = payload.get("data")
@@ -1412,6 +1454,8 @@ def _record_blend_diagnostics(
                     "degraded": bool(getattr(quote, "degraded", False)),
                     "staleness_ms": getattr(quote, "staleness_ms", None),
                     "confidence": getattr(quote, "confidence", None),
+                    "spread_bps": getattr(quote, "spread_bps", None),
+                    "venues": list(getattr(quote, "venues", []) or []),
                     "zscore": 0.0,
                     "side": "neutral",
                     "deviation_bps": 0.0,
@@ -1674,14 +1718,52 @@ async def _fetch_price_quotes(tokens: Sequence[str]) -> Dict[str, PriceQuote]:
             logger.warning(
                 "Prices: unresolved token(s) after provider loop: %s", ", ".join(missing)
             )
+    now_ms = _now_ms()
+    final_quotes: Dict[str, PriceQuote] = {}
+    pyth_results = provider_results.get("pyth") or {}
+    for token in tokens:
+        pyth_quote = pyth_results.get(token)
+        if isinstance(pyth_quote, PriceQuote):
+            final_quotes[token] = pyth_quote
+            continue
+        candidates: List[tuple[str, PriceQuote]] = []
+        for provider_name, quote_map in provider_results.items():
+            quote = quote_map.get(token)
+            if isinstance(quote, PriceQuote):
+                candidates.append((provider_name, quote))
+        if not candidates:
+            fallback_quote = resolved.get(token)
+            if isinstance(fallback_quote, PriceQuote):
+                final_quotes[token] = fallback_quote
+            continue
+
+        def _selection_key(item: tuple[str, PriceQuote]) -> tuple[int, float, float, int]:
+            provider_name, quote = item
+            asof = getattr(quote, "asof", 0) or 0
+            try:
+                asof_float = float(asof)
+            except (TypeError, ValueError):
+                asof_float = 0.0
+            liquidity = getattr(quote, "liquidity_hint", 0.0) or 0.0
+            age_ms = max(0.0, float(now_ms - asof_float))
+            stale_flag = 1 if age_ms > PRICE_BLEND_STALE_MS else 0
+            try:
+                provider_priority = order.index(provider_name)
+            except ValueError:
+                provider_priority = len(order)
+            return (stale_flag, -float(liquidity), -asof_float, provider_priority)
+
+        _, selected_quote = min(candidates, key=_selection_key)
+        final_quotes[token] = selected_quote
+
     _record_blend_diagnostics(
         tokens,
-        resolved,
+        final_quotes,
         provider_requests,
         provider_results,
         provider_failures,
     )
-    return {token: resolved[token] for token in tokens if token in resolved}
+    return {token: final_quotes[token] for token in tokens if token in final_quotes}
 
 
 async def fetch_price_quotes_async(tokens: Iterable[str]) -> Dict[str, PriceQuote]:

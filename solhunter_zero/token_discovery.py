@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, List, AsyncIterator
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence, AsyncIterator
 
 import yaml
 from aiohttp import ClientTimeout
@@ -23,6 +23,8 @@ import aiohttp
 from .http import HostCircuitOpenError, host_request, host_retry_config
 from .http import get_session as _shared_http_session
 from .scanner_common import DEFAULT_BIRDEYE_API_KEY
+from .providers import orca as orca_provider
+from .providers import raydium as raydium_provider
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
 from .util.mints import is_valid_solana_mint
@@ -78,6 +80,11 @@ _DEXSCREENER_MAX_AGE_SECONDS = float(
     os.getenv("DEXSCREENER_MAX_AGE_SECONDS", "3600") or 3600.0
 )
 
+_ENABLE_RAYDIUM = (
+    os.getenv("DISCOVERY_ENABLE_RAYDIUM", "1").lower() in {"1", "true", "yes", "on"}
+)
+_RAYDIUM_TIMEOUT = float(os.getenv("RAYDIUM_TIMEOUT", "2.0") or 2.0)
+
 _ENABLE_METEORA = (
     os.getenv("DISCOVERY_ENABLE_METEORA", "1").lower() in {"1", "true", "yes", "on"}
 )
@@ -108,11 +115,18 @@ _SOLSCAN_API_KEY = (os.getenv("SOLSCAN_API_KEY") or "").strip()
 _SOLSCAN_TIMEOUT = float(os.getenv("DISCOVERY_SOLSCAN_TIMEOUT", "6.0") or 6.0)
 _SOLSCAN_ENRICH_LIMIT = max(0, int(os.getenv("DISCOVERY_SOLSCAN_LIMIT", "8") or 8))
 
+_ENABLE_ORCA = os.getenv("DISCOVERY_ENABLE_ORCA", "1").lower() in {"1", "true", "yes", "on"}
+_ORCA_TIMEOUT = float(os.getenv("ORCA_TIMEOUT", "2.0") or 2.0)
+_ORCA_CATALOG_TTL = float(os.getenv("ORCA_CATALOG_TTL", "600") or 600.0)
+
 TokenEntry = Dict[str, Any]
 
 _BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
 _CACHE_LOCK = Lock()
 _BIRDEYE_DISABLED_INFO = False
+
+_ORCA_CATALOG_CACHE: tuple[float, Dict[str, List[Dict[str, Any]]]] = (0.0, {})
+_ORCA_CATALOG_LOCK: asyncio.Lock = asyncio.Lock()
 
 _BIRDEYE_TOKENLIST_URL = (
     (os.getenv("BIRDEYE_TOKENLIST_URL") or "https://api.birdeye.so/defi/tokenlist")
@@ -231,6 +245,46 @@ def _cache_get(key: str) -> List[TokenEntry] | None:
 def _cache_set(key: str, value: List[TokenEntry]) -> None:
     with _CACHE_LOCK:
         _BIRDEYE_CACHE.set(key, value)
+
+
+async def _load_orca_catalog(
+    *, session: aiohttp.ClientSession | None = None
+) -> Dict[str, List[Dict[str, Any]]]:
+    if not _ENABLE_ORCA:
+        return {}
+    ttl = max(60.0, float(_ORCA_CATALOG_TTL))
+    async with _ORCA_CATALOG_LOCK:
+        expires, cached = _ORCA_CATALOG_CACHE
+        now = time.monotonic()
+        if cached and expires > now:
+            return cached
+        try:
+            payload = await orca_provider.fetch(
+                None,
+                timeout=_ORCA_TIMEOUT,
+                session=session,
+            )
+        except Exception as exc:
+            logger.debug("Orca catalog fetch failed: %s", exc)
+            return cached if cached else {}
+        catalog_data = payload.get("catalog") if isinstance(payload, Mapping) else None
+        normalized: Dict[str, List[Dict[str, Any]]] = {}
+        if isinstance(catalog_data, Mapping):
+            for mint, pools in catalog_data.items():
+                if not isinstance(mint, str):
+                    continue
+                if isinstance(pools, Sequence):
+                    pool_entries: List[Dict[str, Any]] = []
+                    for pool in pools:
+                        if isinstance(pool, Mapping):
+                            pool_entries.append(dict(pool))
+                    if pool_entries:
+                        normalized[mint] = pool_entries
+        if normalized:
+            global _ORCA_CATALOG_CACHE
+            _ORCA_CATALOG_CACHE = (time.monotonic() + ttl, normalized)
+            return normalized
+        return cached if cached else {}
 
 
 def _cache_clear() -> None:
@@ -386,6 +440,53 @@ def _extract_numeric_from_item(item: Dict[str, Any], *keys: str) -> float:
     return 0.0
 
 
+def _normalize_venues_field(value: Any) -> set[str]:
+    venues: set[str] = set()
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate:
+            venues.add(candidate)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            if isinstance(item, str):
+                candidate = item.strip().lower()
+                if candidate:
+                    venues.add(candidate)
+    return venues
+
+
+def _merge_orca_venues(
+    entry: Dict[str, Any], catalog: Mapping[str, Sequence[Mapping[str, Any]]]
+) -> None:
+    if not catalog or not isinstance(entry, dict):
+        return
+    mint = entry.get("address")
+    if not isinstance(mint, str):
+        return
+    pools = catalog.get(mint)
+    if not pools:
+        return
+    existing = entry.get("venues")
+    if isinstance(existing, set):
+        venues = existing
+    elif isinstance(existing, list):
+        venues = {str(v).strip().lower() for v in existing if isinstance(v, str)}
+        entry["venues"] = venues
+    else:
+        venues = set()
+        entry["venues"] = venues
+    venues.add("orca")
+    top_pool = None
+    for pool in pools:
+        if isinstance(pool, Mapping) and pool.get("pool"):
+            top_pool = pool
+            break
+    if top_pool and "pair_address" not in entry:
+        pool_addr = top_pool.get("pool")
+        if isinstance(pool_addr, str) and pool_addr:
+            entry["pair_address"] = pool_addr
+
+
 def _merge_candidate_entry(
     candidates: Dict[str, Dict[str, Any]],
     token: Dict[str, Any],
@@ -418,6 +519,7 @@ def _merge_candidate_entry(
     symbol = token.get("symbol") or token.get("tokenSymbol")
 
     entry = candidates.get(address)
+    incoming_venues = _normalize_venues_field(token.get("venues"))
     discovered_at = _parse_timestamp(
         token.get("discovered_at")
         or token.get("created_at")
@@ -435,6 +537,7 @@ def _merge_candidate_entry(
             "price": price,
             "price_change": change,
             "sources": set(),
+            "venues": set(incoming_venues),
         }
         if discovered_at is not None:
             entry["discovered_at"] = discovered_at
@@ -452,6 +555,15 @@ def _merge_candidate_entry(
                 entry[extra_key] = token[extra_key]
         candidates[address] = entry
     else:
+        venues_field = entry.get("venues")
+        if isinstance(venues_field, list):
+            entry["venues"] = {str(v).strip().lower() for v in venues_field if isinstance(v, str)}
+        elif isinstance(venues_field, set):
+            pass
+        elif venues_field:
+            entry["venues"] = _normalize_venues_field(venues_field)
+        else:
+            entry["venues"] = set()
         if symbol and not entry.get("symbol"):
             entry["symbol"] = str(symbol)
         if name and (not entry.get("name") or entry.get("name") == entry.get("address")):
@@ -464,6 +576,14 @@ def _merge_candidate_entry(
             entry["price"] = price
         if change != 0:
             entry["price_change"] = change
+        if incoming_venues:
+            venues_obj = entry.get("venues")
+            if isinstance(venues_obj, set):
+                venues_obj.update(incoming_venues)
+            else:
+                merged = _normalize_venues_field(venues_obj)
+                merged.update(incoming_venues)
+                entry["venues"] = merged
         if discovered_at is not None:
             existing = entry.get("discovered_at")
             if not isinstance(existing, (int, float)) or discovered_at < float(existing):
@@ -828,6 +948,61 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
     return result
 
 
+async def _fetch_raydium_tokens(
+    *, session: aiohttp.ClientSession | None = None
+) -> List[TokenEntry]:
+    if not _ENABLE_RAYDIUM:
+        return []
+    try:
+        payload = await raydium_provider.fetch(
+            None,
+            timeout=_RAYDIUM_TIMEOUT,
+            session=session,
+        )
+    except Exception as exc:
+        logger.debug("Raydium discovery request failed: %s", exc)
+        return []
+    if not isinstance(payload, Mapping):
+        return []
+    pairs = payload.get("pairs")
+    if not isinstance(pairs, Sequence):
+        return []
+    results: List[TokenEntry] = []
+    for pair in pairs:
+        if not isinstance(pair, Mapping):
+            continue
+        mint_base = pair.get("mint_base")
+        mint_quote = pair.get("mint_quote")
+        valid_mint = None
+        for candidate in (mint_base, mint_quote):
+            if isinstance(candidate, str) and is_valid_solana_mint(candidate):
+                valid_mint = candidate
+                break
+        if not valid_mint:
+            continue
+        liquidity = _coerce_numeric(pair.get("liquidity_usd"))
+        if _MIN_LIQUIDITY and liquidity < _MIN_LIQUIDITY:
+            continue
+        price = _coerce_numeric(pair.get("price_usd"))
+        entry: Dict[str, Any] = {
+            "address": valid_mint,
+            "name": pair.get("name") or pair.get("symbol") or valid_mint,
+            "symbol": pair.get("symbol") or "",
+            "liquidity": liquidity,
+            "price": price,
+            "venues": ["raydium"],
+            "sources": ["raydium"],
+        }
+        pool_addr = pair.get("pool")
+        if isinstance(pool_addr, str) and pool_addr:
+            entry["pair_address"] = pool_addr
+        discovered_at = _parse_timestamp(pair.get("as_of"))
+        if discovered_at is not None:
+            entry["discovered_at"] = discovered_at
+        results.append(entry)
+    return results
+
+
 async def _fetch_dexscreener_tokens(
     *, session: aiohttp.ClientSession | None = None
 ) -> List[TokenEntry]:
@@ -837,7 +1012,7 @@ async def _fetch_dexscreener_tokens(
     try:
         payload = await _http_get_json(
             _DEXSCREENER_URL,
-            headers={"accept": "application/json"},
+            headers={"Accept": "application/json"},
             timeout=_DEXSCREENER_TIMEOUT,
             session=session,
         )
@@ -960,7 +1135,7 @@ async def _fetch_meteora_tokens(
     try:
         payload = await _http_get_json(
             _METEORA_POOLS_URL,
-            headers={"accept": "application/json"},
+            headers={"Accept": "application/json"},
             timeout=_METEORA_TIMEOUT,
             session=session,
         )
@@ -1076,7 +1251,7 @@ async def _fetch_dexlab_tokens(
     try:
         payload = await _http_get_json(
             _DEXLAB_LIST_URL,
-            headers={"accept": "application/json"},
+            headers={"Accept": "application/json"},
             timeout=_DEXLAB_TIMEOUT,
             session=session,
         )
@@ -1219,7 +1394,7 @@ async def _enrich_with_solscan(
     if not pending:
         return
 
-    headers = {"accept": "application/json"}
+    headers = {"Accept": "application/json"}
     if _SOLSCAN_API_KEY:
         headers["token"] = _SOLSCAN_API_KEY
 
@@ -1337,6 +1512,8 @@ def discover_candidates(
             _ENABLE_DEXSCREENER and _DEXSCREENER_URL,
             _ENABLE_METEORA and _METEORA_POOLS_URL,
             _ENABLE_DEXLAB and _DEXLAB_LIST_URL,
+            _ENABLE_RAYDIUM,
+            _ENABLE_ORCA,
         )
     )
 
@@ -1395,6 +1572,16 @@ def discover_candidates(
                 src_list = sorted(list(sources or []))
             copy = dict(entry)
             copy["sources"] = src_list
+            venues_field = entry.get("venues")
+            if isinstance(venues_field, set):
+                venues_list = sorted(venues_field)
+            elif isinstance(venues_field, list):
+                venues_list = list(venues_field)
+            elif venues_field:
+                venues_list = sorted(_normalize_venues_field(venues_field))
+            else:
+                venues_list = []
+            copy["venues"] = venues_list
             for internal in ("_stage_b_eligible", "score_breakdown"):
                 copy.pop(internal, None)
             final.append(copy)
@@ -1411,6 +1598,13 @@ def discover_candidates(
         async def _run(
             shared_session: aiohttp.ClientSession | None,
         ) -> AsyncIterator[List[TokenEntry]]:
+            orca_catalog: Dict[str, List[Dict[str, Any]]] = {}
+            if _ENABLE_ORCA:
+                try:
+                    orca_catalog = await _load_orca_catalog(session=shared_session)
+                except Exception as exc:
+                    logger.debug("Orca catalog unavailable: %s", exc)
+                    orca_catalog = {}
             bird_task = asyncio.create_task(_fetch_birdeye_tokens())
             mempool_task = (
                 asyncio.create_task(
@@ -1431,6 +1625,12 @@ def discover_candidates(
                         _fetch_dexscreener_tokens(session=shared_session)
                     )
                 ] = "dexscreener"
+            if _ENABLE_RAYDIUM:
+                task_map[
+                    asyncio.create_task(
+                        _fetch_raydium_tokens(session=shared_session)
+                    )
+                ] = "raydium"
             if _ENABLE_METEORA and _METEORA_POOLS_URL:
                 task_map[
                     asyncio.create_task(
@@ -1444,6 +1644,13 @@ def discover_candidates(
                     )
                 ] = "dexlab"
 
+            def _enrich_with_orca(entry: Dict[str, Any] | None) -> None:
+                if not entry:
+                    return
+                if not _ENABLE_ORCA or not orca_catalog:
+                    return
+                _merge_orca_venues(entry, orca_catalog)
+
             merge_locks: Dict[str, asyncio.Lock] = {
                 label: asyncio.Lock() for label in set(task_map.values())
             }
@@ -1453,6 +1660,7 @@ def discover_candidates(
 
             bird_tokens: List[TokenEntry] = []
             dexscreener_tokens: List[TokenEntry] = []
+            raydium_tokens: List[TokenEntry] = []
             meteora_tokens: List[TokenEntry] = []
             dexlab_tokens: List[TokenEntry] = []
 
@@ -1468,7 +1676,8 @@ def discover_candidates(
             completed: set[asyncio.Task[Any]] = set()
 
             async def _merge_result(label: str, result: Any) -> bool:
-                nonlocal mempool, bird_tokens, dexscreener_tokens, meteora_tokens, dexlab_tokens
+                nonlocal mempool, bird_tokens, dexscreener_tokens, raydium_tokens
+                nonlocal meteora_tokens, dexlab_tokens
                 lock = merge_locks[label]
                 async with lock:
                     changed = False
@@ -1479,8 +1688,10 @@ def discover_candidates(
                         bird_tokens = list(result or [])
                         for token in bird_tokens:
                             entry = _merge_candidate_entry(candidates, dict(token), "birdeye")
-                            if entry is not None:
-                                changed = True
+                            if entry is None:
+                                continue
+                            _enrich_with_orca(entry)
+                            changed = True
                         return changed
                     if label == "mempool":
                         if isinstance(result, Exception):
@@ -1502,6 +1713,7 @@ def discover_candidates(
                             )
                             if entry is None:
                                 continue
+                            _enrich_with_orca(entry)
                             changed = True
                             for key in (
                                 "score",
@@ -1528,8 +1740,24 @@ def discover_candidates(
                             entry = _merge_candidate_entry(
                                 candidates, dict(token), "dexscreener"
                             )
-                            if entry is not None:
-                                changed = True
+                            if entry is None:
+                                continue
+                            _enrich_with_orca(entry)
+                            changed = True
+                        return changed
+                    if label == "raydium":
+                        if isinstance(result, Exception):
+                            logger.debug("Raydium discovery unavailable: %s", result)
+                            return False
+                        raydium_tokens = list(result or [])
+                        for token in raydium_tokens:
+                            entry = _merge_candidate_entry(
+                                candidates, dict(token), "raydium"
+                            )
+                            if entry is None:
+                                continue
+                            _enrich_with_orca(entry)
+                            changed = True
                         return changed
                     if label == "meteora":
                         if isinstance(result, Exception):
@@ -1540,8 +1768,10 @@ def discover_candidates(
                             entry = _merge_candidate_entry(
                                 candidates, dict(token), "meteora"
                             )
-                            if entry is not None:
-                                changed = True
+                            if entry is None:
+                                continue
+                            _enrich_with_orca(entry)
+                            changed = True
                         return changed
                     if label == "dexlab":
                         if isinstance(result, Exception):
@@ -1552,8 +1782,10 @@ def discover_candidates(
                             entry = _merge_candidate_entry(
                                 candidates, dict(token), "dexlab"
                             )
-                            if entry is not None:
-                                changed = True
+                            if entry is None:
+                                continue
+                            _enrich_with_orca(entry)
+                            changed = True
                         return changed
                     return False
 
@@ -1609,10 +1841,11 @@ def discover_candidates(
 
             top_score = final[0]["score"] if final and "score" in final[0] else None
             logger.debug(
-                "Discovery combine summary bird=%s mempool=%s dexscreener=%s meteora=%s dexlab=%s final=%s top_score=%s",
+                "Discovery combine summary bird=%s mempool=%s dexscreener=%s raydium=%s meteora=%s dexlab=%s final=%s top_score=%s",
                 len(bird_tokens),
                 len(mempool),
                 len(dexscreener_tokens),
+                len(raydium_tokens),
                 len(meteora_tokens),
                 len(dexlab_tokens),
                 len(final),

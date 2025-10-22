@@ -229,6 +229,27 @@ def _price_provider_order() -> List[str]:
     return ordered
 
 
+def _price_provider_timeouts() -> Dict[str, int]:
+    try:
+        from . import prices
+    except Exception:
+        return {}
+    try:
+        raw_timeouts = prices.get_provider_timeouts()
+    except Exception:
+        return {}
+    timeouts: Dict[str, int] = {}
+    for name, timeout in (raw_timeouts or {}).items():
+        try:
+            millis = int(float(timeout) * 1000.0)
+        except (TypeError, ValueError):
+            continue
+        if millis <= 0:
+            continue
+        timeouts[name] = millis
+    return timeouts
+
+
 def _discover_seed_tokens() -> List[str]:
     try:
         from . import seed_token_publisher
@@ -1074,6 +1095,7 @@ def _resilience_snapshot() -> Dict[str, Any]:
         "request_interval_s": request_interval,
         "max_attempts": max_attempts,
     }
+    provider_timeout_snapshot: Dict[str, Dict[str, float]] = {}
     try:
         from . import prices
     except Exception:
@@ -1082,10 +1104,24 @@ def _resilience_snapshot() -> Dict[str, Any]:
     else:
         price_attempts = getattr(prices, "PRICE_RETRY_ATTEMPTS", None)
         price_backoff = getattr(prices, "PRICE_RETRY_BACKOFF", None)
+        try:
+            timeout_mapping = prices.get_provider_timeouts()
+        except Exception:
+            timeout_mapping = {}
+        for name, timeout in (timeout_mapping or {}).items():
+            try:
+                timeout_ms = float(timeout) * 1000.0
+            except (TypeError, ValueError):
+                continue
+            if timeout_ms <= 0:
+                continue
+            provider_timeout_snapshot[name] = {"timeout_ms": timeout_ms}
     resilience["birdeye_retry"] = {
         "attempts": price_attempts,
         "backoff_s": price_backoff,
     }
+    if provider_timeout_snapshot:
+        resilience["price_providers"] = provider_timeout_snapshot
     ping_interval = _maybe_float(os.getenv("UI_WS_PING_INTERVAL") or os.getenv("WS_PING_INTERVAL"))
     if ping_interval is None or ping_interval <= 0:
         ping_interval = 20.0
@@ -1252,10 +1288,13 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         if schema_item:
             schemas_listing.append(schema_item)
 
+    provider_order = _price_provider_order()
     bootstrap = {
         "seed_tokens": _discover_seed_tokens(),
         "pyth_price_hints": _pyth_price_hints(),
-        "price_providers": _price_provider_order(),
+        "price_providers": provider_order,
+        "price_provider_order": provider_order,
+        "price_provider_timeouts_ms": _price_provider_timeouts(),
         "discovery": {"sources": _discovery_hint_sources(state)},
     }
 
