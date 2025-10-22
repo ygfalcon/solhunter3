@@ -26,7 +26,7 @@ dependencies = [
     "redis>=4.6,<6.0",
     "watchfiles>=0.19,<2.0",
     "pydantic>=1.10,<3.0",
-    "jsonschema>=4.17,<5.0",
+    "jsonschema[format-nongpl]>=4.20,<5",
     "cryptography>=41,<44",
     "rich>=13,<14",
     "protobuf>=6.31,<7",
@@ -54,11 +54,18 @@ extras = [
     "psutil>=5.9,<6.0",
 ]
 dev = [
-    "pytest",
+    "pytest>=7.4,<9",
     "pytest-asyncio",
+    "jsonschema[format-nongpl]>=4.20,<5",
+    "ruff>=0.6.8",
+    "black>=24.8",
     "flake8",
     "grpcio-tools",
     "mypy",
+]
+test = [
+    "pytest>=7.4,<9",
+    "jsonschema[format-nongpl]>=4.20,<5",
 ]
 numba = ["numba"]
 fastjson = ["orjson"]
