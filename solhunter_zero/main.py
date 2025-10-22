@@ -49,6 +49,7 @@ from .main_state import TradingState
 from .memory import Memory, load_snapshot
 from .portfolio import Portfolio
 from . import prices
+from . import prices_bootstrap
 from .feature_flags import get_feature_flags
 from .strategy_manager import StrategyManager
 from .agent_manager import AgentManager
@@ -310,6 +311,12 @@ async def perform_startup_async(
     set_env_from_config(cfg)
     _ensure_live_keypair_ready(cfg)
     _log_active_keypair_path()
+    try:
+        resolved_ids = prices_bootstrap.ensure_env_has_pyth_price_ids()
+    except Exception as exc:
+        log.debug("Failed to resolve Pyth price ids automatically: %s", exc)
+    else:
+        log.info("[boot] PYTH_PRICE_IDS resolved: %s", resolved_ids)
     try:
         prices.validate_pyth_overrides_on_boot(network_required=not (offline or dry_run))
     except RuntimeError:
