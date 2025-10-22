@@ -53,7 +53,23 @@ from .feature_flags import get_feature_flags
 from .strategy_manager import StrategyManager
 from .agent_manager import AgentManager
 from .onchain_metrics import fetch_dex_metrics_async
-from .token_scanner import scan_tokens_async
+try:
+    from .token_scanner import scan_tokens_async
+except ImportError as exc:  # pragma: no cover - optional dependency guard
+    logging.getLogger(__name__).warning(
+        "token_scanner unavailable (%s); discovery CLI will use stubbed scan",
+        exc,
+    )
+
+    async def scan_tokens_async(
+        *,
+        rpc_url: str,
+        limit: int = 50,
+        enrich: bool = True,
+        api_key: str | None = None,
+    ) -> list[str]:
+        del rpc_url, enrich, api_key
+        return []
 from .simulation import run_simulations
 from .decision import should_buy, should_sell
 from . import event_bus

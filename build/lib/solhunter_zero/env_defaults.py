@@ -50,7 +50,7 @@ DEFAULTS: dict[str, str] = {
     "RAYDIUM_WS_URL": "",
     "PHOENIX_WS_URL": "",
     "METEORA_WS_URL": "",
-    "JUPITER_WS_URL": "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d",
+    "JUPITER_WS_URL": "wss://stats.jup.ag/ws",
     "ORCA_DEX_URL": "https://www.orca.so",
     "RAYDIUM_DEX_URL": "https://raydium.io",
     "PHOENIX_DEX_URL": "https://app.phoenix.trade",

@@ -9,7 +9,50 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from ..util import parse_bool_env
 from ..prices import fetch_token_prices_async
-from ..portfolio import dynamic_order_size
+try:
+    from ..portfolio import dynamic_order_size
+except ImportError as exc:  # pragma: no cover - optional dependency guard
+    logging.getLogger(__name__).warning(
+        "portfolio.dynamic_order_size unavailable (%s); using simplified fallback",
+        exc,
+    )
+
+    def dynamic_order_size(
+        balance: float,
+        expected_roi: float,
+        predicted_roi: float | None = None,
+        volatility: float = 0.0,
+        drawdown: float = 0.0,
+        *,
+        risk_tolerance: float = 0.1,
+        max_allocation: float = 0.2,
+        max_risk_per_token: float = 0.1,
+        max_drawdown: float = 1.0,
+        volatility_factor: float = 1.0,
+        gas_cost: float | None = None,
+        current_allocation: float = 0.0,
+        min_portfolio_value: float = 0.0,
+        correlation: float | None = None,
+        var: float | None = None,
+        var_threshold: float | None = None,
+    ) -> float:
+        del (
+            predicted_roi,
+            volatility,
+            drawdown,
+            risk_tolerance,
+            max_allocation,
+            max_risk_per_token,
+            max_drawdown,
+            volatility_factor,
+            gas_cost,
+            current_allocation,
+            min_portfolio_value,
+            correlation,
+            var,
+            var_threshold,
+        )
+        return max(0.0, balance * max(expected_roi, 0.0))
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
 

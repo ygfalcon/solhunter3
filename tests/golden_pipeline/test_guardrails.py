@@ -289,7 +289,43 @@ def test_pipeline_uses_injected_bus_in_live_mode(monkeypatch):
         return {}
 
     pipeline = GoldenPipeline(enrichment_fetcher=_fetcher, bus=spy_bus)
-    asyncio.run(pipeline._publish(STREAMS.golden_snapshot, {"mint": "MintLive"}))
+    payload = {
+        "mint": "MintLive",
+        "asof": 0.0,
+        "meta": {"decimals": 6},
+        "px": {
+            "mid_usd": 1.0,
+            "spread_bps": 0.0,
+            "bid_usd": 1.0,
+            "ask_usd": 1.0,
+            "ts": 0.0,
+        },
+        "liq": {
+            "depth_pct": {"1": 0.0},
+            "depth_usd_by_pct": {"0.01": 0.0},
+            "bands": [],
+            "asof": 0.0,
+            "staleness_ms": 0.0,
+            "degraded": False,
+        },
+        "ohlcv5m": {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "vol": 0.0},
+        "hash": "h",
+        "metrics": {},
+        "px_mid_usd": 1.0,
+        "px_bid_usd": 1.0,
+        "px_ask_usd": 1.0,
+        "liq_depth_0_1pct_usd": 0.0,
+        "liq_depth_0_5pct_usd": 0.0,
+        "liq_depth_1_0pct_usd": 0.0,
+        "liq_depth_1pct_usd": 0.0,
+        "degraded": False,
+        "source": None,
+        "staleness_ms": 0.0,
+        "content_hash": "h",
+        "idempotency_key": "h",
+        "schema_version": "2.0",
+    }
+    asyncio.run(pipeline._publish(STREAMS.golden_snapshot, payload))
 
     assert spy_bus.sent and spy_bus.sent[0][0] == STREAMS.golden_snapshot
     assert created_inmemory["count"] == 0

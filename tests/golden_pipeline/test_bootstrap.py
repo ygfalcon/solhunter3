@@ -1,4 +1,5 @@
 from tests.golden_pipeline.conftest import (
+    BASE58_MINTS,
     SCENARIO_PAYLOADS,
     STREAMS,
 )
@@ -39,5 +40,6 @@ def test_bootstrap_runtime_advertises_readiness(golden_harness, fake_broker):
     expected_batches = {
         (SCENARIO_PAYLOADS["discovery_plan"]["das"][0],),
         (SCENARIO_PAYLOADS["discovery_plan"]["das"][1],),
+        (BASE58_MINTS["breaker"],),
     }
     assert providers_seen == expected_batches
