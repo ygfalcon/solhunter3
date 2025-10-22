@@ -364,7 +364,17 @@ class GoldenPipeline:
         )
 
         async def _on_discovery(candidate: DiscoveryCandidate) -> None:
-            await self._publish(STREAMS.discovery_candidates, asdict(candidate))
+            payload = asdict(candidate)
+            sources = list(candidate.sources)
+            if sources:
+                payload["sources"] = sources
+                if not payload.get("source") and sources:
+                    payload["source"] = sources[0]
+            payload.setdefault("v", candidate.v)
+            await self._publish(STREAMS.discovery_candidates, dict(payload))
+            mint_stream = getattr(STREAMS, "mint_discovered", None)
+            if mint_stream:
+                await self._publish(mint_stream, dict(payload))
             await self._enrichment_stage.submit([candidate])
 
         self._discovery_stage = DiscoveryStage(

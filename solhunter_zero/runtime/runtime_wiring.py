@@ -539,14 +539,24 @@ class RuntimeEventCollectors:
 
         async def _on_discovery_candidate(event: Any) -> None:
             payload = _normalize_event(event)
+            now = time.time()
+            mint_value = payload.get("mint")
+            if mint_value:
+                mint = str(mint_value)
+                self._record_discovery([mint])
+                entry = dict(payload)
+                entry.setdefault("asof", now)
+                entry["_received"] = now
+                with self._swarm_lock:
+                    self._token_facts.setdefault(mint, {"seen": now})
+                with self._discovery_lock:
+                    self._discovery_candidates.appendleft(entry)
+                return
             tokens = payload.get("tokens") or payload.get("recent")
             if isinstance(tokens, dict):
                 tokens = tokens.get("mints") or tokens.get("tokens")
-            if not tokens and "mint" in payload:
-                tokens = [payload.get("mint")]
             if not tokens:
                 return
-            now = time.time()
             parsed: List[str] = []
             for raw in tokens:
                 if raw is None:
@@ -559,7 +569,7 @@ class RuntimeEventCollectors:
                     self._token_facts.setdefault(mint, {"seen": now})
             if parsed:
                 self._record_discovery(parsed)
-                entry = {"tokens": parsed, "asof": now}
+                entry = {"tokens": parsed, "asof": now, "_received": now}
                 with self._discovery_lock:
                     self._discovery_candidates.appendleft(entry)
 

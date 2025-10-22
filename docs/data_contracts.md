@@ -5,15 +5,19 @@ messages are JSON objects serialized into Redis streams unless stated otherwise.
 
 ## Stream Payloads
 
-### `x:discovery.candidates` — `DiscoveryCandidate`
+### `x:mint.discovered` — `DiscoveryCandidate`
+
+`x:mint.discovered` carries v1 `DiscoveryCandidate` payloads. For backward
+compatibility the identical JSON body is also emitted on
+`x:discovery.candidates`.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `mint` | `str` | Mint address under evaluation. |
-| `asof` | `str` (ISO-8601) | Timestamp when the mint was observed. |
-| `score` | `float` | Optional score produced by upstream scanners. |
-| `source` | `str` | Discovery source identifier. |
-| `cursor` | `str` | Pagination cursor for DAS backfills. |
+| `mint` | `str` | Candidate mint address. |
+| `asof` | `float` | Epoch timestamp (seconds) when the mint was observed. |
+| `source` | `str` | Primary discovery source slug (lower-case, e.g. `das`, `pumpfun`). |
+| `sources` | `list[str]` | Normalised list of contributing sources for display/tooling. |
+| `v` | `str` | Schema version identifier (`"1.0"`). |
 
 ### `x:token.snap` — `TokenSnapshot`
 

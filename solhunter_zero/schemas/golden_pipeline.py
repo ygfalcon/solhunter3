@@ -22,16 +22,23 @@ def _number() -> Dict[str, Any]:
     return {"type": "number"}
 
 
-STREAM_SCHEMAS: Mapping[str, Dict[str, Any]] = {
-    STREAMS.discovery_candidates: {
-        "type": "object",
-        "properties": {
-            "mint": {"type": "string", "minLength": 1},
-            "asof": _number(),
-        },
-        "required": ["mint", "asof"],
-        "additionalProperties": True,
+_DISCOVERY_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mint": {"type": "string", "minLength": 1},
+        "asof": _number(),
+        "source": {"type": ["string", "null"]},
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "v": {"type": ["string", "number"]},
     },
+    "required": ["mint", "asof"],
+    "additionalProperties": True,
+}
+
+
+STREAM_SCHEMAS: Mapping[str, Dict[str, Any]] = {
+    STREAMS.discovery_candidates: _DISCOVERY_SCHEMA,
+    getattr(STREAMS, "mint_discovered", "x:mint.discovered"): _DISCOVERY_SCHEMA,
     STREAMS.token_snapshot: {
         "type": "object",
         "properties": {

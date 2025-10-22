@@ -24,8 +24,8 @@ staleness rules.
 ## Discovery & Enrichment
 
 ### Discovery Panel
-- **Topic:** `x:discovery.candidates`
-- **Fields:** `mint`, `asof`, `score`, `source`
+- **Topic:** `x:mint.discovered` (also published on `x:discovery.candidates`)
+- **Fields:** `mint`, `asof`, `source`, `sources`, `v`
 - **Staleness:** Badge if `now - asof > 120s`
 - **Interaction:** Click row → request enrichment details.
 

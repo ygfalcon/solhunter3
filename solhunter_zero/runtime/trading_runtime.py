@@ -1528,6 +1528,78 @@ class TradingRuntime:
             rows = list(self._discovery_candidates)
         seen: set[str] = set()
         candidates: List[Dict[str, Any]] = []
+
+        def _humanize_source(value: Any) -> str | None:
+            if value is None:
+                return None
+            text = str(value).strip()
+            if not text:
+                return None
+            slug = text.lower()
+            mapping = {
+                "das": "DAS",
+                "helius": "Helius",
+                "helius-das": "Helius DAS",
+                "das_timeout": "DAS Timeout",
+                "pumpfun": "Pump.fun",
+                "pump.fun": "Pump.fun",
+                "pump_fun": "Pump.fun",
+                "mempool": "Mempool",
+                "amm": "AMM",
+                "amm_logs": "AMM Logs",
+                "rpc": "RPC",
+                "rpc_logs": "RPC Logs",
+                "seed": "Seeded",
+                "seeded": "Seeded",
+            }
+            if slug in mapping:
+                return mapping[slug]
+            if slug.startswith("discovery:"):
+                suffix = slug.split(":", 1)[1]
+                suffix = suffix.replace("_", " ").replace(".", " ").strip()
+                suffix = suffix.title() if suffix else "Unknown"
+                return f"Discovery · {suffix}"
+            cleaned = slug.replace("-", " ").replace("_", " ").replace(".", " ")
+            parts = [part for part in cleaned.split() if part]
+            if not parts:
+                return text
+            formatted_parts: list[str] = []
+            for part in parts:
+                if part in {"amm", "das", "rpc", "jito"}:
+                    formatted_parts.append(part.upper())
+                else:
+                    formatted_parts.append(part.capitalize())
+            return " ".join(formatted_parts)
+
+        def _format_sources(payload: Mapping[str, Any]) -> tuple[str | None, list[str]]:
+            ordered: list[str] = []
+
+            def _extend(value: Any) -> None:
+                if value is None:
+                    return
+                if isinstance(value, str):
+                    text = value.strip()
+                    if text:
+                        ordered.append(text)
+                    return
+                if isinstance(value, (list, tuple, set)):
+                    for item in value:
+                        _extend(item)
+
+            _extend(payload.get("source"))
+            _extend(payload.get("sources"))
+            deduped: list[str] = []
+            seen_keys: set[str] = set()
+            for raw in ordered:
+                key = raw.lower()
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                deduped.append(raw)
+            formatted = [value for value in (_humanize_source(raw) for raw in deduped) if value]
+            primary = formatted[0] if formatted else None
+            return primary, formatted
+
         for row in rows:
             mint_raw = row.get("mint") or row.get("token") or row.get("address")
             mint = str(mint_raw).strip() if mint_raw else ""
@@ -1542,11 +1614,13 @@ class TradingRuntime:
                 except Exception:
                     age = None
             stale = age is not None and age > 120.0
+            primary_source, source_list = _format_sources(row)
             candidates.append(
                 {
                     "mint": mint,
                     "score": _maybe_float(row.get("score")),
-                    "source": row.get("source"),
+                    "source": primary_source,
+                    "sources": source_list,
                     "asof": row.get("asof"),
                     "age_seconds": age,
                     "age_label": _format_age(age),
