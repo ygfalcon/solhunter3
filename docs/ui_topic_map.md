@@ -3,6 +3,11 @@
 This guide maps each UI panel to its backing stream or API, the fields that must be rendered, and
 staleness rules.
 
+## Header Signals
+
+- **Metrics:** Header shows bus latency, OHLCV lag, depth lag, and golden lag alongside environment toggles. Bus latency above
+  3s or depth lag beyond 10s is treated as an alert and should remain green under normal operating conditions.
+
 ## Swarm Summary
 
 - **Endpoint:** `/summary`
@@ -13,12 +18,14 @@ staleness rules.
 - **Validation:** The list is built from `SEED_TOKENS` and normalised using the configured Pyth
   overrides (`PYTH_PRICE_IDS` plus defaults). Missing or malformed identifiers are logged during
   startup and called out in the summary for quick remediation.
+- **Defaults:** Production env files preload SOL, USDC, and USDT in `SEED_TOKENS`, so the Golden panel opens with authoritative
+  snapshots before fresh discovery events stream in.
 
 ## Discovery & Enrichment
 
 ### Discovery Panel
 - **Topic:** `x:discovery.candidates`
-- **Fields:** `mint`, `asof`, `score`
+- **Fields:** `mint`, `asof`, `score`, `source`
 - **Staleness:** Badge if `now - asof > 120s`
 - **Interaction:** Click row → request enrichment details.
 
@@ -44,7 +51,8 @@ staleness rules.
 
 ### Golden Panel
 - **Topic:** `x:mint.golden`
-- **Fields:** `hash`, `meta`, `px_mid_usd`, `px_bid_usd`, `px_ask_usd`, `liq_depth_0_1pct_usd`, `liq_depth_0_5pct_usd`, `liq_depth_1_0pct_usd`, nested `px`/`liq` (with depth bands + `route_meta`), embedded `ohlcv5m`, `asof`, `source`, `degraded`
+- **Fields:** `hash`, `meta`, `px_mid_usd`, `px_bid_usd`, `px_ask_usd`, `liq_depth_0_1pct_usd`, `liq_depth_0_5pct_usd`, `liq_depth_1_0pct_usd`, nested `px`/`liq` (with depth bands + `route_meta`), embedded `ohlcv5m`, `asof`, `source`, `sentiment`, `degraded`
+- **Sentiment column:** Renders `boosted` when LunarCrush fallback sentiment is merged, `baseline` for native Pump.fun/Birdeye feeds, and `—` when no social signal exists; the numeric sentiment score and upstream `social_source` appear beneath the badge.
 - **Route badge tooltip:** When `source=jup_route`, the badge hover shows recent sweep notionals and their observed impact from `liq.route_meta.sweeps`; synthetic (`source=pyth_synthetic`) rows show the confidence-derived spread. `liq.route_meta.latency_ms` is rendered in the detail line to surface adapter latency.
 - **Badges:** Publish cadence stats (emit rate, change ratio).  Flag if `now - asof > 60s`.
 
