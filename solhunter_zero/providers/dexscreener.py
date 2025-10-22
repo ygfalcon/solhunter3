@@ -34,8 +34,8 @@ async def _acquire_session(
 ) -> tuple[aiohttp.ClientSession, bool]:
     if session is not None:
         return session, False
-    owned = await get_session()
-    return owned, True
+    shared = await get_session()
+    return shared, False
 
 
 async def _rate_limit() -> None:
@@ -219,67 +219,60 @@ async def fetch(
     timeout_value = float(timeout or _DEFAULT_TIMEOUT)
     client_timeout = aiohttp.ClientTimeout(total=timeout_value)
 
-    owned_session: aiohttp.ClientSession | None = None
-    try:
-        session_obj, owned = await _acquire_session(session)
-        if owned:
-            owned_session = session_obj
-        attempts, backoff = host_retry_config(url)
-        last_error: Exception | None = None
-        for attempt in range(max(1, attempts)):
-            await _rate_limit()
-            try:
-                async with host_request(url):
-                    async with session_obj.get(
-                        url,
-                        headers={"accept": "application/json"},
-                        timeout=client_timeout,
-                    ) as resp:
-                        resp.raise_for_status()
-                        payload = await resp.json()
-            except Exception as exc:  # pragma: no cover - retried path
-                last_error = exc
-                if attempt + 1 >= max(1, attempts):
-                    raise
-                await asyncio.sleep(backoff * (2**attempt))
-                continue
+    session_obj, _ = await _acquire_session(session)
+    attempts, backoff = host_retry_config(url)
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        await _rate_limit()
+        try:
+            async with host_request(url):
+                async with session_obj.get(
+                    url,
+                    headers={"Accept": "application/json"},
+                    timeout=client_timeout,
+                ) as resp:
+                    resp.raise_for_status()
+                    payload = await resp.json()
+        except Exception as exc:  # pragma: no cover - retried path
+            last_error = exc
+            if attempt + 1 >= max(1, attempts):
+                raise
+            await asyncio.sleep(backoff * (2**attempt))
+            continue
 
-            pairs = _extract_pairs(payload)
-            ranked = _select_pairs(pairs, token)
-            venues = _build_venues(ranked)
-            best_pair = ranked[0] if ranked else None
+        pairs = _extract_pairs(payload)
+        ranked = _select_pairs(pairs, token)
+        venues = _build_venues(ranked)
+        best_pair = ranked[0] if ranked else None
 
-            if best_pair is not None:
-                price = (
-                    _coerce_float(best_pair.get("priceUsd"))
-                    or _coerce_float(best_pair.get("price"))
-                    or _coerce_float(payload.get("priceUsd"))
-                )
-                as_of = _pair_timestamp(best_pair)
-                spread_bps = _compute_spread_bps(best_pair)
-                liquidity = float(_pair_liquidity(best_pair))
-            else:
-                price = _coerce_float(payload.get("priceUsd"))
-                as_of = _parse_timestamp(payload.get("timestamp")) or int(time.time() * 1000)
-                spread_bps = None
-                liquidity = 0.0
+        if best_pair is not None:
+            price = (
+                _coerce_float(best_pair.get("priceUsd"))
+                or _coerce_float(best_pair.get("price"))
+                or _coerce_float(payload.get("priceUsd"))
+            )
+            as_of = _pair_timestamp(best_pair)
+            spread_bps = _compute_spread_bps(best_pair)
+            liquidity = float(_pair_liquidity(best_pair))
+        else:
+            price = _coerce_float(payload.get("priceUsd"))
+            as_of = _parse_timestamp(payload.get("timestamp")) or int(time.time() * 1000)
+            spread_bps = None
+            liquidity = 0.0
 
-            return {
-                "price": float(price) if price is not None else None,
-                "liquidity_usd": liquidity,
-                "spread_bps": spread_bps,
-                "venues": venues,
-                "as_of": as_of,
-                "source": "dexscreener",
-                "pairs": [dict(pair) for pair in ranked],
-            }
+        return {
+            "price": float(price) if price is not None else None,
+            "liquidity_usd": liquidity,
+            "spread_bps": spread_bps,
+            "venues": venues,
+            "as_of": as_of,
+            "source": "dexscreener",
+            "pairs": [dict(pair) for pair in ranked],
+        }
 
-        if last_error is not None:
-            raise last_error
-    finally:
-        if owned_session is not None:
-            await owned_session.close()
-
+    if last_error is not None:
+        raise last_error
+    
     # If we somehow exit the retry loop without returning or raising, fallback.
     now_ms = int(time.time() * 1000)
     return {

@@ -26,8 +26,8 @@ async def _acquire_session(
 ) -> tuple[aiohttp.ClientSession, bool]:
     if session is not None:
         return session, False
-    owned = await get_session()
-    return owned, True
+    shared = await get_session()
+    return shared, False
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -130,68 +130,61 @@ async def fetch(
     timeout_value = float(timeout or _DEFAULT_TIMEOUT)
     client_timeout = aiohttp.ClientTimeout(total=timeout_value)
 
-    owned_session: aiohttp.ClientSession | None = None
-    try:
-        session_obj, owned = await _acquire_session(session)
-        if owned:
-            owned_session = session_obj
-        attempts, backoff = host_retry_config(url)
-        last_error: Exception | None = None
-        for attempt in range(max(1, attempts)):
-            try:
-                async with host_request(url):
-                    async with session_obj.get(
-                        url,
-                        headers={"accept": "application/json"},
-                        timeout=client_timeout,
-                    ) as resp:
-                        resp.raise_for_status()
-                        payload = await resp.json()
-            except Exception as exc:  # pragma: no cover - retried path
-                last_error = exc
-                if attempt + 1 >= max(1, attempts):
-                    raise
-                await asyncio.sleep(backoff * (2**attempt))
-                continue
+    session_obj, _ = await _acquire_session(session)
+    attempts, backoff = host_retry_config(url)
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            async with host_request(url):
+                async with session_obj.get(
+                    url,
+                    headers={"Accept": "application/json"},
+                    timeout=client_timeout,
+                ) as resp:
+                    resp.raise_for_status()
+                    payload = await resp.json()
+        except Exception as exc:  # pragma: no cover - retried path
+            last_error = exc
+            if attempt + 1 >= max(1, attempts):
+                raise
+            await asyncio.sleep(backoff * (2**attempt))
+            continue
 
-            pools = []
-            if isinstance(payload, Mapping):
-                pools_raw = payload.get("whirlpools") or payload.get("data")
-            else:
-                pools_raw = payload
-            if isinstance(pools_raw, Sequence):
-                pools = [pool for pool in pools_raw if isinstance(pool, MutableMapping)]
-            catalog = _extract_catalog(pools)
-            now_ms = int(time.time() * 1000)
-            venues = []
-            liquidity = 0.0
-            if token_or_mint:
-                entries = catalog.get(token_or_mint, [])
-                if entries:
-                    top = entries[0]
-                    liquidity = top.get("liquidity_usd", 0.0)
-                    venues.append(
-                        {
-                            "name": "orca",
-                            "pair": top.get("pool", ""),
-                            "liquidity_usd": top.get("liquidity_usd", 0.0),
-                        }
-                    )
-            return {
-                "price": None,
-                "liquidity_usd": float(liquidity),
-                "spread_bps": None,
-                "venues": venues,
-                "as_of": now_ms,
-                "source": "orca",
-                "catalog": catalog,
-            }
+        pools = []
+        if isinstance(payload, Mapping):
+            pools_raw = payload.get("whirlpools") or payload.get("data")
+        else:
+            pools_raw = payload
+        if isinstance(pools_raw, Sequence):
+            pools = [pool for pool in pools_raw if isinstance(pool, MutableMapping)]
+        catalog = _extract_catalog(pools)
+        now_ms = int(time.time() * 1000)
+        venues = []
+        liquidity = 0.0
+        if token_or_mint:
+            entries = catalog.get(token_or_mint, [])
+            if entries:
+                top = entries[0]
+                liquidity = top.get("liquidity_usd", 0.0)
+                venues.append(
+                    {
+                        "name": "orca",
+                        "pair": top.get("pool", ""),
+                        "liquidity_usd": top.get("liquidity_usd", 0.0),
+                    }
+                )
+        return {
+            "price": None,
+            "liquidity_usd": float(liquidity),
+            "spread_bps": None,
+            "venues": venues,
+            "as_of": now_ms,
+            "source": "orca",
+            "catalog": catalog,
+        }
 
-        if last_error is not None:
-            raise last_error
-    finally:
-        if owned_session is not None:
-            await owned_session.close()
+    if last_error is not None:
+        raise last_error
 
     now_ms = int(time.time() * 1000)
     return {

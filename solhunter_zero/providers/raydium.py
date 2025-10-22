@@ -26,8 +26,8 @@ async def _acquire_session(
 ) -> tuple[aiohttp.ClientSession, bool]:
     if session is not None:
         return session, False
-    owned = await get_session()
-    return owned, True
+    shared = await get_session()
+    return shared, False
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -153,60 +153,53 @@ async def fetch(
     timeout_value = float(timeout or _DEFAULT_TIMEOUT)
     client_timeout = aiohttp.ClientTimeout(total=timeout_value)
 
-    owned_session: aiohttp.ClientSession | None = None
-    try:
-        session_obj, owned = await _acquire_session(session)
-        if owned:
-            owned_session = session_obj
-        attempts, backoff = host_retry_config(url)
-        last_error: Exception | None = None
-        for attempt in range(max(1, attempts)):
-            try:
-                async with host_request(url):
-                    async with session_obj.get(
-                        url,
-                        headers={"accept": "application/json"},
-                        timeout=client_timeout,
-                    ) as resp:
-                        resp.raise_for_status()
-                        payload = await resp.json()
-            except Exception as exc:  # pragma: no cover - retried path
-                last_error = exc
-                if attempt + 1 >= max(1, attempts):
-                    raise
-                await asyncio.sleep(backoff * (2**attempt))
-                continue
+    session_obj, _ = await _acquire_session(session)
+    attempts, backoff = host_retry_config(url)
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            async with host_request(url):
+                async with session_obj.get(
+                    url,
+                    headers={"Accept": "application/json"},
+                    timeout=client_timeout,
+                ) as resp:
+                    resp.raise_for_status()
+                    payload = await resp.json()
+        except Exception as exc:  # pragma: no cover - retried path
+            last_error = exc
+            if attempt + 1 >= max(1, attempts):
+                raise
+            await asyncio.sleep(backoff * (2**attempt))
+            continue
 
-            pairs = _extract_pairs(payload)
-            normalised = _normalise_pairs(pairs, token_or_mint)
-            top = normalised[0] if normalised else None
-            as_of = top["as_of"] if top else int(time.time() * 1000)
-            price = top["price_usd"] if top else None
-            liquidity = top["liquidity_usd"] if top else 0.0
-            venues = []
-            for entry in normalised[:3]:
-                venues.append(
-                    {
-                        "name": "raydium",
-                        "pair": entry.get("pool", ""),
-                        "liquidity_usd": entry.get("liquidity_usd", 0.0),
-                    }
-                )
-            return {
-                "price": price,
-                "liquidity_usd": liquidity,
-                "spread_bps": None,
-                "venues": venues,
-                "as_of": as_of,
-                "source": "raydium",
-                "pairs": normalised,
-            }
+        pairs = _extract_pairs(payload)
+        normalised = _normalise_pairs(pairs, token_or_mint)
+        top = normalised[0] if normalised else None
+        as_of = top["as_of"] if top else int(time.time() * 1000)
+        price = top["price_usd"] if top else None
+        liquidity = top["liquidity_usd"] if top else 0.0
+        venues = []
+        for entry in normalised[:3]:
+            venues.append(
+                {
+                    "name": "raydium",
+                    "pair": entry.get("pool", ""),
+                    "liquidity_usd": entry.get("liquidity_usd", 0.0),
+                }
+            )
+        return {
+            "price": price,
+            "liquidity_usd": liquidity,
+            "spread_bps": None,
+            "venues": venues,
+            "as_of": as_of,
+            "source": "raydium",
+            "pairs": normalised,
+        }
 
-        if last_error is not None:
-            raise last_error
-    finally:
-        if owned_session is not None:
-            await owned_session.close()
+    if last_error is not None:
+        raise last_error
 
     now_ms = int(time.time() * 1000)
     return {

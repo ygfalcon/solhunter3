@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, List, AsyncIterator
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence, AsyncIterator
 
 import yaml
 from aiohttp import ClientTimeout
@@ -1012,7 +1012,7 @@ async def _fetch_dexscreener_tokens(
     try:
         payload = await _http_get_json(
             _DEXSCREENER_URL,
-            headers={"accept": "application/json"},
+            headers={"Accept": "application/json"},
             timeout=_DEXSCREENER_TIMEOUT,
             session=session,
         )
@@ -1135,7 +1135,7 @@ async def _fetch_meteora_tokens(
     try:
         payload = await _http_get_json(
             _METEORA_POOLS_URL,
-            headers={"accept": "application/json"},
+            headers={"Accept": "application/json"},
             timeout=_METEORA_TIMEOUT,
             session=session,
         )
@@ -1251,7 +1251,7 @@ async def _fetch_dexlab_tokens(
     try:
         payload = await _http_get_json(
             _DEXLAB_LIST_URL,
-            headers={"accept": "application/json"},
+            headers={"Accept": "application/json"},
             timeout=_DEXLAB_TIMEOUT,
             session=session,
         )
@@ -1394,7 +1394,7 @@ async def _enrich_with_solscan(
     if not pending:
         return
 
-    headers = {"accept": "application/json"}
+    headers = {"Accept": "application/json"}
     if _SOLSCAN_API_KEY:
         headers["token"] = _SOLSCAN_API_KEY
 
