@@ -636,7 +636,9 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
         for attempt in range(1, _BIRDEYE_RETRIES + 1):
             try:
                 request_cm = session.get(
-                    _BIRDEYE_TOKENLIST_URL, params=params, headers=_headers()
+                    _BIRDEYE_TOKENLIST_URL,
+                    params=params,
+                    headers=_headers(),
                 )
                 async with request_cm as resp:
                     if resp.status in (429, 503) or 500 <= resp.status < 600:
@@ -676,82 +678,82 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                         if any(marker in lower_text for marker in _BIRDEYE_THROTTLE_MARKERS):
                             logger.warning(
                                 "BirdEye throttle %s attempt=%s offset=%s backoff=%.2fs: %s",
-                                    resp.status,
-                                    attempt,
-                                    offset,
-                                    backoff,
-                                    text[:200],
-                                )
-                                delay = backoff
-                                retry_after = resp.headers.get("Retry-After")
-                                if retry_after:
-                                    try:
-                                        ra_val = min(float(retry_after), _BIRDEYE_BACKOFF_MAX)
-                                        delay = max(delay, ra_val)
-                                    except ValueError:
-                                        pass
-                                if attempt >= _BIRDEYE_RETRIES:
-                                    if tokens:
-                                        logger.warning(
-                                            "BirdEye throttle %s after %s tokens; returning partial results",
-                                            resp.status,
-                                            len(tokens),
-                                        )
-                                        payload = None
-                                        break
-                                    _cache_set(cache_key, [])
-                                    return []
-                                await asyncio.sleep(delay)
-                                backoff = min(max(backoff * 2, delay), _BIRDEYE_BACKOFF_MAX)
-                                continue
-
-                            logger.warning(
-                                "BirdEye 400 at offset %s (params=%r): %s",
+                                resp.status,
+                                attempt,
                                 offset,
-                                params,
+                                backoff,
                                 text[:200],
                             )
-                            payload = None
-                            offset = _MAX_OFFSET
-                            break
+                            delay = backoff
+                            retry_after = resp.headers.get("Retry-After")
+                            if retry_after:
+                                try:
+                                    ra_val = min(float(retry_after), _BIRDEYE_BACKOFF_MAX)
+                                    delay = max(delay, ra_val)
+                                except ValueError:
+                                    pass
+                            if attempt >= _BIRDEYE_RETRIES:
+                                if tokens:
+                                    logger.warning(
+                                        "BirdEye throttle %s after %s tokens; returning partial results",
+                                        resp.status,
+                                        len(tokens),
+                                    )
+                                    payload = None
+                                    break
+                                _cache_set(cache_key, [])
+                                return []
+                            await asyncio.sleep(delay)
+                            backoff = min(max(backoff * 2, delay), _BIRDEYE_BACKOFF_MAX)
+                            continue
 
-                        resp.raise_for_status()
-                        payload = await resp.json()
-                        backoff = _BIRDEYE_BACKOFF
+                        logger.warning(
+                            "BirdEye 400 at offset %s (params=%r): %s",
+                            offset,
+                            params,
+                            text[:200],
+                        )
+                        payload = None
+                        offset = _MAX_OFFSET
                         break
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    logger.warning(
-                        "BirdEye request error attempt=%s offset=%s: %s",
-                        attempt,
-                        offset,
-                        exc,
-                    )
-                    if attempt >= _BIRDEYE_RETRIES:
-                        if tokens:
-                            logger.warning(
-                                "BirdEye retries exhausted after %s tokens; returning partial",
-                                len(tokens),
-                            )
-                            payload = None
-                            break
-                        _cache_set(cache_key, [])
-                        return []
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
-                    continue
-                except Exception as exc:
-                    logger.warning("BirdEye unexpected error offset=%s: %s", offset, exc)
-                    if not tokens:
-                        _cache_set(cache_key, [])
-                        return []
-                    payload = None
-                    break
-                else:
-                    # Success path already breaks out of loop
-                    pass
 
-                if payload is not None:
+                    resp.raise_for_status()
+                    payload = await resp.json()
+                    backoff = _BIRDEYE_BACKOFF
                     break
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "BirdEye request error attempt=%s offset=%s: %s",
+                    attempt,
+                    offset,
+                    exc,
+                )
+                if attempt >= _BIRDEYE_RETRIES:
+                    if tokens:
+                        logger.warning(
+                            "BirdEye retries exhausted after %s tokens; returning partial",
+                            len(tokens),
+                        )
+                        payload = None
+                        break
+                    _cache_set(cache_key, [])
+                    return []
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
+                continue
+            except Exception as exc:
+                logger.warning("BirdEye unexpected error offset=%s: %s", offset, exc)
+                if not tokens:
+                    _cache_set(cache_key, [])
+                    return []
+                payload = None
+                break
+            else:
+                # Success path already breaks out of loop
+                pass
+
+            if payload is not None:
+                break
 
             if payload is None:
                 break

@@ -45,15 +45,18 @@ from ..exit_management import ExitManager
 from ..schemas import RuntimeLog
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-from ..golden_pipeline.flags import resolve_depth_flag, resolve_momentum_flag
-from ..golden_pipeline.service import GoldenPipelineService
-from ..paths import ROOT
-from ..redis_util import ensure_local_redis_if_needed
-from ..ui import UIState, UIServer
-from ..util import parse_bool_env
-from .runtime_wiring import resolve_golden_enabled
-from .schema_adapters import read_golden, read_ohlcv
-from .tuning import analyse_evaluation
+    from ..golden_pipeline.flags import (
+        resolve_depth_flag,
+        resolve_momentum_flag,
+    )
+    from ..golden_pipeline.service import GoldenPipelineService
+    from ..paths import ROOT
+    from ..redis_util import ensure_local_redis_if_needed
+    from ..ui import UIState, UIServer
+    from ..util import parse_bool_env
+    from .runtime_wiring import resolve_golden_enabled
+    from .schema_adapters import read_golden, read_ohlcv
+    from .tuning import analyse_evaluation
 
 
 log = logging.getLogger(__name__)
