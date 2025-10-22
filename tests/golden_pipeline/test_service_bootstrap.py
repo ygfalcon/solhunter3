@@ -4,6 +4,8 @@ import types
 from types import SimpleNamespace
 from typing import Iterable
 
+import pytest
+
 if "solhunter_zero.agent_manager" not in sys.modules:
     agent_manager_stub = types.ModuleType("solhunter_zero.agent_manager")
 
@@ -141,3 +143,43 @@ def test_agents_receive_bootstrapped_snapshot() -> None:
             token_scanner_stub.TRENDING_METADATA.clear()
 
     asyncio.run(_run())
+
+
+def test_depth_cache_ttl_config_override() -> None:
+    async def _noop_enrichment(mints: Iterable[str]) -> dict[str, TokenSnapshot]:
+        return {}
+
+    manager = RecordingAgentManager()
+    portfolio = Portfolio(path=None)
+    bus = EventBus()
+    config = {"golden": {"depth": {"cache_ttl": 18.5}}}
+
+    service = GoldenPipelineService(
+        agent_manager=manager,
+        portfolio=portfolio,
+        enrichment_fetcher=_noop_enrichment,
+        event_bus=bus,
+        config=config,
+    )
+
+    assert service._depth_adapter._cache_ttl == pytest.approx(18.5)
+
+
+def test_depth_cache_ttl_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop_enrichment(mints: Iterable[str]) -> dict[str, TokenSnapshot]:
+        return {}
+
+    monkeypatch.setenv("GOLDEN_DEPTH_CACHE_TTL", "12.25")
+    manager = RecordingAgentManager()
+    portfolio = Portfolio(path=None)
+    bus = EventBus()
+
+    service = GoldenPipelineService(
+        agent_manager=manager,
+        portfolio=portfolio,
+        enrichment_fetcher=_noop_enrichment,
+        event_bus=bus,
+        config={"golden": {"depth": {"cache_ttl": 90}}},
+    )
+
+    assert service._depth_adapter._cache_ttl == pytest.approx(12.25)

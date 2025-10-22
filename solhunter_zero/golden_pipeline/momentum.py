@@ -25,6 +25,7 @@ from typing import (
     Optional,
     Sequence,
 )
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -56,7 +57,7 @@ _READ_TIMEOUT_SEC = float(os.getenv("GOLDEN_MOMENTUM_READ_TIMEOUT", "0.7") or 0.
 _TOTAL_TIMEOUT_SEC = max(_CONNECT_TIMEOUT_SEC + _READ_TIMEOUT_SEC, 1.0)
 _RETRY_BACKOFF_SEC = float(os.getenv("GOLDEN_MOMENTUM_RETRY_BACKOFF", "0.15") or 0.15)
 
-_HOST_RPS: Mapping[str, tuple[float, int]] = {
+_HOST_RPS: Dict[str, tuple[float, int]] = {
     "public-api.birdeye.so": (5.0, 5),
     "api.dexscreener.com": (5.0, 5),
     "pump.fun": (3.0, 3),
@@ -199,6 +200,87 @@ if Histogram is not None:  # pragma: no branch - optional metrics
     )
 else:  # pragma: no cover - metrics optional
     MOMENTUM_LATENCY_MS = None
+
+if Counter is not None:  # pragma: no branch - optional metrics
+    BREAKER_OPEN_TOTAL = Counter(
+        "breaker_open_total",
+        "Circuit breaker open events by upstream host",
+        labelnames=("host",),
+    )
+else:  # pragma: no cover - metrics optional
+    BREAKER_OPEN_TOTAL = None
+
+if Histogram is not None:  # pragma: no branch - optional metrics
+    BREAKER_DURATION_MS = Histogram(
+        "breaker_duration_ms",
+        "Circuit breaker open duration in milliseconds",
+        labelnames=("host",),
+        buckets=(250, 500, 1000, 2500, 5000, 10_000, 30_000, 60_000, 120_000),
+    )
+else:  # pragma: no cover - metrics optional
+    BREAKER_DURATION_MS = None
+
+
+def _parse_bool(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _format_lunarcrush_url(symbol: str, template: str) -> str:
+    try:
+        return template.format(symbol=symbol)
+    except Exception:
+        return template
+
+
+_LUNARCRUSH_URL_TEMPLATE = os.getenv(
+    "LUNARCRUSH_URL_TEMPLATE",
+    "https://lunarcrush.com/api4/public/coins/{symbol}",
+)
+_LUNARCRUSH_RATE_FREE = _parse_bool(os.getenv("LUNARCRUSH_RATE_FREE"))
+_LUNARCRUSH_API_KEY = os.getenv("LUNARCRUSH_API_KEY")
+
+
+def _resolve_lunarcrush_host(template: str) -> str:
+    url = _format_lunarcrush_url("SOL", template)
+    parsed = urlparse(url)
+    if parsed.netloc:
+        return parsed.netloc
+    if parsed.path:
+        parts = parsed.path.split("/")
+        if parts:
+            return parts[0]
+    return "lunarcrush.com"
+
+
+_LUNARCRUSH_HOST = (
+    _resolve_lunarcrush_host(_LUNARCRUSH_URL_TEMPLATE)
+    if _LUNARCRUSH_RATE_FREE
+    else ""
+)
+
+
+def _record_breaker_open(host: str, duration: float) -> None:
+    if not host:
+        return
+    if BREAKER_OPEN_TOTAL is not None:
+        try:
+            BREAKER_OPEN_TOTAL.labels(host=host).inc()
+        except Exception:  # pragma: no cover - metrics optional
+            pass
+    if BREAKER_DURATION_MS is not None and duration > 0:
+        try:
+            BREAKER_DURATION_MS.labels(host=host).observe(max(0.0, duration) * 1000.0)
+        except Exception:  # pragma: no cover - metrics optional
+            pass
+
+
+def _breaker_open_callback(host: str) -> Callable[[float], None]:
+    def _callback(duration: float) -> None:
+        _record_breaker_open(host, duration)
+
+    return _callback
 
 
 @dataclass(slots=True)
@@ -441,13 +523,41 @@ class MomentumAgent:
             sock_connect=_CONNECT_TIMEOUT_SEC,
             sock_read=_READ_TIMEOUT_SEC,
         )
+        env_rate_flag = os.getenv("LUNARCRUSH_RATE_FREE")
+        rate_free_enabled = (
+            _parse_bool(env_rate_flag) if env_rate_flag is not None else _LUNARCRUSH_RATE_FREE
+        )
+        template_override = os.getenv("LUNARCRUSH_URL_TEMPLATE") or _LUNARCRUSH_URL_TEMPLATE
+        api_key_override = os.getenv("LUNARCRUSH_API_KEY")
+        self._lunarcrush_enabled = rate_free_enabled
+        self._lunarcrush_url_template = template_override
+        self._lunarcrush_api_key = (
+            api_key_override if api_key_override is not None else _LUNARCRUSH_API_KEY
+        )
+        self._lunarcrush_host = (
+            _resolve_lunarcrush_host(template_override) if rate_free_enabled else ""
+        )
         for host, (rate, burst) in _HOST_RPS.items():
             self._limiters[host] = TokenBucket(host, rate=rate, burst=burst)
             self._breakers[host] = CircuitBreaker(
                 threshold=3,
                 window_sec=30.0,
                 cooldown_sec=30.0,
+                on_open=_breaker_open_callback(host),
             )
+        if self._lunarcrush_enabled and self._lunarcrush_host:
+            rate, burst = _HOST_RPS.get(self._lunarcrush_host, (2.0, 2))
+            if self._lunarcrush_host not in self._limiters:
+                self._limiters[self._lunarcrush_host] = TokenBucket(
+                    self._lunarcrush_host, rate=rate, burst=burst
+                )
+            if self._lunarcrush_host not in self._breakers:
+                self._breakers[self._lunarcrush_host] = CircuitBreaker(
+                    threshold=3,
+                    window_sec=30.0,
+                    cooldown_sec=30.0,
+                    on_open=_breaker_open_callback(self._lunarcrush_host),
+                )
 
     @property
     def enabled(self) -> bool:
@@ -1275,6 +1385,7 @@ class MomentumAgent:
     ) -> Mapping[str, Any]:
         community_score = None
         community_source = None
+        social_sentiment: float | None = None
         for pair in pairs:
             try:
                 payload = await self._request_json(
@@ -1310,11 +1421,30 @@ class MomentumAgent:
                 social_source = nitter_source
         elif community_source is None:
             social_source = None
+        if self._lunarcrush_enabled and symbol:
+            lunar_payload = await self._fetch_lunarcrush_social(symbol)
+            if isinstance(lunar_payload, Mapping):
+                if social_sentiment is None and lunar_payload.get("social_sentiment") is not None:
+                    try:
+                        social_sentiment = clamp(
+                            float(lunar_payload["social_sentiment"]), 0.0, 1.0
+                        )
+                    except Exception:
+                        social_sentiment = None
+                if tweets_per_min is None and lunar_payload.get("tweets_per_min") is not None:
+                    try:
+                        tweets_per_min = max(0.0, float(lunar_payload["tweets_per_min"]))
+                    except Exception:
+                        tweets_per_min = None
+                if not social_source and lunar_payload.get("social_source"):
+                    social_source = str(lunar_payload["social_source"])
         payload: Dict[str, Any] = {}
         if community_score is not None:
             payload["community_score"] = community_score
         if tweets_per_min is not None:
             payload["tweets_per_min"] = tweets_per_min
+        if social_sentiment is not None:
+            payload["social_sentiment"] = social_sentiment
         if social_source:
             payload["social_source"] = social_source
         return payload
@@ -1346,6 +1476,75 @@ class MomentumAgent:
             tweets_per_min = min(5.0, len(recent) / 60.0)
             return tweets_per_min, f"nitter:{host}"
         return None, None
+
+    async def _fetch_lunarcrush_social(self, symbol: str) -> Mapping[str, Any]:
+        if not self._lunarcrush_enabled or not symbol:
+            return {}
+        template = self._lunarcrush_url_template or _LUNARCRUSH_URL_TEMPLATE
+        url = _format_lunarcrush_url(symbol.upper(), template)
+        host = self._lunarcrush_host or urlparse(url).netloc or "lunarcrush.com"
+        params: Dict[str, Any] | None = None
+        if self._lunarcrush_api_key:
+            params = {"key": self._lunarcrush_api_key}
+        try:
+            payload = await self._request_json(url, host=host, params=params)
+        except MomentumError as exc:
+            self._record_error("lunarcrush", exc)
+            return {}
+        if not isinstance(payload, Mapping):
+            return {}
+        entries: list[Mapping[str, Any]] = []
+        data = payload.get("data")
+        if isinstance(data, list):
+            entries = [entry for entry in data if isinstance(entry, Mapping)]
+        elif isinstance(data, Mapping):
+            entries = [data]
+        else:
+            entries = [payload]
+        sentiment: float | None = None
+        tweets_per_min: float | None = None
+        for entry in entries:
+            if sentiment is None:
+                for key in ("avg_sentiment", "average_sentiment", "sentiment", "social_sentiment"):
+                    value = entry.get(key)
+                    if value is None:
+                        continue
+                    try:
+                        sentiment = clamp(float(value), 0.0, 1.0)
+                    except Exception:
+                        sentiment = None
+                    if sentiment is not None:
+                        break
+            if sentiment is None:
+                for key, scale in (("galaxy_score", 100.0), ("social_score", 100.0)):
+                    value = entry.get(key)
+                    if value is None:
+                        continue
+                    try:
+                        sentiment = clamp(float(value) / scale, 0.0, 1.0)
+                    except Exception:
+                        sentiment = None
+                    if sentiment is not None:
+                        break
+            if tweets_per_min is None:
+                tweet_value = (
+                    entry.get("tweet_volume")
+                    or entry.get("tweets_last_24h")
+                    or entry.get("tweet_count")
+                )
+                if tweet_value is not None:
+                    try:
+                        tweets_per_min = max(0.0, float(tweet_value) / 1440.0)
+                    except Exception:
+                        tweets_per_min = None
+        result: Dict[str, Any] = {}
+        if sentiment is not None:
+            result["social_sentiment"] = sentiment
+        if tweets_per_min is not None:
+            result["tweets_per_min"] = tweets_per_min
+        if result:
+            result.setdefault("social_source", "lunarcrush")
+        return result
 
     async def _fetch_pumpfun(self) -> Mapping[str, Mapping[str, Any]]:
         cache_key = "pumpfun_trending"

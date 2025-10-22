@@ -42,6 +42,51 @@ from .types import (
 log = logging.getLogger(__name__)
 
 
+def _parse_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_depth_cache_ttl(config: Mapping[str, Any] | None) -> float:
+    default = 10.0
+    env_value = os.getenv("GOLDEN_DEPTH_CACHE_TTL")
+    if env_value is not None:
+        parsed_env = _parse_float(env_value)
+        if parsed_env is not None and parsed_env > 0:
+            return max(0.5, parsed_env)
+        log.warning(
+            "Invalid GOLDEN_DEPTH_CACHE_TTL=%r; falling back to default %.1f s",
+            env_value,
+            default,
+        )
+    candidate: Any = None
+    if isinstance(config, Mapping):
+        golden_cfg = config.get("golden")
+        if isinstance(golden_cfg, Mapping):
+            depth_cfg = golden_cfg.get("depth")
+            if isinstance(depth_cfg, Mapping):
+                candidate = depth_cfg.get("cache_ttl") or depth_cfg.get("depth_cache_ttl")
+            if candidate is None:
+                candidate = golden_cfg.get("depth_cache_ttl")
+        legacy_cfg = config.get("golden_pipeline")
+        if candidate is None and isinstance(legacy_cfg, Mapping):
+            depth_cfg = legacy_cfg.get("depth")
+            if isinstance(depth_cfg, Mapping):
+                candidate = depth_cfg.get("cache_ttl") or depth_cfg.get("depth_cache_ttl")
+    parsed = _parse_float(candidate)
+    if parsed is not None and parsed > 0:
+        return max(0.5, parsed)
+    if candidate is not None:
+        log.warning(
+            "Invalid depth_cache_ttl=%r in config; using default %.1f s",
+            candidate,
+            default,
+        )
+    return default
+
+
 _GLOBAL_CAP_ENV = "SWARM_AGENT_GLOBAL_CAP_USD"
 _AGENT_CAPS_ENV = "SWARM_AGENT_AGENT_CAPS_USD"
 
@@ -690,10 +735,12 @@ class GoldenPipelineService:
                 publish=self.pipeline.publish_momentum,
                 config=config,
             )
+        depth_cache_ttl = _resolve_depth_cache_ttl(config)
         self._depth_adapter = GoldenDepthAdapter(
             enabled=self._depth_flag,
             submit_depth=self.pipeline.submit_depth,
             decimals_resolver=self._resolve_decimals,
+            cache_ttl=depth_cache_ttl,
         )
 
         self._subscriptions: List[Callable[[], None]] = []
