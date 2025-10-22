@@ -36,7 +36,6 @@ __all__ = [
     "VirtualPnL",
     "LiveFill",
     "GoldenPipelineService",
-    "GoldenStreamService",
     "AgentManagerAgent",
     "GoldenMetrics",
 ]
@@ -44,18 +43,15 @@ __all__ = [
 
 if TYPE_CHECKING:  # pragma: no cover - type checkers only
     from .service import AgentManagerAgent, GoldenPipelineService
-    from .phase_one.service import GoldenStreamService
 
 
 def __getattr__(name: str) -> Any:  # pragma: no cover - exercised implicitly
-    if name in {"GoldenPipelineService", "AgentManagerAgent", "GoldenStreamService"}:
+    if name in {"GoldenPipelineService", "AgentManagerAgent"}:
         from .service import AgentManagerAgent, GoldenPipelineService
-        from .phase_one.service import GoldenStreamService
 
         mapping = {
             "GoldenPipelineService": GoldenPipelineService,
             "AgentManagerAgent": AgentManagerAgent,
-            "GoldenStreamService": GoldenStreamService,
         }
         return mapping[name]
     raise AttributeError(name)
