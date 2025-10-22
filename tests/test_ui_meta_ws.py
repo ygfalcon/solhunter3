@@ -78,7 +78,49 @@ def test_ui_meta_websocket_smoke(monkeypatch):
             assert hello_obj.get("channel") == "events"
             meta_obj = json.loads(meta_msg)
             assert meta_obj.get("type") == "UI_META"
-            assert meta_obj.get("v") == 3
+            assert meta_obj.get("v") == ui.UI_SCHEMA_VERSION
+            version_block = meta_obj.get("version") or {}
+            assert version_block.get("schema_version") == ui.UI_SCHEMA_VERSION
+            assert version_block.get("schema_hash")
+            assert version_block.get("mode") in {"paper", "live"}
+            broker_info = meta_obj.get("broker") or {}
+            assert broker_info.get("channel") == meta_obj.get("channel")
+            assert broker_info.get("kind")
+            event_bus_info = meta_obj.get("event_bus") or {}
+            assert (event_bus_info.get("url_ws") or "").startswith("ws://")
+            lag_block = meta_obj.get("lag") or {}
+            for key in ("bus", "ohlcv", "depth", "golden", "suggestions", "decisions", "rl"):
+                assert key in lag_block
+            ttl_block = meta_obj.get("ttl") or {}
+            assert ttl_block.get("depth_s") == pytest.approx(10.0, rel=1e-6)
+            assert ttl_block.get("ohlcv_5m_s") == pytest.approx(600.0, rel=1e-6)
+            providers = meta_obj.get("providers") or {}
+            for provider_key in (
+                "solana_rpc",
+                "helius_das",
+                "jupiter_ws",
+                "bird_eye",
+                "dexscreener",
+                "raydium",
+                "meteora",
+                "phoenix",
+                "pump_fun",
+            ):
+                assert provider_key in providers
+                assert providers[provider_key]["status"] in {"ok", "degraded", "down"}
+            streams = meta_obj.get("streams") or []
+            stream_names = {entry.get("name") for entry in streams if isinstance(entry, dict)}
+            assert {"discovery", "market_ohlcv", "market_depth", "golden_snapshot", "agent_suggestions", "vote_decisions", "rl_weights", "shadow_execution"}.issubset(stream_names)
+            schemas = meta_obj.get("schemas") or []
+            assert schemas and all(entry.get("schema_id") for entry in schemas)
+            bootstrap = meta_obj.get("bootstrap") or {}
+            assert bootstrap.get("price_providers")
+            resilience = meta_obj.get("resilience") or {}
+            ws_resilience = resilience.get("ws") or {}
+            assert ws_resilience.get("ping_interval_s") == pytest.approx(20.0, rel=1e-6)
+            assert ws_resilience.get("ping_timeout_s") == pytest.approx(20.0, rel=1e-6)
+            contracts = meta_obj.get("test_contracts") or {}
+            assert contracts.get("handshake") == "tests/test_ui_meta_ws.py"
             payload_obj = json.loads(payload_msg)
             assert payload_obj.get("event") == "heartbeat"
         finally:
