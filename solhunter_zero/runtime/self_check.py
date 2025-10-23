@@ -43,6 +43,13 @@ _DEXSCREENER_TRENDING = "https://api.dexscreener.com/latest/dex/tokens/trending"
 _CHECK_TIMEOUT = 10.0
 _SESSION_TIMEOUT = aiohttp.ClientTimeout(total=_CHECK_TIMEOUT) if aiohttp else None
 
+_CREDENTIAL_REQUIREMENTS: tuple[tuple[str, str], ...] = (
+    ("HELIUS_API_KEY", "Helius API key"),
+    ("HELIUS_RPC_URL", "Helius RPC URL"),
+    ("JITO_AUTH", "Jito auth token"),
+    ("BIRDEYE_API_KEY", "Birdeye API key"),
+)
+
 
 @dataclass(slots=True)
 class CheckResult:
@@ -159,6 +166,7 @@ class SelfCheckRunner:
             "helius_das": self._check_das(session),
             "trending": self._check_trending(session),
             "synthetic_depth": self._check_synthetic_depth(),
+            "credentials": self._check_credentials(),
         }
         tasks = {name: asyncio.create_task(coro) for name, coro in checks.items()}
         results: List[CheckResult] = []
@@ -198,6 +206,24 @@ class SelfCheckRunner:
             detail = "broker round-trip succeeded" if ok else "broker round-trip missed"
         duration = _now_ms() - start
         return CheckResult("event_bus", status, detail, duration)
+
+    async def _check_credentials(self) -> CheckResult:
+        start = _now_ms()
+        missing: list[str] = []
+        for env_key, label in _CREDENTIAL_REQUIREMENTS:
+            if not os.getenv(env_key):
+                missing.append(label)
+        if missing:
+            status = "degraded"
+            detail = "missing: " + ", ".join(sorted(missing))
+        else:
+            status = "ok"
+            detail = "all credentials present"
+        duration = _now_ms() - start
+        extra: Dict[str, Any] | None = None
+        if missing:
+            extra = {"missing": missing}
+        return CheckResult("credentials", status, detail, duration, extra=extra)
 
     async def _check_pyth_prices(self) -> CheckResult:
         start = _now_ms()

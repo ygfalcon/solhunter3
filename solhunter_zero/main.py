@@ -31,6 +31,7 @@ from .config import (
     initialize_event_bus,
 )
 from . import wallet
+from .production.keypair import resolve_live_keypair
 from . import metrics_aggregator
 from . import arbitrage
 from .bootstrap import bootstrap
@@ -125,59 +126,9 @@ def _ensure_live_keypair_ready(cfg: Mapping[str, object]) -> None:
     if mode != "live":
         return
 
-    candidates: list[tuple[str, Path]] = []
-    for source in ("KEYPAIR_PATH", "SOLANA_KEYPAIR"):
-        raw = os.getenv(source)
-        if not raw:
-            continue
-        candidates.append((source, Path(str(raw))))
-
-    cfg_path = cfg.get("solana_keypair") if isinstance(cfg, Mapping) else None
-    if isinstance(cfg_path, str) and cfg_path.strip():
-        candidates.append(("config.solana_keypair", Path(cfg_path.strip())))
-
-    deduped: list[tuple[str, Path]] = []
-    seen: set[str] = set()
-    for label, path in candidates:
-        expanded = path.expanduser()
-        if not expanded.is_absolute():
-            expanded = ROOT / expanded
-        key = str(expanded)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append((label, expanded))
-
-    for label, path in deduped:
-        try:
-            wallet.load_keypair(str(path))
-        except FileNotFoundError:
-            log.debug("Live trading keypair candidate missing at %s (%s)", label, path)
-            continue
-        except Exception as exc:
-            log.warning(
-                "Failed to load live trading keypair from %s (%s): %s",
-                label,
-                path,
-                exc,
-            )
-            continue
-        os.environ.setdefault("KEYPAIR_PATH", str(path))
-        os.environ.setdefault("SOLANA_KEYPAIR", str(path))
-        log.info("Live trading keypair ready from %s (%s)", label, path)
-        return
-
-    info = wallet.setup_default_keypair()
-    default_path = Path(wallet.KEYPAIR_DIR) / f"{info.name}.json"
-    os.environ.setdefault("KEYPAIR_PATH", str(default_path))
-    os.environ.setdefault("SOLANA_KEYPAIR", str(default_path))
-    try:
-        wallet.load_keypair(str(default_path))
-    except Exception as exc:  # pragma: no cover - catastrophic misconfiguration
-        message = f"Failed to load generated default keypair at {default_path}: {exc}"
-        log.error(message)
-        raise SystemExit(message) from exc
-    log.info("Generated default keypair for live trading at %s", default_path)
+    resolved, pubkey = resolve_live_keypair(cfg, announce=False)
+    if resolved and resolved.exists():
+        log.info("Live keypair ready at %s (pubkey=%s)", resolved, pubkey)
 
 _ORIGINAL_STRATEGY_MANAGER = StrategyManager
 
