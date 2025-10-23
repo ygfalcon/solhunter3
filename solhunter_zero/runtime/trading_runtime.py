@@ -53,11 +53,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     )
     from ..golden_pipeline.service import GoldenPipelineService
     from ..redis_util import ensure_local_redis_if_needed
-    from ..ui import UIState, UIServer
-    from ..util import parse_bool_env
-    from .runtime_wiring import resolve_golden_enabled
-    from .schema_adapters import read_golden, read_ohlcv
-    from .tuning import analyse_evaluation
+from ..ui import UIState, UIServer
+from ..util import parse_bool_env
+from .runtime_wiring import resolve_golden_enabled
+from .schema_adapters import read_golden, read_ohlcv
+from .tuning import analyse_evaluation
+from .self_check import SelfCheckRunner
 
 
 log = logging.getLogger(__name__)
@@ -318,6 +319,7 @@ class TradingRuntime:
         self._virtual_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
         self._live_fills: Deque[Dict[str, Any]] = deque(maxlen=fills_limit)
         self._paper_positions_cache: List[Dict[str, Any]] = []
+        self._self_check = SelfCheckRunner(logger=log)
         self._rl_weights_windows: Deque[Dict[str, Any]] = deque(
             maxlen=_int_env("UI_RL_WEIGHTS_LIMIT", 240)
         )
@@ -408,6 +410,8 @@ class TradingRuntime:
         self.activity.add("loop", loop_state)
         log.info("TradingRuntime: trading loop started (%s)", loop_state)
         self.activity.add("runtime", "started")
+        await self._self_check.start()
+        self.activity.add("self_check", "running")
 
     async def stop(self) -> None:
         if self.stop_event.is_set() and not self._tasks:
@@ -419,6 +423,9 @@ class TradingRuntime:
             with contextlib.suppress(Exception):
                 await self._golden_service.stop()
             self._golden_service = None
+
+        with contextlib.suppress(Exception):
+            await self._self_check.stop()
 
         tasks_to_cancel = list(self._tasks)
         if self.rl_task is not None and self.rl_task not in tasks_to_cancel:
@@ -1378,6 +1385,10 @@ class TradingRuntime:
         status["recent_tokens"] = recent_tokens[:10]
         status["rl_gate"] = rl_snapshot.get("gate")
         status["rl_gate_reason"] = rl_snapshot.get("gate_reason")
+        try:
+            status["self_check"] = self._self_check.snapshot()
+        except Exception:
+            status.setdefault("self_check", {"status": "pending"})
         return status
 
     def _collect_health_metrics(self) -> Dict[str, Any]:
@@ -1434,6 +1445,10 @@ class TradingRuntime:
             },
             "ui": {"ws_clients": ws_clients},
         }
+        try:
+            payload["self_check"] = self._self_check.snapshot()
+        except Exception:
+            payload.setdefault("self_check", {"status": "pending"})
         return payload
 
     def _collect_weights(self) -> Dict[str, Any]:

@@ -15,7 +15,7 @@ from solhunter_zero.golden_pipeline.types import (
     TokenSnapshot,
 )
 
-ARTIFACT_DIR = Path("artifacts/golden_demo")
+ARTIFACT_DIR = Path("artifacts/demo")
 
 _BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
@@ -307,7 +307,7 @@ def write_summary_markdown(path: Path, summary: Mapping[str, Any]) -> None:
     lines.append("")
     lines.append("Lag metrics: bus 320 ms · depth 1.6 s · golden ttl 60 s")
     lines.append("All contracts compatible. No protobuf/schema drops detected.")
-    lines.append("Artifacts: artifacts/golden_demo/*.jsonl")
+    lines.append("Artifacts: artifacts/demo/*.jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

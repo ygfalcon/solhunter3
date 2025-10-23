@@ -411,11 +411,12 @@
             gap: 18px;
             flex-wrap: wrap;
         }
-        .header-signals {
+        .header-status-line {
             display: flex;
             align-items: center;
             gap: 10px;
             flex-wrap: wrap;
+            margin: 16px 0 10px;
         }
         .signal-pill {
             display: inline-flex;
@@ -423,12 +424,18 @@
             gap: 6px;
             padding: 6px 12px;
             border-radius: 999px;
-            font-size: 0.78rem;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
+            font-size: 0.82rem;
             background: rgba(13,17,23,0.72);
-            border: 1px solid rgba(88,166,255,0.2);
+            border: 1px solid rgba(88,166,255,0.18);
+            font-weight: 600;
         }
+        .env-pill { text-transform: uppercase; letter-spacing: 0.04em; }
+        .self-check-pill.status-ok { color: var(--success); border-color: rgba(63,185,80,0.45); }
+        .self-check-pill.status-partial { color: var(--warning); border-color: rgba(242,204,96,0.45); }
+        .self-check-pill.status-degraded { color: var(--danger); border-color: rgba(255,123,114,0.48); }
+        .self-check-pill.status-failed { color: var(--danger); border-color: rgba(255,123,114,0.48); }
+        .self-check-pill.status-running { color: var(--accent); border-color: rgba(88,166,255,0.35); }
+        .self-check-pill.status-pending { color: var(--muted); }
         .signal-pill.env-dev { border-color: rgba(88,166,255,0.45); color: #58a6ff; }
         .signal-pill.env-STAGE, .signal-pill.env-stage { border-color: rgba(242,204,96,0.45); color: var(--warning); }
         .signal-pill.env-PROD, .signal-pill.env-prod { border-color: rgba(63,185,80,0.5); color: var(--success); }
@@ -702,12 +709,6 @@
         }
         .test-indicator.ok { border-color: rgba(63,185,80,0.45); color: var(--success); }
         .test-indicator.waiting { color: var(--warning); border-color: rgba(242,204,96,0.45); }
-        .preflight-result {
-            font-size: 0.82rem;
-            color: var(--muted);
-        }
-        .preflight-result.ok { color: var(--success); }
-        .preflight-result.fail { color: var(--danger); }
         .control-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -831,7 +832,7 @@
                 </div>
             </div>
             <div id="schema-banner" class="schema-banner" role="alert">
-                <strong>Schema mismatch</strong>
+                <strong id="schema-banner-title">Schema status</strong>
                 <span id="schema-banner-detail" class="schema-detail"></span>
             </div>
             <div class="header-top">
@@ -842,18 +843,16 @@
                     </span>
                 </div>
                 <div class="header-actions">
-                    <div id="test-indicator" class="test-indicator waiting">
-                        <span>Test Mode</span>
-                        <strong id="test-status-label">Waiting</strong>
-                    </div>
-                    <button id="test-mode-toggle" type="button">Toggle Test Mode</button>
-                    <button id="preflight-button" type="button">Run Pre-flight</button>
+                    <button id="golden-demo-button" type="button">Run Golden Demo</button>
                 </div>
             </div>
-            <div class="header-signals">
-                <span class="signal-pill {{ 'toggle-on' if header_signals.paper_mode else 'toggle-off' }}">📝 Paper {{ 'ON' if header_signals.paper_mode else 'OFF' }}</span>
-                <span class="signal-pill {{ 'toggle-paused' if header_signals.paused else 'toggle-on' }}">⏸ Pause {{ 'ON' if header_signals.paused else 'OFF' }}</span>
-                <span class="signal-pill {{ 'toggle-on' if header_signals.rl_mode == 'applied' else 'toggle-off' }}">🤖 RL {{ header_signals.rl_mode|title }}</span>
+            <div class="header-status-line">
+                <span id="environment-pill" class="signal-pill env-pill">🌎 Env {{ header_signals.environment }}</span>
+                <span id="paper-pill" class="signal-pill {{ 'toggle-on' if header_signals.paper_mode else 'toggle-off' }}">📝 Paper {{ 'ON' if header_signals.paper_mode else 'OFF' }}</span>
+                <span id="rl-pill" class="signal-pill">🤖 RL {{ header_signals.rl_label }}</span>
+                {% set sc = header_signals.self_check or {} %}
+                {% set sc_status = sc.get('status', 'pending') %}
+                <span id="self-check-pill" class="signal-pill self-check-pill status-{{ sc_status }}">Self-check: {{ sc_status|upper() }}</span>
             </div>
             <div class="signal-metrics">
                 <div class="signal-metric">
@@ -1849,6 +1848,7 @@
                 const connectionLabel = document.getElementById('connection-status-label');
                 const connectionDetail = document.getElementById('connection-status-detail');
                 const schemaBanner = document.getElementById('schema-banner');
+                const schemaBannerTitle = document.getElementById('schema-banner-title');
                 const schemaBannerDetail = document.getElementById('schema-banner-detail');
                 const handshakeStatus = document.getElementById('handshake-status');
                 const handshakeBroker = document.getElementById('handshake-broker');
@@ -1862,6 +1862,11 @@
                 const statusStripMessage = document.getElementById('status-strip-message');
                 const statusStripSchema = document.getElementById('status-strip-schema');
                 const statusStripClock = document.getElementById('status-strip-clock');
+                const environmentPill = document.getElementById('environment-pill');
+                const paperPill = document.getElementById('paper-pill');
+                const rlPill = document.getElementById('rl-pill');
+                const selfCheckPill = document.getElementById('self-check-pill');
+                const goldenDemoButton = document.getElementById('golden-demo-button');
                 const navLinks = Array.from(document.querySelectorAll('.nav-link[data-target]'));
                 const UI_SCHEMA_VERSION = 3;
                 let latestMeta = null;
@@ -1920,6 +1925,125 @@
                     }
                 }
 
+                function titleCase(value) {
+                    if (!value && value !== 0) {
+                        return '';
+                    }
+                    return String(value)
+                        .replace(/[_-]+/g, ' ')
+                        .split(' ')
+                        .filter(Boolean)
+                        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+                        .join(' ');
+                }
+
+                function updateSelfCheckPill(snapshot) {
+                    if (!selfCheckPill) {
+                        return;
+                    }
+                    const info = snapshot && typeof snapshot === 'object' ? snapshot : {};
+                    const raw = info.status || info.state || (info.ok ? 'ok' : '');
+                    const statusValue = typeof raw === 'string' ? raw.toLowerCase() : String(raw || '').toLowerCase();
+                    let statusKey = 'pending';
+                    if (statusValue === 'ok' || statusValue === 'pass' || statusValue === 'passed') {
+                        statusKey = 'ok';
+                    } else if (statusValue === 'partial') {
+                        statusKey = 'partial';
+                    } else if (statusValue === 'degraded') {
+                        statusKey = 'degraded';
+                    } else if (statusValue === 'failed' || statusValue === 'fail' || statusValue === 'error') {
+                        statusKey = 'failed';
+                    } else if (statusValue === 'running') {
+                        statusKey = 'running';
+                    } else if (statusValue === 'pending') {
+                        statusKey = 'pending';
+                    }
+                    const classNames = ['status-ok', 'status-partial', 'status-degraded', 'status-failed', 'status-running', 'status-pending'];
+                    classNames.forEach((cls) => selfCheckPill.classList.remove(cls));
+                    selfCheckPill.classList.add('status-' + statusKey);
+                    selfCheckPill.dataset.status = statusKey;
+                    const labelMap = {
+                        ok: 'OK',
+                        partial: 'PARTIAL',
+                        degraded: 'DEGRADED',
+                        failed: 'FAILED',
+                        running: 'RUNNING',
+                        pending: 'PENDING'
+                    };
+                    const label = labelMap[statusKey] || 'PENDING';
+                    selfCheckPill.textContent = 'Self-check: ' + label;
+                    if (info.detail) {
+                        selfCheckPill.title = String(info.detail);
+                    } else if (info.checks && typeof info.checks === 'object') {
+                        try {
+                            selfCheckPill.title = 'Checks: ' + Object.keys(info.checks).join(', ');
+                        } catch (err) {
+                            selfCheckPill.title = 'Self-check status: ' + label;
+                        }
+                    } else {
+                        selfCheckPill.removeAttribute('title');
+                    }
+                }
+
+                function updateStatusPills(meta) {
+                    if (!meta || typeof meta !== 'object') {
+                        updateSelfCheckPill(null);
+                        return;
+                    }
+                    if (environmentPill) {
+                        const envRaw = meta.environment || '';
+                        const envValue = envRaw ? String(envRaw).toUpperCase() : 'UNKNOWN';
+                        environmentPill.textContent = '🌎 Env ' + envValue;
+                        environmentPill.className = 'signal-pill env-pill env-' + envValue.toLowerCase();
+                        const workflow = meta.version && meta.version.workflow ? String(meta.version.workflow) : '';
+                        if (workflow) {
+                            environmentPill.title = workflow;
+                        } else {
+                            environmentPill.removeAttribute('title');
+                        }
+                    }
+                    const executionMeta = meta.execution || {};
+                    if (paperPill) {
+                        const paperOn = Boolean(executionMeta.paper);
+                        paperPill.classList.remove('toggle-on', 'toggle-off', 'toggle-paused');
+                        paperPill.classList.add(paperOn ? 'toggle-on' : 'toggle-off');
+                        paperPill.textContent = '📝 Paper ' + (paperOn ? 'ON' : 'OFF');
+                        const keypairMode = executionMeta.keypair_mode ? String(executionMeta.keypair_mode) : '';
+                        if (keypairMode) {
+                            paperPill.title = 'Keypair: ' + titleCase(keypairMode);
+                        } else {
+                            paperPill.removeAttribute('title');
+                        }
+                    }
+                    if (rlPill) {
+                        const featuresMeta = meta.features || {};
+                        const rlModeRaw = executionMeta.rl_mode || (featuresMeta.rl_shadow_enabled ? 'shadow' : 'applied');
+                        const rlMode = rlModeRaw ? String(rlModeRaw) : 'shadow';
+                        let rlText = titleCase(rlMode) || 'Shadow';
+                        const rlGateRaw = executionMeta.rl_gate ? String(executionMeta.rl_gate) : '';
+                        const rlGate = rlGateRaw.toLowerCase();
+                        const rlReason = executionMeta.rl_gate_reason ? String(executionMeta.rl_gate_reason) : '';
+                        rlPill.classList.remove('toggle-on', 'toggle-off', 'toggle-paused');
+                        if (rlGate && rlGate !== 'open') {
+                            rlText += ' · ' + titleCase(rlGate);
+                            rlPill.classList.add('toggle-paused');
+                        } else if (rlMode.toLowerCase() === 'applied') {
+                            rlPill.classList.add('toggle-on');
+                        } else {
+                            rlPill.classList.add('toggle-off');
+                        }
+                        rlPill.textContent = '🤖 RL ' + rlText;
+                        if (rlReason) {
+                            rlPill.title = titleCase(rlReason);
+                        } else if (rlGate && rlGate !== 'open') {
+                            rlPill.title = 'Gate ' + rlGate;
+                        } else {
+                            rlPill.removeAttribute('title');
+                        }
+                    }
+                    updateSelfCheckPill(meta.self_check);
+                }
+
                 function setStatusMessage(message) {
                     if (!statusStripMessage || !message) {
                         return;
@@ -1970,8 +2094,12 @@
                         statusStripSchema.textContent = 'Schema ' + schemaHash;
                     }
                     if (handshakeStatus) {
-                        const versionNumber = typeof meta.v === 'number' ? meta.v : UI_SCHEMA_VERSION;
-                        handshakeStatus.textContent = 'UI_META v' + versionNumber + ' negotiated';
+                        if (!schemaCompatible) {
+                            handshakeStatus.textContent = 'Negotiating schema…';
+                        } else {
+                            const versionNumber = typeof meta.v === 'number' ? meta.v : UI_SCHEMA_VERSION;
+                            handshakeStatus.textContent = 'UI_META v' + versionNumber + ' negotiated';
+                        }
                     }
                 }
 
@@ -2054,6 +2182,9 @@
                     if (!meta || typeof meta !== 'object') {
                         schemaBanner.classList.remove('visible');
                         schemaBannerDetail.textContent = '';
+                        if (schemaBannerTitle) {
+                            schemaBannerTitle.textContent = 'Schema ready';
+                        }
                         schemaCompatible = true;
                         return;
                     }
@@ -2061,10 +2192,16 @@
                     const version = typeof rawVersion === 'number' ? rawVersion : Number(rawVersion);
                     if (Number.isFinite(version) && version !== UI_SCHEMA_VERSION) {
                         schemaBanner.classList.add('visible');
+                        if (schemaBannerTitle) {
+                            schemaBannerTitle.textContent = 'Negotiating schema…';
+                        }
                         schemaBannerDetail.textContent = 'Expected v' + UI_SCHEMA_VERSION + ' · Received ' + version;
                         schemaCompatible = false;
                     } else {
                         schemaBanner.classList.remove('visible');
+                        if (schemaBannerTitle) {
+                            schemaBannerTitle.textContent = 'Schema ready';
+                        }
                         schemaBannerDetail.textContent = '';
                         schemaCompatible = true;
                     }
@@ -2077,6 +2214,7 @@
                         return;
                     }
                     updateHandshakeDetails(latestMeta);
+                    updateStatusPills(latestMeta);
                     if (connectionBanner) {
                         const lag = latestMeta.lag || {};
                         const busLag = typeof lag.bus_ms === 'number' ? lag.bus_ms : null;
@@ -2099,13 +2237,16 @@
                     }
                     const detailText = schemaCompatible
                         ? (detailParts.join(' · ') || 'Streaming')
-                        : ('Schema mismatch (expected v' + UI_SCHEMA_VERSION + ')');
-                    setChannelState('events', schemaCompatible ? 'open' : 'error', detailText);
+                        : 'Negotiating schema…';
+                    const eventStatus = schemaCompatible ? 'open' : 'pending';
+                    setChannelState('events', eventStatus, detailText);
                     updateDataChannelsFromBanner();
                     renderConnectionSummary();
+                    markHandshakeComplete();
                     if (schemaCompatible) {
-                        markHandshakeComplete();
                         setStatusMessage('Connected to runtime');
+                    } else {
+                        setStatusMessage('Negotiating schema…');
                     }
                 }
 
@@ -2525,8 +2666,6 @@
                 const sideSelect = document.getElementById('suggestion-filter-side');
                 const mintInput = document.getElementById('suggestion-filter-mint');
                 const mismatchOnly = document.getElementById('suggestion-filter-mismatch');
-                const preflightButton = document.getElementById('preflight-button');
-                const preflightBadges = Array.from(document.querySelectorAll('.preflight-result'));
                 const testToggle = document.getElementById('test-mode-toggle');
                 const testIndicator = document.getElementById('test-indicator');
                 const testLabel = document.getElementById('test-status-label');
@@ -2596,54 +2735,62 @@
                     });
                 }
 
-                function setPreflightStatus(panel, status, symbol) {
-                    const badge = preflightBadges.find((el) => el.dataset.preflightPanel === panel);
-                    if (!badge) {
+                async function triggerGoldenDemo() {
+                    if (!goldenDemoButton || goldenDemoButton.disabled) {
                         return;
                     }
-                    badge.textContent = symbol;
-                    badge.classList.remove('ok', 'fail');
-                    if (status === 'ok') {
-                        badge.classList.add('ok');
-                    } else if (status === 'fail') {
-                        badge.classList.add('fail');
-                    }
-                }
-
-                async function runPreflight() {
-                    if (!preflightButton) {
-                        return;
-                    }
-                    preflightButton.disabled = true;
-                    preflightButton.textContent = 'Running…';
-                    preflightBadges.forEach((badge) => {
-                        badge.textContent = '⏳';
-                        badge.classList.remove('ok', 'fail');
-                    });
-                    const steps = [
-                        {panel: 'discovery', url: '/swarm/discovery'},
-                        {panel: 'token-facts', url: '/tokens'},
-                        {panel: 'market', url: '/swarm/market'},
-                        {panel: 'golden', url: '/swarm/golden'},
-                        {panel: 'suggestions', url: '/swarm/suggestions'},
-                        {panel: 'vote', url: '/swarm/votes'},
-                        {panel: 'shadow', url: '/swarm/shadow'},
-                        {panel: 'rl', url: '/swarm/rl'}
-                    ];
-                    for (const step of steps) {
-                        try {
-                            const response = await fetch(step.url, {cache: 'no-store'});
-                            if (response.ok) {
-                                setPreflightStatus(step.panel, 'ok', '✅');
+                    const originalLabel = goldenDemoButton.textContent || 'Run Golden Demo';
+                    goldenDemoButton.disabled = true;
+                    goldenDemoButton.textContent = 'Running…';
+                    setStatusMessage('Golden demo running…');
+                    let finalMessage = '';
+                    try {
+                        const response = await fetch('/ops/golden-demo', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({source: 'ui'})
+                        });
+                        if (!response.ok) {
+                            finalMessage = 'Golden demo failed: HTTP ' + response.status;
+                        } else {
+                            const data = await response.json().catch(() => ({}));
+                            if (data && data.ok) {
+                                const duration = typeof data.duration_s === 'number' ? data.duration_s : null;
+                                const artifactDir = data.artifacts_dir ? String(data.artifacts_dir) : '';
+                                finalMessage = 'Golden demo PASS';
+                                if (duration !== null && Number.isFinite(duration)) {
+                                    finalMessage += ' (' + duration.toFixed(1) + 's)';
+                                }
+                                if (artifactDir) {
+                                    finalMessage += ' — artifacts @ ' + artifactDir;
+                                }
+                                if (typeof console !== 'undefined') {
+                                    if (data.stdout) {
+                                        console.log('golden-demo stdout', data.stdout);
+                                    }
+                                    if (data.stderr) {
+                                        console.log('golden-demo stderr', data.stderr);
+                                    }
+                                }
                             } else {
-                                setPreflightStatus(step.panel, 'fail', '❌');
+                                const detail = data && data.error ? String(data.error) : 'failed';
+                                finalMessage = 'Golden demo failed: ' + detail;
+                                if (data && data.stderr && typeof console !== 'undefined') {
+                                    console.log('golden-demo stderr', data.stderr);
+                                }
                             }
-                        } catch (err) {
-                            setPreflightStatus(step.panel, 'fail', '❌');
                         }
+                    } catch (err) {
+                        const detail = err && err.message ? err.message : 'unknown error';
+                        finalMessage = 'Golden demo failed: ' + detail;
+                    } finally {
+                        if (!finalMessage) {
+                            finalMessage = 'Golden demo complete';
+                        }
+                        setStatusMessage(finalMessage);
+                        goldenDemoButton.disabled = false;
+                        goldenDemoButton.textContent = originalLabel;
                     }
-                    preflightButton.disabled = false;
-                    preflightButton.textContent = 'Run Pre-flight';
                 }
 
                 const panelsToCheck = [
@@ -2737,8 +2884,8 @@
                     mismatchOnly.addEventListener('change', applySuggestionFilters);
                 }
 
-                if (preflightButton) {
-                    preflightButton.addEventListener('click', runPreflight);
+                if (goldenDemoButton) {
+                    goldenDemoButton.addEventListener('click', triggerGoldenDemo);
                 }
                 if (testToggle) {
                     testToggle.addEventListener('click', function () {
