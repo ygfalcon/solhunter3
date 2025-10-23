@@ -29,6 +29,7 @@ from .bootstrap_utils import ensure_deps
 from .cache_paths import MAC_SETUP_MARKER, TOOLS_OK_MARKER
 from .logging_utils import log_startup
 from .paths import ROOT
+from .util import parse_bool_env
 
 METAL_INDEX = "https://download.pytorch.org/whl/metal"
 METAL_EXTRA_INDEX = ["--extra-index-url", METAL_INDEX]
@@ -404,7 +405,10 @@ def prepare_macos_env(non_interactive: bool = True) -> dict[str, object]:
     :func:`solhunter_zero.logging_utils.log_startup`.
     """
 
-    ensure_network()
+    if parse_bool_env("SOLHUNTER_OFFLINE", False) or parse_bool_env("SOLHUNTER_SKIP_CONNECTIVITY", False):
+        log_startup("macOS setup: skipping network check (offline mode enabled)")
+    else:
+        ensure_network()
 
     report: dict[str, object] = {"steps": {}, "success": True}
 

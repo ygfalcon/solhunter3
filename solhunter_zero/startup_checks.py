@@ -11,6 +11,8 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     aiohttp = None
 
+from .util import parse_bool_env
+
 logger = logging.getLogger(__name__)
 
 # Endpoints / env
@@ -103,11 +105,27 @@ def ensure_endpoints(_cfg: Optional[dict[str, Any]] = None) -> None:
 # -----------------------------
 # Compatibility shim
 # -----------------------------
-def perform_checks(*args, **kwargs) -> dict[str, Any]:
+def perform_checks(args, rest, *_, **__) -> dict[str, Any]:
     """
     Compatibility shim so scripts.startup can still call startup_checks.perform_checks.
     This simply ensures RPC + endpoint checks run, but doesn't duplicate startup_runner.
     """
-    ensure_rpc(warn_only=True)
-    ensure_endpoints()
+    offline = bool(getattr(args, "offline", False) or parse_bool_env("SOLHUNTER_OFFLINE", False))
+    skip_rpc = bool(getattr(args, "skip_rpc_check", False))
+    skip_endpoints = bool(getattr(args, "skip_endpoint_check", False))
+
+    if offline or parse_bool_env("SOLHUNTER_SKIP_CONNECTIVITY", False):
+        skip_rpc = True
+        skip_endpoints = True
+
+    if skip_rpc:
+        logger.info("Skipping RPC connectivity check (offline or explicitly skipped)")
+    else:
+        ensure_rpc(warn_only=True)
+
+    if skip_endpoints:
+        logger.info("Skipping endpoint connectivity checks (offline or explicitly skipped)")
+    else:
+        ensure_endpoints()
+
     return {"summary_rows": [], "rest": [], "code": 0}

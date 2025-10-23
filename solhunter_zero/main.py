@@ -257,6 +257,13 @@ async def perform_startup_async(
     dry_run: bool = False,
 ) -> tuple[dict, Config, subprocess.Popen | None]:
     """Load configuration, verify connectivity and start services."""
+    offline = bool(
+        offline
+        or parse_bool_env("SOLHUNTER_OFFLINE", False)
+        or parse_bool_env("SOLHUNTER_SKIP_CONNECTIVITY", False)
+    )
+    if offline:
+        log.info("[boot] Offline mode enabled; skipping external connectivity checks where possible")
     start = time.perf_counter()
     cfg = apply_env_overrides(load_config(config_path))
     set_env_from_config(cfg)

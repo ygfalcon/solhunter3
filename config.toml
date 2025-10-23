@@ -1,4 +1,4 @@
-solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
 dex_base_url = "https://swap.helius.dev/"
 agents = [
     "simulation",
@@ -23,7 +23,7 @@ agents = [
     "ramanujan",
     "alien_cipher",
 ]
-solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
 jupiter_ws_url = "wss://stats.jup.ag/ws"
 priority_rpc = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 dex_testnet_url = "https://quote-api.jup.ag"
@@ -87,7 +87,7 @@ compress_events = "True"
 event_batch_ms = "10"
 event_mmap_batch_ms = "5"
 event_mmap_batch_size = "16"
-depth_service = "True"
+depth_service = "0"
 depth_max_restarts = "1"
 use_depth_stream = "True"
 use_depth_feed = "False"

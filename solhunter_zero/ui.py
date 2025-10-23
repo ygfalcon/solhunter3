@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import errno
@@ -3215,3 +3216,149 @@ class UIServer:
         self._thread = None
         self._server = None
         stop_websockets()
+
+
+def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the SolHunter Zero UI without the full trading stack."
+    )
+    parser.add_argument(
+        "--host",
+        default=os.getenv("UI_HOST", "127.0.0.1"),
+        help="Interface to bind (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("UI_PORT", "5000") or 5000),
+        help="Port to listen on (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--snapshot-dir",
+        default=None,
+        help="Optional directory containing JSON payloads to seed the UI.",
+    )
+    return parser.parse_args(argv)
+
+
+def _seed_state_from_snapshots(state: UIState, snapshot_dir: str | None) -> None:
+    if not snapshot_dir:
+        state.status_provider = lambda: {
+            "event_bus": False,
+            "trading_loop": False,
+            "depth_service": False,
+            "rl_daemon": False,
+        }
+        return
+
+    base = Path(snapshot_dir)
+    if not base.exists():
+        log.warning("Snapshot directory %s not found; starting with empty UI state", base)
+        state.status_provider = lambda: {
+            "event_bus": False,
+            "trading_loop": False,
+            "depth_service": False,
+            "rl_daemon": False,
+        }
+        return
+
+    def _load_json(name: str, default: Any) -> Any:
+        path = base / name
+        if not path.exists():
+            return default
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except Exception as exc:
+            log.warning("Failed to load %s: %s", path, exc)
+            return default
+
+    default_status = {
+        "event_bus": False,
+        "trading_loop": False,
+        "depth_service": False,
+        "rl_daemon": False,
+    }
+    status_data = _load_json("status.json", None)
+    state.status_provider = (
+        lambda data=status_data if isinstance(status_data, dict) else default_status: data
+    )
+
+    summary_data = _load_json("summary.json", None)
+    if not isinstance(summary_data, dict):
+        summary_data = {}
+        roi_data = _load_json("roi.json", {})
+        if isinstance(roi_data, dict):
+            summary_data.update(roi_data)
+        history = _load_json("vars.json", [])
+        if isinstance(history, list) and history:
+            summary_data["history"] = history
+    state.summary_provider = lambda data=summary_data: data
+
+    state.logs_provider = lambda data=_load_json("logs.json", []): data
+    state.activity_provider = lambda data=_load_json("activity.json", []): data
+    state.trades_provider = lambda data=_load_json("trades.json", []): data
+    state.weights_provider = lambda data=_load_json("weights.json", {}): data
+    state.rl_status_provider = lambda data=_load_json("rl_status.json", {}): data
+    discovery_data = _load_json("discovery.json", None)
+    if discovery_data is None:
+        history_map = _load_json("token_history.json", {})
+        discovery_data = {"recent": list(history_map.keys())} if isinstance(history_map, dict) else {"recent": []}
+    state.discovery_provider = lambda data=discovery_data: data
+    state.history_provider = lambda data=_load_json("history.json", []): data
+    state.actions_provider = lambda data=_load_json("actions.json", []): data
+
+    token_facts = _load_json("token_facts.json", None)
+    if not isinstance(token_facts, dict):
+        positions = _load_json("positions.json", {})
+        token_facts = {"tokens": positions if isinstance(positions, dict) else {}, "selected": None}
+    state.token_facts_provider = lambda data=token_facts: data
+
+    state.market_state_provider = lambda data=_load_json(
+        "market.json", {"markets": [], "updated_at": None}
+    ): data
+    state.golden_snapshot_provider = lambda data=_load_json(
+        "golden.json", {"snapshots": [], "hash_map": {}}
+    ): data
+    state.suggestions_provider = lambda data=_load_json(
+        "suggestions.json", {"suggestions": [], "metrics": {}}
+    ): data
+    state.exit_provider = lambda data=_load_json(
+        "exits.json",
+        {"hot_watch": [], "diagnostics": [], "closed": [], "queue": [], "missed_exits": []},
+    ): data
+    state.vote_windows_provider = lambda data=_load_json(
+        "votes.json", {"windows": [], "decisions": []}
+    ): data
+    state.shadow_provider = lambda data=_load_json(
+        "shadow.json", {"virtual_fills": [], "paper_positions": [], "live_fills": []}
+    ): data
+    state.rl_provider = lambda data=_load_json("rl_panel.json", {"weights": {}, "uplift": {}}): data
+    state.settings_provider = lambda data=_load_json(
+        "settings.json", {"controls": {}, "overrides": {}, "staleness": {}}
+    ): data
+    state.health_provider = lambda data=_load_json("health.json", {}): data
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = _parse_cli_args(argv)
+    state = UIState()
+    _seed_state_from_snapshots(state, args.snapshot_dir)
+
+    server = UIServer(state, host=args.host, port=args.port)
+    server.start()
+    url = f"http://{args.host}:{args.port}"
+    print(f"Solsniper Zero UI listening on {url}", flush=True)
+    if args.snapshot_dir:
+        print(f"Seeded UI state from {args.snapshot_dir}", flush=True)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Stopping SolHunter UI server...", flush=True)
+    finally:
+        server.stop()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main(sys.argv[1:])

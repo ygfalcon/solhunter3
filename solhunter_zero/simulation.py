@@ -578,6 +578,7 @@ async def run_simulations_async(
     """Asynchronously run ROI simulations using a simple regression-based model."""
 
     metrics = await fetch_token_metrics_async(token)
+    base_volume_metric = float(metrics.get("volume", 0.0))
     bias = bias_correction()
     depth_features = metrics.get("depth_per_dex", []) or []
     slip_features = metrics.get("slippage_per_dex", []) or []
@@ -649,7 +650,11 @@ async def run_simulations_async(
             whale_activity = float(insights.get("whale_activity", 0.0))
             avg_swap_size = float(insights.get("avg_swap_size", 0.0))
         except Exception as exc:  # pragma: no cover - unexpected errors
-            logger.warning("On-chain metric fetch failed: %s", exc)
+            logger.warning(
+                "On-chain metric fetch failed (%s): %s",
+                exc.__class__.__name__,
+                exc,
+            )
     else:
         metrics.setdefault("slippage", 0.0)
 
@@ -669,7 +674,9 @@ async def run_simulations_async(
 
     mu = metrics.get("mean", 0.0)
     sigma = metrics.get("volatility", 0.02)
-    base_volume = metrics.get("volume", 0.0)
+    base_volume = float(metrics.get("volume", 0.0))
+    if base_volume <= 0.0 and base_volume_metric > 0.0:
+        base_volume = base_volume_metric
     volume = base_volume
     volume_spike = 1.0
     if recent_volume is not None:

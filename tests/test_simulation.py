@@ -49,7 +49,7 @@ def test_run_simulations_uses_metrics(monkeypatch):
             "depth": 1.0,
         }
 
-    def fake_dex_metrics(token):
+    async def fake_dex_metrics(token):
         return {"depth": 2.0}
 
     monkeypatch.setenv("SOLANA_RPC_URL", "http://node")
@@ -58,10 +58,24 @@ def test_run_simulations_uses_metrics(monkeypatch):
         "fetch_volume_onchain",
         lambda t, u: 123.0,
     )
+    async def _fake_volume_async(_token, _rpc):
+        return 123.0
+    monkeypatch.setattr(
+        simulation.onchain_metrics,
+        "fetch_volume_onchain_async",
+        _fake_volume_async,
+    )
     monkeypatch.setattr(
         simulation.onchain_metrics,
         "fetch_liquidity_onchain",
         lambda t, u: 456.0,
+    )
+    async def _fake_liquidity_async(_token, _rpc):
+        return 456.0
+    monkeypatch.setattr(
+        simulation.onchain_metrics,
+        "fetch_liquidity_onchain_async",
+        _fake_liquidity_async,
     )
     monkeypatch.setattr(
         simulation.onchain_metrics,
@@ -77,6 +91,9 @@ def test_run_simulations_uses_metrics(monkeypatch):
         return np.full(size, mean)
 
     monkeypatch.setattr(simulation, "fetch_token_metrics", fake_metrics)
+    async def fake_metrics_async(token):
+        return fake_metrics(token)
+    monkeypatch.setattr(simulation, "fetch_token_metrics_async", fake_metrics_async)
     monkeypatch.setattr(
         simulation.onchain_metrics,
         "fetch_dex_metrics_async",
@@ -272,6 +289,23 @@ def test_run_simulations_volume_filter(monkeypatch):
         }
 
     monkeypatch.setattr(simulation, "fetch_token_metrics", fake_metrics)
+    async def fake_metrics_async(token):
+        return fake_metrics(token)
+    monkeypatch.setattr(simulation, "fetch_token_metrics_async", fake_metrics_async)
+    async def _fake_volume_async(_token, _rpc):
+        return 50.0
+    monkeypatch.setattr(
+        simulation.onchain_metrics,
+        "fetch_volume_onchain_async",
+        _fake_volume_async,
+    )
+    async def _fake_liquidity_async(_token, _rpc):
+        return 100.0
+    monkeypatch.setattr(
+        simulation.onchain_metrics,
+        "fetch_liquidity_onchain_async",
+        _fake_liquidity_async,
+    )
     async def fake_fetch(_t):
         return {}
 
@@ -294,6 +328,9 @@ def test_run_simulations_recent_volume(monkeypatch):
         }
 
     monkeypatch.setattr(simulation, "fetch_token_metrics", fake_metrics)
+    async def fake_metrics_async(token):
+        return fake_metrics(token)
+    monkeypatch.setattr(simulation, "fetch_token_metrics_async", fake_metrics_async)
     async def fake_fetch(_t):
         return {}
 
@@ -335,6 +372,9 @@ def test_run_simulations_with_history(monkeypatch):
             return np.array([0.07])
 
     monkeypatch.setattr(simulation, "fetch_token_metrics", lambda _t: metrics)
+    async def fake_metrics_async(_token):
+        return metrics
+    monkeypatch.setattr(simulation, "fetch_token_metrics_async", fake_metrics_async)
     async def fake_fetch(_t):
         return {}
 
@@ -385,6 +425,9 @@ def test_run_simulations_with_tx_trend(monkeypatch):
             return np.array([0.09])
 
     monkeypatch.setattr(simulation, "fetch_token_metrics", lambda _t: metrics)
+    async def fake_metrics_async(_token):
+        return metrics
+    monkeypatch.setattr(simulation, "fetch_token_metrics_async", fake_metrics_async)
     async def fake_fetch(_t):
         return {}
 
@@ -413,6 +456,9 @@ def test_run_simulations_optional_inputs(monkeypatch):
         }
 
     monkeypatch.setattr(simulation, "fetch_token_metrics", fake_metrics)
+    async def fake_metrics_async(token):
+        return fake_metrics(token)
+    monkeypatch.setattr(simulation, "fetch_token_metrics_async", fake_metrics_async)
     async def fake_fetch(_t):
         return {}
 
@@ -447,6 +493,9 @@ def test_run_simulations_additional_metrics(monkeypatch):
 
     monkeypatch.setenv("SOLANA_RPC_URL", "http://node")
     monkeypatch.setattr(simulation, "fetch_token_metrics", fake_metrics)
+    async def fake_metrics_async(token):
+        return fake_metrics(token)
+    monkeypatch.setattr(simulation, "fetch_token_metrics_async", fake_metrics_async)
     async def fake_fetch(_t):
         return {}
 
@@ -457,6 +506,18 @@ def test_run_simulations_additional_metrics(monkeypatch):
         simulation.onchain_metrics,
         "collect_onchain_insights",
         lambda t, u: {"depth_change": 1.0, "tx_rate": 2.0, "whale_activity": 0.5},
+    )
+    async def _fake_collect_async(_token, _rpc):
+        return {
+            "depth_change": 1.0,
+            "tx_rate": 2.0,
+            "whale_activity": 0.5,
+            "avg_swap_size": 0.0,
+        }
+    monkeypatch.setattr(
+        simulation.onchain_metrics,
+        "collect_onchain_insights_async",
+        _fake_collect_async,
     )
     monkeypatch.setattr(simulation.np.random, "normal", lambda mean, vol, size: np.full(size, mean))
 
