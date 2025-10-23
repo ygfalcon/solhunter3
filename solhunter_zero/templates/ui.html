@@ -136,14 +136,34 @@
             display: flex;
             flex-direction: column;
             gap: 6px;
+            counter-reset: navstep;
+            position: relative;
         }
         .nav-link {
             text-decoration: none;
             color: var(--muted);
             font-size: 0.92rem;
-            padding: 8px 12px;
+            padding: 8px 12px 8px 44px;
             border-radius: 12px;
             transition: background 0.2s ease, color 0.2s ease;
+            position: relative;
+        }
+        .nav-link::before {
+            counter-increment: navstep;
+            content: counter(navstep, decimal-leading-zero);
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            color: rgba(230,237,243,0.72);
+            background: rgba(13,17,23,0.9);
+            border-radius: 999px;
+            padding: 3px 7px;
+            border: 1px solid rgba(88,166,255,0.22);
+            transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
         }
         .nav-link:hover {
             color: #e6edf3;
@@ -153,6 +173,11 @@
             color: #e6edf3;
             background: rgba(88,166,255,0.26);
             border: 1px solid rgba(88,166,255,0.42);
+        }
+        .nav-link.active::before {
+            border-color: rgba(88,166,255,0.45);
+            color: #e6edf3;
+            background: rgba(88,166,255,0.22);
         }
         .main-column {
             display: flex;
@@ -306,7 +331,9 @@
             .nav-link {
                 flex: 1 1 calc(50% - 8px);
                 text-align: center;
+                padding: 10px 12px;
             }
+            .nav-link::before { content: none; }
             .status-strip {
                 grid-template-columns: 1fr;
                 gap: 8px;
@@ -513,31 +540,6 @@
             border-radius: 12px;
             padding: 10px 12px;
             border: 1px solid rgba(88,166,255,0.12);
-        }
-        #session-summary-panel .summary-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-            gap: 12px;
-            margin-top: 12px;
-        }
-        #session-summary-panel .summary-card {
-            padding: 12px;
-            border-radius: 12px;
-            background: rgba(13,17,23,0.72);
-            border: 1px solid rgba(88,166,255,0.12);
-        }
-        #session-summary-panel .summary-card strong {
-            display: block;
-            margin-top: 4px;
-            font-size: 1.18rem;
-        }
-        #session-summary-panel .summary-card small {
-            font-size: 0.75rem;
-            color: var(--muted);
-            margin-left: 4px;
-        }
-        #session-summary-panel .lag-grid {
-            margin-top: 16px;
         }
         .color-chip {
             width: 10px;
@@ -774,24 +776,6 @@
         }
         .test-indicator.ok { border-color: rgba(63,185,80,0.45); color: var(--success); }
         .test-indicator.waiting { color: var(--warning); border-color: rgba(242,204,96,0.45); }
-        .control-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 16px;
-            margin-top: 16px;
-        }
-        .control-card {
-            border-radius: 14px;
-            padding: 14px;
-            background: rgba(13,17,23,0.72);
-            border: 1px solid rgba(88,166,255,0.12);
-        }
-        .control-card strong { display: block; margin-bottom: 6px; }
-        .stack {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
         .decision-tape {
             margin-top: 12px;
             display: grid;
@@ -833,13 +817,14 @@
         <nav class="nav-rail" aria-label="Primary">
             <div class="nav-group">
                 <a class="nav-link active" href="#overview" data-target="overview">Overview</a>
-                <a class="nav-link" href="#discovery" data-target="discovery">Discovery</a>
-                <a class="nav-link" href="#market-panel" data-target="market">Market</a>
-                <a class="nav-link" href="#golden-panel" data-target="golden">Golden</a>
-                <a class="nav-link" href="#suggestions-panel" data-target="agents">Agents</a>
-                <a class="nav-link" href="#vote-panel" data-target="execution">Execution</a>
-                <a class="nav-link" href="#diagnostics-panel" data-target="diagnostics">Diagnostics</a>
-                <a class="nav-link" href="#settings-panel" data-target="settings">Settings</a>
+                <a class="nav-link" href="#discovery" data-target="discovery">Discover</a>
+                <a class="nav-link" href="#market-panel" data-target="market">Markets</a>
+                <a class="nav-link" href="#golden-panel" data-target="golden">Golden Routes</a>
+                <a class="nav-link" href="#suggestions-panel" data-target="agents">Agent Lifecycle</a>
+                <a class="nav-link" href="#vote-panel" data-target="execution">Execution Windows</a>
+                <a class="nav-link" href="#shadow-panel" data-target="fills">Live Fills &amp; Portfolio</a>
+                <a class="nav-link" href="#rl-panel" data-target="rl">RL Ops</a>
+                <a class="nav-link" href="#exits-panel" data-target="exits">Selling &amp; Exits</a>
             </div>
         </nav>
         <div class="main-column">
@@ -976,98 +961,6 @@
                 {% endfor %}
             </div>
         </header>
-
-        {% set summary_state = 'warn' if swarm_overall.get('stale') else 'ok' %}
-        <section class="panel" id="session-summary-panel">
-            <div class="section-title">
-                <h2><span class="color-chip {{ summary_state }}"></span>Session Summary</h2>
-                <span class="muted">Last update {{ swarm_overall.get('age_label', 'n/a') }}</span>
-            </div>
-            <div class="summary-grid">
-                <div class="summary-card">
-                    <span class="muted">Suggestions / 5m</span>
-                    {% if session_summary.suggestions_5m is not none %}
-                    <strong>{{ session_summary.suggestions_5m | round(2) }}</strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-                <div class="summary-card">
-                    <span class="muted">Acceptance Rate</span>
-                    {% if session_summary.acceptance_rate is not none %}
-                    <strong>{{ (session_summary.acceptance_rate * 100) | round(1) }}%</strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-                <div class="summary-card">
-                    <span class="muted">Golden Hashes</span>
-                    {% if session_summary.golden_hashes is not none %}
-                    <strong>{{ session_summary.golden_hashes }}</strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-                <div class="summary-card">
-                    <span class="muted">Shadow Fills</span>
-                    {% if session_summary.shadow_fills is not none %}
-                    <strong>{{ session_summary.shadow_fills }}</strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-                <div class="summary-card">
-                    <span class="muted">Open Vote Windows</span>
-                    {% if session_summary.open_vote_windows is not none %}
-                    <strong>{{ session_summary.open_vote_windows }}</strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-                <div class="summary-card">
-                    <span class="muted">Paper Unrealized</span>
-                    {% if session_summary.paper_unrealized_usd is not none %}
-                    <strong>{{ session_summary.paper_unrealized_usd | round(2) }}<small>USD</small></strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-            </div>
-            <div class="summary-grid lag-grid">
-                <div class="summary-card">
-                    <span class="muted">Bus Lag</span>
-                    {% if session_summary.lag_bus_ms is not none %}
-                    <strong>{{ session_summary.lag_bus_ms | round(1) }} ms</strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-                <div class="summary-card">
-                    <span class="muted">OHLCV Lag</span>
-                    {% if session_summary.lag_ohlcv_ms is not none %}
-                    <strong>{{ session_summary.lag_ohlcv_ms | round(1) }} ms</strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-                <div class="summary-card">
-                    <span class="muted">Depth Lag</span>
-                    {% if session_summary.lag_depth_ms is not none %}
-                    <strong>{{ session_summary.lag_depth_ms | round(1) }} ms</strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-                <div class="summary-card">
-                    <span class="muted">Golden Lag</span>
-                    {% if session_summary.lag_golden_ms is not none %}
-                    <strong>{{ session_summary.lag_golden_ms | round(1) }} ms</strong>
-                    {% else %}
-                    <strong>—</strong>
-                    {% endif %}
-                </div>
-            </div>
-        </section>
 
         <section class="grid-two" id="discovery">
             <article class="panel" id="discovery-panel" data-run-live-panel="discovery">
@@ -1517,7 +1410,7 @@
                     {% endif %}
                 {% endif %}
                 <div class="section-title">
-                    <h2><span class="color-chip {{ vote_state }}"></span>Vote Window Visualiser</h2>
+                    <h2><span class="color-chip {{ vote_state }}"></span>Execution Windows</h2>
                     <span class="muted">{{ vote_windows.windows | length }} open</span>
                     <span class="preflight-result" data-preflight-panel="vote">⏳</span>
                 </div>
@@ -1574,7 +1467,7 @@
                     {% endif %}
                 {% endif %}
                 <div class="section-title">
-                    <h2><span class="color-chip {{ shadow_state }}"></span>Shadow Execution</h2>
+                    <h2><span class="color-chip {{ shadow_state }}"></span>Live Fills &amp; Portfolio</h2>
                     <span class="muted">{{ shadow.virtual_fills | length }} fills</span>
                     <span class="preflight-result" data-preflight-panel="shadow">⏳</span>
                 </div>
@@ -1606,7 +1499,7 @@
                         {% endfor %}
                     </tbody>
                 </table>
-                <h3>Paper Positions</h3>
+                <h3>Portfolio Positions (Paper)</h3>
                 <table>
                     <thead>
                         <tr>
@@ -1696,7 +1589,7 @@
             </article>
         </section>
 
-        <article class="panel" id="diagnostics-panel" data-run-live-panel="exits">
+        <article class="panel" id="exits-panel" data-run-live-panel="exits">
             <div class="section-title">
                 {% set diag_state = 'idle' %}
                 {% if exit_panel.queue %}
@@ -1704,7 +1597,7 @@
                 {% elif exit_panel.hot_watch %}
                     {% set diag_state = 'ok' %}
                 {% endif %}
-                <h2><span class="color-chip {{ diag_state }}"></span>Exit Diagnostics</h2>
+                <h2><span class="color-chip {{ diag_state }}"></span>Selling &amp; Exit Management</h2>
                 <span class="muted">Queue {{ exit_panel.queue | length }} · Hot watch {{ exit_panel.hot_watch | length }}</span>
                 <span class="preflight-result" data-preflight-panel="exits">⏳</span>
             </div>
@@ -1880,25 +1773,6 @@
             </div>
         </article>
 
-        <section class="panel" id="settings-panel">
-            <div class="section-title">
-                <h2><span class="color-chip idle"></span>Settings & Controls</h2>
-                <span class="muted">{{ settings.controls | length }} controls</span>
-            </div>
-            <div class="control-grid">
-                {% for control in settings.controls %}
-                <div class="control-card">
-                    <strong>{{ control.label }}</strong>
-                    <div class="muted">Endpoint {{ control.endpoint }}</div>
-                    <div>Status: {{ control.state }}</div>
-                    <div>TTL: {{ control.ttl_label }}</div>
-                </div>
-                {% else %}
-                <div class="muted">No controls available.</div>
-                {% endfor %}
-            </div>
-        </section>
-
         </div>
     </div>
     <footer class="status-strip">
@@ -1956,8 +1830,9 @@
                     golden: document.getElementById('golden-panel'),
                     agents: document.getElementById('suggestions-panel'),
                     execution: document.getElementById('vote-panel'),
-                    diagnostics: document.getElementById('diagnostics-panel'),
-                    settings: document.getElementById('settings-panel')
+                    fills: document.getElementById('shadow-panel'),
+                    rl: document.getElementById('rl-panel'),
+                    exits: document.getElementById('exits-panel')
                 };
                 const preflightIndicators = new Map();
                 document.querySelectorAll('.preflight-result[data-preflight-panel]').forEach((node) => {
@@ -3241,7 +3116,7 @@
                     'vote-panel',
                     'shadow-panel',
                     'rl-panel',
-                    'diagnostics-panel'
+                    'exits-panel'
                 ];
 
                 function panelHasData(panelId) {
