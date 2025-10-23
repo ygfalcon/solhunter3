@@ -271,6 +271,45 @@ def _discover_seed_tokens() -> List[str]:
     return tokens
 
 
+def _seed_token_metadata(state: "UIState" | None = None) -> List[Dict[str, Any]]:
+    tokens = _discover_seed_tokens()
+    metadata: List[Dict[str, Any]] = []
+    active_state = state or _get_active_ui_state()
+    token_facts: Mapping[str, Any] | None = None
+    if active_state is not None:
+        try:
+            facts_payload = active_state.snapshot_token_facts()
+        except Exception:
+            facts_payload = {}
+        if isinstance(facts_payload, Mapping):
+            facts_tokens = facts_payload.get("tokens")
+            if isinstance(facts_tokens, Mapping):
+                token_facts = facts_tokens
+    for mint in tokens:
+        entry: Dict[str, Any] = {"mint": mint}
+        detail = token_facts.get(mint) if isinstance(token_facts, Mapping) else None
+        if isinstance(detail, Mapping):
+            symbol = detail.get("symbol") or detail.get("ticker")
+            name = detail.get("name")
+            decimals = detail.get("decimals")
+            venues = detail.get("venues") or detail.get("market_venues")
+            if symbol:
+                entry["symbol"] = symbol
+            if name:
+                entry["name"] = name
+            if decimals is not None:
+                try:
+                    entry["decimals"] = int(decimals)
+                except (TypeError, ValueError):
+                    entry["decimals"] = decimals
+            if isinstance(venues, (list, tuple, set)):
+                entry["venues"] = [str(v) for v in venues if v]
+        metadata.append(entry)
+    if not metadata and tokens:
+        metadata = [{"mint": mint} for mint in tokens]
+    return metadata
+
+
 def _pyth_price_hints() -> List[Dict[str, Any]]:
     try:
         from . import prices
@@ -1027,14 +1066,26 @@ def _resolve_execution_snapshot(status: Mapping[str, Any]) -> Dict[str, Any]:
     if keypair_mode == "missing" and effective_paper:
         keypair_mode = "ephemeral"
     depth_info = _depth_service_info(status, keypair_mode=keypair_mode, paper_mode=effective_paper)
-    return {
+    rl_mode_raw = status.get("rl_mode")
+    if not rl_mode_raw:
+        rl_mode_raw = "shadow" if not status.get("rl_daemon") else "applied"
+    rl_mode = str(rl_mode_raw or "shadow").lower()
+    rl_gate = str(status.get("rl_gate") or "").strip().lower()
+    rl_gate_reason = status.get("rl_gate_reason")
+    snapshot: Dict[str, Any] = {
         "paper": effective_paper,
         "rate_limit_per_s": rate_limit_per_s,
         "concurrency": concurrency,
         "priority_rpc": priority_rpc,
         "keypair_mode": keypair_mode,
         "depth_service": depth_info,
+        "rl_mode": rl_mode,
     }
+    if rl_gate:
+        snapshot["rl_gate"] = rl_gate
+    if rl_gate_reason:
+        snapshot["rl_gate_reason"] = rl_gate_reason
+    return snapshot
 
 
 def _resilience_snapshot() -> Dict[str, Any]:
@@ -1289,13 +1340,16 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
             schemas_listing.append(schema_item)
 
     provider_order = _price_provider_order()
+    seed_tokens = _discover_seed_tokens()
+    seed_metadata = _seed_token_metadata(state)
     bootstrap = {
-        "seed_tokens": _discover_seed_tokens(),
+        "seed_tokens": seed_tokens,
         "pyth_price_hints": _pyth_price_hints(),
         "price_providers": provider_order,
         "price_provider_order": provider_order,
         "price_provider_timeouts_ms": _price_provider_timeouts(),
         "discovery": {"sources": _discovery_hint_sources(state)},
+        "seed_token_metadata": seed_metadata,
     }
 
     execution = _resolve_execution_snapshot(status)
@@ -1345,6 +1399,29 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
 
     heartbeat_ts = _maybe_float(status.get("heartbeat"))
 
+    raw_self_check = status.get("self_check")
+    if isinstance(raw_self_check, Mapping):
+        try:
+            self_check_payload = dict(raw_self_check)
+        except Exception:
+            self_check_payload = {str(k): raw_self_check[k] for k in raw_self_check}
+    else:
+        self_check_payload = {}
+    checks_mapping = self_check_payload.get("checks")
+    if isinstance(checks_mapping, Mapping):
+        normalized_checks: Dict[str, Any] = {}
+        for key, value in checks_mapping.items():
+            if isinstance(value, Mapping):
+                try:
+                    normalized_checks[str(key)] = dict(value)
+                except Exception:
+                    normalized_checks[str(key)] = value
+            else:
+                normalized_checks[str(key)] = value
+        self_check_payload["checks"] = normalized_checks
+    if "status" not in self_check_payload:
+        self_check_payload["status"] = "pending"
+
     payload: Dict[str, Any] = {
         "type": "UI_META",
         "v": UI_SCHEMA_VERSION,
@@ -1375,6 +1452,7 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
             ],
         },
         "generated_ts": time.time(),
+        "self_check": self_check_payload,
     }
 
     if heartbeat_ts is not None:
@@ -2682,13 +2760,38 @@ def create_app(state: UIState | None = None) -> Flask:
             _make_badge("logs", "Logs", "connecting", "Waiting for metadata…"),
         ]
         stream_lag["golden"] = golden_lag_value
+        execution_snapshot = _resolve_execution_snapshot(status)
+
+        def _title_case(text: str | None) -> str:
+            if not text:
+                return ""
+            parts = str(text).replace("_", " ").replace("-", " ").split()
+            return " ".join(part.capitalize() for part in parts if part)
+
+        rl_mode_value = str(
+            execution_snapshot.get("rl_mode")
+            or status.get("rl_mode")
+            or "shadow"
+        )
+        rl_gate_value = str(
+            execution_snapshot.get("rl_gate")
+            or status.get("rl_gate")
+            or ""
+        ).lower()
+        rl_label = _title_case(rl_mode_value) or "Shadow"
+        if rl_gate_value and rl_gate_value not in {"", "open"}:
+            rl_label = f"{rl_label} · {_title_case(rl_gate_value)}"
+
         header_signals = {
             "environment": (status.get("environment") or "dev").upper(),
-            "paper_mode": bool(status.get("paper_mode")),
+            "paper_mode": bool(execution_snapshot.get("paper")),
             "paused": bool(status.get("paused")),
-            "rl_mode": status.get("rl_mode", "shadow"),
+            "rl_mode": rl_mode_value,
+            "rl_label": rl_label,
+            "rl_gate": rl_gate_value or None,
             "bus_latency_ms": status.get("bus_latency_ms"),
             "stream_lag": stream_lag,
+            "self_check": status.get("self_check"),
         }
         kpis = {
             "suggestions_per_5m": suggestions.get("metrics", {}).get("rate_per_min", 0)
@@ -2728,6 +2831,7 @@ def create_app(state: UIState | None = None) -> Flask:
             golden_depth_enabled=state.golden_depth_enabled,
             golden_momentum_enabled=state.golden_momentum_enabled,
             ui_schema_version=UI_SCHEMA_VERSION,
+            self_check=status.get("self_check"),
         )
 
     def _ws_config_payload() -> Dict[str, str]:
@@ -2786,6 +2890,82 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.get("/ui/meta")
     def ui_meta() -> Any:
         return jsonify(_ui_meta_payload())
+
+    @app.post("/ops/golden-demo")
+    def ui_run_golden_demo() -> Any:
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_golden_demo.sh"
+        if not script_path.exists():
+            return jsonify({"ok": False, "error": f"script not found: {script_path}"}), 404
+        timeout_raw = os.getenv("GOLDEN_DEMO_TIMEOUT", "120")
+        try:
+            timeout_s = float(timeout_raw or 120.0)
+        except (TypeError, ValueError):
+            timeout_s = 120.0
+        timeout_s = max(timeout_s, 30.0)
+        start = time.perf_counter()
+        try:
+            result = subprocess.run(
+                ["bash", str(script_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            duration = time.perf_counter() - start
+            log.warning("Golden demo timed out after %.2fs", duration)
+            payload = {
+                "ok": False,
+                "error": f"timeout after {timeout_s:.0f}s",
+                "stdout": exc.stdout or "",
+                "stderr": exc.stderr or "",
+                "duration_s": round(duration, 3),
+            }
+            return jsonify(payload), 504
+        except subprocess.CalledProcessError as exc:
+            duration = time.perf_counter() - start
+            log.error("Golden demo failed with exit code %s", exc.returncode)
+            payload = {
+                "ok": False,
+                "error": f"exit code {exc.returncode}",
+                "stdout": exc.stdout or "",
+                "stderr": exc.stderr or "",
+                "duration_s": round(duration, 3),
+            }
+            return jsonify(payload), 500
+        except FileNotFoundError as exc:
+            duration = time.perf_counter() - start
+            log.error("Unable to execute golden demo script: %s", exc)
+            payload = {
+                "ok": False,
+                "error": "bash executable not found",
+                "duration_s": round(duration, 3),
+            }
+            return jsonify(payload), 500
+        except Exception as exc:
+            duration = time.perf_counter() - start
+            log.exception("Golden demo execution failed: %s", exc)
+            payload = {
+                "ok": False,
+                "error": str(exc),
+                "duration_s": round(duration, 3),
+            }
+            return jsonify(payload), 500
+
+        duration = time.perf_counter() - start
+        artifacts_dir = (
+            Path(__file__).resolve().parents[1] / "artifacts" / "demo"
+        ).resolve()
+        payload = {
+            "ok": True,
+            "returncode": result.returncode,
+            "stdout": result.stdout or "",
+            "stderr": result.stderr or "",
+            "duration_s": round(duration, 3),
+            "artifacts_dir": str(artifacts_dir),
+        }
+        log.info("Golden demo completed in %.2fs", duration)
+        return jsonify(payload)
 
     @app.get("/ui/ws-config")
     def ui_ws_config() -> Any:

@@ -87,8 +87,8 @@ bash scripts/run_golden_demo.sh
 
 The script forces paper-mode defaults, executes
 `tests/golden_pipeline/test_golden_demo.py`, and writes JSONL plus a compact
-markdown summary under `artifacts/golden_demo/`. Inspect
-`artifacts/golden_demo/summary.md` to confirm counts, medians, and the top
+markdown summary under `artifacts/demo/`. Inspect
+`artifacts/demo/summary.md` to confirm counts, medians, and the top
 suggestions before promoting a new environment to live trading.
 
 ## Paper Trading Simulation

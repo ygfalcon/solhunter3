@@ -148,6 +148,10 @@ def test_ui_meta_websocket_smoke(monkeypatch):
                 assert timeouts_ms[provider_name] > 0
             seeds = bootstrap.get("seed_tokens") or []
             assert {"So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}.issubset(set(seeds))
+            seed_metadata = bootstrap.get("seed_token_metadata") or []
+            assert seed_metadata, "expected seed token metadata"
+            metadata_mints = {entry.get("mint") for entry in seed_metadata if isinstance(entry, dict)}
+            assert {"So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}.issubset(metadata_mints)
             resilience = meta_obj.get("resilience") or {}
             ws_resilience = resilience.get("ws") or {}
             assert ws_resilience.get("ping_interval_s") == pytest.approx(20.0, rel=1e-6)
@@ -166,11 +170,15 @@ def test_ui_meta_websocket_smoke(monkeypatch):
             execution_block = meta_obj.get("execution") or {}
             assert execution_block.get("paper") is True
             assert execution_block.get("keypair_mode") in {"ephemeral", "missing"}
+            assert execution_block.get("rl_mode") in {"shadow", "applied", "live"}
             depth_info = execution_block.get("depth_service") or {}
             assert depth_info.get("enabled") is True
             assert depth_info.get("ready") in {True, False}
             assert depth_info.get("rpc_url")
             assert depth_info.get("reason") in {None, "paper-mode", "starting", "disabled"}
+            self_check = meta_obj.get("self_check") or {}
+            assert isinstance(self_check, dict)
+            assert self_check.get("status")
             assert payload_obj.get("event") == "heartbeat"
             if isinstance(meta.get("meta"), dict):
                 assert meta["meta"].get("channel") == meta_obj.get("channel")

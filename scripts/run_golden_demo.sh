@@ -12,8 +12,11 @@ export REDIS_URL="redis://localhost:6379/1"
 export PRICE_PROVIDERS="pyth,dexscreener,birdeye,synthetic"
 export SEED_TOKENS="So11111111111111111111111111111111111111112,EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9,Es9vMFrzaCERzSi1jS6t4G8iKrrf5gkP8KkP4dDLf2N9"
 
+ARTIFACT_DIR="$ROOT_DIR/artifacts/demo"
+mkdir -p "$ARTIFACT_DIR"
+
 pytest -q tests/golden_pipeline/test_golden_demo.py "$@"
 
 echo
-echo "Artifacts written to $ROOT_DIR/artifacts/golden_demo/"
-ls -1 "$ROOT_DIR"/artifacts/golden_demo/ || echo "(no artifacts found)"
+echo "Artifacts written to $ARTIFACT_DIR/"
+ls -1 "$ARTIFACT_DIR" || echo "(no artifacts found)"
