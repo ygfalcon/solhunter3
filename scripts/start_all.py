@@ -36,6 +36,7 @@ from solhunter_zero.config import (
 )
 from solhunter_zero.redis_util import ensure_local_redis_if_needed
 from solhunter_zero.logging_utils import configure_runtime_logging
+from solhunter_zero.feature_flags import get_feature_flags
 from solhunter_zero.production import (
     Provider,
     load_production_env,
@@ -43,6 +44,10 @@ from solhunter_zero.production import (
     format_configured_providers,
     write_env_manifest,
     ConnectivityChecker,
+)
+from solhunter_zero.production.keypair import (
+    resolve_live_keypair,
+    verify_onchain_funds,
 )
 from solhunter_zero.cache_paths import RUNTIME_LOCK_PATH
 from solhunter_zero.health_runtime import (
@@ -201,6 +206,35 @@ def ensure_environment(cfg_path: str | None) -> dict:
     return {"config_path": cfg_path, "config": cfg}
 
 
+def ensure_live_keypair(cfg: dict | None) -> dict:
+    resolved, pubkey = resolve_live_keypair(cfg or {}, announce=True, force=True)
+    return {"keypair_path": str(resolved), "keypair_pubkey": str(pubkey)}
+
+
+def verify_live_account() -> dict:
+    try:
+        mode = get_feature_flags().mode.lower()
+    except Exception:
+        mode = "paper"
+    if mode != "live":
+        return {"skipped": True}
+    balance, blockhash = verify_onchain_funds(min_sol=0.0)
+    log.info("Keypair balance %.6f SOL; latest blockhash %s", balance, blockhash)
+    return {"balance_sol": balance, "blockhash": blockhash}
+
+
+def apply_production_defaults() -> dict[str, str]:
+    overrides = {
+        "SOLHUNTER_MODE": "live",
+        "MODE": "live",
+        "EVENT_BUS_URL": "ws://127.0.0.1:8779",
+        "BROKER_WS_URLS": "ws://127.0.0.1:8769",
+    }
+    for key, value in overrides.items():
+        os.environ[key] = value
+    return overrides
+
+
 def _parse_int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -342,7 +376,7 @@ PRODUCTION_PROVIDERS: list[Provider] = [
 
 
 def _load_production_environment() -> dict[str, str]:
-    return load_production_env()
+    return load_production_env(overwrite=True)
 
 
 def _validate_keys() -> str:
@@ -383,6 +417,20 @@ def _connectivity_check() -> list[dict[str, object]]:
                     "error": result.error,
                 }
             )
+        for result in results:
+            if result.name == "redis" and not result.ok:
+                message = result.error or "Redis connectivity failed"
+                raise SystemExit(f"Redis unavailable: {message}")
+            if (
+                result.name == "ui-http"
+                and not result.ok
+                and result.error
+                and "event bus" in result.error.lower()
+            ):
+                raise SystemExit(
+                    "Event bus unavailable: "
+                    f"{result.error} ({result.target})"
+                )
         return formatted
 
     return asyncio.run(_run())
@@ -427,10 +475,18 @@ def main(argv: list[str] | None = None) -> int:
             if not args.skip_clean:
                 run_stage("process-cleanup", kill_lingering_processes, stage_results)
             env = run_stage("ensure-environment", lambda: ensure_environment(args.config), stage_results)
+            keypair_info = run_stage(
+                "resolve-live-keypair",
+                lambda: ensure_live_keypair(env.get("config")),
+                stage_results,
+            )
+            env.update(keypair_info)
             cfg_path = env["config_path"]
             loaded_env = run_stage("load-production-env", _load_production_environment, stage_results)
+            run_stage("apply-prod-defaults", apply_production_defaults, stage_results)
             run_stage("validate-keys", _validate_keys, stage_results)
             run_stage("write-env-manifest", lambda: _write_manifest(loaded_env), stage_results)
+            run_stage("verify-onchain-account", verify_live_account, stage_results)
             run_stage("connectivity-check", _connectivity_check, stage_results)
             run_stage("connectivity-soak", _connectivity_soak, stage_results)
             run_stage("rl-health-gate", rl_health_gate, stage_results)
