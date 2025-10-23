@@ -405,6 +405,50 @@
         .status-card.ok { border-color: rgba(63,185,80,0.32); }
         .status-card.fail { border-color: rgba(255,123,114,0.32); }
         .status-card.warn { border-color: rgba(242,204,96,0.35); }
+        .run-live-status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            border: 1px solid rgba(88,166,255,0.24);
+            background: rgba(13,17,23,0.72);
+            color: var(--muted);
+            transition: border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .run-live-status-pill::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+            opacity: 0.9;
+        }
+        .run-live-status-pill.status-ok {
+            color: var(--success);
+            border-color: rgba(63,185,80,0.45);
+            box-shadow: 0 0 12px rgba(63,185,80,0.28);
+        }
+        .run-live-status-pill.status-warn {
+            color: var(--warning);
+            border-color: rgba(242,204,96,0.5);
+            box-shadow: 0 0 12px rgba(242,204,96,0.26);
+        }
+        .run-live-status-pill.status-error {
+            color: var(--danger);
+            border-color: rgba(255,123,114,0.55);
+            box-shadow: 0 0 14px rgba(255,123,114,0.26);
+        }
+        .run-live-status-pill.status-pending {
+            color: var(--accent);
+            border-color: rgba(88,166,255,0.45);
+            box-shadow: 0 0 14px rgba(88,166,255,0.28);
+        }
+        .run-live-status-pill.status-idle {
+            color: var(--muted);
+            border-color: rgba(88,166,255,0.2);
+        }
         .header-top {
             display: flex;
             justify-content: space-between;
@@ -544,11 +588,32 @@
             gap: 24px;
         }
         .panel {
+            position: relative;
             background: var(--panel);
             border-radius: 18px;
             border: 1px solid var(--border);
             padding: 18px 20px 22px;
             box-shadow: 0 14px 38px rgba(0,0,0,0.35);
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        .panel[data-run-live-status="ok"] {
+            border-color: rgba(63,185,80,0.32);
+            box-shadow: 0 20px 48px rgba(63,185,80,0.18);
+        }
+        .panel[data-run-live-status="warn"] {
+            border-color: rgba(242,204,96,0.38);
+            box-shadow: 0 20px 48px rgba(242,204,96,0.18);
+        }
+        .panel[data-run-live-status="error"] {
+            border-color: rgba(255,123,114,0.45);
+            box-shadow: 0 20px 52px rgba(255,123,114,0.22);
+        }
+        .panel[data-run-live-status="pending"] {
+            border-color: rgba(88,166,255,0.32);
+            box-shadow: 0 18px 44px rgba(88,166,255,0.2);
+        }
+        .panel[data-run-live-status="idle"] {
+            border-color: var(--border);
         }
         .panel.skeleton::after {
             content: "";
@@ -1005,7 +1070,7 @@
         </section>
 
         <section class="grid-two" id="discovery">
-            <article class="panel" id="discovery-panel">
+            <article class="panel" id="discovery-panel" data-run-live-panel="discovery">
                 {% set discovery_stale = discovery_console.candidates | selectattr('stale') | list %}
                 {% set discovery_state = 'idle' %}
                 {% if discovery_console.candidates %}
@@ -1055,7 +1120,7 @@
                 </table>
             </article>
 
-            <article class="panel" id="token-facts-panel">
+            <article class="panel" id="token-facts-panel" data-run-live-panel="token-facts">
                 {% set token_stale = token_facts.tokens.values() | selectattr('stale') | list %}
                 {% set token_state = 'idle' %}
                 {% if token_facts.tokens %}
@@ -1098,7 +1163,7 @@
         </section>
 
         <section class="grid-two">
-            <article class="panel" id="market-panel">
+            <article class="panel" id="market-panel" data-run-live-panel="market">
                 {% set market_stale = market_state.markets | selectattr('stale') | list %}
                 {% set market_state_flag = 'idle' %}
                 {% if market_state.markets %}
@@ -1148,7 +1213,7 @@
                 </table>
             </article>
 
-            <article class="panel" id="golden-panel">
+            <article class="panel" id="golden-panel" data-run-live-panel="golden">
                 {% set golden_stale = golden_snapshots | selectattr('stale') | list %}
                 {% set golden_state = 'idle' %}
                 {% if golden_snapshots %}
@@ -1353,7 +1418,7 @@
         </section>
 
         <section class="grid-two">
-            <article class="panel" id="suggestions-panel">
+            <article class="panel" id="suggestions-panel" data-run-live-panel="suggestions">
                 {% set suggestion_stale = suggestions.suggestions | selectattr('stale') | list %}
                 {% set mismatch = suggestions.suggestions | selectattr('hash_mismatch') | list %}
                 {% set suggestions_state = 'idle' %}
@@ -1442,7 +1507,7 @@
 
             </article>
 
-            <article class="panel" id="vote-panel">
+            <article class="panel" id="vote-panel" data-run-live-panel="vote">
                 {% set vote_state = 'idle' %}
                 {% if vote_windows.windows %}
                     {% if vote_windows.windows | selectattr('expired') | list %}
@@ -1499,7 +1564,7 @@
         </section>
 
         <section class="grid-two">
-            <article class="panel" id="shadow-panel">
+            <article class="panel" id="shadow-panel" data-run-live-panel="shadow">
                 {% set shadow_state = 'idle' %}
                 {% if shadow.virtual_fills %}
                     {% if shadow.virtual_fills | selectattr('stale') | list %}
@@ -1570,7 +1635,7 @@
                 </table>
             </article>
 
-            <article class="panel" id="rl-panel">
+            <article class="panel" id="rl-panel" data-run-live-panel="rl">
                 {% set rl_state = 'idle' %}
                 {% if rl_panel.weights %}
                     {% if rl_panel.weights | selectattr('stale') | list %}
@@ -1631,7 +1696,7 @@
             </article>
         </section>
 
-        <article class="panel" id="diagnostics-panel">
+        <article class="panel" id="diagnostics-panel" data-run-live-panel="exits">
             <div class="section-title">
                 {% set diag_state = 'idle' %}
                 {% if exit_panel.queue %}
@@ -1641,6 +1706,7 @@
                 {% endif %}
                 <h2><span class="color-chip {{ diag_state }}"></span>Exit Diagnostics</h2>
                 <span class="muted">Queue {{ exit_panel.queue | length }} · Hot watch {{ exit_panel.hot_watch | length }}</span>
+                <span class="preflight-result" data-preflight-panel="exits">⏳</span>
             </div>
             <div class="exit-hot-watch">
                 <h3>Hot Watch</h3>
@@ -1898,19 +1964,45 @@
                     if (!node || !node.dataset) {
                         return;
                     }
-                    const panelKey = (node.dataset.preflightPanel || '').trim();
+                    const rawKey = (node.dataset.preflightPanel || node.getAttribute('data-preflight-panel') || '').trim();
+                    const panelKey = normalisePanelKey(rawKey);
                     if (!panelKey) {
                         return;
                     }
                     if (!node.textContent || !node.textContent.trim()) {
                         node.textContent = '⏳';
                     }
+                    node.dataset.preflightKey = panelKey;
+                    if (!node.dataset.preflightLabel) {
+                        node.dataset.preflightLabel = titleCase(rawKey || panelKey);
+                    }
                     node.dataset.preflightState = node.dataset.preflightState || 'pending';
                     node.setAttribute('role', 'status');
                     preflightIndicators.set(panelKey, node);
                 });
+                const runLivePanels = new Map();
+                document.querySelectorAll('[data-run-live-panel]').forEach((panelEl) => {
+                    if (!panelEl || !panelEl.dataset) {
+                        return;
+                    }
+                    const raw = panelEl.dataset.runLivePanel || panelEl.id || '';
+                    const key = normalisePanelKey(raw);
+                    if (!key) {
+                        return;
+                    }
+                    panelEl.dataset.runLivePanel = key;
+                    runLivePanels.set(key, panelEl);
+                });
                 const runLiveState = new Map();
                 let lastStatusMessage = '';
+
+                function normalisePanelKey(value) {
+                    return String(value || '')
+                        .trim()
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]+/g, '-')
+                        .replace(/^-+|-+$/g, '');
+                }
 
                 function setHandshakeSpinnerActive(active) {
                     if (!handshakeSpinner) {
@@ -2015,8 +2107,10 @@
                     };
                     const symbol = symbolMap[status] || symbolMap.pending;
                     indicator.dataset.preflightState = status;
+                    indicator.dataset.preflightStatus = status;
+                    indicator.dataset.preflightDetail = detail || '';
                     indicator.textContent = symbol;
-                    const descriptor = indicator.dataset.preflightPanel || name;
+                    const descriptor = indicator.dataset.preflightLabel || indicator.dataset.preflightPanel || name;
                     if (detail) {
                         indicator.title = detail;
                     } else {
@@ -2029,11 +2123,165 @@
                     indicator.setAttribute('aria-label', ariaDetail);
                 }
 
+                function runLiveStatusClass(status) {
+                    switch (status) {
+                        case 'ok':
+                            return 'status-ok';
+                        case 'warn':
+                            return 'status-warn';
+                        case 'error':
+                            return 'status-error';
+                        case 'pending':
+                            return 'status-pending';
+                        default:
+                            return 'status-idle';
+                    }
+                }
+
+                function updateRunLivePill(panelEl, status, label) {
+                    if (!panelEl) {
+                        return;
+                    }
+                    const header = panelEl.querySelector('.section-title');
+                    if (!header) {
+                        return;
+                    }
+                    let pill = panelEl.querySelector('.run-live-status-pill');
+                    if (!pill) {
+                        pill = document.createElement('span');
+                        pill.className = 'run-live-status-pill';
+                        const indicator = header.querySelector('.preflight-result[data-preflight-panel]');
+                        if (indicator && indicator.parentNode === header) {
+                            header.insertBefore(pill, indicator);
+                        } else {
+                            header.appendChild(pill);
+                        }
+                    }
+                    const classes = ['status-ok', 'status-warn', 'status-error', 'status-pending', 'status-idle'];
+                    classes.forEach((cls) => pill.classList.remove(cls));
+                    pill.classList.add(runLiveStatusClass(status));
+                    const fallback = {
+                        ok: 'Connected',
+                        warn: 'Stale',
+                        error: 'Offline',
+                        pending: 'Connecting…',
+                        idle: 'Idle'
+                    };
+                    const text = label && label.trim() ? label.trim() : (fallback[status] || fallback.idle);
+                    pill.textContent = text;
+                    pill.setAttribute('aria-label', text);
+                    if (label && label.trim() && label.trim() !== text) {
+                        pill.title = label.trim();
+                    } else if (label && label.trim()) {
+                        pill.title = label.trim();
+                    } else {
+                        pill.removeAttribute('title');
+                    }
+                }
+
+                function setRunLivePanelStatus(name, status, detail, endpoint) {
+                    const key = normalisePanelKey(name);
+                    const panelEl = runLivePanels.get(key);
+                    if (!panelEl) {
+                        return;
+                    }
+                    const normalizedStatus = ['ok', 'warn', 'error', 'pending', 'idle'].includes(status) ? status : 'pending';
+                    panelEl.dataset.runLiveStatus = normalizedStatus;
+                    if (detail && detail.trim()) {
+                        const trimmed = detail.trim();
+                        panelEl.dataset.runLiveDetail = trimmed;
+                        panelEl.setAttribute('data-run-live-detail', trimmed);
+                    } else {
+                        delete panelEl.dataset.runLiveDetail;
+                        panelEl.removeAttribute('data-run-live-detail');
+                    }
+                    if (endpoint) {
+                        panelEl.dataset.runLiveEndpoint = endpoint;
+                    } else {
+                        delete panelEl.dataset.runLiveEndpoint;
+                    }
+                    updateRunLivePill(panelEl, normalizedStatus, detail);
+                }
+
+                function joinRunLiveDetail(parts) {
+                    return parts
+                        .map((value) => {
+                            if (value === null || value === undefined) {
+                                return '';
+                            }
+                            const text = typeof value === 'string' ? value.trim() : String(value);
+                            return text.trim();
+                        })
+                        .filter((value) => Boolean(value))
+                        .join(' · ');
+                }
+
+                function extractRunLiveTimestamp(payload) {
+                    if (!payload || typeof payload !== 'object') {
+                        return '';
+                    }
+                    const keys = ['age_label', 'updated_label', 'updated_at', 'updated', 'timestamp', 'ts'];
+                    for (const key of keys) {
+                        const value = payload[key];
+                        if (typeof value === 'string' && value.trim()) {
+                            return value.trim();
+                        }
+                    }
+                    const data = payload.data;
+                    if (data && typeof data === 'object') {
+                        for (const key of keys) {
+                            const value = data[key];
+                            if (typeof value === 'string' && value.trim()) {
+                                return value.trim();
+                            }
+                        }
+                        const nested = Array.isArray(data.entries) ? data.entries : Array.isArray(data.items) ? data.items : null;
+                        if (nested && nested.length) {
+                            const first = nested[0];
+                            if (first && typeof first === 'object') {
+                                for (const key of keys) {
+                                    const value = first[key];
+                                    if (typeof value === 'string' && value.trim()) {
+                                        return value.trim();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return '';
+                }
+
+                function describeRunLivePayload(payload, endpoint) {
+                    if (!payload || typeof payload !== 'object') {
+                        return {
+                            status: 'warn',
+                            detail: joinRunLiveDetail(['No data', endpoint ? shortUrl(endpoint) : ''])
+                        };
+                    }
+                    if (payload.ok === false) {
+                        const detail = joinRunLiveDetail([
+                            payload.error ? String(payload.error) : 'Endpoint reported failure',
+                            endpoint ? shortUrl(endpoint) : ''
+                        ]);
+                        return {status: 'error', detail: detail || 'Unavailable'};
+                    }
+                    const stale = payload.stale === true || (payload.data && typeof payload.data === 'object' && payload.data.stale === true);
+                    const status = stale ? 'warn' : 'ok';
+                    const timestamp = extractRunLiveTimestamp(payload);
+                    const detail = joinRunLiveDetail([
+                        stale ? 'Stale' : 'Streaming',
+                        timestamp,
+                        endpoint ? shortUrl(endpoint) : ''
+                    ]);
+                    return {status, detail: detail || (stale ? 'Stale' : 'Connected')};
+                }
+
                 function scheduleRunLivePoll(name, endpoint, delayMs) {
-                    let state = runLiveState.get(name);
+                    const key = normalisePanelKey(name);
+                    let state = runLiveState.get(key);
                     if (!state) {
                         state = {timer: null, retries: 0, endpoint: endpoint};
-                        runLiveState.set(name, state);
+                        runLiveState.set(key, state);
                     }
                     state.endpoint = endpoint;
                     if (state.timer) {
@@ -2041,18 +2289,20 @@
                     }
                     state.timer = window.setTimeout(() => {
                         state.timer = null;
-                        probeRunLivePanel(name, endpoint);
+                        probeRunLivePanel(key, endpoint);
                     }, delayMs);
                 }
 
                 async function probeRunLivePanel(name, endpoint) {
-                    const indicator = preflightIndicators.get(name);
-                    const state = runLiveState.get(name) || {retries: 0, endpoint: endpoint};
-                    runLiveState.set(name, state);
+                    const key = normalisePanelKey(name);
+                    const indicator = preflightIndicators.get(key);
+                    const state = runLiveState.get(key) || {retries: 0, endpoint: endpoint};
+                    runLiveState.set(key, state);
                     if (indicator) {
                         indicator.dataset.preflightEndpoint = endpoint;
                     }
-                    updatePreflightIndicator(name, 'pending', 'Connecting…');
+                    updatePreflightIndicator(key, 'pending', 'Connecting…');
+                    setRunLivePanelStatus(key, 'pending', 'Connecting…', endpoint);
                     try {
                         const response = await fetch(endpoint, {cache: 'no-store'});
                         if (!response.ok) {
@@ -2064,31 +2314,47 @@
                             throw new Error(detail);
                         }
                         state.retries = 0;
-                        updatePreflightIndicator(name, 'ok', 'Connected to ' + endpoint);
-                        scheduleRunLivePoll(name, endpoint, 15000);
+                        const summary = describeRunLivePayload(payload, endpoint);
+                        updatePreflightIndicator(key, summary.status, summary.detail);
+                        setRunLivePanelStatus(key, summary.status, summary.detail, endpoint);
+                        scheduleRunLivePoll(key, endpoint, 15000);
                     } catch (err) {
                         const message = err && err.message ? err.message : 'Request failed';
                         state.retries = (state.retries || 0) + 1;
-                        updatePreflightIndicator(name, 'error', message);
+                        updatePreflightIndicator(key, 'error', message);
+                        setRunLivePanelStatus(key, 'error', message, endpoint);
                         const retryDelay = Math.min(60000, 2000 * state.retries);
-                        scheduleRunLivePoll(name, endpoint, retryDelay);
+                        scheduleRunLivePoll(key, endpoint, retryDelay);
                     }
                 }
 
                 function initRunLiveConnectivity() {
                     if (!preflightIndicators.size) {
+                        runLivePanels.forEach((_panel, panelKey) => {
+                            setRunLivePanelStatus(panelKey, 'idle', 'No monitor attached', '');
+                        });
                         return;
                     }
+                    runLivePanels.forEach((_panel, panelKey) => {
+                        if (preflightIndicators.has(panelKey)) {
+                            setRunLivePanelStatus(panelKey, 'pending', 'Negotiating manifest…', '');
+                        } else {
+                            setRunLivePanelStatus(panelKey, 'idle', 'No monitor attached', '');
+                        }
+                    });
+                    preflightIndicators.forEach((_node, panelKey) => {
+                        updatePreflightIndicator(panelKey, 'pending', 'Waiting for manifest…');
+                    });
                     const startProbes = (mapping) => {
                         preflightIndicators.forEach((_node, panelName) => {
-                            const variants = [panelName, panelName.replace(/_/g, '-'), panelName.replace(/-/g, '_')];
                             let endpoint = '';
-                            for (const variant of variants) {
-                                if (mapping && Object.prototype.hasOwnProperty.call(mapping, variant)) {
-                                    endpoint = String(mapping[variant] || '').trim();
-                                    if (endpoint) {
-                                        break;
-                                    }
+                            if (mapping && Object.prototype.hasOwnProperty.call(mapping, panelName)) {
+                                endpoint = String(mapping[panelName] || '').trim();
+                            }
+                            if (!endpoint && mapping) {
+                                const underscoreKey = panelName.replace(/-/g, '_');
+                                if (Object.prototype.hasOwnProperty.call(mapping, underscoreKey)) {
+                                    endpoint = String(mapping[underscoreKey] || '').trim();
                                 }
                             }
                             if (!endpoint) {
@@ -2126,17 +2392,26 @@
                                     if (!name || !endpoint) {
                                         return;
                                     }
-                                    mapping[String(name).trim()] = String(endpoint).trim();
+                                    const key = normalisePanelKey(name);
+                                    if (key) {
+                                        mapping[key] = String(endpoint).trim();
+                                    }
                                 });
                             } else {
                                 Object.keys(panels).forEach((key) => {
                                     const value = panels[key];
                                     if (typeof value === 'string') {
-                                        mapping[String(key).trim()] = value.trim();
+                                        const normalized = normalisePanelKey(key);
+                                        if (normalized) {
+                                            mapping[normalized] = value.trim();
+                                        }
                                     } else if (value && typeof value === 'object') {
                                         const endpoint = value.endpoint || value.url;
                                         if (endpoint) {
-                                            mapping[String(key).trim()] = String(endpoint).trim();
+                                            const normalized = normalisePanelKey(key);
+                                            if (normalized) {
+                                                mapping[normalized] = String(endpoint).trim();
+                                            }
                                         }
                                     }
                                 });
@@ -2965,7 +3240,8 @@
                     'suggestions-panel',
                     'vote-panel',
                     'shadow-panel',
-                    'rl-panel'
+                    'rl-panel',
+                    'diagnostics-panel'
                 ];
 
                 function panelHasData(panelId) {
