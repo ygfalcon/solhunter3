@@ -3103,6 +3103,77 @@ def create_app(state: UIState | None = None) -> Flask:
             }
         )
 
+    run_live_providers: Dict[str, Callable[[], Any]] = {
+        "discovery": state.snapshot_discovery_console,
+        "token-facts": state.snapshot_token_facts,
+        "market": state.snapshot_market_state,
+        "golden": state.snapshot_golden_snapshots,
+        "suggestions": state.snapshot_suggestions,
+        "vote": state.snapshot_vote_windows,
+        "shadow": state.snapshot_shadow,
+        "rl": state.snapshot_rl_panel,
+        "exits": state.snapshot_exit,
+    }
+
+    run_live_aliases = {
+        "token_facts": "token-facts",
+        "tokenfacts": "token-facts",
+        "market_state": "market",
+        "golden_snapshot": "golden",
+        "golden_snapshots": "golden",
+        "suggestion": "suggestions",
+        "suggestion_panel": "suggestions",
+        "votes": "vote",
+        "vote_windows": "vote",
+        "shadow_panel": "shadow",
+        "rl_panel": "rl",
+        "diagnostics": "exits",
+        "exit": "exits",
+    }
+
+    def _normalise_run_live_panel(panel: str) -> str:
+        name = panel.strip().lower().replace("_", "-")
+        name = name.strip("/")
+        return run_live_aliases.get(name, name)
+
+    def _run_live_manifest() -> Dict[str, str]:
+        return {key: f"/run/live/{key}" for key in sorted(run_live_providers)}
+
+    def _run_live_payload(panel: str, data: Any) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "ok": True,
+            "panel": panel,
+            "endpoint": f"/run/live/{panel}",
+            "data": _json_ready(data),
+        }
+        if isinstance(data, Mapping):
+            for updated_key in ("updated_at", "updated", "ts", "timestamp"):
+                updated_value = data.get(updated_key)
+                if updated_value is not None:
+                    payload["updated_at"] = updated_value
+                    break
+            stale = data.get("stale")
+            if stale is not None:
+                payload["stale"] = stale
+        return payload
+
+    @app.get("/run/live")
+    def run_live_index() -> Any:
+        return jsonify({"ok": True, "panels": _run_live_manifest()})
+
+    @app.get("/run/live/<path:panel>")
+    def run_live_panel(panel: str) -> Any:
+        key = _normalise_run_live_panel(panel)
+        provider = run_live_providers.get(key)
+        if provider is None:
+            return jsonify({"ok": False, "error": f"unknown panel: {panel}"}), 404
+        try:
+            data = provider()
+        except Exception as exc:  # pragma: no cover - defensive guardrail
+            log.exception("Run live provider for %s failed", key)
+            return jsonify({"ok": False, "error": str(exc)}), 500
+        return jsonify(_run_live_payload(key, data))
+
     @app.get("/swarm/discovery")
     def swarm_discovery() -> Any:
         return jsonify(_json_ready(state.snapshot_discovery_console()))

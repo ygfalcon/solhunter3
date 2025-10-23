@@ -690,6 +690,52 @@ def test_logs_endpoint(monkeypatch):
     assert logs[-1] == "beta"
 
 
+def test_run_live_manifest_lists_panels():
+    client = ui.app.test_client()
+    resp = client.get("/run/live")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    panels = payload["panels"]
+    assert isinstance(panels, dict)
+    expected = {
+        "discovery",
+        "token-facts",
+        "market",
+        "golden",
+        "suggestions",
+        "vote",
+        "shadow",
+        "rl",
+    }
+    assert expected.issubset(set(panels))
+    for name in expected:
+        assert panels[name].startswith("/run/live/")
+
+
+@pytest.mark.parametrize(
+    "panel_name",
+    [
+        "discovery",
+        "token-facts",
+        "market",
+        "golden",
+        "suggestions",
+        "vote",
+        "shadow",
+        "rl",
+    ],
+)
+def test_run_live_panel_payload(panel_name):
+    client = ui.app.test_client()
+    resp = client.get(f"/run/live/{panel_name}")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["panel"] == panel_name
+    assert "data" in payload
+
+
 def test_autostart_env(monkeypatch):
     monkeypatch.setattr(ui, "load_config", lambda p=None: {})
     monkeypatch.setattr(ui, "apply_env_overrides", lambda c: c)
