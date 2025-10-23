@@ -1893,6 +1893,23 @@
                     diagnostics: document.getElementById('diagnostics-panel'),
                     settings: document.getElementById('settings-panel')
                 };
+                const preflightIndicators = new Map();
+                document.querySelectorAll('.preflight-result[data-preflight-panel]').forEach((node) => {
+                    if (!node || !node.dataset) {
+                        return;
+                    }
+                    const panelKey = (node.dataset.preflightPanel || '').trim();
+                    if (!panelKey) {
+                        return;
+                    }
+                    if (!node.textContent || !node.textContent.trim()) {
+                        node.textContent = '⏳';
+                    }
+                    node.dataset.preflightState = node.dataset.preflightState || 'pending';
+                    node.setAttribute('role', 'status');
+                    preflightIndicators.set(panelKey, node);
+                });
+                const runLiveState = new Map();
                 let lastStatusMessage = '';
 
                 function setHandshakeSpinnerActive(active) {
@@ -1983,6 +2000,152 @@
                     } else {
                         selfCheckPill.removeAttribute('title');
                     }
+                }
+
+                function updatePreflightIndicator(name, status, detail) {
+                    const indicator = preflightIndicators.get(name);
+                    if (!indicator) {
+                        return;
+                    }
+                    const symbolMap = {
+                        ok: '✅',
+                        warn: '⚠️',
+                        error: '❌',
+                        pending: '⏳'
+                    };
+                    const symbol = symbolMap[status] || symbolMap.pending;
+                    indicator.dataset.preflightState = status;
+                    indicator.textContent = symbol;
+                    const descriptor = indicator.dataset.preflightPanel || name;
+                    if (detail) {
+                        indicator.title = detail;
+                    } else {
+                        indicator.removeAttribute('title');
+                    }
+                    const label = [descriptor, String(status || 'pending').toUpperCase()]
+                        .filter(Boolean)
+                        .join(' ');
+                    const ariaDetail = detail ? label + ' · ' + detail : label;
+                    indicator.setAttribute('aria-label', ariaDetail);
+                }
+
+                function scheduleRunLivePoll(name, endpoint, delayMs) {
+                    let state = runLiveState.get(name);
+                    if (!state) {
+                        state = {timer: null, retries: 0, endpoint: endpoint};
+                        runLiveState.set(name, state);
+                    }
+                    state.endpoint = endpoint;
+                    if (state.timer) {
+                        window.clearTimeout(state.timer);
+                    }
+                    state.timer = window.setTimeout(() => {
+                        state.timer = null;
+                        probeRunLivePanel(name, endpoint);
+                    }, delayMs);
+                }
+
+                async function probeRunLivePanel(name, endpoint) {
+                    const indicator = preflightIndicators.get(name);
+                    const state = runLiveState.get(name) || {retries: 0, endpoint: endpoint};
+                    runLiveState.set(name, state);
+                    if (indicator) {
+                        indicator.dataset.preflightEndpoint = endpoint;
+                    }
+                    updatePreflightIndicator(name, 'pending', 'Connecting…');
+                    try {
+                        const response = await fetch(endpoint, {cache: 'no-store'});
+                        if (!response.ok) {
+                            throw new Error('HTTP ' + response.status);
+                        }
+                        const payload = await response.json().catch(() => null);
+                        if (payload && typeof payload === 'object' && payload.ok === false) {
+                            const detail = payload.error ? String(payload.error) : 'Endpoint reported failure';
+                            throw new Error(detail);
+                        }
+                        state.retries = 0;
+                        updatePreflightIndicator(name, 'ok', 'Connected to ' + endpoint);
+                        scheduleRunLivePoll(name, endpoint, 15000);
+                    } catch (err) {
+                        const message = err && err.message ? err.message : 'Request failed';
+                        state.retries = (state.retries || 0) + 1;
+                        updatePreflightIndicator(name, 'error', message);
+                        const retryDelay = Math.min(60000, 2000 * state.retries);
+                        scheduleRunLivePoll(name, endpoint, retryDelay);
+                    }
+                }
+
+                function initRunLiveConnectivity() {
+                    if (!preflightIndicators.size) {
+                        return;
+                    }
+                    const startProbes = (mapping) => {
+                        preflightIndicators.forEach((_node, panelName) => {
+                            const variants = [panelName, panelName.replace(/_/g, '-'), panelName.replace(/-/g, '_')];
+                            let endpoint = '';
+                            for (const variant of variants) {
+                                if (mapping && Object.prototype.hasOwnProperty.call(mapping, variant)) {
+                                    endpoint = String(mapping[variant] || '').trim();
+                                    if (endpoint) {
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!endpoint) {
+                                endpoint = '/run/live/' + panelName;
+                            }
+                            probeRunLivePanel(panelName, endpoint);
+                        });
+                    };
+                    const fallback = () => startProbes({});
+                    fetch('/run/live', {cache: 'no-store'})
+                        .then((response) => {
+                            if (!response.ok) {
+                                throw new Error('HTTP ' + response.status);
+                            }
+                            return response.json();
+                        })
+                        .then((manifest) => {
+                            if (!manifest || typeof manifest !== 'object') {
+                                fallback();
+                                return;
+                            }
+                            let panels = manifest.panels || manifest.endpoints || manifest.data;
+                            if (!panels) {
+                                fallback();
+                                return;
+                            }
+                            const mapping = {};
+                            if (Array.isArray(panels)) {
+                                panels.forEach((entry) => {
+                                    if (!entry || typeof entry !== 'object') {
+                                        return;
+                                    }
+                                    const name = entry.name || entry.panel || entry.key;
+                                    const endpoint = entry.endpoint || entry.url;
+                                    if (!name || !endpoint) {
+                                        return;
+                                    }
+                                    mapping[String(name).trim()] = String(endpoint).trim();
+                                });
+                            } else {
+                                Object.keys(panels).forEach((key) => {
+                                    const value = panels[key];
+                                    if (typeof value === 'string') {
+                                        mapping[String(key).trim()] = value.trim();
+                                    } else if (value && typeof value === 'object') {
+                                        const endpoint = value.endpoint || value.url;
+                                        if (endpoint) {
+                                            mapping[String(key).trim()] = String(endpoint).trim();
+                                        }
+                                    }
+                                });
+                            }
+                            startProbes(mapping);
+                        })
+                        .catch(() => {
+                            fallback();
+                        });
                 }
 
                 function updateStatusPills(meta) {
@@ -2659,6 +2822,7 @@
 
                 updateDataChannelsFromBanner();
                 renderConnectionSummary();
+                initRunLiveConnectivity();
                 bootRealtime();
 
                 const suggestionRows = Array.from(document.querySelectorAll('#suggestions-panel tbody tr'));
