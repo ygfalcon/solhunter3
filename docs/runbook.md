@@ -29,6 +29,10 @@ include their credentials in the environment file as well. Audit the template
 for any entry that contains `YOUR_`, `REDACTED`, `XXXX`, empty strings, or other
 obvious placeholders and replace them with secrets from your vault.
 
+For the funded production wallet distributed with this deployment, set both
+`SOLANA_KEYPAIR` and `KEYPAIR_PATH` to `/workspace/solhunter3/keypairs/default.json`
+so the launcher inherits the correct signing key.
+
 Run the placeholder audit to confirm nothing was missed:
 
 ```bash
