@@ -1,4 +1,4 @@
-solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+solana_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 dex_base_url = "https://swap.helius.dev/"
 agents = [
     "simulation",
@@ -23,9 +23,9 @@ agents = [
     "ramanujan",
     "alien_cipher",
 ]
-solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+solana_ws_url = "wss://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 jupiter_ws_url = "wss://stats.jup.ag/ws"
-priority_rpc = "https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"
+priority_rpc = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 dex_testnet_url = "https://quote-api.jup.ag"
 orca_api_url = "https://api.orca.so"
 raydium_api_url = "https://api.raydium.io"
@@ -125,15 +125,10 @@ gpu_memory_index = "False"
 memory_sync_interval = "5.0"
 rl_build_mmap_dataset = "True"
 rl_prefetch_buffer = "0"
-solana_keypair = "keypairs/default.json"
+solana_keypair = "/Users/sfredx/Documents/Python/Solsniper-zero-main/keypairs/default.json"
 jito_rpc_url = "https://mainnet.block-engine.jito.wtf"
-
-[resource_limits]
-cpu_percent = 80.0
-cpu_action = "throttle"
-memory_percent = 90.0
-memory_action = "exit"
-grace_samples = 5
+helius_rpc_url = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+helius_api_key = "af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 
 [agent_weights]
 simulation = 1.0
@@ -157,6 +152,13 @@ mempool_sniper = 0.9
 meta_conviction = 1.0
 ramanujan = 0.8
 alien_cipher = 0.75
+
+[resource_limits]
+cpu_percent = 80.0
+cpu_action = "throttle"
+memory_percent = 90.0
+memory_action = "exit"
+grace_samples = 5
 
 [dex_partner_urls]
 jupiter = "https://quote-api.jup.ag"

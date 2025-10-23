@@ -1,0 +1,1 @@
+# Test dependency placeholder to satisfy launch_live.sh automation.

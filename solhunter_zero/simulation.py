@@ -632,7 +632,9 @@ async def run_simulations_async(
                 token, rpc_url
             )
 
-            slippage_info = onchain_metrics.fetch_slippage_onchain(token, rpc_url)
+            slippage_info = await asyncio.to_thread(
+                onchain_metrics.fetch_slippage_onchain, token, rpc_url
+            )
             if isinstance(slippage_info, dict):
                 metrics["slippage"] = float(slippage_info.get("price_impact_pct", 0.0))
             else:

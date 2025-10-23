@@ -1,0 +1,2 @@
+# Dependencies are managed via pyproject.
+# This placeholder keeps launch_live.sh satisfied in local runs.
