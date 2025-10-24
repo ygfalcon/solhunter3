@@ -210,6 +210,102 @@ def _compute_schema_hash() -> str:
     return digest
 
 
+def _default_run_state() -> Dict[str, Any]:
+    """Build a baseline run-state snapshot from the current environment."""
+
+    mode = os.getenv("SOLHUNTER_MODE") or os.getenv("RUNTIME_MODE")
+    if not mode:
+        mode = "paper" if parse_bool_env("PAPER_TRADING", False) else "live"
+
+    workflow = (
+        os.getenv("SOLHUNTER_WORKFLOW")
+        or os.getenv("WORKFLOW")
+        or os.getenv("TRADING_WORKFLOW")
+        or "default"
+    )
+
+    keypair_path = os.getenv("KEYPAIR_PATH") or os.getenv("SOLANA_KEYPAIR")
+    keypair_pubkey: str | None = None
+    if keypair_path:
+        try:
+            from .wallet import load_keypair
+
+            keypair = load_keypair(keypair_path)
+            keypair_pubkey = str(keypair.pubkey())
+        except Exception:
+            try:
+                keypair_pubkey = Path(keypair_path).name or keypair_path
+            except Exception:
+                keypair_pubkey = keypair_path
+
+    budget = os.getenv("BUDGET_REMAINING") or os.getenv("RISK_BUDGET")
+    budget_remaining: float | None
+    try:
+        budget_remaining = float(budget) if budget not in (None, "") else None
+    except (TypeError, ValueError):
+        budget_remaining = None
+
+    risk_current_env = os.getenv("RISK_CURRENT") or os.getenv("RISK_MULTIPLIER")
+    try:
+        risk_current = float(risk_current_env) if risk_current_env else None
+    except (TypeError, ValueError):
+        risk_current = None
+
+    rps_limits_env = os.getenv("RPC_RPS_LIMITS") or os.getenv("RPS_LIMITS")
+    if rps_limits_env:
+        rps_limits = [part.strip() for part in rps_limits_env.split(",") if part.strip()]
+    else:
+        rps_limits = []
+
+    rpc_backoff = os.getenv("RPC_BACKOFF") or os.getenv("RPC_BACKOFF_STATE")
+    canary = parse_bool_env("CANARY", False) or parse_bool_env("LIVE_CANARY", False)
+
+    throttle_state = os.getenv("RPC_THROTTLE_STATE")
+
+    return {
+        "mode": mode,
+        "workflow": workflow,
+        "keypair_pubkey": keypair_pubkey,
+        "keypair_path": keypair_path,
+        "budget_remaining": budget_remaining,
+        "budget_reserved": None,
+        "risk_current": risk_current,
+        "rps_limits": rps_limits,
+        "rpc_backoff": rpc_backoff,
+        "throttle_state": throttle_state,
+        "canary": canary,
+    }
+
+
+def _mask_env_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    if len(stripped) <= 4:
+        return "*" * len(stripped)
+    return f"{stripped[:2]}…{stripped[-2:]}"
+
+
+def _masked_environment_snapshot() -> Dict[str, Any]:
+    """Return a masked view of relevant runtime environment variables."""
+
+    snapshot: Dict[str, Any] = {}
+    for key, value in sorted(os.environ.items()):
+        upper_key = key.upper()
+        if not (
+            upper_key.startswith("SOLHUNTER_")
+            or upper_key.startswith("RISK")
+            or upper_key.startswith("RPC")
+            or upper_key.startswith("KEYPAIR")
+            or upper_key.startswith("JITO")
+        ):
+            continue
+        snapshot[key] = _mask_env_value(value)
+    return snapshot
+
+
 def _price_provider_order() -> List[str]:
     try:
         from . import prices
@@ -2291,6 +2387,48 @@ def stop_websockets() -> None:
 StatusProvider = Callable[[], Dict[str, Any]]
 ListProvider = Callable[[], Iterable[Dict[str, Any]]]
 DictProvider = Callable[[], Dict[str, Any]]
+RunStateProvider = Callable[[], Dict[str, Any]]
+RunEnvProvider = Callable[[], Dict[str, Any]]
+DiscoveryRecentProvider = Callable[[int], Iterable[Dict[str, Any]]]
+TokenMetaProvider = Callable[[str], Dict[str, Any]]
+TokenSnapshotProvider = Callable[[str], Dict[str, Any]]
+AgentEventsProvider = Callable[[str, Optional[float]], Iterable[Dict[str, Any]]]
+ExecutionPlanProvider = Callable[[str], Dict[str, Any]]
+FillsProvider = Callable[[int], Iterable[Dict[str, Any]]]
+PositionsProvider = Callable[[], Iterable[Dict[str, Any]]]
+PnlProvider = Callable[[str], Dict[str, Any]]
+RiskProvider = Callable[[], Dict[str, Any]]
+ProviderStatusProvider = Callable[[], Iterable[Dict[str, Any]]]
+MetricsProvider = Callable[[], Dict[str, Any]]
+ClosePositionHandler = Callable[[str, float], Dict[str, Any]]
+
+
+def _empty_dict() -> Dict[str, Any]:
+    return {}
+
+
+def _empty_list(*_args: Any, **_kwargs: Any) -> List[Dict[str, Any]]:
+    return []
+
+
+def _empty_token_dict(_mint: str) -> Dict[str, Any]:
+    return {}
+
+
+def _empty_agent_events(_mint: str, _since: Optional[float] = None) -> List[Dict[str, Any]]:
+    return []
+
+
+def _empty_fills(_limit: int) -> List[Dict[str, Any]]:
+    return []
+
+
+def _empty_pnl(_window: str) -> Dict[str, Any]:
+    return {}
+
+
+def _default_close_handler(mint: str, qty: float) -> Dict[str, Any]:
+    raise RuntimeError("close position handler not configured")
 
 
 @dataclass
@@ -2341,6 +2479,22 @@ class UIState:
         default=lambda: {"controls": {}, "overrides": {}, "staleness": {}}
     )
     health_provider: DictProvider = field(default=lambda: {})
+    run_state_provider: RunStateProvider = field(default=_default_run_state)
+    run_env_provider: RunEnvProvider = field(default=_masked_environment_snapshot)
+    discovery_recent_provider: DiscoveryRecentProvider = field(default=_empty_list)
+    token_meta_provider: TokenMetaProvider = field(default=_empty_token_dict)
+    token_snapshot_provider: TokenSnapshotProvider = field(default=_empty_token_dict)
+    token_price_provider: TokenSnapshotProvider = field(default=_empty_token_dict)
+    token_depth_provider: TokenSnapshotProvider = field(default=_empty_token_dict)
+    agent_events_provider: AgentEventsProvider = field(default=_empty_agent_events)
+    execution_plan_provider: ExecutionPlanProvider = field(default=_empty_dict)
+    fills_provider: FillsProvider = field(default=_empty_fills)
+    positions_provider: PositionsProvider = field(default=_empty_list)
+    pnl_provider: PnlProvider = field(default=_empty_pnl)
+    risk_provider: RiskProvider = field(default=_empty_dict)
+    provider_status_provider: ProviderStatusProvider = field(default=_empty_list)
+    metrics_provider: MetricsProvider = field(default=_empty_dict)
+    close_position_handler: ClosePositionHandler = field(default=_default_close_handler)
     golden_depth_enabled: bool = False
     golden_momentum_enabled: bool = False
 
@@ -2505,6 +2659,196 @@ class UIState:
         except Exception:  # pragma: no cover
             log.exception("UI health provider failed")
             return {"ok": False}
+
+    def snapshot_run_state(self) -> Dict[str, Any]:
+        try:
+            payload = dict(self.run_state_provider())
+        except Exception:
+            log.exception("UI run state provider failed")
+            payload = _default_run_state()
+        fallback = _default_run_state()
+        for key, value in fallback.items():
+            payload.setdefault(key, value)
+        return payload
+
+    def snapshot_run_env(self) -> Dict[str, Any]:
+        try:
+            data = self.run_env_provider()
+        except Exception:
+            log.exception("UI run env provider failed")
+            data = _masked_environment_snapshot()
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): v for k, v in data.items()}
+
+    def snapshot_discovery_recent(self, limit: int = 200) -> List[Dict[str, Any]]:
+        try:
+            records = self.discovery_recent_provider(int(limit))
+        except Exception:
+            log.exception("UI discovery recent provider failed")
+            records = []
+        result: List[Dict[str, Any]] = []
+        for record in records:
+            if isinstance(record, Mapping):
+                result.append(dict(record))
+            else:
+                result.append({"value": record})
+        return result
+
+    def snapshot_token_meta(self, mint: str) -> Dict[str, Any]:
+        if not mint:
+            return {}
+        try:
+            data = self.token_meta_provider(str(mint))
+        except Exception:
+            log.exception("UI token meta provider failed")
+            data = {}
+        if isinstance(data, Mapping):
+            return dict(data)
+        return {"value": data}
+
+    def snapshot_token_snapshot(self, mint: str) -> Dict[str, Any]:
+        if not mint:
+            return {}
+        try:
+            data = self.token_snapshot_provider(str(mint))
+        except Exception:
+            log.exception("UI token snapshot provider failed")
+            data = {}
+        if isinstance(data, Mapping):
+            return dict(data)
+        return {"value": data}
+
+    def snapshot_token_price(self, mint: str) -> Dict[str, Any]:
+        if not mint:
+            return {}
+        try:
+            data = self.token_price_provider(str(mint))
+        except Exception:
+            log.exception("UI token price provider failed")
+            data = {}
+        if isinstance(data, Mapping):
+            return dict(data)
+        return {"value": data}
+
+    def snapshot_token_depth(self, mint: str) -> Dict[str, Any]:
+        if not mint:
+            return {}
+        try:
+            data = self.token_depth_provider(str(mint))
+        except Exception:
+            log.exception("UI token depth provider failed")
+            data = {}
+        if isinstance(data, Mapping):
+            return dict(data)
+        return {"value": data}
+
+    def snapshot_agent_events(self, mint: str, since: Optional[float] = None) -> List[Dict[str, Any]]:
+        if not mint:
+            return []
+        try:
+            events = self.agent_events_provider(str(mint), since)
+        except Exception:
+            log.exception("UI agent events provider failed")
+            events = []
+        result: List[Dict[str, Any]] = []
+        for event in events:
+            if isinstance(event, Mapping):
+                result.append(dict(event))
+            else:
+                result.append({"value": event})
+        return result
+
+    def snapshot_execution_plan(self, mint: str) -> Dict[str, Any]:
+        if not mint:
+            return {}
+        try:
+            data = self.execution_plan_provider(str(mint))
+        except Exception:
+            log.exception("UI execution plan provider failed")
+            data = {}
+        if isinstance(data, Mapping):
+            return dict(data)
+        return {"value": data}
+
+    def snapshot_fills(self, limit: int = 500) -> List[Dict[str, Any]]:
+        try:
+            fills = self.fills_provider(int(limit))
+        except Exception:
+            log.exception("UI fills provider failed")
+            fills = []
+        result: List[Dict[str, Any]] = []
+        for fill in fills:
+            if isinstance(fill, Mapping):
+                result.append(dict(fill))
+            else:
+                result.append({"value": fill})
+        return result
+
+    def snapshot_positions(self) -> List[Dict[str, Any]]:
+        try:
+            positions = self.positions_provider()
+        except Exception:
+            log.exception("UI positions provider failed")
+            positions = []
+        result: List[Dict[str, Any]] = []
+        for position in positions:
+            if isinstance(position, Mapping):
+                result.append(dict(position))
+            else:
+                result.append({"value": position})
+        return result
+
+    def snapshot_pnl(self, window: str) -> Dict[str, Any]:
+        try:
+            data = self.pnl_provider(str(window))
+        except Exception:
+            log.exception("UI PnL provider failed")
+            data = {}
+        if isinstance(data, Mapping):
+            return dict(data)
+        return {"value": data}
+
+    def snapshot_risk(self) -> Dict[str, Any]:
+        try:
+            data = self.risk_provider()
+        except Exception:
+            log.exception("UI risk provider failed")
+            data = {}
+        if isinstance(data, Mapping):
+            return dict(data)
+        return {"value": data}
+
+    def snapshot_provider_status(self) -> List[Dict[str, Any]]:
+        try:
+            providers = self.provider_status_provider()
+        except Exception:
+            log.exception("UI provider status provider failed")
+            providers = []
+        result: List[Dict[str, Any]] = []
+        for provider in providers:
+            if isinstance(provider, Mapping):
+                result.append(dict(provider))
+            else:
+                result.append({"value": provider})
+        return result
+
+    def snapshot_metrics(self) -> Dict[str, Any]:
+        try:
+            data = self.metrics_provider()
+        except Exception:
+            log.exception("UI metrics provider failed")
+            data = {}
+        if isinstance(data, Mapping):
+            return dict(data)
+        return {"value": data}
+
+    def submit_close_position(self, mint: str, qty: float) -> Dict[str, Any]:
+        try:
+            return self.close_position_handler(str(mint), float(qty))
+        except Exception as exc:
+            log.warning("UI close position handler failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
 
 
 
@@ -2834,6 +3178,119 @@ def create_app(state: UIState | None = None) -> Flask:
             ui_schema_version=UI_SCHEMA_VERSION,
             self_check=status.get("self_check"),
         )
+
+    @app.get("/api/run/state")
+    def api_run_state() -> Any:
+        payload = state.snapshot_run_state()
+        health_snapshot = state.snapshot_health()
+        if isinstance(health_snapshot, Mapping):
+            payload.setdefault("health", health_snapshot.get("status") or health_snapshot)
+        return jsonify(payload)
+
+    @app.get("/api/run/env")
+    def api_run_env() -> Any:
+        return jsonify(state.snapshot_run_env())
+
+    @app.get("/api/discovery/recent")
+    def api_discovery_recent() -> Any:
+        try:
+            limit = int(request.args.get("limit", "200"))
+        except (TypeError, ValueError):
+            limit = 200
+        return jsonify(state.snapshot_discovery_recent(limit))
+
+    @app.get("/api/token/<mint>")
+    def api_token_snapshot(mint: str) -> Any:
+        return jsonify(state.snapshot_token_snapshot(mint))
+
+    @app.get("/api/token/meta/<mint>")
+    def api_token_meta(mint: str) -> Any:
+        return jsonify(state.snapshot_token_meta(mint))
+
+    @app.get("/api/price/<mint>")
+    def api_token_price(mint: str) -> Any:
+        return jsonify(state.snapshot_token_price(mint))
+
+    @app.get("/api/depth/<mint>")
+    def api_token_depth(mint: str) -> Any:
+        return jsonify(state.snapshot_token_depth(mint))
+
+    @app.get("/api/agents/events")
+    def api_agent_events() -> Any:
+        mint = request.args.get("mint", "")
+        since_raw = request.args.get("since")
+        since: float | None = None
+        if since_raw:
+            try:
+                since = float(since_raw)
+            except (TypeError, ValueError):
+                since = None
+        return jsonify(state.snapshot_agent_events(mint, since))
+
+    @app.get("/api/execution/plan")
+    def api_execution_plan() -> Any:
+        mint = request.args.get("mint", "")
+        return jsonify(state.snapshot_execution_plan(mint))
+
+    @app.get("/api/execution/fills")
+    def api_execution_fills() -> Any:
+        try:
+            limit = int(request.args.get("limit", "500"))
+        except (TypeError, ValueError):
+            limit = 500
+        return jsonify(state.snapshot_fills(limit))
+
+    @app.post("/api/execution/close")
+    def api_execution_close() -> Any:
+        mint = request.args.get("mint") or ""
+        qty_raw = request.args.get("qty")
+        if qty_raw is None and request.is_json:
+            payload = request.get_json(silent=True) or {}
+            if isinstance(payload, Mapping):
+                qty_raw = payload.get("qty")
+        if qty_raw is None:
+            qty_raw = request.form.get("qty")
+        try:
+            qty = float(qty_raw) if qty_raw is not None else None
+        except (TypeError, ValueError):
+            qty = None
+        if not mint or qty is None:
+            return jsonify({"ok": False, "error": "mint and qty are required"}), 400
+        result = state.submit_close_position(mint, qty)
+        status_code = 200 if result.get("ok", False) else 503
+        return jsonify(result), status_code
+
+    @app.get("/api/portfolio/positions")
+    def api_portfolio_positions() -> Any:
+        return jsonify(state.snapshot_positions())
+
+    @app.get("/api/portfolio/pnl")
+    def api_portfolio_pnl() -> Any:
+        window = request.args.get("window", "24h")
+        return jsonify(state.snapshot_pnl(window))
+
+    @app.get("/api/risk/state")
+    def api_risk_state() -> Any:
+        return jsonify(state.snapshot_risk())
+
+    @app.get("/api/providers/status")
+    def api_provider_status() -> Any:
+        return jsonify(state.snapshot_provider_status())
+
+    @app.get("/api/health")
+    def api_health() -> Any:
+        return jsonify(state.snapshot_health())
+
+    @app.get("/api/logs/tail")
+    def api_logs_tail() -> Any:
+        try:
+            lines = int(request.args.get("lines", "500"))
+        except (TypeError, ValueError):
+            lines = 500
+        logs = state.snapshot_logs()
+        if lines >= 0:
+            logs = logs[-lines:]
+        return jsonify(logs)
 
     def _ws_config_payload() -> Dict[str, str]:
         manifest = build_ui_manifest(request)
