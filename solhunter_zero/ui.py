@@ -32,6 +32,7 @@ from .agents.discovery import (
     DISCOVERY_METHODS,
     resolve_discovery_method,
 )
+from .production import load_production_env
 from .util import parse_bool_env
 
 
@@ -42,6 +43,21 @@ UI_SCHEMA_VERSION: int = 3
 _UI_META_CACHE_TTL = 1.0
 _ui_meta_cache: tuple[float, Dict[str, Any]] | None = None
 _active_ui_state: "UIState" | None = None
+_ENV_BOOTSTRAPPED = False
+
+
+def _bootstrap_ui_environment() -> None:
+    """Ensure the live trading environment defaults are loaded once."""
+
+    global _ENV_BOOTSTRAPPED
+    if _ENV_BOOTSTRAPPED:
+        return
+
+    load_production_env()
+    os.environ.setdefault("SOLHUNTER_MODE", "live")
+    os.environ.setdefault("BROKER_CHANNEL", "solhunter-events-v3")
+    os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")
+    _ENV_BOOTSTRAPPED = True
 
 
 def _set_active_ui_state(state: "UIState" | None) -> None:
@@ -2520,6 +2536,7 @@ def _json_ready(obj: Any) -> Any:
 def create_app(state: UIState | None = None) -> Flask:
     """Return a configured Flask application bound to *state*."""
 
+    _bootstrap_ui_environment()
     if state is None:
         state = UIState()
     _set_active_ui_state(state)
@@ -2536,304 +2553,18 @@ def create_app(state: UIState | None = None) -> Flask:
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    def _status_cards(status: Dict[str, Any]) -> List[Dict[str, Any]]:
-        cards: List[Dict[str, Any]] = []
-        cards.append(
-            {
-                "label": "Event Bus",
-                "state": "ok" if status.get("event_bus") else "fail",
-                "caption": "connected" if status.get("event_bus") else "offline",
-            }
-        )
-        cards.append(
-            {
-                "label": "Trading Loop",
-                "state": "ok" if status.get("trading_loop") else "fail",
-                "caption": "running" if status.get("trading_loop") else "stopped",
-            }
-        )
-        if status.get("depth_service") is not None:
-            cards.append(
-                {
-                    "label": "Depth",
-                    "state": "ok" if status.get("depth_service") else "warn",
-                    "caption": "streaming" if status.get("depth_service") else "idle",
-                }
-            )
-        if status.get("rl_daemon") is not None:
-            cards.append(
-                {
-                    "label": "RL Daemon",
-                    "state": "ok" if status.get("rl_daemon") else "warn",
-                    "caption": "healthy" if status.get("rl_daemon") else "degraded",
-                }
-            )
-        heartbeat = status.get("heartbeat") or status.get("heartbeat_ts")
-        if heartbeat:
-            cards.append(
-                {
-                    "label": "Heartbeat",
-                    "state": "ok",
-                    "caption": str(heartbeat),
-                }
-            )
-        return cards
-
     @app.get("/")
     def index() -> Any:
         if request.args.get("format", "").lower() == "json":
             payload = {
-                "message": "SolHunter Zero Swarm UI",
-                "status": state.snapshot_status(),
-                "summary": state.snapshot_summary(),
-                "discovery": state.snapshot_discovery_console(),
-                "token_facts": state.snapshot_token_facts(),
-                "market": state.snapshot_market_state(),
-                "golden": state.snapshot_golden_snapshots(),
-                "suggestions": state.snapshot_suggestions(),
-                "votes": state.snapshot_vote_windows(),
-                "shadow": state.snapshot_shadow(),
-                "rl": state.snapshot_rl_panel(),
-                "settings": state.snapshot_settings(),
-                "activity": state.snapshot_activity(),
-                "logs": state.snapshot_logs(),
-                "weights": state.snapshot_weights(),
-                "config_overview": state.snapshot_config(),
-                "history": state.snapshot_history(),
-                "exits": state.snapshot_exit(),
+                "message": "SolHunter Live Console",
+                "ui_schema_version": UI_SCHEMA_VERSION,
+                "manifest": build_ui_manifest(request),
+                "meta": get_ui_meta_snapshot(),
             }
             return jsonify(_json_ready(payload))
 
-        status = state.snapshot_status()
-        status_cards = _status_cards(status)
-        discovery_console = state.snapshot_discovery_console()
-        token_facts = state.snapshot_token_facts()
-        market_state = state.snapshot_market_state()
-        golden_detail = state.snapshot_golden_snapshots()
-        suggestions = state.snapshot_suggestions()
-        exit_panel = state.snapshot_exit()
-        vote_windows = state.snapshot_vote_windows()
-        shadow = state.snapshot_shadow()
-        rl_panel = state.snapshot_rl_panel()
-        settings = state.snapshot_settings()
-        summary = state.snapshot_summary()
-
-        golden_snapshots = golden_detail.get("snapshots", [])
-        golden_summary = {
-            "count": len(golden_snapshots),
-        }
-        suggestion_metrics = suggestions.get("metrics", {})
-        rl_summary = {
-            "weights_applied": len(rl_panel.get("weights", [])),
-        }
-        swarm_overall = {
-            "stale": suggestions.get("metrics", {}).get("stale", False),
-            "age_label": suggestions.get("metrics", {}).get("updated_label", "n/a"),
-        }
-        stream_lag = {
-            "ohlcv": (market_state.get("lag_ms") or {}).get("ohlcv_ms"),
-            "depth": (market_state.get("lag_ms") or {}).get("depth_ms"),
-            "golden": golden_detail.get("lag_ms"),
-        }
-        golden_lag_value = None
-        golden_candidates = [
-            status.get("golden_lag_ms"),
-            summary.get("golden", {}).get("lag_ms")
-            if isinstance(summary, dict)
-            else None,
-            stream_lag.get("golden"),
-        ]
-        for candidate in golden_candidates:
-            try:
-                numeric = float(candidate)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(numeric):
-                continue
-            golden_lag_value = numeric
-            break
-        agent_is_stale = bool(suggestion_metrics.get("stale"))
-        agent_age_label = suggestion_metrics.get("updated_label") or swarm_overall.get(
-            "age_label", "n/a"
-        )
-        if not isinstance(summary, dict):
-            summary = {}
-        evaluation_summary = summary.get("evaluation")
-        if not isinstance(evaluation_summary, dict):
-            evaluation_summary = {}
-        execution_summary = summary.get("execution")
-        if not isinstance(execution_summary, dict):
-            execution_summary = {}
-        paper_summary = summary.get("paper_pnl")
-        if not isinstance(paper_summary, dict):
-            paper_summary = {}
-        golden_meta = summary.get("golden")
-        if not isinstance(golden_meta, dict):
-            golden_meta = {}
-
-        session_summary = {
-            "suggestions_5m": evaluation_summary.get("suggestions_5m"),
-            "acceptance_rate": evaluation_summary.get("acceptance_rate"),
-            "open_vote_windows": evaluation_summary.get("open_vote_windows"),
-            "golden_hashes": golden_meta.get("count"),
-            "shadow_fills": execution_summary.get("count"),
-            "paper_unrealized_usd": paper_summary.get("latest_unrealized"),
-            "lag_bus_ms": status.get("bus_latency_ms"),
-            "lag_ohlcv_ms": status.get("ohlcv_lag_ms")
-            if status.get("ohlcv_lag_ms") is not None
-            else stream_lag.get("ohlcv"),
-            "lag_depth_ms": status.get("depth_lag_ms")
-            if status.get("depth_lag_ms") is not None
-            else stream_lag.get("depth"),
-            "lag_golden_ms": golden_lag_value,
-        }
-
-        def _badge_css(status_value: str) -> str:
-            mapping = {
-                "open": "status-ok",
-                "ok": "status-ok",
-                "streaming": "status-ok",
-                "warn": "status-warn",
-                "warning": "status-warn",
-                "error": "status-danger",
-                "fail": "status-danger",
-                "danger": "status-danger",
-                "connecting": "status-pending",
-                "pending": "status-pending",
-                "idle": "status-idle",
-            }
-            return mapping.get(status_value, "status-idle")
-
-        def _lag_badge(value: Any, fallback: str) -> tuple[str, str]:
-            if value is None:
-                return "connecting", fallback
-            try:
-                numeric = float(value)
-            except (TypeError, ValueError):
-                return "connecting", fallback
-            if not math.isfinite(numeric):
-                return "connecting", fallback
-            if numeric > 10_000.0:
-                status_value = "error"
-            elif numeric > 3_000.0:
-                status_value = "warn"
-            else:
-                status_value = "open"
-            detail = f"Lag {int(numeric + 0.5)} ms"
-            return status_value, detail
-
-        def _make_badge(name: str, label: str, status_value: str, detail: str) -> Dict[str, str]:
-            return {
-                "name": name,
-                "label": label,
-                "status": status_value,
-                "detail": detail,
-                "css_class": _badge_css(status_value),
-            }
-
-        market_lag_value: float | None = None
-        for candidate in (
-            session_summary.get("lag_ohlcv_ms"),
-            session_summary.get("lag_depth_ms"),
-        ):
-            try:
-                numeric = float(candidate)
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(numeric):
-                continue
-            if market_lag_value is None or numeric > market_lag_value:
-                market_lag_value = numeric
-        market_status, market_detail = _lag_badge(market_lag_value, "Awaiting market data")
-        golden_status, golden_detail = _lag_badge(
-            golden_lag_value, "Awaiting golden stream"
-        )
-        agent_label = agent_age_label or "n/a"
-        agent_prefix = "Stale" if agent_is_stale else "Fresh"
-        agent_detail = f"{agent_prefix} · {agent_label}"
-
-        connection_badges = [
-            _make_badge("events", "Events", "connecting", "Waiting for metadata…"),
-            _make_badge("market", "Market", market_status, market_detail),
-            _make_badge("golden", "Golden", golden_status, golden_detail),
-            _make_badge("agents", "Agents", "warn" if agent_is_stale else "open", agent_detail),
-            _make_badge("rl", "RL", "connecting", "Waiting for metadata…"),
-            _make_badge("logs", "Logs", "connecting", "Waiting for metadata…"),
-        ]
-        stream_lag["golden"] = golden_lag_value
-        execution_snapshot = _resolve_execution_snapshot(status)
-
-        def _title_case(text: str | None) -> str:
-            if not text:
-                return ""
-            parts = str(text).replace("_", " ").replace("-", " ").split()
-            return " ".join(part.capitalize() for part in parts if part)
-
-        rl_mode_value = str(
-            execution_snapshot.get("rl_mode")
-            or status.get("rl_mode")
-            or "shadow"
-        )
-        rl_gate_value = str(
-            execution_snapshot.get("rl_gate")
-            or status.get("rl_gate")
-            or ""
-        ).lower()
-        rl_label = _title_case(rl_mode_value) or "Shadow"
-        if rl_gate_value and rl_gate_value not in {"", "open"}:
-            rl_label = f"{rl_label} · {_title_case(rl_gate_value)}"
-
-        header_signals = {
-            "environment": (status.get("environment") or "dev").upper(),
-            "paper_mode": bool(execution_snapshot.get("paper")),
-            "paused": bool(status.get("paused")),
-            "rl_mode": rl_mode_value,
-            "rl_label": rl_label,
-            "rl_gate": rl_gate_value or None,
-            "bus_latency_ms": status.get("bus_latency_ms"),
-            "stream_lag": stream_lag,
-            "self_check": status.get("self_check"),
-        }
-        kpis = {
-            "suggestions_per_5m": suggestions.get("metrics", {}).get("rate_per_min", 0)
-            * 5.0,
-            "acceptance_rate": suggestions.get("metrics", {}).get("acceptance_rate", 0),
-            "golden_hashes": golden_summary.get("count", 0),
-            "open_windows": len(vote_windows.get("windows", [])),
-            "paper_pnl": summary.get("execution", {}).get("pnl_1d"),
-            "drawdown": summary.get("execution", {}).get("drawdown"),
-            "turnover": summary.get("execution", {}).get("turnover"),
-        }
-
-        return render_template(
-            "ui.html",
-            status_cards=status_cards,
-            discovery_console=discovery_console,
-            token_facts=token_facts,
-            market_state=market_state,
-            golden_snapshots=golden_snapshots,
-            golden_summary=golden_summary,
-            suggestions=suggestions,
-            suggestion_metrics=suggestion_metrics,
-            exit_panel=exit_panel,
-            vote_windows=vote_windows,
-            shadow=shadow,
-            rl_panel=rl_panel,
-            rl_summary=rl_summary,
-            settings=settings,
-            swarm_overall=swarm_overall,
-            header_signals=header_signals,
-            kpis=kpis,
-            session_summary=session_summary,
-            connection_badges=connection_badges,
-            golden_lag_value=golden_lag_value,
-            agent_is_stale=agent_is_stale,
-            agent_age_label=agent_age_label,
-            golden_depth_enabled=state.golden_depth_enabled,
-            golden_momentum_enabled=state.golden_momentum_enabled,
-            ui_schema_version=UI_SCHEMA_VERSION,
-            self_check=status.get("self_check"),
-        )
+        return render_template("ui.html", ui_schema_version=UI_SCHEMA_VERSION)
 
     def _ws_config_payload() -> Dict[str, str]:
         manifest = build_ui_manifest(request)
