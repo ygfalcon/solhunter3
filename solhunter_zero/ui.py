@@ -38,7 +38,7 @@ from .util import parse_bool_env
 log = logging.getLogger(__name__)
 
 
-UI_SCHEMA_VERSION: int = 3
+UI_SCHEMA_VERSION: int = 4
 _UI_META_CACHE_TTL = 1.0
 _ui_meta_cache: tuple[float, Dict[str, Any]] | None = None
 _active_ui_state: "UIState" | None = None
@@ -208,6 +208,73 @@ def _compute_schema_hash() -> str:
     payload = {"ui_schema_version": UI_SCHEMA_VERSION, "schemas": records}
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     return digest
+
+
+def _live_console_panels() -> List[Dict[str, Any]]:
+    """Return the default Live Console manifest."""
+
+    return [
+        {
+            "name": "Run Header & Safety State",
+            "snapshot": "/api/run/state",
+            "stream": "/ws/run/state",
+            "health": "/api/health",
+            "env_snapshot": "/api/run/env",
+        },
+        {
+            "name": "Discovery Stream (Mint & Mempool)",
+            "snapshot": "/api/discovery/recent?limit=200",
+            "stream": "/ws/discovery",
+            "meta": "/api/token/meta/:mint",
+        },
+        {
+            "name": "Token Deep View",
+            "snapshot": "/api/token/:mint",
+            "price_snapshot": "/api/price/:mint",
+            "price_stream": "/ws/price/:mint",
+            "depth_stream": "/ws/depth/:mint",
+        },
+        {
+            "name": "Agent Swarm Timeline",
+            "snapshot": "/api/agents/events?mint=:mint&since=:ts",
+            "stream": "/ws/agents/events",
+        },
+        {
+            "name": "Trade Planner & Routing",
+            "snapshot": "/api/execution/plan?mint=:mint",
+            "stream": "/ws/execution/plan",
+        },
+        {
+            "name": "Orders, Fills & Slippage",
+            "snapshot": "/api/execution/fills?limit=500",
+            "stream": "/ws/execution/fills",
+        },
+        {
+            "name": "Positions & Portfolio",
+            "snapshot": "/api/portfolio/positions",
+            "stream": "/ws/portfolio",
+            "poll_interval_s": 5,
+            "close_endpoint": "/api/execution/close?mint=:mint&qty=:qty",
+        },
+        {
+            "name": "PnL & Risk Overview",
+            "snapshot": "/api/portfolio/pnl?window=1h",
+            "snapshot_alt": "/api/portfolio/pnl?window=24h",
+            "risk_snapshot": "/api/risk/state",
+            "stream": "/ws/risk",
+        },
+        {
+            "name": "Runtime Health & Rate Limits",
+            "snapshot": "/api/health",
+            "providers_snapshot": "/api/providers/status",
+            "stream": "/ws/metrics",
+        },
+        {
+            "name": "Structured Logs (Live)",
+            "snapshot": "/api/logs/tail?lines=500",
+            "stream": "/ws/logs?level=INFO|WARN|ERROR",
+        },
+    ]
 
 
 def _price_provider_order() -> List[str]:
@@ -1351,6 +1418,7 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         "price_provider_timeouts_ms": _price_provider_timeouts(),
         "discovery": {"sources": _discovery_hint_sources(state)},
         "seed_token_metadata": seed_metadata,
+        "live_console_panels": _live_console_panels(),
     }
 
     execution = _resolve_execution_snapshot(status)
@@ -1455,6 +1523,8 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         "generated_ts": time.time(),
         "self_check": self_check_payload,
     }
+
+    payload["live_console"] = {"panels": _live_console_panels()}
 
     if heartbeat_ts is not None:
         payload["heartbeat_ts"] = heartbeat_ts
@@ -1806,6 +1876,7 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
 
     ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
     manifest["ui_port"] = _parse_port(ui_port_value, 5000)
+    manifest["live_console"] = {"panels": _live_console_panels()}
     return manifest
 def _shutdown_state(state: _WebsocketState) -> None:
     loop = state.loop
@@ -2601,21 +2672,11 @@ def create_app(state: UIState | None = None) -> Flask:
                 "config_overview": state.snapshot_config(),
                 "history": state.snapshot_history(),
                 "exits": state.snapshot_exit(),
+                "live_console": {"panels": _live_console_panels()},
             }
             return jsonify(_json_ready(payload))
 
         status = state.snapshot_status()
-        status_cards = _status_cards(status)
-        discovery_console = state.snapshot_discovery_console()
-        token_facts = state.snapshot_token_facts()
-        market_state = state.snapshot_market_state()
-        golden_detail = state.snapshot_golden_snapshots()
-        suggestions = state.snapshot_suggestions()
-        exit_panel = state.snapshot_exit()
-        vote_windows = state.snapshot_vote_windows()
-        shadow = state.snapshot_shadow()
-        rl_panel = state.snapshot_rl_panel()
-        settings = state.snapshot_settings()
         summary = state.snapshot_summary()
 
         golden_snapshots = golden_detail.get("snapshots", [])
@@ -2763,76 +2824,82 @@ def create_app(state: UIState | None = None) -> Flask:
         stream_lag["golden"] = golden_lag_value
         execution_snapshot = _resolve_execution_snapshot(status)
 
-        def _title_case(text: str | None) -> str:
-            if not text:
-                return ""
-            parts = str(text).replace("_", " ").replace("-", " ").split()
-            return " ".join(part.capitalize() for part in parts if part)
-
-        rl_mode_value = str(
-            execution_snapshot.get("rl_mode")
-            or status.get("rl_mode")
-            or "shadow"
+        summary = state.snapshot_summary()
+        workflow = (
+            status.get("workflow")
+            or os.getenv("SOLHUNTER_WORKFLOW")
+            or os.getenv("RUNTIME_WORKFLOW")
+            or "live"
         )
-        rl_gate_value = str(
-            execution_snapshot.get("rl_gate")
-            or status.get("rl_gate")
-            or ""
-        ).lower()
-        rl_label = _title_case(rl_mode_value) or "Shadow"
-        if rl_gate_value and rl_gate_value not in {"", "open"}:
-            rl_label = f"{rl_label} · {_title_case(rl_gate_value)}"
+        raw_mode = status.get("mode") or os.getenv("SOLHUNTER_MODE") or "live"
+        mode = str(raw_mode).lower()
+        if mode not in {"live", "paper"}:
+            mode = "paper" if parse_bool_env("PAPER_MODE", False) else "live"
 
-        header_signals = {
-            "environment": (status.get("environment") or "dev").upper(),
-            "paper_mode": bool(execution_snapshot.get("paper")),
-            "paused": bool(status.get("paused")),
-            "rl_mode": rl_mode_value,
-            "rl_label": rl_label,
-            "rl_gate": rl_gate_value or None,
-            "bus_latency_ms": status.get("bus_latency_ms"),
-            "stream_lag": stream_lag,
-            "self_check": status.get("self_check"),
+        event_bus_url = (
+            os.getenv("EVENT_BUS_URL")
+            or getattr(event_bus, "DEFAULT_WS_URL", None)
+            or "ws://127.0.0.1:8779"
+        )
+        broker_channel = (
+            status.get("channel")
+            or os.getenv("BROKER_CHANNEL")
+            or _env_or_default("BROKER_CHANNEL")
+            or "solhunter-events-v3"
+        )
+        redis_url = _discover_broker_url() or (
+            _env_or_default("REDIS_URL") or "redis://localhost:6379/1"
+        )
+        env_file = os.getenv("SOLHUNTER_ENV_FILE") or "etc/solhunter/env.production"
+        keypair_path = os.getenv("KEYPAIR_PATH")
+        keypair_fingerprint = None
+        if keypair_path:
+            try:
+                keypair_fingerprint = hashlib.sha256(
+                    keypair_path.encode("utf-8")
+                ).hexdigest()[:16]
+            except Exception:
+                keypair_fingerprint = Path(keypair_path).name
+
+        rl_health_url = os.getenv("RL_HEALTH_URL")
+        canary_flag = bool(
+            status.get("canary")
+            or str(status.get("workflow") or "").lower() == "canary"
+            or parse_bool_env("SOLHUNTER_CANARY", False)
+            or parse_bool_env("CANARY", False)
+        )
+
+        bootstrap_config: Dict[str, Any] = {
+            "schemaVersion": UI_SCHEMA_VERSION,
+            "panels": _live_console_panels(),
+            "mode": mode,
+            "workflow": str(workflow),
+            "status": _json_ready(status),
+            "summary": _json_ready(summary),
+            "eventBus": {"url": event_bus_url, "channel": broker_channel},
+            "redisUrl": redis_url,
+            "envFile": env_file,
+            "keypairPath": keypair_path,
+            "keypairFingerprint": keypair_fingerprint,
+            "healthUrl": "/api/health",
+            "rlHealthUrl": rl_health_url,
+            "envSnapshotUrl": "/api/run/env",
+            "selfCheckDurationMs": 30_000,
+            "canary": canary_flag,
         }
-        kpis = {
-            "suggestions_per_5m": suggestions.get("metrics", {}).get("rate_per_min", 0)
-            * 5.0,
-            "acceptance_rate": suggestions.get("metrics", {}).get("acceptance_rate", 0),
-            "golden_hashes": golden_summary.get("count", 0),
-            "open_windows": len(vote_windows.get("windows", [])),
-            "paper_pnl": summary.get("execution", {}).get("pnl_1d"),
-            "drawdown": summary.get("execution", {}).get("drawdown"),
-            "turnover": summary.get("execution", {}).get("turnover"),
-        }
+        if status.get("budget_remaining") is not None:
+            bootstrap_config["budgetRemaining"] = status.get("budget_remaining")
+        if status.get("risk_current") is not None:
+            bootstrap_config["riskCurrent"] = status.get("risk_current")
+        if status.get("rps_limits"):
+            bootstrap_config["rpsLimits"] = status.get("rps_limits")
+        if status.get("rpc_backoff"):
+            bootstrap_config["rpcBackoff"] = status.get("rpc_backoff")
 
         return render_template(
             "ui.html",
-            status_cards=status_cards,
-            discovery_console=discovery_console,
-            token_facts=token_facts,
-            market_state=market_state,
-            golden_snapshots=golden_snapshots,
-            golden_summary=golden_summary,
-            suggestions=suggestions,
-            suggestion_metrics=suggestion_metrics,
-            exit_panel=exit_panel,
-            vote_windows=vote_windows,
-            shadow=shadow,
-            rl_panel=rl_panel,
-            rl_summary=rl_summary,
-            settings=settings,
-            swarm_overall=swarm_overall,
-            header_signals=header_signals,
-            kpis=kpis,
-            session_summary=session_summary,
-            connection_badges=connection_badges,
-            golden_lag_value=golden_lag_value,
-            agent_is_stale=agent_is_stale,
-            agent_age_label=agent_age_label,
-            golden_depth_enabled=state.golden_depth_enabled,
-            golden_momentum_enabled=state.golden_momentum_enabled,
+            bootstrap_json=json.dumps(_json_ready(bootstrap_config)),
             ui_schema_version=UI_SCHEMA_VERSION,
-            self_check=status.get("self_check"),
         )
 
     def _ws_config_payload() -> Dict[str, str]:
@@ -3103,76 +3170,17 @@ def create_app(state: UIState | None = None) -> Flask:
             }
         )
 
-    run_live_providers: Dict[str, Callable[[], Any]] = {
-        "discovery": state.snapshot_discovery_console,
-        "token-facts": state.snapshot_token_facts,
-        "market": state.snapshot_market_state,
-        "golden": state.snapshot_golden_snapshots,
-        "suggestions": state.snapshot_suggestions,
-        "vote": state.snapshot_vote_windows,
-        "shadow": state.snapshot_shadow,
-        "rl": state.snapshot_rl_panel,
-        "exits": state.snapshot_exit,
-    }
-
-    run_live_aliases = {
-        "token_facts": "token-facts",
-        "tokenfacts": "token-facts",
-        "market_state": "market",
-        "golden_snapshot": "golden",
-        "golden_snapshots": "golden",
-        "suggestion": "suggestions",
-        "suggestion_panel": "suggestions",
-        "votes": "vote",
-        "vote_windows": "vote",
-        "shadow_panel": "shadow",
-        "rl_panel": "rl",
-        "diagnostics": "exits",
-        "exit": "exits",
-    }
-
-    def _normalise_run_live_panel(panel: str) -> str:
-        name = panel.strip().lower().replace("_", "-")
-        name = name.strip("/")
-        return run_live_aliases.get(name, name)
-
-    def _run_live_manifest() -> Dict[str, str]:
-        return {key: f"/run/live/{key}" for key in sorted(run_live_providers)}
-
-    def _run_live_payload(panel: str, data: Any) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "ok": True,
-            "panel": panel,
-            "endpoint": f"/run/live/{panel}",
-            "data": _json_ready(data),
-        }
-        if isinstance(data, Mapping):
-            for updated_key in ("updated_at", "updated", "ts", "timestamp"):
-                updated_value = data.get(updated_key)
-                if updated_value is not None:
-                    payload["updated_at"] = updated_value
-                    break
-            stale = data.get("stale")
-            if stale is not None:
-                payload["stale"] = stale
-        return payload
-
     @app.get("/run/live")
     def run_live_index() -> Any:
-        return jsonify({"ok": True, "panels": _run_live_manifest()})
+        return jsonify({"ok": True, "panels": _live_console_panels()})
 
     @app.get("/run/live/<path:panel>")
     def run_live_panel(panel: str) -> Any:
-        key = _normalise_run_live_panel(panel)
-        provider = run_live_providers.get(key)
-        if provider is None:
-            return jsonify({"ok": False, "error": f"unknown panel: {panel}"}), 404
-        try:
-            data = provider()
-        except Exception as exc:  # pragma: no cover - defensive guardrail
-            log.exception("Run live provider for %s failed", key)
-            return jsonify({"ok": False, "error": str(exc)}), 500
-        return jsonify(_run_live_payload(key, data))
+        message = (
+            "Direct panel payloads are no longer served from /run/live. "
+            "Use the production REST and websocket endpoints advertised in the manifest."
+        )
+        return jsonify({"ok": False, "panel": panel, "error": message}), 410
 
     @app.get("/swarm/discovery")
     def swarm_discovery() -> Any:
