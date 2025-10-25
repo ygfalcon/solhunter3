@@ -140,6 +140,25 @@
       flex-direction: column;
       gap: 14px;
       min-height: 160px;
+      position: relative;
+    }
+    article.panel[data-rate-limited] {
+      border-color: rgba(255, 79, 94, 0.65);
+      box-shadow: 0 0 0 1px rgba(255, 79, 94, 0.35);
+    }
+    article.panel[data-rate-limited]::after {
+      content: attr(data-rate-limited);
+      position: absolute;
+      top: 12px;
+      right: 16px;
+      font-size: 0.7rem;
+      color: var(--danger);
+      background: rgba(255, 79, 94, 0.12);
+      border: 1px solid rgba(255, 79, 94, 0.4);
+      border-radius: 10px;
+      padding: 4px 8px;
+      max-width: 60%;
+      text-align: right;
     }
     .panel-header {
       display: flex;
@@ -221,6 +240,8 @@
     .portfolio-actions { display: flex; gap: 6px; }
     .portfolio-actions button { padding: 6px 10px; border-radius: 10px; border: 1px solid rgba(75, 130, 255, 0.4); background: rgba(16, 22, 36, 0.85); color: var(--text); cursor: pointer; }
     .portfolio-actions button[disabled] { opacity: 0.5; cursor: not-allowed; }
+    a.link-out { color: var(--accent); text-decoration: none; }
+    a.link-out:hover { text-decoration: underline; }
     @media (max-width: 1320px) {
       .console-grid { grid-template-columns: repeat(2, minmax(300px, 1fr)); }
     }
@@ -263,9 +284,9 @@
               <h2>Discovery Stream (Mint &amp; Mempool)</h2>
               <div class="controls">
                 <select data-control="window">
-                  <option value="300">5s</option>
-                  <option value="900" selected>15s</option>
-                  <option value="3600">60s</option>
+                  <option value="5">5s</option>
+                  <option value="15" selected>15s</option>
+                  <option value="60">60s</option>
                 </select>
                 <button type="button" data-control="pause">Pause</button>
               </div>
@@ -312,9 +333,9 @@
               <h2>Agent Swarm Timeline</h2>
               <div class="controls">
                 <select data-control="window">
-                  <option value="1800" selected>30m</option>
-                  <option value="3600">60m</option>
-                  <option value="10800">3h</option>
+                  <option value="5">5s</option>
+                  <option value="15">15s</option>
+                  <option value="60" selected>60s</option>
                 </select>
                 <button type="button" data-control="pause">Pause</button>
               </div>
@@ -346,9 +367,10 @@
               <h2>Orders, Fills &amp; Slippage</h2>
               <div class="controls">
                 <select data-control="window">
-                  <option value="3600" selected>60m</option>
-                  <option value="21600">6h</option>
-                  <option value="86400">24h</option>
+                  <option value="5">5s</option>
+                  <option value="15">15s</option>
+                  <option value="60" selected>60s</option>
+                  <option value="0">All</option>
                 </select>
                 <button type="button" data-control="pause">Pause</button>
               </div>
@@ -474,8 +496,14 @@
     riskStream: '/ws/risk',
     providerStatus: '/api/providers/status',
     metricsStream: '/ws/metrics',
-    logsSnapshot: '/api/logs/tail?lines=500',
-    logsStream: '/ws/logs?level=INFO|WARN|ERROR'
+    logsSnapshot: (runId) => {
+      const base = '/api/logs/tail?lines=500';
+      return runId ? `${base}&run_id=${encodeURIComponent(runId)}` : base;
+    },
+    logsStream: (runId) => {
+      const base = '/ws/logs?level=INFO|WARN|ERROR';
+      return runId ? `${base}&run_id=${encodeURIComponent(runId)}` : base;
+    }
   };
   const hydration = {
     runHeader: false,
@@ -489,30 +517,40 @@
     runtime: false,
     logs: false
   };
-    const state = {
-      selectedMint: null,
-      runState: null,
-      rlHealthUrl: null,
-      discoveryWindow: 900,
+  const RATE_LIMIT_PANEL_MAP = [
+    {pattern: /helius/i, panels: ['panel-token', 'panel-planner']},
+    {pattern: /(das|amm|mint)/i, panels: ['panel-discovery']},
+    {pattern: /(portfolio|position|risk)/i, panels: ['panel-positions', 'panel-pnl']},
+    {pattern: /(execution|order|router|jito)/i, panels: ['panel-orders', 'panel-planner']},
+    {pattern: /(log|event|redis|queue)/i, panels: ['panel-logs']}
+  ];
+  const state = {
+    selectedMint: null,
+    runState: null,
+    rlHealthUrl: null,
+    discoveryWindow: 15,
     discoveryPaused: false,
     discoveryEvents: [],
     tokenPaused: false,
-    agentWindow: 1800,
+    agentWindow: 60,
     agentPaused: false,
     plannerPaused: false,
-    ordersWindow: 3600,
-      ordersPaused: false,
-      orders: [],
-      positionsPaused: false,
-      pnlWindow: 86400,
-      pnlPaused: false,
-      runtimePaused: false,
-      logsPaused: false,
-      planByMint: new Map(),
-      lastRiskState: null,
-      pnlMetrics: null,
-      runtimeMetrics: null
-    };
+    ordersWindow: 60,
+    ordersPaused: false,
+    orders: [],
+    positionsPaused: false,
+    pnlWindow: 86400,
+    pnlPaused: false,
+    runtimePaused: false,
+    logsPaused: false,
+    planByMint: new Map(),
+    lastRiskState: null,
+    pnlMetrics: null,
+    runtimeMetrics: null,
+    priceSnapshots: new Map(),
+    depthByMint: new Map(),
+    rateLimitAnnotations: new Map()
+  };
   function createStore(initial) {
     let value = initial;
     const listeners = new Set();
@@ -604,6 +642,159 @@
       label: date.toLocaleString(undefined, {hour12: false}),
       utc: date.toISOString()
     };
+  }
+  function maybeNumber(value) {
+    if (value === undefined || value === null || value === '') return null;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+  function updatePriceSnapshot(mint, payload) {
+    if (!mint || !payload || typeof payload !== 'object') return;
+    const snapshot = state.priceSnapshots.get(mint) || {};
+    const assignments = [
+      ['price', payload.price ?? payload.px ?? payload.last],
+      ['mark', payload.mark ?? payload.mark_price],
+      ['mid', payload.mid ?? payload.mid_price],
+      ['reference', payload.reference_price ?? payload.target_price]
+    ];
+    assignments.forEach(([key, value]) => {
+      const num = maybeNumber(value);
+      if (num !== null) {
+        snapshot[key] = num;
+      }
+    });
+    if (snapshot.price !== undefined && snapshot.mark === undefined) {
+      snapshot.mark = snapshot.price;
+    }
+    const origin = typeof payload.__source === 'string' ? payload.__source : 'stream';
+    state.priceSnapshots.set(mint, snapshot);
+    doc.dispatchEvent(new CustomEvent('price-snapshot-update', {detail: {mint, snapshot, origin}}));
+  }
+  function normalizeOrderbookPayload(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    const source = payload.orderbook || payload.book || payload.depth || payload;
+    const toPairs = (levels) => {
+      if (!Array.isArray(levels)) return [];
+      return levels
+        .map((level) => {
+          if (Array.isArray(level)) {
+            const price = maybeNumber(level[0]);
+            const size = maybeNumber(level[1]);
+            return price !== null && size !== null && size > 0 ? [price, size] : null;
+          }
+          if (level && typeof level === 'object') {
+            const price = maybeNumber(level.price ?? level.px ?? level[0]);
+            const size = maybeNumber(level.size ?? level.qty ?? level.quantity ?? level.amount ?? level[1]);
+            return price !== null && size !== null && size > 0 ? [price, size] : null;
+          }
+          return null;
+        })
+        .filter(Boolean);
+    };
+    const bids = toPairs(source.bids || source.bid || source.buy || []);
+    const asks = toPairs(source.asks || source.ask || source.sell || []);
+    if (!bids.length && !asks.length) return null;
+    const ts = toMillis(source.ts || source.timestamp || payload.ts || payload.timestamp || Date.now());
+    return {bids, asks, ts};
+  }
+  function resolvePanelsForMetric(metricKey) {
+    const panels = new Set(['panel-runtime']);
+    RATE_LIMIT_PANEL_MAP.forEach(({pattern, panels: mapped}) => {
+      if (pattern.test(metricKey)) {
+        mapped.forEach((panelId) => panels.add(panelId));
+      }
+    });
+    return Array.from(panels);
+  }
+  function applyRateLimitAnnotations(annotationMap) {
+    const applied = new Set();
+    annotationMap.forEach((messages, panelId) => {
+      const panel = doc.getElementById(panelId);
+      if (!panel) return;
+      const uniqueMessages = Array.from(new Set(messages));
+      panel.setAttribute('data-rate-limited', `Rate limited: ${uniqueMessages.join(', ')}`);
+      applied.add(panelId);
+    });
+    state.rateLimitAnnotations.forEach((_, panelId) => {
+      if (!applied.has(panelId)) {
+        const panel = doc.getElementById(panelId);
+        if (panel) panel.removeAttribute('data-rate-limited');
+      }
+    });
+    state.rateLimitAnnotations = new Map(annotationMap);
+  }
+  function annotateRateLimitPanels(metrics) {
+    if (!metrics || typeof metrics !== 'object') {
+      applyRateLimitAnnotations(new Map());
+      return;
+    }
+    const annotations = new Map();
+    Object.entries(metrics).forEach(([key, value]) => {
+      const numeric = maybeNumber(value);
+      if (numeric === null || numeric <= 0) return;
+      const normalizedKey = key.toLowerCase();
+      if (!normalizedKey.includes('429') && !normalizedKey.includes('rate_limit')) return;
+      resolvePanelsForMetric(normalizedKey).forEach((panelId) => {
+        const list = annotations.get(panelId) || [];
+        list.push(key);
+        annotations.set(panelId, list);
+      });
+    });
+    applyRateLimitAnnotations(annotations);
+  }
+  function extractPlanSize(plan) {
+    if (!plan || typeof plan !== 'object') return null;
+    const candidates = [plan.size, plan.quantity, plan.qty, plan.base_size, plan.amount, plan.notional];
+    for (const value of candidates) {
+      const num = maybeNumber(value);
+      if (num !== null && num > 0) return num;
+    }
+    return null;
+  }
+  function getReferencePrice(mint, plan) {
+    const candidates = [];
+    if (plan && typeof plan === 'object') {
+      candidates.push(plan.reference_price, plan.mark_price, plan.mark, plan.mid_price, plan.price, plan.quote_price);
+    }
+    const snapshot = state.priceSnapshots.get(mint);
+    if (snapshot) {
+      candidates.push(snapshot.mid, snapshot.mark, snapshot.price, snapshot.reference);
+    }
+    for (const value of candidates) {
+      const num = maybeNumber(value);
+      if (num !== null && num > 0) return num;
+    }
+    return null;
+  }
+  function simulatePlanFill(mint, plan) {
+    const book = state.depthByMint.get(mint);
+    if (!book) return null;
+    const rawIntent = (plan.intent || plan.action || plan.side || '').toString().toLowerCase();
+    const isSell = rawIntent.includes('sell');
+    const isBuy = rawIntent.includes('buy');
+    if (!isSell && !isBuy) return null;
+    const size = extractPlanSize(plan);
+    if (size === null) return null;
+    const levels = isSell ? book.bids : book.asks;
+    if (!Array.isArray(levels) || !levels.length) return null;
+    let remaining = size;
+    let notional = 0;
+    let filled = 0;
+    for (const [price, qty] of levels) {
+      if (remaining <= 0) break;
+      const levelPrice = maybeNumber(price);
+      const levelQty = maybeNumber(qty);
+      if (levelPrice === null || levelQty === null || levelQty <= 0) continue;
+      const take = Math.min(remaining, levelQty);
+      notional += take * levelPrice;
+      filled += take;
+      remaining -= take;
+    }
+    if (filled <= 0) return null;
+    const avgPrice = notional / filled;
+    const reference = getReferencePrice(mint, plan);
+    const impactPct = reference ? ((avgPrice - reference) / reference) * 100 : null;
+    return {avgPrice, filled, remaining, impactPct, side: isSell ? 'sell' : 'buy', ts: book.ts};
   }
   function setHealthPill(status, message) {
     const pill = doc.getElementById('pill-health');
@@ -910,7 +1101,6 @@ function setupDiscoveryPanel() {
       item.addEventListener('click', () => selectedMintStore.set(event.mint));
       timeline.appendChild(item);
     });
-    hydration.discovery = filtered.length > 0;
   }
   async function hydrateMeta(mint) {
     if (!mint || tokenMetaCache.has(mint)) return;
@@ -932,6 +1122,7 @@ function setupDiscoveryPanel() {
       state.discoveryEvents.unshift(normalized);
     });
     state.discoveryEvents = state.discoveryEvents.slice(0, 600);
+    hydration.discovery = true;
     render();
   }
   async function loadSnapshot() {
@@ -941,6 +1132,7 @@ function setupDiscoveryPanel() {
       if (Array.isArray(snapshot)) {
         state.discoveryEvents = snapshot.map((row) => normalizeDiscoveryEvent(row, tokenMetaCache)).filter(Boolean);
         state.discoveryEvents.sort((a, b) => b.ts - a.ts);
+        hydration.discovery = true;
         render();
       }
     } catch (err) {
@@ -1077,6 +1269,14 @@ function setupTokenPanel() {
       badge.textContent = label;
       badges.appendChild(badge);
     });
+    if (currentMint) {
+      updatePriceSnapshot(currentMint, {
+        price: price ? price.price ?? price.px : undefined,
+        mark: price ? price.mark ?? price.mark_price : undefined,
+        mid: price ? price.mid ?? price.mid_price : undefined,
+        reference_price: price ? price.reference_price ?? price.reference ?? price.target_price : undefined
+      });
+    }
     hydration.token = true;
   }
   async function hydrateToken(mint) {
@@ -1097,7 +1297,11 @@ function setupTokenPanel() {
         drawSparkline(sparklineCanvas, pricePoints.slice(-120));
       }
       invalidBanner.hidden = true;
+      if (currentMint) {
+        updatePriceSnapshot(currentMint, price || {});
+      }
       statusNode.textContent = 'Live';
+      hydration.token = true;
     } catch (err) {
       statusNode.textContent = 'Failed to load token';
     }
@@ -1118,6 +1322,9 @@ function setupTokenPanel() {
       onMessage: (payload) => {
         const data = safeJsonParse(payload, 'token-price', errorNode);
         if (data && typeof data === 'object') {
+          if (mint) {
+            updatePriceSnapshot(mint, data);
+          }
           if (data.meta) {
             renderMeta(data.meta, data);
           }
@@ -1140,6 +1347,17 @@ function setupTokenPanel() {
         const data = safeJsonParse(payload, 'token-depth', errorNode);
         if (data && data.status === 'invalid_mint') {
           invalidBanner.hidden = false;
+        } else if (data) {
+          invalidBanner.hidden = true;
+        }
+        const book = normalizeOrderbookPayload(data);
+        if (book && currentMint) {
+          state.depthByMint.set(currentMint, book);
+          if (book.bids.length && book.asks.length) {
+            const mid = (book.bids[0][0] + book.asks[0][0]) / 2;
+            updatePriceSnapshot(currentMint, {mid});
+          }
+          doc.dispatchEvent(new CustomEvent('orderbook-update', {detail: {mint: currentMint, book}}));
         }
       }
     });
@@ -1247,6 +1465,7 @@ function setupAgentPanel() {
           };
         });
         events = mapped;
+        hydration.agents = true;
         setEvents(events);
       }
     } catch (err) {
@@ -1288,6 +1507,7 @@ function setupAgentPanel() {
           });
         });
         events.sort((a, b) => a.ts - b.ts);
+        hydration.agents = true;
         setEvents(events);
       }
     });
@@ -1327,15 +1547,27 @@ function setupPlannerPanel() {
   let currentMint = null;
   function renderPlan(plan) {
     planGrid.innerHTML = '';
+    dryRunNode.innerHTML = 'Dry-run pending…';
     if (!plan) {
       statusNode.textContent = currentMint ? 'No plan available' : 'Waiting for mint…';
-      hydration.planner = false;
       return;
+    }
+    if (currentMint) {
+      updatePriceSnapshot(currentMint, {
+        __source: 'plan',
+        price: plan.price,
+        mark: plan.mark ?? plan.mark_price,
+        mid: plan.mid_price,
+        reference_price: plan.reference_price ?? plan.mark_price ?? plan.mark
+      });
     }
     const entries = [
       ['Intent', plan.intent || plan.action || '—'],
       ['Router', plan.router || plan.route || '—'],
-      ['Size', plan.size !== undefined ? formatNumber(plan.size, 4) : '—'],
+      ['Size', (() => {
+        const size = extractPlanSize(plan);
+        return size !== null ? formatNumber(size, 4) : (plan.size !== undefined ? formatNumber(plan.size, 4) : '—');
+      })()],
       ['Slippage', plan.slippage_bps !== undefined ? `${formatNumber(plan.slippage_bps, 2)} bps` : '—'],
       ['Bundle', plan.bundle_preference || plan.bundle || '—'],
       ['Budget Ref', plan.budget_reference || '—'],
@@ -1347,7 +1579,22 @@ function setupPlannerPanel() {
       dl.innerHTML = `<dt>${label}</dt><dd>${value}</dd>`;
       planGrid.appendChild(dl);
     });
-    dryRunNode.textContent = plan.dry_run ? `Dry-run impact: ${formatPercent(plan.dry_run.price_impact || 0)} · Fill ${formatNumber(plan.dry_run.expected_fill || 0, 4)}` : 'Dry-run pending…';
+    const segments = [];
+    const simulation = currentMint ? simulatePlanFill(currentMint, plan) : null;
+    if (simulation) {
+      const impactLabel = simulation.impactPct !== null ? `${formatNumber(simulation.impactPct, 2)}%` : 'n/a';
+      const tsLabel = formatTimestamp(simulation.ts || Date.now());
+      let summary = `Simulated ${simulation.side} ${formatNumber(simulation.filled, 4)} @ ${formatNumber(simulation.avgPrice, 6)} (${impactLabel})`;
+      if (simulation.remaining > 0) {
+        summary += ` · Unfilled ${formatNumber(simulation.remaining, 4)}`;
+      }
+      summary += ` · Depth ${tsLabel.label}`;
+      segments.push(summary);
+    }
+    if (plan.dry_run) {
+      segments.push(`Plan dry-run: ${formatPercent(plan.dry_run.price_impact || 0)} · Fill ${formatNumber(plan.dry_run.expected_fill || 0, 4)}`);
+    }
+    dryRunNode.innerHTML = segments.length ? segments.map((text) => `<div>${text}</div>`).join('') : 'Dry-run pending…';
     hydration.planner = true;
   }
   async function loadSnapshot(mint) {
@@ -1363,8 +1610,10 @@ function setupPlannerPanel() {
         renderPlan(plan);
         statusNode.textContent = 'Live';
       } else {
+        state.planByMint.delete(mint);
         renderPlan(null);
       }
+      hydration.planner = true;
     } catch (err) {
       statusNode.textContent = 'Plan snapshot failed';
     }
@@ -1395,6 +1644,7 @@ function setupPlannerPanel() {
           }
           state.planByMint.set(currentMint, plan);
           renderPlan(plan);
+          hydration.planner = true;
         });
       }
     });
@@ -1415,8 +1665,24 @@ function setupPlannerPanel() {
       statusNode.textContent = 'Paused';
       return;
     }
+    if (mint && state.planByMint.has(mint)) {
+      renderPlan(state.planByMint.get(mint));
+      statusNode.textContent = 'Live';
+    } else {
+      renderPlan(null);
+    }
     loadSnapshot(mint).then(startStream);
   });
+  const refreshPlanView = (event) => {
+    if (!event || !event.detail || event.detail.mint !== currentMint) return;
+    if (event.detail.origin === 'plan') return;
+    const plan = currentMint ? state.planByMint.get(currentMint) : null;
+    if (plan) {
+      renderPlan(plan);
+    }
+  };
+  doc.addEventListener('orderbook-update', refreshPlanView);
+  doc.addEventListener('price-snapshot-update', refreshPlanView);
   startStream();
 }
 function setupOrdersPanel() {
@@ -1438,7 +1704,7 @@ function setupOrdersPanel() {
       row.innerHTML = '<td colspan="9">No orders yet</td>';
       rowsBody.appendChild(row);
       summaryNode.textContent = '—';
-      hydration.orders = false;
+      statusNode.textContent = state.ordersPaused ? 'Paused — timeline frozen' : 'No orders yet';
       return;
     }
     hydration.orders = true;
@@ -1485,9 +1751,10 @@ function setupOrdersPanel() {
   }
   const sortAndRender = attachSortableTable(table, ordersRows, render, 'orders-sort');
   function updateOrders() {
-    const windowMs = state.ordersWindow * 1000;
-    const cutoff = Date.now() - windowMs;
-    const filtered = state.orders.filter((order) => order.ts >= cutoff);
+    const windowSec = Number(state.ordersWindow);
+    const windowMs = windowSec > 0 ? windowSec * 1000 : null;
+    const cutoff = windowMs ? Date.now() - windowMs : null;
+    const filtered = cutoff ? state.orders.filter((order) => order.ts >= cutoff) : state.orders.slice();
     ordersRows.splice(0, ordersRows.length, ...filtered.map((order) => ({...order})));
     if (sortAndRender) sortAndRender(); else render();
   }
@@ -1509,6 +1776,7 @@ function setupOrdersPanel() {
           status: row.status || 'pending',
           txid: row.txid || row.signature || null
         }));
+        hydration.orders = true;
         updateOrders();
         statusNode.textContent = 'Live';
       }
@@ -1551,6 +1819,7 @@ function setupOrdersPanel() {
           state.orders.unshift(order);
         });
         state.orders = state.orders.slice(0, 800);
+        hydration.orders = true;
         updateOrders();
       }
     });
@@ -1600,7 +1869,6 @@ function setupPositionsPanel() {
       row.className = 'empty';
       row.innerHTML = '<td colspan="8">No open positions</td>';
       rowsBody.appendChild(row);
-      hydration.positions = false;
       return;
     }
     hydration.positions = true;
@@ -1666,6 +1934,7 @@ function setupPositionsPanel() {
           risk: Number(row.risk_weight || row.risk || 0)
         }));
         updatePositions(mapped);
+        hydration.positions = true;
         statusNode.textContent = 'Live';
       }
     } catch (err) {
@@ -1708,6 +1977,7 @@ function setupPositionsPanel() {
             positionsRows.push(position);
           }
         });
+        hydration.positions = true;
         updatePositions(positionsRows);
       }
     });
@@ -1740,11 +2010,11 @@ function setupPositionsPanel() {
       const windowSelect = panel.querySelector('select[data-control="window"]');
       const pauseBtn = panel.querySelector('button[data-control="pause"]');
       let wsRef = null;
-      function render(pnlData, riskData) {
+      function render(pnlData, riskData, previousRisk) {
         metricsGrid.innerHTML = '';
         if (!pnlData && !riskData) {
           statusNode.textContent = 'Waiting for data…';
-          hydration.pnl = false;
+          hydration.pnl = true;
           return;
         }
         hydration.pnl = true;
@@ -1770,7 +2040,23 @@ function setupPositionsPanel() {
           varEntry.className = 'header-card';
           varEntry.innerHTML = `<dt>VaR Proxy</dt><dd>${formatCurrency(riskData.var_proxy || 0)}</dd>`;
           metricsGrid.appendChild(varEntry);
-          if (riskData.tolerance_change) {
+          const prevTolerance = previousRisk ? maybeNumber(previousRisk.risk_tolerance) : null;
+          const nextTolerance = maybeNumber(riskData.risk_tolerance);
+          const prevMultiplier = previousRisk ? maybeNumber(previousRisk.risk_multiplier) : null;
+          const nextMultiplier = maybeNumber(riskData.risk_multiplier);
+          const changes = [];
+          if (nextTolerance !== null && prevTolerance !== null && nextTolerance !== prevTolerance) {
+            changes.push(`RISK_TOLERANCE ${formatNumber(prevTolerance, 2)} → ${formatNumber(nextTolerance, 2)}`);
+          }
+          if (nextMultiplier !== null && prevMultiplier !== null && nextMultiplier !== prevMultiplier) {
+            changes.push(`RISK_MULTIPLIER ${formatNumber(prevMultiplier, 2)} → ${formatNumber(nextMultiplier, 2)}`);
+          }
+          if (changes.length) {
+            const banner = doc.createElement('div');
+            banner.className = 'banner warning';
+            banner.textContent = `Risk updated: ${changes.join(' · ')}`;
+            metricsGrid.appendChild(banner);
+          } else if (riskData.tolerance_change) {
             const banner = doc.createElement('div');
             banner.className = 'banner warning';
             banner.textContent = `Risk updated: ${riskData.tolerance_change}`;
@@ -1788,8 +2074,13 @@ function setupPositionsPanel() {
             safeFetchJson(ENDPOINTS.pnlSnapshot(windowParam), 'pnl', errorNode, {headers: {Accept: 'application/json'}}).catch(() => null),
             safeFetchJson(ENDPOINTS.riskSnapshot, 'risk', errorNode, {headers: {Accept: 'application/json'}}).catch(() => null)
           ]);
+          const previousRisk = state.lastRiskState;
           state.pnlMetrics = {pnl, risk};
-          render(pnl, risk);
+          if (risk) {
+            state.lastRiskState = risk;
+          }
+          render(pnl, risk, previousRisk);
+          hydration.pnl = true;
         } catch (err) {
           statusNode.textContent = 'PnL snapshot failed';
         }
@@ -1811,10 +2102,11 @@ function setupPositionsPanel() {
             if (state.pnlPaused) return;
             const data = safeJsonParse(payload, 'risk', errorNode);
             if (data && typeof data === 'object') {
+              const previous = state.lastRiskState;
               state.lastRiskState = data;
               state.pnlMetrics = state.pnlMetrics || {};
               state.pnlMetrics.risk = data;
-              render(state.pnlMetrics ? state.pnlMetrics.pnl : null, data);
+              render(state.pnlMetrics ? state.pnlMetrics.pnl : null, data, previous);
             }
           }
         });
@@ -1851,7 +2143,8 @@ function setupPositionsPanel() {
         metricsGrid.innerHTML = '';
         if (!providers && !metrics) {
           statusNode.textContent = 'Waiting for metrics…';
-          hydration.runtime = false;
+          annotateRateLimitPanels({});
+          hydration.runtime = true;
           return;
         }
         hydration.runtime = true;
@@ -1874,7 +2167,24 @@ function setupPositionsPanel() {
             metricsGrid.appendChild(card);
           });
         }
+        const runState = state.runState;
+        if (runState && runState.rpc_backoff) {
+          const card = doc.createElement('div');
+          card.className = 'header-card';
+          card.innerHTML = `<dt>RPC Backoff</dt><dd>${runState.rpc_backoff}</dd>`;
+          metricsGrid.appendChild(card);
+        }
+        if (runState && runState.rps_limits) {
+          const limitsText = Array.isArray(runState.rps_limits) ? runState.rps_limits.join(', ') : runState.rps_limits;
+          if (limitsText) {
+            const card = doc.createElement('div');
+            card.className = 'header-card';
+            card.innerHTML = `<dt>RPS Limits</dt><dd>${limitsText}</dd>`;
+            metricsGrid.appendChild(card);
+          }
+        }
         statusNode.textContent = 'Live';
+        annotateRateLimitPanels(metrics || {});
       }
       async function loadSnapshot() {
         if (state.runtimePaused) return;
@@ -1939,6 +2249,9 @@ function setupPositionsPanel() {
       const errorNode = panel.querySelector('[data-role="error"]');
       const pauseBtn = panel.querySelector('button[data-control="pause"]');
       let wsRef = null;
+      let currentRunId = state.runState && state.runState.run_id ? String(state.runState.run_id) : null;
+      const snapshotUrl = () => ENDPOINTS.logsSnapshot(currentRunId);
+      const streamUrl = () => ENDPOINTS.logsStream(currentRunId);
       function renderLine(entry) {
         const div = doc.createElement('div');
         div.className = `log-line ${entry.level}`;
@@ -1957,7 +2270,7 @@ function setupPositionsPanel() {
       async function loadSnapshot() {
         statusNode.textContent = 'Loading logs…';
         try {
-          const data = await safeFetchJson(ENDPOINTS.logsSnapshot, 'logs', errorNode, {headers: {Accept: 'application/json'}});
+          const data = await safeFetchJson(snapshotUrl(), 'logs', errorNode, {headers: {Accept: 'application/json'}});
           list.innerHTML = '';
           if (Array.isArray(data)) {
             data.forEach((row) => {
@@ -1969,7 +2282,7 @@ function setupPositionsPanel() {
                 time
               });
             });
-            hydration.logs = data.length > 0;
+            hydration.logs = true;
             statusNode.textContent = 'Live';
           }
         } catch (err) {
@@ -1979,7 +2292,7 @@ function setupPositionsPanel() {
       function startStream() {
         if (wsRef) wsRef.close();
         wsRef = createWsConnection({
-          url: ENDPOINTS.logsStream,
+          url: streamUrl(),
           panelId: 'logs',
           errorNode,
           onStatus: (status) => {
@@ -2013,9 +2326,23 @@ function setupPositionsPanel() {
           if (wsRef) wsRef.close();
           statusNode.textContent = 'Paused';
         } else {
-          startStream();
+          loadSnapshot().then(() => {
+            if (!state.logsPaused) startStream();
+          });
         }
       });
+      const handleRunStateUpdate = (event) => {
+        const detail = event.detail || {};
+        const nextRunId = detail.run_id ? String(detail.run_id) : null;
+        if (nextRunId === currentRunId) return;
+        currentRunId = nextRunId;
+        if (state.logsPaused) return;
+        if (wsRef) wsRef.close();
+        loadSnapshot().then(() => {
+          if (!state.logsPaused) startStream();
+        });
+      };
+      doc.addEventListener('run-state-update', handleRunStateUpdate);
       loadSnapshot().then(startStream);
     }
     function setupSelfCheck() {
