@@ -47,10 +47,21 @@
       align-items: center;
       justify-content: space-between;
     }
-    .header-top h1 {
+    .header-title {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .header-title h1 {
       margin: 0;
       font-size: 1.35rem;
       letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .header-title .tagline {
+      font-size: 0.75rem;
+      color: var(--muted);
+      letter-spacing: 0.18em;
       text-transform: uppercase;
     }
     .pills {
@@ -69,10 +80,20 @@
       font-size: 0.8rem;
       letter-spacing: 0.05em;
       text-transform: uppercase;
+      position: relative;
     }
-    .pill.success { border-color: rgba(55, 214, 122, 0.65); background: rgba(55, 214, 122, 0.18); }
-    .pill.warning { border-color: rgba(245, 165, 36, 0.65); background: rgba(245, 165, 36, 0.18); }
-    .pill.danger { border-color: rgba(255, 79, 94, 0.65); background: rgba(255, 79, 94, 0.18); }
+    .pill::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      display: inline-block;
+      box-shadow: 0 0 8px currentColor;
+    }
+    .pill.success { border-color: rgba(55, 214, 122, 0.65); background: rgba(55, 214, 122, 0.18); color: var(--success); }
+    .pill.warning { border-color: rgba(245, 165, 36, 0.65); background: rgba(245, 165, 36, 0.18); color: var(--warning); }
+    .pill.danger { border-color: rgba(255, 79, 94, 0.65); background: rgba(255, 79, 94, 0.18); color: var(--danger); }
     .header-grid {
       margin-top: 18px;
       display: grid;
@@ -106,6 +127,12 @@
       flex-wrap: wrap;
       gap: 12px;
       align-items: center;
+    }
+    .header-status {
+      font-size: 0.78rem;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
     }
     button, select {
       font: inherit;
@@ -177,6 +204,7 @@
       font-size: 0.82rem;
     }
     .banner.warning { background: rgba(245, 165, 36, 0.18); border: 1px solid rgba(245, 165, 36, 0.45); color: #ffe2b0; }
+    .banner.info { background: rgba(75, 130, 255, 0.12); border: 1px solid rgba(75, 130, 255, 0.35); color: #d5e4ff; }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 6px 8px; text-align: left; font-size: 0.84rem; }
     thead th {
@@ -234,7 +262,10 @@
   <div class="live-console" data-ui-schema="{{ ui_schema_version }}">
     <header id="run-header">
       <div class="header-top">
-        <h1>Live Console</h1>
+        <div class="header-title">
+          <h1>Run Header &amp; Safety State</h1>
+          <span class="tagline">Live Console</span>
+        </div>
         <div class="pills">
           <span id="pill-live" class="pill">Live</span>
           <span id="pill-mode" class="pill">Mode: —</span>
@@ -253,6 +284,7 @@
         <button class="ghost-btn" id="copy-env-btn">Copy env</button>
         <button class="ghost-btn" id="self-check-btn">Run Self-Check</button>
         <span id="self-check-status" style="font-size:0.8rem;color:var(--muted);">Self-Check idle</span>
+        <span class="header-status" data-role="status">Connecting…</span>
       </div>
     </header>
     <main>
@@ -263,15 +295,16 @@
               <h2>Discovery Stream (Mint &amp; Mempool)</h2>
               <div class="controls">
                 <select data-control="window">
-                  <option value="300">5s</option>
-                  <option value="900" selected>15s</option>
-                  <option value="3600">60s</option>
+                  <option value="5">5s</option>
+                  <option value="15">15s</option>
+                  <option value="60" selected>60s</option>
                 </select>
                 <button type="button" data-control="pause">Pause</button>
               </div>
             </div>
             <div class="panel-body">
               <div class="panel-status" data-role="status">Bootstrapping…</div>
+              <div class="banner warning" data-role="rate-limit" data-default-message="Rate limited — using cached discovery feed." hidden>Rate limited — using cached discovery feed.</div>
               <div class="timeline" data-role="timeline"></div>
               <div class="inline-error" data-role="error"></div>
             </div>
@@ -285,6 +318,7 @@
             </div>
             <div class="panel-body">
               <div class="panel-status" data-role="status">Connecting…</div>
+              <div class="banner warning" data-role="rate-limit" data-default-message="Log stream throttled — replaying backlog." hidden>Log stream throttled — replaying backlog.</div>
               <div class="list" data-role="list"></div>
               <div class="inline-error" data-role="error"></div>
             </div>
@@ -300,6 +334,7 @@
             </div>
             <div class="panel-body">
               <div class="banner warning" data-role="invalid" hidden>Mint invalid; streams continue with caution.</div>
+              <div class="banner warning" data-role="rate-limit" data-default-message="Rate limited — showing last known prices." hidden>Rate limited — showing last known prices.</div>
               <div class="panel-status" data-role="status">Pick a discovery candidate.</div>
               <div class="grid-two" data-role="meta"></div>
               <div class="sparkline"><canvas data-role="sparkline"></canvas></div>
@@ -320,6 +355,7 @@
               </div>
             </div>
             <div class="panel-body">
+              <div class="banner warning" data-role="rate-limit" data-default-message="Agent feed throttled — buffering events." hidden>Agent feed throttled — buffering events.</div>
               <div class="panel-status" data-role="status">Waiting for mint…</div>
               <div class="timeline" data-role="timeline"></div>
               <div class="inline-error" data-role="error"></div>
@@ -333,6 +369,7 @@
               </div>
             </div>
             <div class="panel-body">
+              <div class="banner warning" data-role="rate-limit" data-default-message="Routing feed throttled — using cached plan." hidden>Routing feed throttled — using cached plan.</div>
               <div class="panel-status" data-role="status">Waiting for mint…</div>
               <div class="grid-two" data-role="plan"></div>
               <div class="panel-status" data-role="dry-run">Dry-run not ready.</div>
@@ -355,6 +392,7 @@
             </div>
             <div class="panel-body">
               <div class="panel-status" data-role="status">Loading…</div>
+              <div class="banner warning" data-role="rate-limit" data-default-message="Execution stream throttled — summarizing cached fills." hidden>Execution stream throttled — summarizing cached fills.</div>
               <div class="table-wrapper">
                 <table>
                   <thead>
@@ -386,6 +424,7 @@
             </div>
             <div class="panel-body">
               <div class="panel-status" data-role="status">Loading…</div>
+              <div class="banner warning" data-role="rate-limit" data-default-message="Portfolio updates throttled — values may lag." hidden>Portfolio updates throttled — values may lag.</div>
               <div class="table-wrapper">
                 <table>
                   <thead>
@@ -420,6 +459,7 @@
             </div>
             <div class="panel-body">
               <div class="panel-status" data-role="status">Loading…</div>
+              <div class="banner warning" data-role="rate-limit" data-default-message="Risk feed throttled — metrics may be stale." hidden>Risk feed throttled — metrics may be stale.</div>
               <div class="grid-two" data-role="metrics"></div>
               <div class="inline-error" data-role="error"></div>
             </div>
@@ -433,6 +473,7 @@
             </div>
             <div class="panel-body">
               <div class="panel-status" data-role="status">Loading…</div>
+              <div class="banner warning" data-role="rate-limit" data-default-message="Rate limit detectors active — reviewing providers." hidden>Rate limit detectors active — reviewing providers.</div>
               <div class="grid-two" data-role="metrics"></div>
               <div class="inline-error" data-role="error"></div>
             </div>
@@ -459,6 +500,7 @@
     tokenMetaResolver: (mint) => `/api/token/meta/${encodeURIComponent(mint)}`,
     tokenPrice: (mint) => `/api/price/${encodeURIComponent(mint)}`,
     tokenPriceStream: (mint) => `/ws/price/${encodeURIComponent(mint)}`,
+    tokenDepthSnapshot: (mint) => `/api/depth/${encodeURIComponent(mint)}`,
     tokenDepthStream: (mint) => `/ws/depth/${encodeURIComponent(mint)}`,
     agentEventsBackfill: (mint, since) => `/api/agents/events?mint=${encodeURIComponent(mint)}&since=${encodeURIComponent(since)}`,
     agentEventsStream: '/ws/agents/events',
@@ -493,7 +535,7 @@
       selectedMint: null,
       runState: null,
       rlHealthUrl: null,
-      discoveryWindow: 900,
+      discoveryWindow: 60,
     discoveryPaused: false,
     discoveryEvents: [],
     tokenPaused: false,
@@ -509,9 +551,12 @@
       runtimePaused: false,
       logsPaused: false,
       planByMint: new Map(),
+      orderbooks: new Map(),
       lastRiskState: null,
       pnlMetrics: null,
-      runtimeMetrics: null
+      runtimeMetrics: null,
+      rateLimitedPanels: new Set(),
+      rateLimitMessages: {}
     };
   function createStore(initial) {
     let value = initial;
@@ -537,6 +582,110 @@
       state.selectedMint = next;
       originalSelectedMintSet(next);
     };
+  doc.addEventListener('rate-limit-update', (event) => {
+    const detail = event.detail || {};
+    state.rateLimitedPanels = new Set(detail.impacted || []);
+    state.rateLimitMessages = detail.messages || {};
+  });
+  function registerRateLimitBanner(panel) {
+    if (!panel) return;
+    const banner = panel.querySelector('[data-role="rate-limit"]');
+    if (!banner) return;
+    const defaultMessage = banner.dataset.defaultMessage || banner.textContent || 'Rate limited — observing backoff.';
+    const panelId = panel.id;
+    banner.hidden = true;
+    doc.addEventListener('rate-limit-update', (event) => {
+      const detail = event.detail || {};
+      const impacted = new Set(detail.impacted || []);
+      if (impacted.has(panelId)) {
+        const message = (detail.messages && detail.messages[panelId]) || defaultMessage;
+        banner.textContent = message;
+        banner.hidden = false;
+        panel.dataset.rateLimited = 'true';
+      } else {
+        banner.textContent = defaultMessage;
+        banner.hidden = true;
+        delete panel.dataset.rateLimited;
+      }
+    });
+  }
+  function analyzeRateLimits(providers, metrics) {
+    const impacted = new Map();
+    let flagged = false;
+    const addReason = (panelId, reason) => {
+      if (!panelId) return;
+      flagged = true;
+      if (!impacted.has(panelId)) {
+        impacted.set(panelId, new Set());
+      }
+      impacted.get(panelId).add(reason);
+    };
+    if (Array.isArray(providers)) {
+      providers.forEach((provider) => {
+        const rateLimited = Number(provider && (provider['429'] !== undefined ? provider['429'] : provider.rate_limited));
+        if (!Number.isFinite(rateLimited) || rateLimited <= 0) {
+          return;
+        }
+        const name = String(provider.name || provider.provider || '').toLowerCase();
+        if (name.includes('helius')) {
+          addReason('panel-token', 'Helius 429s — HELIUS_PRICE_CONCURRENCY');
+          addReason('panel-planner', 'Helius 429s — HELIUS_PRICE_CONCURRENCY');
+          addReason('panel-orders', 'Helius 429s — HELIUS_PRICE_CONCURRENCY');
+        }
+        if (name.includes('das') || name.includes('mint') || name.includes('discovery')) {
+          addReason('panel-discovery', 'Discovery 429s — DAS_RPS');
+        }
+        if (name.includes('portfolio')) {
+          addReason('panel-positions', 'Portfolio provider 429s');
+          addReason('panel-pnl', 'Portfolio provider 429s');
+        }
+        addReason('panel-runtime', `${provider.name || provider.provider || 'Provider'} rate limited`);
+      });
+    }
+    if (metrics && typeof metrics === 'object') {
+      Object.entries(metrics).forEach(([key, value]) => {
+        const count = Number(value);
+        if (!Number.isFinite(count) || count <= 0) {
+          return;
+        }
+        const lowerKey = key.toLowerCase();
+        if (!lowerKey.includes('429')) {
+          return;
+        }
+        if (lowerKey.includes('helius') || lowerKey.includes('price')) {
+          addReason('panel-token', 'Helius metrics 429 — HELIUS_PRICE_CONCURRENCY');
+          addReason('panel-planner', 'Helius metrics 429 — HELIUS_PRICE_CONCURRENCY');
+          addReason('panel-orders', 'Helius metrics 429 — HELIUS_PRICE_CONCURRENCY');
+        }
+        if (lowerKey.includes('das') || lowerKey.includes('mint') || lowerKey.includes('mempool')) {
+          addReason('panel-discovery', 'Discovery metrics 429 — DAS_RPS');
+        }
+        if (lowerKey.includes('agent')) {
+          addReason('panel-agents', 'Agent metrics throttled');
+        }
+        if (lowerKey.includes('portfolio') || lowerKey.includes('pnl') || lowerKey.includes('risk')) {
+          addReason('panel-positions', 'Portfolio metrics throttled');
+          addReason('panel-pnl', 'Risk metrics throttled');
+        }
+        if (lowerKey.includes('log')) {
+          addReason('panel-logs', 'Log metrics throttled');
+        }
+      });
+    }
+    if (impacted.size > 0) {
+      addReason('panel-runtime', 'Rate limit detectors active');
+    }
+    if (!flagged) {
+      doc.dispatchEvent(new CustomEvent('rate-limit-update', {detail: {impacted: [], messages: {}}}));
+      return;
+    }
+    const impactedPanels = Array.from(impacted.keys());
+    const messages = {};
+    impacted.forEach((reasons, panelId) => {
+      messages[panelId] = Array.from(reasons).join(' | ');
+    });
+    doc.dispatchEvent(new CustomEvent('rate-limit-update', {detail: {impacted: impactedPanels, messages}}));
+  }
   function safeJsonParse(text, panelId, errorNode) {
     try {
       return JSON.parse(text);
@@ -603,6 +752,52 @@
     return {
       label: date.toLocaleString(undefined, {hour12: false}),
       utc: date.toISOString()
+    };
+  }
+  function normalizeOrderbook(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const toLevels = (levels) => {
+      if (!Array.isArray(levels)) return [];
+      return levels
+        .map((entry) => {
+          if (Array.isArray(entry)) {
+            const price = Number(entry[0]);
+            const size = Number(entry[1]);
+            if (!Number.isFinite(price) || !Number.isFinite(size) || size <= 0) return null;
+            return {price, size};
+          }
+          if (entry && typeof entry === 'object') {
+            const price = Number(entry.price ?? entry.px ?? entry.level ?? entry[0]);
+            const size = Number(entry.size ?? entry.qty ?? entry.quantity ?? entry.amount ?? entry[1]);
+            if (!Number.isFinite(price) || !Number.isFinite(size) || size <= 0) return null;
+            return {price, size};
+          }
+          return null;
+        })
+        .filter((level) => level);
+    };
+    const bids = toLevels(
+      raw.bids || raw.bid || raw.bid_levels || raw.buy || raw.buy_levels || (raw.levels && raw.levels.bids) || []
+    );
+    const asks = toLevels(
+      raw.asks || raw.ask || raw.ask_levels || raw.sell || raw.sell_levels || (raw.levels && raw.levels.asks) || []
+    );
+    let mid = Number(raw.mid || raw.mid_price || raw.midpoint || raw.mark);
+    if (!Number.isFinite(mid)) {
+      if (bids.length && asks.length) {
+        mid = (bids[0].price + asks[0].price) / 2;
+      } else if (asks.length) {
+        mid = asks[0].price;
+      } else if (bids.length) {
+        mid = bids[0].price;
+      } else {
+        mid = NaN;
+      }
+    }
+    return {
+      bids,
+      asks,
+      mid: Number.isFinite(mid) ? mid : null
     };
   }
   function setHealthPill(status, message) {
@@ -794,6 +989,7 @@ async function refreshHealth() {
     mode.textContent = 'Mode: —';
     workflow.textContent = 'Workflow: —';
     keypair.textContent = '—';
+    keypair.title = '';
     budget.textContent = '—';
     risk.textContent = '—';
     throttle.textContent = '—';
@@ -803,6 +999,7 @@ async function refreshHealth() {
   mode.textContent = `Mode: ${runState.mode || '—'}`;
   workflow.textContent = `Workflow: ${runState.workflow || '—'}`;
   keypair.textContent = runState.keypair_pubkey || runState.keypair_path || '—';
+  keypair.title = runState.keypair_path || runState.keypair_pubkey || '';
   budget.textContent = runState.budget_remaining !== undefined ? formatCurrency(runState.budget_remaining) : '—';
   risk.textContent = runState.risk_current !== undefined ? formatNumber(runState.risk_current, 4) : '—';
       throttle.textContent = runState.rpc_backoff ? `${runState.rpc_backoff} (backoff)` : (runState.throttle_state || 'Nominal');
@@ -878,6 +1075,7 @@ function normalizeDiscoveryEvent(raw, tokenMetaCache) {
 function setupDiscoveryPanel() {
   const panel = doc.getElementById('panel-discovery');
   if (!panel) return;
+  registerRateLimitBanner(panel);
   const statusNode = panel.querySelector('[data-role="status"]');
   const timeline = panel.querySelector('[data-role="timeline"]');
   const errorNode = panel.querySelector('[data-role="error"]');
@@ -889,12 +1087,29 @@ function setupDiscoveryPanel() {
     const now = Date.now();
     const windowMs = state.discoveryWindow * 1000;
     const filtered = state.discoveryEvents.filter((event) => now - event.ts <= windowMs);
+    const rateLimited = state.rateLimitedPanels.has('panel-discovery');
     timeline.innerHTML = '';
     if (!filtered.length) {
-      statusNode.textContent = state.discoveryPaused ? 'Paused — timeline frozen' : 'No discovery events yet';
+      if (state.discoveryEvents.length) {
+        const latest = state.discoveryEvents[0];
+        const delta = Math.max(0, Math.round((now - latest.ts) / 1000));
+        const latestStamp = formatTimestamp(latest.ts);
+        const latestLabel = typeof latestStamp === 'string' ? latestStamp : latestStamp.label;
+        statusNode.textContent = rateLimited
+          ? `Rate limited — last discovery ${delta}s ago`
+          : `No events in last ${state.discoveryWindow}s · latest ${latestLabel}`;
+      } else {
+        statusNode.textContent = state.discoveryPaused
+          ? 'Paused — timeline frozen'
+          : rateLimited
+            ? 'Rate limited — awaiting discovery feed'
+            : 'No discovery events yet';
+      }
       return;
     }
-    statusNode.textContent = `${filtered.length} opportunities`;
+    statusNode.textContent = rateLimited
+      ? `${filtered.length} cached opportunities (rate limited)`
+      : `${filtered.length} opportunities`;
     filtered.forEach((event) => {
       const item = doc.createElement('div');
       item.className = 'timeline-item';
@@ -971,6 +1186,7 @@ function setupDiscoveryPanel() {
     state.discoveryWindow = Number(windowSelect.value);
     render();
   });
+  doc.addEventListener('rate-limit-update', () => render());
   pauseBtn.addEventListener('click', () => {
     state.discoveryPaused = !state.discoveryPaused;
     pauseBtn.textContent = state.discoveryPaused ? 'Resume' : 'Pause';
@@ -1023,6 +1239,7 @@ function drawSparkline(canvas, values) {
 function setupTokenPanel() {
   const panel = doc.getElementById('panel-token');
   if (!panel) return;
+  registerRateLimitBanner(panel);
   const statusNode = panel.querySelector('[data-role="status"]');
   const metaGrid = panel.querySelector('[data-role="meta"]');
   const badges = panel.querySelector('[data-role="badges"]');
@@ -1086,9 +1303,10 @@ function setupTokenPanel() {
     }
     statusNode.textContent = 'Loading token…';
     try {
-      const [meta, price] = await Promise.all([
+      const [meta, price, depth] = await Promise.all([
         safeFetchJson(ENDPOINTS.tokenMeta(mint), 'token-meta', errorNode, {headers: {Accept: 'application/json'}}).catch(() => null),
-        safeFetchJson(ENDPOINTS.tokenPrice(mint), 'token-price', errorNode, {headers: {Accept: 'application/json'}}).catch(() => null)
+        safeFetchJson(ENDPOINTS.tokenPrice(mint), 'token-price', errorNode, {headers: {Accept: 'application/json'}}).catch(() => null),
+        safeFetchJson(ENDPOINTS.tokenDepthSnapshot(mint), 'token-depth', errorNode, {headers: {Accept: 'application/json'}}).catch(() => null)
       ]);
       renderMeta(meta || {}, price || {});
       pricePoints = [];
@@ -1096,7 +1314,19 @@ function setupTokenPanel() {
         pricePoints = price.history.map((row) => Number(row.price || row.px)).filter((val) => Number.isFinite(val));
         drawSparkline(sparklineCanvas, pricePoints.slice(-120));
       }
-      invalidBanner.hidden = true;
+      if (depth && typeof depth === 'object') {
+        if (depth.status === 'invalid_mint') {
+          invalidBanner.hidden = false;
+        }
+        const normalized = normalizeOrderbook(depth.orderbook || depth.depth || depth);
+        if (normalized) {
+          state.orderbooks.set(mint, normalized);
+          doc.dispatchEvent(new CustomEvent('depth-update', {detail: {mint, orderbook: normalized}}));
+          invalidBanner.hidden = true;
+        }
+      } else {
+        invalidBanner.hidden = true;
+      }
       statusNode.textContent = 'Live';
     } catch (err) {
       statusNode.textContent = 'Failed to load token';
@@ -1138,8 +1368,18 @@ function setupTokenPanel() {
       errorNode,
       onMessage: (payload) => {
         const data = safeJsonParse(payload, 'token-depth', errorNode);
-        if (data && data.status === 'invalid_mint') {
+        if (!data || typeof data !== 'object') return;
+        if (data.status === 'invalid_mint') {
           invalidBanner.hidden = false;
+          return;
+        }
+        const orderbookRaw = data.orderbook || data.depth || (data.bids && data.asks ? data : null);
+        if (!orderbookRaw) return;
+        const normalized = normalizeOrderbook(orderbookRaw);
+        if (normalized) {
+          invalidBanner.hidden = true;
+          state.orderbooks.set(mint, normalized);
+          doc.dispatchEvent(new CustomEvent('depth-update', {detail: {mint, orderbook: normalized}}));
         }
       }
     });
@@ -1187,6 +1427,7 @@ function setupTokenPanel() {
 function setupAgentPanel() {
   const panel = doc.getElementById('panel-agents');
   if (!panel) return;
+  registerRateLimitBanner(panel);
   const statusNode = panel.querySelector('[data-role="status"]');
   const timeline = panel.querySelector('[data-role="timeline"]');
   const errorNode = panel.querySelector('[data-role="error"]');
@@ -1318,6 +1559,7 @@ function setupAgentPanel() {
 function setupPlannerPanel() {
   const panel = doc.getElementById('panel-planner');
   if (!panel) return;
+  registerRateLimitBanner(panel);
   const statusNode = panel.querySelector('[data-role="status"]');
   const planGrid = panel.querySelector('[data-role="plan"]');
   const dryRunNode = panel.querySelector('[data-role="dry-run"]');
@@ -1325,6 +1567,41 @@ function setupPlannerPanel() {
   const pauseBtn = panel.querySelector('button[data-control="pause"]');
   let wsRef = null;
   let currentMint = null;
+  function computeDryRun(plan) {
+    if (!plan) return null;
+    const size = Number(plan.size ?? plan.quantity);
+    if (!Number.isFinite(size) || size <= 0) return null;
+    const orderbook = state.orderbooks.get(currentMint);
+    if (!orderbook) return null;
+    const intent = String(plan.intent || plan.action || '').toLowerCase();
+    const ladder = intent === 'sell' ? orderbook.bids : orderbook.asks;
+    if (!Array.isArray(ladder) || !ladder.length) return null;
+    let remaining = size;
+    let notional = 0;
+    let filled = 0;
+    ladder.forEach((level) => {
+      if (remaining <= 0) return;
+      const take = Math.min(remaining, level.size);
+      notional += take * level.price;
+      filled += take;
+      remaining -= take;
+    });
+    if (filled <= 0) return null;
+    const avgPrice = notional / filled;
+    const referencePrice = Number(
+      plan.reference_price ?? plan.price ?? plan.mark_price ?? orderbook.mid ?? ladder[0].price
+    );
+    const impactPercent = Number.isFinite(referencePrice) && referencePrice > 0
+      ? ((avgPrice - referencePrice) / referencePrice) * 100
+      : null;
+    return {
+      filled,
+      remaining,
+      avgPrice,
+      referencePrice: Number.isFinite(referencePrice) ? referencePrice : null,
+      impactPercent
+    };
+  }
   function renderPlan(plan) {
     planGrid.innerHTML = '';
     if (!plan) {
@@ -1347,7 +1624,38 @@ function setupPlannerPanel() {
       dl.innerHTML = `<dt>${label}</dt><dd>${value}</dd>`;
       planGrid.appendChild(dl);
     });
-    dryRunNode.textContent = plan.dry_run ? `Dry-run impact: ${formatPercent(plan.dry_run.price_impact || 0)} · Fill ${formatNumber(plan.dry_run.expected_fill || 0, 4)}` : 'Dry-run pending…';
+    const dryRunData = (() => {
+      if (plan.dry_run && typeof plan.dry_run === 'object') {
+        const raw = plan.dry_run;
+        const impact = raw.price_impact ?? raw.impact ?? raw.impact_percent ?? raw.impactPercent;
+        let impactPercent = impact !== undefined ? Number(impact) : null;
+        if (impactPercent !== null && Math.abs(impactPercent) <= 1) {
+          impactPercent *= 100;
+        }
+        return {
+          fill: Number(raw.expected_fill ?? raw.fill ?? raw.size ?? plan.size ?? 0),
+          remaining: Number(raw.remaining ?? 0),
+          avgPrice: Number(raw.avg_price ?? raw.price ?? raw.avg ?? 0),
+          impactPercent,
+          reference: Number(raw.reference_price ?? plan.reference_price ?? 0)
+        };
+      }
+      return computeDryRun(plan);
+    })();
+    if (dryRunData) {
+      const impactText = (dryRunData.impactPercent !== null && dryRunData.impactPercent !== undefined)
+        ? formatPercent(dryRunData.impactPercent)
+        : '—';
+      const remainingText = dryRunData.remaining && dryRunData.remaining > 0
+        ? ` · ${formatNumber(dryRunData.remaining, 4)} unfilled`
+        : '';
+      const referenceText = dryRunData.reference || dryRunData.referencePrice
+        ? ` vs ref ${formatNumber(dryRunData.reference ?? dryRunData.referencePrice, 6)}`
+        : '';
+      dryRunNode.textContent = `Dry-run: fill ${formatNumber(dryRunData.fill ?? dryRunData.filled ?? plan.size ?? 0, 4)} @ ${formatNumber(dryRunData.avgPrice ?? plan.price ?? 0, 6)} · Impact ${impactText}${referenceText}${remainingText}`;
+    } else {
+      dryRunNode.textContent = 'Dry-run pending…';
+    }
     hydration.planner = true;
   }
   async function loadSnapshot(mint) {
@@ -1399,6 +1707,15 @@ function setupPlannerPanel() {
       }
     });
   }
+  doc.addEventListener('depth-update', (event) => {
+    const detail = event.detail || {};
+    if (!detail.mint || detail.mint !== currentMint) return;
+    if (state.plannerPaused) return;
+    const plan = state.planByMint.get(currentMint);
+    if (plan) {
+      renderPlan(plan);
+    }
+  });
   pauseBtn.addEventListener('click', () => {
     state.plannerPaused = !state.plannerPaused;
     pauseBtn.textContent = state.plannerPaused ? 'Resume' : 'Pause';
@@ -1422,6 +1739,7 @@ function setupPlannerPanel() {
 function setupOrdersPanel() {
   const panel = doc.getElementById('panel-orders');
   if (!panel) return;
+  registerRateLimitBanner(panel);
   const statusNode = panel.querySelector('[data-role="status"]');
   const rowsBody = panel.querySelector('[data-role="rows"]');
   const summaryNode = panel.querySelector('[data-role="summary"]');
@@ -1578,6 +1896,7 @@ function setupOrdersPanel() {
 function setupPositionsPanel() {
   const panel = doc.getElementById('panel-positions');
   if (!panel) return;
+  registerRateLimitBanner(panel);
   const statusNode = panel.querySelector('[data-role="status"]');
   const rowsBody = panel.querySelector('[data-role="rows"]');
   const budgetNode = panel.querySelector('[data-role="budget"]');
@@ -1734,6 +2053,7 @@ function setupPositionsPanel() {
     function setupPnlPanel() {
       const panel = doc.getElementById('panel-pnl');
       if (!panel) return;
+      registerRateLimitBanner(panel);
       const statusNode = panel.querySelector('[data-role="status"]');
       const metricsGrid = panel.querySelector('[data-role="metrics"]');
       const errorNode = panel.querySelector('[data-role="error"]');
@@ -1842,6 +2162,7 @@ function setupPositionsPanel() {
     function setupRuntimePanel() {
       const panel = doc.getElementById('panel-runtime');
       if (!panel) return;
+      registerRateLimitBanner(panel);
       const statusNode = panel.querySelector('[data-role="status"]');
       const metricsGrid = panel.querySelector('[data-role="metrics"]');
       const errorNode = panel.querySelector('[data-role="error"]');
@@ -1874,6 +2195,7 @@ function setupPositionsPanel() {
             metricsGrid.appendChild(card);
           });
         }
+        analyzeRateLimits(providers, metrics);
         statusNode.textContent = 'Live';
       }
       async function loadSnapshot() {
@@ -1934,6 +2256,7 @@ function setupPositionsPanel() {
     function setupLogsPanel() {
       const panel = doc.getElementById('panel-logs');
       if (!panel) return;
+      registerRateLimitBanner(panel);
       const statusNode = panel.querySelector('[data-role="status"]');
       const list = panel.querySelector('[data-role="list"]');
       const errorNode = panel.querySelector('[data-role="error"]');
