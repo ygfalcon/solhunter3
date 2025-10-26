@@ -273,6 +273,7 @@
       <div class="header-actions">
         <button class="ghost-btn" id="copy-env-btn">Copy env</button>
         <button class="ghost-btn" id="self-check-btn">Run Self-Check</button>
+        <span id="run-stream-status" style="font-size:0.8rem;color:var(--muted);">Run state: connecting…</span>
         <span id="self-check-status" style="font-size:0.8rem;color:var(--muted);">Self-Check idle</span>
       </div>
     </header>
@@ -483,9 +484,15 @@
     tokenPriceStream: (mint) => `/ws/price/${encodeURIComponent(mint)}`,
     tokenDepthStream: (mint) => `/ws/depth/${encodeURIComponent(mint)}`,
     agentEventsBackfill: (mint, since) => `/api/agents/events?mint=${encodeURIComponent(mint)}&since=${encodeURIComponent(since)}`,
-    agentEventsStream: '/ws/agents/events',
+    agentEventsStream: (mint) => {
+      const base = '/ws/agents/events';
+      return mint ? `${base}?mint=${encodeURIComponent(mint)}` : base;
+    },
     executionPlanSnapshot: (mint) => `/api/execution/plan?mint=${encodeURIComponent(mint)}`,
-    executionPlanStream: '/ws/execution/plan',
+    executionPlanStream: (mint) => {
+      const base = '/ws/execution/plan';
+      return mint ? `${base}?mint=${encodeURIComponent(mint)}` : base;
+    },
     fillsSnapshot: '/api/execution/fills?limit=500',
     fillsStream: '/ws/execution/fills',
     closePosition: (mint, qty) => `/api/execution/close?mint=${encodeURIComponent(mint)}&qty=${encodeURIComponent(qty)}`,
@@ -528,6 +535,7 @@
     selectedMint: null,
     runState: null,
     rlHealthUrl: null,
+    keypairPath: null,
     discoveryWindow: 15,
     discoveryPaused: false,
     discoveryEvents: [],
@@ -884,6 +892,25 @@
       }
     };
   }
+  function unwrapStreamPayload(raw, arrayKeys = []) {
+    if (raw === undefined || raw === null) return [];
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw !== 'object') return [];
+    if (Array.isArray(raw.data)) return raw.data;
+    if (Array.isArray(raw.payload)) return raw.payload;
+    if (Array.isArray(raw.items)) return raw.items;
+    if (Array.isArray(raw.events)) return raw.events;
+    if (Array.isArray(raw.rows)) return raw.rows;
+    for (const key of arrayKeys) {
+      if (Array.isArray(raw[key])) return raw[key];
+    }
+    if (raw.data !== undefined && raw.data !== null) return [raw.data];
+    if (raw.payload !== undefined && raw.payload !== null) return [raw.payload];
+    for (const key of arrayKeys) {
+      if (raw[key] !== undefined && raw[key] !== null) return [raw[key]];
+    }
+    return [raw];
+  }
   function persistSort(key, value) {
     try {
       localStorage.setItem(key, JSON.stringify(value));
@@ -978,30 +1005,44 @@ async function refreshHealth() {
       const workflow = doc.getElementById('pill-workflow');
       const keypair = doc.getElementById('keypair-display');
       const budget = doc.getElementById('budget-remaining');
-  const risk = doc.getElementById('risk-current');
-  const throttle = doc.getElementById('throttle-backoff');
-  const rps = doc.getElementById('rps-limits');
-  if (!runState) {
-    mode.textContent = 'Mode: —';
-    workflow.textContent = 'Workflow: —';
-    keypair.textContent = '—';
-    budget.textContent = '—';
-    risk.textContent = '—';
-    throttle.textContent = '—';
-    rps.textContent = '—';
-    return;
-  }
-  mode.textContent = `Mode: ${runState.mode || '—'}`;
-  workflow.textContent = `Workflow: ${runState.workflow || '—'}`;
-  keypair.textContent = runState.keypair_pubkey || runState.keypair_path || '—';
-  budget.textContent = runState.budget_remaining !== undefined ? formatCurrency(runState.budget_remaining) : '—';
-  risk.textContent = runState.risk_current !== undefined ? formatNumber(runState.risk_current, 4) : '—';
-      throttle.textContent = runState.rpc_backoff ? `${runState.rpc_backoff} (backoff)` : (runState.throttle_state || 'Nominal');
-      const limits = runState.rps_limits;
+      const risk = doc.getElementById('risk-current');
+      const throttle = doc.getElementById('throttle-backoff');
+      const rps = doc.getElementById('rps-limits');
+      if (!runState) {
+        mode.textContent = 'Mode: —';
+        workflow.textContent = 'Workflow: —';
+        keypair.textContent = '—';
+        budget.textContent = '—';
+        risk.textContent = '—';
+        throttle.textContent = '—';
+        rps.textContent = '—';
+        return;
+      }
+      state.runState = {...(state.runState || {}), ...runState};
+      const merged = state.runState;
+      mode.textContent = `Mode: ${merged.mode || '—'}`;
+      workflow.textContent = `Workflow: ${merged.workflow || '—'}`;
+      const fingerprint = merged.keypair_pubkey || merged.keypair_fingerprint || '—';
+      const keypairPath = state.keypairPath || merged.keypair_path || '';
+      if (fingerprint && keypairPath) {
+        keypair.textContent = `${fingerprint} · ${keypairPath}`;
+      } else if (fingerprint !== '—') {
+        keypair.textContent = fingerprint;
+      } else if (keypairPath) {
+        keypair.textContent = keypairPath;
+      } else {
+        keypair.textContent = '—';
+      }
+      budget.textContent = merged.budget_remaining !== undefined ? formatCurrency(merged.budget_remaining) : '—';
+      risk.textContent = merged.risk_current !== undefined ? formatNumber(merged.risk_current, 4) : '—';
+      const throttleParts = [];
+      if (merged.rpc_backoff) throttleParts.push(`Backoff ${merged.rpc_backoff}`);
+      if (merged.throttle_state) throttleParts.push(merged.throttle_state);
+      throttle.textContent = throttleParts.length ? throttleParts.join(' · ') : 'Nominal';
+      const limits = merged.rps_limits;
       rps.textContent = Array.isArray(limits) ? limits.join(', ') : (limits || '—');
-      setLivePill(Boolean(runState.canary));
-      state.runState = runState;
-      doc.dispatchEvent(new CustomEvent('run-state-update', {detail: runState}));
+      setLivePill(Boolean(merged.canary));
+      doc.dispatchEvent(new CustomEvent('run-state-update', {detail: merged}));
       hydration.runHeader = true;
     }
 async function loadRunStateSnapshot() {
@@ -1011,37 +1052,69 @@ async function loadRunStateSnapshot() {
     updateRunHeader(runState);
   }
 }
+async function loadEnvForHeader() {
+  try {
+    const env = await safeFetchJson(ENDPOINTS.runEnv, 'run-env-header', null, {headers: {Accept: 'application/json'}}).catch(() => null);
+    if (env && typeof env === 'object') {
+      if (env.KEYPAIR_PATH) {
+        state.keypairPath = env.KEYPAIR_PATH;
+        if (state.runState) {
+          updateRunHeader(state.runState);
+        }
+      }
+    }
+  } catch (err) {
+    /* env fetch optional */
+  }
+}
 function connectRunStateStream() {
+  const statusLabel = doc.getElementById('run-stream-status');
+  if (statusLabel) {
+    statusLabel.textContent = 'Run state: connecting…';
+  }
   return createWsConnection({
     url: ENDPOINTS.runStateStream,
     panelId: 'run-state',
     errorNode: null,
     onStatus: (status) => {
-      const statusLabel = doc.querySelector('#run-header [data-role="status"]');
-      if (statusLabel) {
-        statusLabel.textContent = status === 'connected' ? 'Live' : 'Reconnecting…';
+      if (!statusLabel) return;
+      if (status === 'connected') {
+        statusLabel.textContent = 'Run state: live';
+      } else {
+        statusLabel.textContent = 'Run state: reconnecting…';
       }
     },
     onMessage: (payload) => {
-      const data = safeJsonParse(payload, 'run-state', null);
-      if (data && typeof data === 'object') {
-        state.runState = data;
-        updateRunHeader(data);
-      }
+      const parsed = safeJsonParse(payload, 'run-state', null);
+      const frames = unwrapStreamPayload(parsed, ['state']);
+      frames.forEach((entry) => {
+        if (!entry || typeof entry !== 'object') return;
+        updateRunHeader(entry);
+      });
     }
   });
 }
 function setupRunHeader() {
   loadRunStateSnapshot();
+  loadEnvForHeader();
   refreshHealth();
   connectRunStateStream();
   window.setInterval(refreshHealth, 15000);
+  window.setInterval(() => {
+    loadRunStateSnapshot();
+  }, 10000);
   const copyEnvBtn = doc.getElementById('copy-env-btn');
   if (copyEnvBtn) {
     copyEnvBtn.addEventListener('click', async () => {
       copyEnvBtn.disabled = true;
       try {
         const env = await safeFetchJson(ENDPOINTS.runEnv, 'run-env', null, {headers: {Accept: 'application/json'}});
+        if (env && env.KEYPAIR_PATH && env.KEYPAIR_PATH !== state.keypairPath) {
+          state.keypairPath = env.KEYPAIR_PATH;
+          if (state.runState) {
+            updateRunHeader(state.runState);
+          }
+        }
         copyToClipboard(JSON.stringify(env || {}, null, 2));
       } finally {
         copyEnvBtn.disabled = false;
@@ -1154,8 +1227,9 @@ function setupDiscoveryPanel() {
       },
       onMessage: (payload) => {
         if (state.discoveryPaused) return;
-        const data = safeJsonParse(payload, 'discovery', errorNode);
-        ingest(data);
+        const parsed = safeJsonParse(payload, 'discovery', errorNode);
+        const frames = unwrapStreamPayload(parsed, ['events', 'discoveries', 'opportunities']);
+        frames.forEach((frame) => ingest(frame));
       }
     });
   }
@@ -1320,20 +1394,23 @@ function setupTokenPanel() {
         }
       },
       onMessage: (payload) => {
-        const data = safeJsonParse(payload, 'token-price', errorNode);
-        if (data && typeof data === 'object') {
-          if (mint) {
-            updatePriceSnapshot(mint, data);
-          }
+        const parsed = safeJsonParse(payload, 'token-price', errorNode);
+        const frames = unwrapStreamPayload(parsed, ['ticks', 'prices', 'candles', 'data']);
+        frames.forEach((data) => {
+          if (!data || (data.mint && data.mint !== mint)) return;
+          updatePriceSnapshot(mint, data);
           if (data.meta) {
             renderMeta(data.meta, data);
           }
-          if (typeof data.price === 'number') {
-            pricePoints.push(data.price);
-            pricePoints = pricePoints.slice(-240);
-            drawSparkline(sparklineCanvas, pricePoints);
+          if (typeof data.price === 'number' || typeof data.c === 'number') {
+            const point = maybeNumber(data.price ?? data.close ?? data.c);
+            if (point !== null) {
+              pricePoints.push(point);
+              pricePoints = pricePoints.slice(-240);
+              drawSparkline(sparklineCanvas, pricePoints);
+            }
           }
-        }
+        });
       }
     });
   }
@@ -1344,21 +1421,25 @@ function setupTokenPanel() {
       panelId: 'token-depth',
       errorNode,
       onMessage: (payload) => {
-        const data = safeJsonParse(payload, 'token-depth', errorNode);
-        if (data && data.status === 'invalid_mint') {
-          invalidBanner.hidden = false;
-        } else if (data) {
-          invalidBanner.hidden = true;
-        }
-        const book = normalizeOrderbookPayload(data);
-        if (book && currentMint) {
-          state.depthByMint.set(currentMint, book);
-          if (book.bids.length && book.asks.length) {
-            const mid = (book.bids[0][0] + book.asks[0][0]) / 2;
-            updatePriceSnapshot(currentMint, {mid});
+        const parsed = safeJsonParse(payload, 'token-depth', errorNode);
+        const frames = unwrapStreamPayload(parsed, ['depth', 'book', 'levels', 'data']);
+        frames.forEach((data) => {
+          if (!data || (data.mint && data.mint !== mint)) return;
+          if (data.status === 'invalid_mint') {
+            invalidBanner.hidden = false;
+            return;
           }
-          doc.dispatchEvent(new CustomEvent('orderbook-update', {detail: {mint: currentMint, book}}));
-        }
+          invalidBanner.hidden = true;
+          const book = normalizeOrderbookPayload(data);
+          if (book && currentMint) {
+            state.depthByMint.set(currentMint, book);
+            if (book.bids.length && book.asks.length) {
+              const mid = (book.bids[0][0] + book.asks[0][0]) / 2;
+              updatePriceSnapshot(currentMint, {mid});
+            }
+            doc.dispatchEvent(new CustomEvent('orderbook-update', {detail: {mint: currentMint, book}}));
+          }
+        });
       }
     });
   }
@@ -1475,9 +1556,8 @@ function setupAgentPanel() {
   function startStream(mint) {
     if (wsRef) wsRef.close();
     if (!mint || state.agentPaused) return;
-    const url = `${ENDPOINTS.agentEventsStream}?mint=${encodeURIComponent(mint)}`;
     wsRef = createWsConnection({
-      url,
+      url: ENDPOINTS.agentEventsStream(mint),
       panelId: 'agents',
       errorNode,
       onStatus: (status) => {
@@ -1489,20 +1569,20 @@ function setupAgentPanel() {
       },
       onMessage: (payload) => {
         if (state.agentPaused) return;
-        const data = safeJsonParse(payload, 'agents', errorNode);
-        const rows = Array.isArray(data) ? data : [data];
-        rows.forEach((row) => {
-          if (row.mint && row.mint !== currentMint) return;
+        const parsed = safeJsonParse(payload, 'agents', errorNode);
+        const frames = unwrapStreamPayload(parsed, ['events', 'messages', 'suggestions']);
+        frames.forEach((row) => {
+          if (!row || (row.mint && row.mint !== currentMint)) return;
           const ts = toMillis(row.ts || row.timestamp);
           const formatted = formatTimestamp(ts);
           events.push({
             ts,
             label: formatted.label,
             utc: formatted.utc,
-            agent: row.agent_id || row.agent || 'unknown',
-            intent: row.intent || 'hold',
-            confidence: Number(row.confidence || 0),
-            features: JSON.stringify(row.features || {}),
+            agent: row.agent_id || row.agent || row.source || 'unknown',
+            intent: row.intent || row.action || 'hold',
+            confidence: Number(row.confidence || row.score || 0),
+            features: JSON.stringify(row.features || row.metrics || {}),
             error: row.error || null
           });
         });
@@ -1618,10 +1698,11 @@ function setupPlannerPanel() {
       statusNode.textContent = 'Plan snapshot failed';
     }
   }
-  function startStream() {
+  function startStream(targetMint = currentMint) {
     if (wsRef) wsRef.close();
+    if (!targetMint || state.plannerPaused) return;
     wsRef = createWsConnection({
-      url: ENDPOINTS.executionPlanStream,
+      url: ENDPOINTS.executionPlanStream(targetMint),
       panelId: 'execution-plan',
       errorNode,
       onStatus: (status) => {
@@ -1633,17 +1714,19 @@ function setupPlannerPanel() {
       },
       onMessage: (payload) => {
         if (state.plannerPaused) return;
-        const data = safeJsonParse(payload, 'execution-plan', errorNode);
-        const items = Array.isArray(data) ? data : [data];
+        const parsed = safeJsonParse(payload, 'execution-plan', errorNode);
+        const items = unwrapStreamPayload(parsed, ['plan', 'data']);
         items.forEach((plan) => {
-          if (!plan || plan.mint && plan.mint !== currentMint) {
+          if (!plan || (plan.mint && plan.mint !== targetMint)) {
             if (plan && plan.mint) {
               state.planByMint.set(plan.mint, plan);
             }
             return;
           }
-          state.planByMint.set(currentMint, plan);
-          renderPlan(plan);
+          state.planByMint.set(targetMint, plan);
+          if (targetMint === currentMint) {
+            renderPlan(plan);
+          }
           hydration.planner = true;
         });
       }
@@ -1656,7 +1739,7 @@ function setupPlannerPanel() {
       if (wsRef) wsRef.close();
       statusNode.textContent = 'Paused';
     } else {
-      loadSnapshot(currentMint).then(startStream);
+      loadSnapshot(currentMint).then(() => startStream(currentMint));
     }
   });
   selectedMintStore.subscribe((mint) => {
@@ -1671,7 +1754,7 @@ function setupPlannerPanel() {
     } else {
       renderPlan(null);
     }
-    loadSnapshot(mint).then(startStream);
+    loadSnapshot(mint).then(() => startStream(mint));
   });
   const refreshPlanView = (event) => {
     if (!event || !event.detail || event.detail.mint !== currentMint) return;
@@ -1683,7 +1766,7 @@ function setupPlannerPanel() {
   };
   doc.addEventListener('orderbook-update', refreshPlanView);
   doc.addEventListener('price-snapshot-update', refreshPlanView);
-  startStream();
+  startStream(currentMint);
 }
 function setupOrdersPanel() {
   const panel = doc.getElementById('panel-orders');
@@ -1800,21 +1883,21 @@ function setupOrdersPanel() {
       },
       onMessage: (payload) => {
         if (state.ordersPaused) return;
-        const data = safeJsonParse(payload, 'orders', errorNode);
-        const rows = Array.isArray(data) ? data : [data];
+        const parsed = safeJsonParse(payload, 'orders', errorNode);
+        const rows = unwrapStreamPayload(parsed, ['fills', 'orders', 'executions']);
         rows.forEach((row) => {
           const order = {
             ts: toMillis(row.ts || row.timestamp),
             mint: row.mint || row.token || '—',
-            side: row.side || '—',
-            qty: Number(row.qty || row.quantity || 0),
-            route: row.route || (Array.isArray(row.routes) ? row.routes.join(', ') : '—'),
+            side: row.side || row.direction || row.intent || '—',
+            qty: Number(row.qty || row.quantity || row.base_amount || 0),
+            route: row.route || row.router || (Array.isArray(row.routes) ? row.routes.join(', ') : '—'),
             quote_price: row.quote_price !== undefined ? formatNumber(row.quote_price, 6) : '—',
-            fill_price: row.fill_price !== undefined ? formatNumber(row.fill_price, 6) : '—',
+            fill_price: row.fill_price !== undefined ? formatNumber(row.fill_price, 6) : (row.price_usd !== undefined ? formatNumber(row.price_usd, 6) : '—'),
             slippage_bps: Number(row.slippage_bps || row.slippage || 0),
-            fees: Number(row.fees || 0),
-            status: row.status || 'pending',
-            txid: row.txid || row.signature || null
+            fees: Number(row.fees || row.fee || 0),
+            status: row.status || row.fill_status || 'pending',
+            txid: row.txid || row.signature || row.tx || null
           };
           state.orders.unshift(order);
         });
@@ -1957,17 +2040,17 @@ function setupPositionsPanel() {
       },
       onMessage: (payload) => {
         if (state.positionsPaused) return;
-        const data = safeJsonParse(payload, 'positions', errorNode);
-        const rows = Array.isArray(data) ? data : [data];
+        const parsed = safeJsonParse(payload, 'positions', errorNode);
+        const rows = unwrapStreamPayload(parsed, ['positions', 'portfolio', 'updates']);
         rows.forEach((row) => {
           const mint = row.mint || row.token;
           const position = {
             mint: mint || '—',
-            qty: Number(row.qty || row.quantity || 0),
-            avg_cost: Number(row.avg_cost || row.avg || 0),
-            mark: Number(row.mark || row.price || 0),
-            ue_pnl: Number(row.unrealized_pnl || row.ue_pnl || 0),
-            realized_pnl: Number(row.realized_pnl || 0),
+            qty: Number(row.qty || row.quantity || row.size || 0),
+            avg_cost: Number(row.avg_cost || row.avg || row.cost_basis || 0),
+            mark: Number(row.mark || row.price || row.mark_price || 0),
+            ue_pnl: Number(row.unrealized_pnl || row.ue_pnl || row.unrealized || 0),
+            realized_pnl: Number(row.realized_pnl || row.realized || 0),
             risk: Number(row.risk_weight || row.risk || 0)
           };
           const index = positionsRows.findIndex((p) => p.mint === position.mint);
@@ -2100,14 +2183,16 @@ function setupPositionsPanel() {
           },
           onMessage: (payload) => {
             if (state.pnlPaused) return;
-            const data = safeJsonParse(payload, 'risk', errorNode);
-            if (data && typeof data === 'object') {
+            const parsed = safeJsonParse(payload, 'risk', errorNode);
+            const frames = unwrapStreamPayload(parsed, ['risk', 'metrics', 'state']);
+            frames.forEach((data) => {
+              if (!data || typeof data !== 'object') return;
               const previous = state.lastRiskState;
               state.lastRiskState = data;
               state.pnlMetrics = state.pnlMetrics || {};
               state.pnlMetrics.risk = data;
               render(state.pnlMetrics ? state.pnlMetrics.pnl : null, data, previous);
-            }
+            });
           }
         });
       }
@@ -2139,6 +2224,20 @@ function setupPositionsPanel() {
       const errorNode = panel.querySelector('[data-role="error"]');
       const pauseBtn = panel.querySelector('button[data-control="pause"]');
       let wsRef = null;
+      function flattenNumericMetrics(source, prefix = '') {
+        const result = {};
+        if (!source || typeof source !== 'object') return result;
+        Object.entries(source).forEach(([key, value]) => {
+          if (value === null || value === undefined) return;
+          const nextKey = prefix ? `${prefix}.${key}` : key;
+          if (typeof value === 'number') {
+            result[nextKey] = value;
+          } else if (!Array.isArray(value) && typeof value === 'object') {
+            Object.assign(result, flattenNumericMetrics(value, nextKey));
+          }
+        });
+        return result;
+      }
       function render(providers, metrics) {
         metricsGrid.innerHTML = '';
         if (!providers && !metrics) {
@@ -2190,9 +2289,15 @@ function setupPositionsPanel() {
         if (state.runtimePaused) return;
         statusNode.textContent = 'Loading…';
         try {
-          const providers = await safeFetchJson(ENDPOINTS.providerStatus, 'providers', errorNode, {headers: {Accept: 'application/json'}});
-          state.runtimeMetrics = {providers: providers || []};
-          render(providers || [], state.runtimeMetrics.metrics || null);
+          const [health, providers] = await Promise.all([
+            safeFetchJson(ENDPOINTS.health, 'runtime-health', errorNode, {headers: {Accept: 'application/json'}}).catch(() => null),
+            safeFetchJson(ENDPOINTS.providerStatus, 'providers', errorNode, {headers: {Accept: 'application/json'}})
+          ]);
+          const numeric = flattenNumericMetrics(health || {});
+          const existing = state.runtimeMetrics && state.runtimeMetrics.metrics ? {...state.runtimeMetrics.metrics} : {};
+          const merged = {...existing, ...numeric};
+          state.runtimeMetrics = {providers: providers || [], metrics: merged};
+          render(state.runtimeMetrics.providers, merged);
         } catch (err) {
           statusNode.textContent = 'Provider snapshot failed';
         }
@@ -2212,16 +2317,27 @@ function setupPositionsPanel() {
           },
           onMessage: (payload) => {
             if (state.runtimePaused) return;
-            const data = safeJsonParse(payload, 'metrics', errorNode);
-            if (data && typeof data === 'object') {
-              state.runtimeMetrics = state.runtimeMetrics || {};
-              state.runtimeMetrics.metrics = data;
-              render(state.runtimeMetrics.providers || [], data);
-              const any429 = Object.keys(data).some((key) => key.includes('429') && Number(data[key]) > 0);
-              if (any429) {
-                statusNode.textContent = 'Rate limited — observing backoff';
+            const parsed = safeJsonParse(payload, 'metrics', errorNode);
+            const frames = unwrapStreamPayload(parsed, ['metrics', 'data', 'providers']);
+            frames.forEach((data) => {
+              if (!data || typeof data !== 'object') return;
+              state.runtimeMetrics = state.runtimeMetrics || {providers: [], metrics: {}};
+              if (Array.isArray(data.providers)) {
+                state.runtimeMetrics.providers = data.providers;
               }
-            }
+              const numeric = flattenNumericMetrics(data.metrics || data);
+              if (Object.keys(numeric).length) {
+                const merged = {...(state.runtimeMetrics.metrics || {}), ...numeric};
+                state.runtimeMetrics.metrics = merged;
+                render(state.runtimeMetrics.providers || [], merged);
+                const any429 = Object.keys(merged).some((key) => key.toLowerCase().includes('429') && Number(merged[key]) > 0);
+                if (any429) {
+                  statusNode.textContent = 'Rate limited — observing backoff';
+                }
+              } else if (Array.isArray(data.providers)) {
+                render(state.runtimeMetrics.providers || [], state.runtimeMetrics.metrics || {});
+              }
+            });
           }
         });
       }
