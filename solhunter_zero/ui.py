@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from queue import Queue
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from flask import Flask, Request, Response, jsonify, render_template, request
 from werkzeug.serving import BaseWSGIServer, make_server
@@ -1377,6 +1377,7 @@ class _WebsocketState:
         "loop",
         "server",
         "clients",
+        "client_filters",
         "queue",
         "task",
         "thread",
@@ -1395,7 +1396,8 @@ class _WebsocketState:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.server: Any | None = None
         self.clients: set[Any] = set()
-        self.queue: asyncio.Queue[str] | None = None
+        self.client_filters: Dict[Any, Callable[[Optional[Mapping[str, Any]]], bool] | None] = {}
+        self.queue: asyncio.Queue[tuple[str, Optional[Dict[str, Any]]]] | None = None
         self.task: asyncio.Task[Any] | None = None
         self.thread: threading.Thread | None = None
         self.port: int = 0
@@ -1471,25 +1473,238 @@ def _format_payload(payload: Any) -> str:
         return str(payload)
 
 
-def _enqueue_message(channel: str, payload: Any) -> bool:
+def _normalize_panel_name(panel: str | None) -> str:
+    if panel is None:
+        return ""
+    name = str(panel).strip().lower()
+    aliases = {
+        "golden": "token_price",
+        "token_snapshot": "token_price",
+        "market_ohlcv": "token_price",
+        "market_depth": "token_depth",
+        "token_facts": "token_price",
+        "suggestions": "agent_events",
+        "votes": "agent_events",
+        "virtual_fills": "execution_fills",
+        "live_fills": "execution_fills",
+        "status": "run_state",
+        "heartbeat": "run_state",
+    }
+    return aliases.get(name, name)
+
+
+def _build_meta_filter(
+    panel: Optional[str] = None,
+    mint: Optional[str] = None,
+    *,
+    levels: Optional[Set[str]] = None,
+) -> Callable[[Optional[Dict[str, Any]]], bool] | None:
+    canonical_panel = _normalize_panel_name(panel)
+    canonical_mint = str(mint).strip() if mint else ""
+    normalized_levels = {level.lower() for level in levels} if levels else None
+    if not canonical_panel and not canonical_mint and not normalized_levels:
+        return None
+
+    def _filter(meta: Optional[Dict[str, Any]]) -> bool:
+        if meta is None:
+            return not canonical_panel and not canonical_mint and normalized_levels is None
+        if canonical_panel:
+            candidate = _normalize_panel_name(str(meta.get("panel") or ""))
+            if candidate != canonical_panel:
+                return False
+        if canonical_mint:
+            mint_value = str(meta.get("mint") or "").strip()
+            if mint_value != canonical_mint:
+                return False
+        if normalized_levels is not None:
+            level_value = str(meta.get("level") or "").strip().lower()
+            if level_value and level_value not in normalized_levels:
+                return False
+        return True
+
+    return _filter
+
+
+def _first_query_value(values: Optional[Sequence[str]]) -> Optional[str]:
+    if not values:
+        return None
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _extract_path_suffix(path: str, prefix: str) -> Optional[str]:
+    if not path.startswith(prefix):
+        return None
+    remainder = path[len(prefix) :].strip("/")
+    return remainder or None
+
+
+def _resolve_event_alias(
+    path: str,
+    raw_query: str,
+    template_path: str,
+) -> tuple[str | None, Callable[[Optional[Dict[str, Any]]], bool] | None]:
+    normalized_path = (path or "").rstrip("/")
+    if not normalized_path:
+        normalized_path = "/"
+    try:
+        query_params = parse_qs(raw_query, keep_blank_values=True)
+    except Exception:
+        query_params = {}
+
+    static_aliases: Dict[str, str] = {
+        "/ws/discovery": "discovery",
+        "/ws/run/state": "run_state",
+        "/ws/execution/fills": "execution_fills",
+        "/ws/portfolio": "portfolio",
+        "/ws/risk": "risk",
+        "/ws/metrics": "metrics",
+    }
+    panel = static_aliases.get(normalized_path)
+    if panel:
+        return template_path, _build_meta_filter(panel=panel)
+
+    price_suffix = _extract_path_suffix(normalized_path, "/ws/price")
+    if price_suffix is not None or "mint" in query_params:
+        mint = price_suffix or _first_query_value(query_params.get("mint"))
+        return template_path, _build_meta_filter(panel="token_price", mint=mint)
+
+    depth_suffix = _extract_path_suffix(normalized_path, "/ws/depth")
+    if depth_suffix is not None or "mint" in query_params:
+        mint = depth_suffix or _first_query_value(query_params.get("mint"))
+        return template_path, _build_meta_filter(panel="token_depth", mint=mint)
+
+    if normalized_path.startswith("/ws/agents/events"):
+        mint = _first_query_value(query_params.get("mint"))
+        return template_path, _build_meta_filter(panel="agent_events", mint=mint)
+
+    if normalized_path.startswith("/ws/execution/plan"):
+        mint = _first_query_value(query_params.get("mint"))
+        return template_path, _build_meta_filter(panel="execution_plan", mint=mint)
+
+    return None, None
+
+
+def _resolve_log_filter(raw_query: str) -> Callable[[Optional[Dict[str, Any]]], bool] | None:
+    if not raw_query:
+        return None
+    try:
+        params = parse_qs(raw_query, keep_blank_values=True)
+    except Exception:
+        params = {}
+    raw_levels = _first_query_value(params.get("level"))
+    if not raw_levels:
+        return None
+    separators = "|,; "
+    parts: List[str] = [raw_levels]
+    for separator in separators:
+        if separator in raw_levels:
+            parts = [segment for segment in raw_levels.replace(separator, "|").split("|")]
+            break
+    levels = {segment.strip().lower() for segment in parts if segment.strip()}
+    if not levels:
+        return None
+    return _build_meta_filter(levels=levels)
+
+
+def _resolve_panels(panel_name: str) -> List[str]:
+    normalized = panel_name.strip().lower()
+    mapping: Dict[str, List[str]] = {
+        "golden": ["token_price"],
+        "token_snapshot": ["token_price"],
+        "market_ohlcv": ["token_price"],
+        "market_depth": ["token_depth"],
+        "token_facts": ["token_price"],
+        "suggestions": ["agent_events", "execution_plan"],
+        "votes": ["agent_events"],
+        "virtual_fills": ["execution_fills"],
+        "live_fills": ["execution_fills"],
+        "status": ["run_state"],
+        "heartbeat": ["run_state"],
+    }
+    return mapping.get(normalized, [normalized])
+
+
+def _extract_mint_from_payload(data: Any, depth: int = 0) -> Optional[str]:
+    if depth > 3:
+        return None
+    if isinstance(data, Mapping):
+        for key in ("mint", "token", "address", "id", "symbol"):
+            value = data.get(key)
+            if value:
+                return str(value)
+        for value in data.values():
+            result = _extract_mint_from_payload(value, depth + 1)
+            if result:
+                return result
+    elif isinstance(data, Sequence) and not isinstance(data, (str, bytes, bytearray)):
+        for item in data:
+            result = _extract_mint_from_payload(item, depth + 1)
+            if result:
+                return result
+    return None
+
+
+def _derive_event_meta_entries(payload: Any) -> List[Dict[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return []
+    raw_panel = payload.get("panel") or payload.get("channel")
+    if not raw_panel:
+        return []
+    panels = _resolve_panels(str(raw_panel))
+    if not panels:
+        panels = [_normalize_panel_name(str(raw_panel))]
+    data = payload.get("data")
+    mint = _extract_mint_from_payload(data)
+    topic = payload.get("topic")
+    entries: List[Dict[str, Any]] = []
+    for panel_name in panels:
+        canonical = _normalize_panel_name(panel_name)
+        entry: Dict[str, Any] = {"panel": canonical}
+        if mint:
+            entry["mint"] = mint
+        if topic:
+            entry["topic"] = str(topic)
+        entries.append(entry)
+    return entries
+
+
+def _enqueue_message(
+    channel: str,
+    payload: Any,
+    *,
+    meta: Optional[Dict[str, Any]] = None,
+) -> bool:
     state = _WS_CHANNELS.get(channel)
     if not state or state.loop is None or state.queue is None:
         return False
 
     message = _format_payload(payload)
+    if meta is None:
+        meta_payload: Optional[Dict[str, Any]] = None
+    else:
+        try:
+            meta_payload = {str(key): value for key, value in meta.items()}
+        except Exception:
+            meta_payload = None
 
     def _put() -> None:
         if state.queue is None:
             return
         try:
-            state.queue.put_nowait(message)
+            state.queue.put_nowait((message, meta_payload))
         except asyncio.QueueFull:
             try:
                 state.queue.get_nowait()
                 state.queue.task_done()
             except asyncio.QueueEmpty:  # pragma: no cover - race
                 pass
-            state.queue.put_nowait(message)
+            state.queue.put_nowait((message, meta_payload))
             with state.lock:
                 state.drop_count += 1
                 depth = state.queue.qsize()
@@ -1510,7 +1725,27 @@ def _enqueue_message(channel: str, payload: Any) -> bool:
 def push_event(payload: Any) -> bool:
     """Broadcast *payload* to UI event websocket listeners."""
 
-    return _enqueue_message("events", payload)
+    meta_entries = _derive_event_meta_entries(payload)
+    if not meta_entries:
+        return _enqueue_message("events", payload, meta=None)
+    seen: Set[tuple[str, Optional[str]]] = set()
+    success = True
+    for entry in meta_entries:
+        panel = _normalize_panel_name(entry.get("panel"))
+        mint_value = entry.get("mint")
+        key = (panel, str(mint_value) if mint_value is not None else None)
+        if key in seen:
+            continue
+        seen.add(key)
+        meta = {"panel": panel}
+        if mint_value is not None:
+            meta["mint"] = mint_value
+        topic_value = entry.get("topic")
+        if topic_value is not None:
+            meta["topic"] = topic_value
+        if not _enqueue_message("events", payload, meta=meta):
+            success = False
+    return success
 
 
 def push_rl(payload: Any) -> bool:
@@ -1522,7 +1757,12 @@ def push_rl(payload: Any) -> bool:
 def push_log(payload: Any) -> bool:
     """Broadcast *payload* to log websocket listeners."""
 
-    return _enqueue_message("logs", payload)
+    meta: Optional[Dict[str, Any]] = None
+    if isinstance(payload, Mapping):
+        level_value = payload.get("level") or payload.get("severity")
+        if level_value:
+            meta = {"level": str(level_value).strip().lower()}
+    return _enqueue_message("logs", payload, meta=meta)
 
 
 def get_ws_client_counts() -> Dict[str, int]:
@@ -1725,6 +1965,7 @@ def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> No
         state.queue_high = 0
         state.drop_count = 0
         state.recent_close_codes.clear()
+        state.client_filters.clear()
 
 
 def _start_channel(
@@ -1756,9 +1997,9 @@ def _start_channel(
         else:
             log_ws_loop = loop
 
-        queue = asyncio.Queue[str](maxsize=queue_size)
+        queue = asyncio.Queue[tuple[str, Optional[Dict[str, Any]]]](maxsize=queue_size)
         state.queue = queue
-        backlog: deque[str] = deque()
+        backlog: deque[tuple[str, Optional[Dict[str, Any]]]] = deque()
         with state.lock:
             state.queue_max = queue_size
             state.queue_depth = 0
@@ -1768,11 +2009,19 @@ def _start_channel(
 
         async def _broadcast_loop() -> None:
             while True:
-                message = await queue.get()
+                message, meta = await queue.get()
                 stale_clients: list[Any] = []
                 with state.lock:
                     clients_snapshot = list(state.clients)
+                    filters = {ws: state.client_filters.get(ws) for ws in clients_snapshot}
                 for ws in clients_snapshot:
+                    client_filter = filters.get(ws)
+                    if client_filter is not None:
+                        try:
+                            if not client_filter(meta):
+                                continue
+                        except Exception:
+                            continue
                     try:
                         await ws.send(message)
                     except Exception:
@@ -1781,7 +2030,8 @@ def _start_channel(
                     with state.lock:
                         for ws in stale_clients:
                             state.clients.discard(ws)
-                backlog.append(message)
+                            state.client_filters.pop(ws, None)
+                backlog.append((message, meta))
                 if len(backlog) > BACKLOG_MAX:
                     backlog.popleft()
                 queue.task_done()
@@ -1793,6 +2043,19 @@ def _start_channel(
             parsed = urlparse(path or "")
             req_path = parsed.path or "/"
             template_path = _channel_path(channel)
+            client_filter: Callable[[Optional[Dict[str, Any]]], bool] | None = None
+            if channel == "events":
+                canonical_path, resolved_filter = _resolve_event_alias(
+                    req_path, parsed.query or "", template_path
+                )
+                if canonical_path:
+                    req_path = canonical_path
+                if resolved_filter is not None:
+                    client_filter = resolved_filter
+            elif channel == "logs":
+                log_filter = _resolve_log_filter(parsed.query or "")
+                if log_filter is not None:
+                    client_filter = log_filter
             allowed_paths = {
                 "",
                 "/",
@@ -1809,6 +2072,10 @@ def _start_channel(
                 return
             with state.lock:
                 state.clients.add(websocket)
+                if client_filter is not None:
+                    state.client_filters[websocket] = client_filter
+                else:
+                    state.client_filters.pop(websocket, None)
 
             handshake_event = asyncio.Event()
             send_lock = asyncio.Lock()
@@ -1834,9 +2101,15 @@ def _start_channel(
                         return
                     meta_sent = True
                     handshake_event.set()
-                    for cached in backlog_snapshot:
+                    for cached_message, cached_meta in backlog_snapshot:
+                        if client_filter is not None:
+                            try:
+                                if not client_filter(cached_meta):
+                                    continue
+                            except Exception:
+                                continue
                         try:
-                            await websocket.send(cached)
+                            await websocket.send(cached_message)
                         except Exception:
                             break
 
@@ -1853,6 +2126,7 @@ def _start_channel(
             except Exception:
                 with state.lock:
                     state.clients.discard(websocket)
+                    state.client_filters.pop(websocket, None)
                 timeout_task.cancel()
                 with contextlib.suppress(Exception):
                     await timeout_task
@@ -1864,6 +2138,7 @@ def _start_channel(
             except Exception:
                 with state.lock:
                     state.clients.discard(websocket)
+                    state.client_filters.pop(websocket, None)
                 timeout_task.cancel()
                 with contextlib.suppress(Exception):
                     await timeout_task
@@ -1912,6 +2187,7 @@ def _start_channel(
                 with state.lock:
                     state.clients.discard(websocket)
                     state.recent_close_codes.append(getattr(websocket, "close_code", None))
+                    state.client_filters.pop(websocket, None)
 
         server = None
         last_exc: Exception | None = None
