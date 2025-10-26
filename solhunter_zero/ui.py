@@ -27,11 +27,7 @@ from flask import Flask, Request, Response, jsonify, render_template, request
 from werkzeug.serving import BaseWSGIServer, make_server
 
 from . import event_bus
-from .agents.discovery import (
-    DEFAULT_DISCOVERY_METHOD,
-    DISCOVERY_METHODS,
-    resolve_discovery_method,
-)
+from .health_runtime import resolve_rl_health_url
 from .production import load_production_env
 from .util import parse_bool_env
 
@@ -1300,283 +1296,36 @@ def _resilience_snapshot() -> Dict[str, Any]:
 
 def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
     state = state or _get_active_ui_state()
-    summary: Dict[str, Any] = {}
-    status: Dict[str, Any] = {}
-    settings: Dict[str, Any] = {}
-    rl_status: Mapping[str, Any] | None = None
     if state is not None:
         try:
-            summary = dict(state.snapshot_summary())
+            run_state = dict(state.snapshot_run_state())
         except Exception:
-            log.debug("Failed to build summary snapshot for UI_META", exc_info=True)
-        try:
-            status = dict(state.snapshot_status())
-        except Exception:
-            log.debug("Failed to build status snapshot for UI_META", exc_info=True)
-        try:
-            settings = dict(state.snapshot_settings())
-        except Exception:
-            log.debug("Failed to build settings snapshot for UI_META", exc_info=True)
-        try:
-            rl_status = state.snapshot_rl_status()
-        except Exception:
-            rl_status = None
-    if rl_status is None and isinstance(status.get("rl_daemon_status"), Mapping):
-        rl_status = status.get("rl_daemon_status")
-
-    lag_snapshot = summary.get("lag") if isinstance(summary.get("lag"), dict) else {}
-    golden_info = summary.get("golden") if isinstance(summary.get("golden"), dict) else {}
-    lag_metrics: Dict[str, Optional[float]] = {
-        "bus_ms": _maybe_float(status.get("bus_latency_ms")),
-        "ohlcv_ms": _maybe_float(lag_snapshot.get("ohlcv_ms")),
-        "depth_ms": _maybe_float(lag_snapshot.get("depth_ms")),
-        "golden_ms": _maybe_float(golden_info.get("lag_ms")),
-        "suggestions_ms": _maybe_float(lag_snapshot.get("suggestion_ms")),
-        "votes_ms": _maybe_float(lag_snapshot.get("decision_ms")),
-    }
-    rl_updated = None
-    if isinstance(rl_status, Mapping):
-        rl_updated = _maybe_float(rl_status.get("updated_at"))
-    if rl_updated is not None:
-        lag_metrics["rl_ms"] = max(0.0, (time.time() - rl_updated) * 1000.0)
+            log.debug("Failed to snapshot run state for UI meta", exc_info=True)
+            run_state = _default_run_state()
     else:
-        lag_metrics["rl_ms"] = None
+        run_state = _default_run_state()
 
-    execution = _resolve_execution_snapshot(status)
-    paper_mode = bool(execution.get("paper"))
-
-    redis_url = _discover_broker_url() or (_env_or_default("REDIS_URL") or "redis://localhost:6379/1")
-    channel = (
-        getattr(event_bus, "_BROKER_CHANNEL", None)
-        or os.getenv("BROKER_CHANNEL")
-        or _env_or_default("BROKER_CHANNEL")
-        or "solhunter-events-v3"
-    )
-
-    depth_info = execution.get("depth_service") if isinstance(execution.get("depth_service"), Mapping) else {}
-    features: Dict[str, Any] = {
-        "sentiment_enabled": parse_bool_env("SENTIMENT_ENABLED", False),
-        "rl_shadow_enabled": str(status.get("rl_mode") or "").lower() == "shadow",
-        "depth_service_enabled": bool(depth_info.get("enabled")),
-        "golden_pipeline_enabled": parse_bool_env("GOLDEN_PIPELINE", True),
-        "discovery_enabled": parse_bool_env("MINT_STREAM_ENABLE", True),
-        "use_mev_bundles": parse_bool_env("USE_MEV_BUNDLES", False),
-        "golden_depth": bool(getattr(state, "golden_depth_enabled", False)) if state else False,
-        "golden_momentum": bool(getattr(state, "golden_momentum_enabled", False)) if state else False,
-    }
-    # Backwards compatibility for legacy keys used by older dashboards
-    features["sentiment"] = features["sentiment_enabled"]
-
-    staleness = {}
-    if isinstance(settings.get("staleness"), dict):
-        staleness = dict(settings["staleness"])
-
-    ttl_info = {
-        "depth_s": _resolve_depth_ttl(),
-        "ohlcv_5m_s": 600.0,
-        "golden_s": 60.0,
-        "suggestions_s": 15.0,
-        "votes_s": 30.0,
-    }
-
-    workflow = (
-        status.get("workflow")
-        or os.getenv("SOLHUNTER_WORKFLOW")
-        or os.getenv("RUNTIME_WORKFLOW")
-    )
-    version_info: Dict[str, Any] = {
-        "app_version": _resolve_app_version(),
-        "schema_version": UI_SCHEMA_VERSION,
-        "schema_hash": _compute_schema_hash(),
-        "build_git": _resolve_build_git(),
-        "workflow": workflow,
-        "mode": "paper" if paper_mode else "live",
-    }
-    version_info = {key: value for key, value in version_info.items() if value is not None}
-
+    redis_url = os.getenv("REDIS_URL") or os.getenv("BROKER_URL") or "redis://localhost:6379/1"
     redis_info = _parse_redis_url(redis_url)
-    broker_kind = "redis"
-    try:
-        broker_types = getattr(event_bus, "_BROKER_TYPES", None)
-    except Exception:
-        broker_types = None
-    if broker_types:
-        try:
-            broker_kind = str(broker_types[0])
-        except Exception:
-            broker_kind = "redis"
-    broker_info: Dict[str, Any] = {
-        "kind": broker_kind,
-        "channel": channel,
-    }
-    broker_url = redis_info.get("url") if isinstance(redis_info, Mapping) else None
-    if not broker_url:
-        broker_url = redis_url
-    if broker_url:
-        broker_info["url"] = broker_url
-    if isinstance(redis_info, Mapping) and redis_info.get("db") is not None:
-        broker_info["db"] = redis_info.get("db")
-
-    event_bus_url = (
-        os.getenv("EVENT_BUS_URL")
-        or getattr(event_bus, "DEFAULT_WS_URL", None)
-        or "ws://127.0.0.1:8779"
-    )
-    event_bus_payload = {"url_ws": event_bus_url}
-
-    raw_schema_entries = _schema_entries(ttl_info)
-    streams_contracts: List[Dict[str, Any]] = []
-    schemas_listing: List[Dict[str, Any]] = []
-    for raw_entry in raw_schema_entries:
-        schema_key = raw_entry.get("_schema_key")
-        field_types = raw_entry.get("_field_types")
-        entry = {
-            key: value
-            for key, value in raw_entry.items()
-            if key not in {"_schema_key", "_field_types"}
-        }
-        streams_contracts.append(entry)
-        topics = entry.get("topics") or []
-        topic = topics[0] if topics else None
-        required_fields = entry.get("required") or []
-        schema_item: Dict[str, Any] = {
-            "topic": topic,
-            "schema_id": entry.get("schema_id"),
-            "required": required_fields,
-        }
-        if isinstance(field_types, Mapping) and field_types:
-            schema_item["types"] = dict(field_types)
-        if entry.get("aliases"):
-            schema_item["aliases"] = entry["aliases"]
-        schema_item = {key: value for key, value in schema_item.items() if value}
-        if schema_item:
-            schemas_listing.append(schema_item)
-
-    provider_order = _price_provider_order()
-    seed_tokens = _discover_seed_tokens()
-    seed_metadata = _seed_token_metadata(state)
-    bootstrap = {
-        "seed_tokens": seed_tokens,
-        "pyth_price_hints": _pyth_price_hints(),
-        "price_providers": provider_order,
-        "price_provider_order": provider_order,
-        "price_provider_timeouts_ms": _price_provider_timeouts(),
-        "discovery": {"sources": _discovery_hint_sources(state)},
-        "seed_token_metadata": seed_metadata,
-    }
-
-    execution = _resolve_execution_snapshot(status)
+    event_bus_url = os.getenv("EVENT_BUS_URL") or _discover_broker_url() or "ws://127.0.0.1:8779"
+    broker_channel = os.getenv("BROKER_CHANNEL") or "solhunter-events-v3"
 
     try:
-        from .golden_pipeline.contracts import STREAMS
+        rl_health_url = resolve_rl_health_url(require_health_file=False)
     except Exception:
-        pipeline_topics = None
-    else:
-        pipeline_topics = STREAMS
-
-    stages: Dict[str, Any] = {}
-    if pipeline_topics is not None:
-        discovery_topics = [pipeline_topics.discovery_candidates]
-        mint_discovered = getattr(pipeline_topics, "mint_discovered", "x:mint.discovered")
-        if mint_discovered not in discovery_topics:
-            discovery_topics.append(mint_discovered)
-        stages["discovery"] = {
-            "enabled": bool(features.get("discovery_enabled")),
-            "topics": discovery_topics,
-        }
-        stages["golden"] = {
-            "enabled": bool(features.get("golden_pipeline_enabled")),
-            "topics": [pipeline_topics.golden_snapshot],
-        }
-        stages["agents"] = {
-            "enabled": bool(features.get("golden_pipeline_enabled")),
-            "topics": [pipeline_topics.trade_suggested],
-        }
-    else:
-        stages["discovery"] = {
-            "enabled": bool(features.get("discovery_enabled")),
-            "topics": ["x:discovery.candidates", "x:mint.discovered"],
-        }
-        stages["golden"] = {
-            "enabled": bool(features.get("golden_pipeline_enabled")),
-            "topics": ["x:mint.golden"],
-        }
-        stages["agents"] = {
-            "enabled": bool(features.get("golden_pipeline_enabled")),
-            "topics": ["x:trade.suggested"],
-        }
-    pipeline_payload = {
-        "stages": stages,
-        "expectations": "discovery → golden → suggestions → votes",
-    }
-
-    heartbeat_ts = _maybe_float(status.get("heartbeat"))
-
-    raw_self_check = status.get("self_check")
-    if isinstance(raw_self_check, Mapping):
-        try:
-            self_check_payload = dict(raw_self_check)
-        except Exception:
-            self_check_payload = {str(k): raw_self_check[k] for k in raw_self_check}
-    else:
-        self_check_payload = {}
-    checks_mapping = self_check_payload.get("checks")
-    if isinstance(checks_mapping, Mapping):
-        normalized_checks: Dict[str, Any] = {}
-        for key, value in checks_mapping.items():
-            if isinstance(value, Mapping):
-                try:
-                    normalized_checks[str(key)] = dict(value)
-                except Exception:
-                    normalized_checks[str(key)] = value
-            else:
-                normalized_checks[str(key)] = value
-        self_check_payload["checks"] = normalized_checks
-    if "status" not in self_check_payload:
-        self_check_payload["status"] = "pending"
+        rl_health_url = None
 
     payload: Dict[str, Any] = {
         "type": "UI_META",
         "v": UI_SCHEMA_VERSION,
-        "channel": channel,
-        "redis": redis_info,
-        "broker": broker_info,
-        "event_bus": event_bus_payload,
-        "version": version_info,
-        "lag": lag_metrics,
-        "features": features,
-        "staleness": staleness,
-        "heartbeat_epoch": time.monotonic(),
-        "ttl": ttl_info,
-        "bootstrap": bootstrap,
-        "providers": _provider_status_snapshot(),
-        "streams": streams_contracts,
-        "schemas": schemas_listing,
-        "execution": execution,
-        "pipeline": pipeline_payload,
-        "resilience": _resilience_snapshot(),
-        "test_contracts": {
-            "handshake": "tests/test_ui_meta_ws.py",
-            "golden_pipeline": [
-                "tests/golden_pipeline/test_bootstrap.py",
-                "tests/golden_pipeline/test_discovery.py",
-                "tests/golden_pipeline/test_ui_smoke_synth.py",
-                "tests/golden_pipeline/test_validation.py",
-            ],
-        },
         "generated_ts": time.time(),
-        "self_check": self_check_payload,
+        "redis": redis_info,
+        "event_bus": {"url_ws": event_bus_url, "channel": broker_channel},
+        "run_state": run_state,
     }
-
-    if heartbeat_ts is not None:
-        payload["heartbeat_ts"] = heartbeat_ts
-
-    if status.get("environment"):
-        payload["environment"] = status.get("environment")
-    if version_info.get("workflow"):
-        payload["workflow"] = version_info.get("workflow")
+    if rl_health_url:
+        payload["rl_health_url"] = rl_health_url
     return payload
-
 
 def get_ui_meta_snapshot(force: bool = False) -> Dict[str, Any]:
     global _ui_meta_cache
@@ -3076,6 +2825,10 @@ def create_app(state: UIState | None = None) -> Flask:
     def api_manifest() -> Any:
         return jsonify(build_ui_manifest(request))
 
+    @app.get("/api/ui/meta")
+    def api_ui_meta() -> Any:
+        return jsonify(get_ui_meta_snapshot())
+
     @app.get("/ui/meta")
     def ui_meta() -> Any:
         return jsonify(_ui_meta_payload())
@@ -3191,9 +2944,15 @@ def create_app(state: UIState | None = None) -> Flask:
 
     @app.get("/health")
     def health() -> Any:
-        status = state.snapshot_status()
-        ok = bool(status.get("event_bus")) and bool(status.get("trading_loop"))
-        return jsonify({"ok": ok, "status": status})
+        run_state = state.snapshot_run_state()
+        health_snapshot = state.snapshot_health()
+        ok = bool(health_snapshot.get("ok", True))
+        payload = {
+            "ok": ok,
+            "run_state": run_state,
+            "health": health_snapshot,
+        }
+        return jsonify(payload)
 
     @app.get("/health/runtime")
     def health_runtime_view() -> Any:
@@ -3204,219 +2963,6 @@ def create_app(state: UIState | None = None) -> Flask:
             resource_ok = not bool(payload.get("resource", {}).get("exit_active"))
             payload["ok"] = event_bus_ok and heartbeat_ok and resource_ok
         return jsonify(_json_ready(payload))
-
-    @app.get("/status")
-    def status_view() -> Any:
-        return jsonify(state.snapshot_status())
-
-    @app.get("/summary")
-    def summary() -> Any:
-        return jsonify(state.snapshot_summary())
-
-    @app.get("/tokens")
-    def tokens() -> Any:
-        return jsonify(state.snapshot_token_facts())
-
-    @app.get("/actions")
-    def actions() -> Any:
-        return jsonify({"actions": state.snapshot_actions()})
-
-    @app.get("/activity")
-    def activity() -> Any:
-        return jsonify({"entries": state.snapshot_activity()})
-
-    @app.get("/trades")
-    def trades() -> Any:
-        return jsonify(list(state.snapshot_trades()))
-
-    @app.get("/weights")
-    def weights() -> Any:
-        return jsonify(state.snapshot_weights())
-
-    @app.get("/rl/status")
-    def rl_status() -> Any:
-        return jsonify(state.snapshot_rl())
-
-    @app.get("/config")
-    def config() -> Any:
-        return jsonify(state.snapshot_config())
-
-    @app.get("/logs")
-    def logs() -> Any:
-        return jsonify({"entries": state.snapshot_logs()})
-
-    @app.get("/discovery")
-    def discovery_settings() -> Any:
-        method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
-        if method is None:
-            method = DEFAULT_DISCOVERY_METHOD
-        return jsonify(
-            {
-                "method": method,
-                "allowed_methods": sorted(DISCOVERY_METHODS),
-            }
-        )
-
-    @app.post("/discovery")
-    def update_discovery() -> Any:
-        payload = request.get_json(silent=True) or {}
-        raw_method = payload.get("method")
-        if not isinstance(raw_method, str) or not raw_method.strip():
-            return (
-                jsonify(
-                    {
-                        "error": "method must be a non-empty string",
-                        "allowed_methods": sorted(DISCOVERY_METHODS),
-                    }
-                ),
-                400,
-            )
-        method = resolve_discovery_method(raw_method)
-        if method is None:
-            return (
-                jsonify(
-                    {
-                        "error": f"Invalid discovery method: {raw_method}",
-                        "allowed_methods": sorted(DISCOVERY_METHODS),
-                    }
-                ),
-                400,
-            )
-        os.environ["DISCOVERY_METHOD"] = method
-        return jsonify(
-            {
-                "status": "ok",
-                "method": method,
-                "allowed_methods": sorted(DISCOVERY_METHODS),
-            }
-        )
-
-    run_live_providers: Dict[str, Callable[[], Any]] = {
-        "discovery": state.snapshot_discovery_console,
-        "token-facts": state.snapshot_token_facts,
-        "market": state.snapshot_market_state,
-        "golden": state.snapshot_golden_snapshots,
-        "suggestions": state.snapshot_suggestions,
-        "vote": state.snapshot_vote_windows,
-        "shadow": state.snapshot_shadow,
-        "rl": state.snapshot_rl_panel,
-        "exits": state.snapshot_exit,
-    }
-
-    run_live_aliases = {
-        "token_facts": "token-facts",
-        "tokenfacts": "token-facts",
-        "market_state": "market",
-        "golden_snapshot": "golden",
-        "golden_snapshots": "golden",
-        "suggestion": "suggestions",
-        "suggestion_panel": "suggestions",
-        "votes": "vote",
-        "vote_windows": "vote",
-        "shadow_panel": "shadow",
-        "rl_panel": "rl",
-        "diagnostics": "exits",
-        "exit": "exits",
-    }
-
-    def _normalise_run_live_panel(panel: str) -> str:
-        name = panel.strip().lower().replace("_", "-")
-        name = name.strip("/")
-        return run_live_aliases.get(name, name)
-
-    def _run_live_manifest() -> Dict[str, str]:
-        return {key: f"/run/live/{key}" for key in sorted(run_live_providers)}
-
-    def _run_live_payload(panel: str, data: Any) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "ok": True,
-            "panel": panel,
-            "endpoint": f"/run/live/{panel}",
-            "data": _json_ready(data),
-        }
-        if isinstance(data, Mapping):
-            for updated_key in ("updated_at", "updated", "ts", "timestamp"):
-                updated_value = data.get(updated_key)
-                if updated_value is not None:
-                    payload["updated_at"] = updated_value
-                    break
-            stale = data.get("stale")
-            if stale is not None:
-                payload["stale"] = stale
-        return payload
-
-    @app.get("/run/live")
-    def run_live_index() -> Any:
-        return jsonify({"ok": True, "panels": _run_live_manifest()})
-
-    @app.get("/run/live/<path:panel>")
-    def run_live_panel(panel: str) -> Any:
-        key = _normalise_run_live_panel(panel)
-        provider = run_live_providers.get(key)
-        if provider is None:
-            return jsonify({"ok": False, "error": f"unknown panel: {panel}"}), 404
-        try:
-            data = provider()
-        except Exception as exc:  # pragma: no cover - defensive guardrail
-            log.exception("Run live provider for %s failed", key)
-            return jsonify({"ok": False, "error": str(exc)}), 500
-        return jsonify(_run_live_payload(key, data))
-
-    @app.get("/swarm/discovery")
-    def swarm_discovery() -> Any:
-        return jsonify(_json_ready(state.snapshot_discovery_console()))
-
-    @app.get("/swarm/market")
-    def swarm_market() -> Any:
-        return jsonify(_json_ready(state.snapshot_market_state()))
-
-    @app.get("/swarm/golden")
-    def swarm_golden() -> Any:
-        return jsonify(_json_ready(state.snapshot_golden_snapshots()))
-
-    @app.get("/swarm/suggestions")
-    def swarm_suggestions() -> Any:
-        return jsonify(_json_ready(state.snapshot_suggestions()))
-
-    @app.get("/swarm/exits")
-    def swarm_exits() -> Any:
-        return jsonify(_json_ready(state.snapshot_exit()))
-
-    @app.get("/swarm/votes")
-    def swarm_votes() -> Any:
-        return jsonify(_json_ready(state.snapshot_vote_windows()))
-
-    @app.get("/swarm/shadow")
-    def swarm_shadow() -> Any:
-        return jsonify(_json_ready(state.snapshot_shadow()))
-
-    @app.get("/swarm/rl")
-    def swarm_rl() -> Any:
-        return jsonify(_json_ready(state.snapshot_rl_panel()))
-
-    @app.post("/actions/flatten")
-    def action_flatten() -> Any:
-        payload = request.get_json(silent=True) or {}
-        mint = payload.get("mint")
-        if not isinstance(mint, str) or not mint.strip():
-            return jsonify({"ok": False, "error": "mint must be a non-empty string"}), 400
-
-        must = bool(payload.get("must", False))
-        must_exit = bool(payload.get("must_exit", False))
-        action = {
-            "type": "flatten",
-            "mint": mint,
-            "must": must,
-            "must_exit": must_exit,
-        }
-        log.info(
-            "UI flatten requested mint=%s must=%s must_exit=%s",
-            mint,
-            must,
-            must_exit,
-        )
-        push_event({"ui_action": action})
-        return jsonify({"ok": True, "action": action})
 
     @app.get("/__shutdown__")
     def _shutdown() -> Any:  # pragma: no cover - invoked via HTTP
@@ -3502,23 +3048,11 @@ def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def _seed_state_from_snapshots(state: UIState, snapshot_dir: str | None) -> None:
     if not snapshot_dir:
-        state.status_provider = lambda: {
-            "event_bus": False,
-            "trading_loop": False,
-            "depth_service": False,
-            "rl_daemon": False,
-        }
         return
 
     base = Path(snapshot_dir)
     if not base.exists():
         log.warning("Snapshot directory %s not found; starting with empty UI state", base)
-        state.status_provider = lambda: {
-            "event_bus": False,
-            "trading_loop": False,
-            "depth_service": False,
-            "rl_daemon": False,
-        }
         return
 
     def _load_json(name: str, default: Any) -> Any:
@@ -3532,71 +3066,86 @@ def _seed_state_from_snapshots(state: UIState, snapshot_dir: str | None) -> None
             log.warning("Failed to load %s: %s", path, exc)
             return default
 
-    default_status = {
-        "event_bus": False,
-        "trading_loop": False,
-        "depth_service": False,
-        "rl_daemon": False,
-    }
-    status_data = _load_json("status.json", None)
-    state.status_provider = (
-        lambda data=status_data if isinstance(status_data, dict) else default_status: data
-    )
+    run_state_data = _load_json("run_state.json", None)
+    if isinstance(run_state_data, Mapping):
+        state.run_state_provider = lambda data=run_state_data: data
 
-    summary_data = _load_json("summary.json", None)
-    if not isinstance(summary_data, dict):
-        summary_data = {}
-        roi_data = _load_json("roi.json", {})
-        if isinstance(roi_data, dict):
-            summary_data.update(roi_data)
-        history = _load_json("vars.json", [])
-        if isinstance(history, list) and history:
-            summary_data["history"] = history
-    state.summary_provider = lambda data=summary_data: data
+    run_env_data = _load_json("run_env.json", None)
+    if isinstance(run_env_data, Mapping):
+        state.run_env_provider = lambda data=run_env_data: data
 
-    state.logs_provider = lambda data=_load_json("logs.json", []): data
-    state.activity_provider = lambda data=_load_json("activity.json", []): data
-    state.trades_provider = lambda data=_load_json("trades.json", []): data
-    state.weights_provider = lambda data=_load_json("weights.json", {}): data
-    state.rl_status_provider = lambda data=_load_json("rl_status.json", {}): data
-    discovery_data = _load_json("discovery.json", None)
-    if discovery_data is None:
-        history_map = _load_json("token_history.json", {})
-        discovery_data = {"recent": list(history_map.keys())} if isinstance(history_map, dict) else {"recent": []}
-    state.discovery_provider = lambda data=discovery_data: data
-    state.history_provider = lambda data=_load_json("history.json", []): data
-    state.actions_provider = lambda data=_load_json("actions.json", []): data
+    discovery_rows = _load_json("discovery_recent.json", None)
+    if isinstance(discovery_rows, list):
+        state.discovery_recent_provider = (
+            lambda limit, data=discovery_rows: list(data)[: max(0, int(limit))]
+        )
 
-    token_facts = _load_json("token_facts.json", None)
-    if not isinstance(token_facts, dict):
-        positions = _load_json("positions.json", {})
-        token_facts = {"tokens": positions if isinstance(positions, dict) else {}, "selected": None}
-    state.token_facts_provider = lambda data=token_facts: data
+    token_meta_map = _load_json("token_meta.json", None)
+    if isinstance(token_meta_map, Mapping):
+        state.token_meta_provider = lambda mint, data=token_meta_map: dict(data.get(str(mint), {}))
 
-    state.market_state_provider = lambda data=_load_json(
-        "market.json", {"markets": [], "updated_at": None}
-    ): data
-    state.golden_snapshot_provider = lambda data=_load_json(
-        "golden.json", {"snapshots": [], "hash_map": {}}
-    ): data
-    state.suggestions_provider = lambda data=_load_json(
-        "suggestions.json", {"suggestions": [], "metrics": {}}
-    ): data
-    state.exit_provider = lambda data=_load_json(
-        "exits.json",
-        {"hot_watch": [], "diagnostics": [], "closed": [], "queue": [], "missed_exits": []},
-    ): data
-    state.vote_windows_provider = lambda data=_load_json(
-        "votes.json", {"windows": [], "decisions": []}
-    ): data
-    state.shadow_provider = lambda data=_load_json(
-        "shadow.json", {"virtual_fills": [], "paper_positions": [], "live_fills": []}
-    ): data
-    state.rl_provider = lambda data=_load_json("rl_panel.json", {"weights": {}, "uplift": {}}): data
-    state.settings_provider = lambda data=_load_json(
-        "settings.json", {"controls": {}, "overrides": {}, "staleness": {}}
-    ): data
-    state.health_provider = lambda data=_load_json("health.json", {}): data
+    token_snapshot_map = _load_json("token_snapshot.json", None)
+    if isinstance(token_snapshot_map, Mapping):
+        state.token_snapshot_provider = (
+            lambda mint, data=token_snapshot_map: dict(data.get(str(mint), {}))
+        )
+
+    token_price_map = _load_json("token_price.json", None)
+    if isinstance(token_price_map, Mapping):
+        state.token_price_provider = (
+            lambda mint, data=token_price_map: dict(data.get(str(mint), {}))
+        )
+
+    token_depth_map = _load_json("token_depth.json", None)
+    if isinstance(token_depth_map, Mapping):
+        state.token_depth_provider = (
+            lambda mint, data=token_depth_map: dict(data.get(str(mint), {}))
+        )
+
+    agent_events_map = _load_json("agent_events.json", None)
+    if isinstance(agent_events_map, Mapping):
+        state.agent_events_provider = (
+            lambda mint, _since=None, data=agent_events_map: list(data.get(str(mint), []))
+        )
+
+    execution_plan_map = _load_json("execution_plan.json", None)
+    if isinstance(execution_plan_map, Mapping):
+        state.execution_plan_provider = (
+            lambda mint, data=execution_plan_map: dict(data.get(str(mint), {}))
+        )
+
+    fills_data = _load_json("fills.json", None)
+    if isinstance(fills_data, list):
+        state.fills_provider = lambda limit, data=fills_data: list(data)[: max(0, int(limit))]
+
+    positions_data = _load_json("positions.json", None)
+    if isinstance(positions_data, list):
+        state.positions_provider = lambda data=positions_data: list(data)
+
+    pnl_map = _load_json("pnl.json", None)
+    if isinstance(pnl_map, Mapping):
+        state.pnl_provider = lambda window, data=pnl_map: dict(data.get(str(window), {}))
+
+    risk_data = _load_json("risk.json", None)
+    if isinstance(risk_data, Mapping):
+        state.risk_provider = lambda data=risk_data: dict(data)
+
+    provider_status_data = _load_json("provider_status.json", None)
+    if isinstance(provider_status_data, list):
+        state.provider_status_provider = lambda data=provider_status_data: list(data)
+
+    metrics_data = _load_json("metrics.json", None)
+    if isinstance(metrics_data, Mapping):
+        state.metrics_provider = lambda data=metrics_data: dict(data)
+
+    logs_data = _load_json("logs.json", None)
+    if isinstance(logs_data, list):
+        state.logs_provider = lambda data=logs_data: list(data)
+
+    health_data = _load_json("health.json", None)
+    if isinstance(health_data, Mapping):
+        state.health_provider = lambda data=health_data: dict(data)
+
 
 
 def main(argv: Sequence[str] | None = None) -> None:
