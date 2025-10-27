@@ -1180,7 +1180,25 @@ function setupDiscoveryPanel() {
     try {
       const meta = await safeFetchJson(ENDPOINTS.tokenMetaResolver(mint), 'discovery-meta', errorNode, {headers: {Accept: 'application/json'}});
       if (meta && typeof meta === 'object') {
-        tokenMetaCache.set(mint, {symbol: meta.symbol || meta.ticker || '—', name: meta.name || '—'});
+        const resolved = {symbol: meta.symbol || meta.ticker || '—', name: meta.name || '—'};
+        tokenMetaCache.set(mint, resolved);
+        let mutated = false;
+        state.discoveryEvents.forEach((event) => {
+          if (event.mint !== mint) return;
+          let updated = false;
+          if (resolved.symbol && event.symbol !== resolved.symbol) {
+            event.symbol = resolved.symbol;
+            updated = true;
+          }
+          if (resolved.name && event.name !== resolved.name) {
+            event.name = resolved.name;
+            updated = true;
+          }
+          if (updated) mutated = true;
+        });
+        if (mutated) {
+          render();
+        }
       }
     } catch (err) {
       /* ignore meta errors */
