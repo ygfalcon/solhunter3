@@ -2485,7 +2485,17 @@ function setupPositionsPanel() {
         await new Promise((resolve) => setTimeout(resolve, 30000));
         window.clearInterval(interval);
         const panelsOk = Object.values(hydration).every(Boolean);
-        const runtimeOk = state.runtimeMetrics && Array.isArray(state.runtimeMetrics.providers) && state.runtimeMetrics.providers.some((provider) => provider && (provider['2xx'] !== undefined || provider.success !== undefined));
+        const runtimeMetrics = state.runtimeMetrics || {};
+        const providerStatsOk = Array.isArray(runtimeMetrics.providers) && runtimeMetrics.providers.some((provider) => {
+          if (!provider) return false;
+          const has2xx = Object.prototype.hasOwnProperty.call(provider, '2xx') || Object.prototype.hasOwnProperty.call(provider, 'success');
+          const has429 = Object.prototype.hasOwnProperty.call(provider, '429') || Object.prototype.hasOwnProperty.call(provider, 'rate_limited');
+          return has2xx && has429;
+        });
+        const metricsMap = runtimeMetrics.metrics && typeof runtimeMetrics.metrics === 'object' ? runtimeMetrics.metrics : null;
+        const rateMetricsOk = metricsMap
+          ? Object.keys(metricsMap).some((key) => key.toLowerCase().includes('429'))
+          : true;
         const pnlOk = (() => {
           if (state.pnlMetrics && state.pnlMetrics.pnl) return true;
           const mock = {qty: 1, fill: 1.2, cost: 1.0};
@@ -2493,7 +2503,7 @@ function setupPositionsPanel() {
           return Number.isFinite(pnl);
         })();
         const mintOk = mintPropagation;
-        const runtimeCountsOk = runtimeOk;
+        const runtimeCountsOk = providerStatsOk && rateMetricsOk;
         const resultOk = panelsOk && pnlOk && mintOk && runtimeCountsOk;
         statusLabel.textContent = resultOk ? 'Self-Check pass' : 'Self-Check failed';
         running = false;
