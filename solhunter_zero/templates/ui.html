@@ -842,6 +842,28 @@
     let closed = false;
     let reconnectTimer = null;
     let attempts = 0;
+
+    function resolveUrl(rawUrl) {
+      const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const baseHref = `${scheme}//${window.location.host}${window.location.pathname || '/'}`;
+      if (rawUrl instanceof URL) return rawUrl.toString();
+      const trimmed = (rawUrl ?? '').toString().trim();
+      if (!trimmed) {
+        throw new Error('Empty WebSocket URL');
+      }
+      if (/^wss?:\/\//i.test(trimmed)) {
+        return trimmed;
+      }
+      if (/^\/\//.test(trimmed)) {
+        return `${scheme}${trimmed}`;
+      }
+      try {
+        return new URL(trimmed, baseHref).toString();
+      } catch (err) {
+        throw new Error(`Invalid WebSocket URL: ${trimmed}`);
+      }
+    }
+
     function scheduleReconnect() {
       if (closed) return;
       const delay = Math.min(5000, 250 + attempts * 500);
@@ -851,8 +873,10 @@
       if (closed) return;
       attempts += 1;
       try {
-        socket = new WebSocket(url);
+        const resolvedUrl = resolveUrl(url);
+        socket = new WebSocket(resolvedUrl);
       } catch (err) {
+        console.error('ws url resolution failed', {panelId, url, error: err});
         if (errorNode) errorNode.textContent = `${panelId} ws error: ${err.message}`;
         scheduleReconnect();
         return;
