@@ -1306,7 +1306,7 @@ function setupTokenPanel() {
     priceWs = null;
     depthWs = null;
   }
-  function renderMeta(meta, price) {
+  function renderMeta(meta, price, mintOverride = currentMint) {
     metaGrid.innerHTML = '';
     badges.innerHTML = '';
     if (!meta) {
@@ -1314,10 +1314,11 @@ function setupTokenPanel() {
       drawSparkline(sparklineCanvas, []);
       return;
     }
+    const mintForRender = mintOverride;
     const entries = [
       ['Symbol', meta.symbol || '—'],
       ['Name', meta.name || '—'],
-      ['Mint', currentMint || '—'],
+      ['Mint', mintForRender || '—'],
       ['Liquidity', price && price.liquidity !== undefined ? formatCurrency(price.liquidity) : '—'],
       ['Holders', meta.holders !== undefined ? formatNumber(meta.holders, 0) : '—'],
       ['Pool', Array.isArray(meta.pools) ? meta.pools.join(', ') : (meta.pool || '—')],
@@ -1343,8 +1344,8 @@ function setupTokenPanel() {
       badge.textContent = label;
       badges.appendChild(badge);
     });
-    if (currentMint) {
-      updatePriceSnapshot(currentMint, {
+    if (mintForRender) {
+      updatePriceSnapshot(mintForRender, {
         price: price ? price.price ?? price.px : undefined,
         mark: price ? price.mark ?? price.mark_price : undefined,
         mid: price ? price.mid ?? price.mid_price : undefined,
@@ -1358,21 +1359,34 @@ function setupTokenPanel() {
       renderMeta(null, null);
       return;
     }
+    const requestMint = mint;
     statusNode.textContent = 'Loading token…';
     try {
       const [meta, price] = await Promise.all([
         safeFetchJson(ENDPOINTS.tokenMeta(mint), 'token-meta', errorNode, {headers: {Accept: 'application/json'}}).catch(() => null),
         safeFetchJson(ENDPOINTS.tokenPrice(mint), 'token-price', errorNode, {headers: {Accept: 'application/json'}}).catch(() => null)
       ]);
-      renderMeta(meta || {}, price || {});
+      if (currentMint !== requestMint) {
+        return;
+      }
+      renderMeta(meta || {}, price || {}, requestMint);
+      if (currentMint !== requestMint) {
+        return;
+      }
       pricePoints = [];
       if (price && Array.isArray(price.history)) {
+        if (currentMint !== requestMint) {
+          return;
+        }
         pricePoints = price.history.map((row) => Number(row.price || row.px)).filter((val) => Number.isFinite(val));
         drawSparkline(sparklineCanvas, pricePoints.slice(-120));
       }
+      if (currentMint !== requestMint) {
+        return;
+      }
       invalidBanner.hidden = true;
-      if (currentMint) {
-        updatePriceSnapshot(currentMint, price || {});
+      if (requestMint) {
+        updatePriceSnapshot(requestMint, price || {});
       }
       statusNode.textContent = 'Live';
       hydration.token = true;
