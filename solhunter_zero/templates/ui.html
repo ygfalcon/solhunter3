@@ -649,6 +649,17 @@
       utc: date.toISOString()
     };
   }
+  const HTML_ESCAPE_LOOKUP = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  };
+  function escapeHtml(value) {
+    if (value === undefined || value === null) return '';
+    return String(value).replace(/[&<>"']/g, (char) => HTML_ESCAPE_LOOKUP[char] || char);
+  }
   function maybeNumber(value) {
     if (value === undefined || value === null || value === '') return null;
     const num = Number(value);
@@ -1539,6 +1550,15 @@ function setupTokenPanel() {
     });
   });
 }
+function formatAgentFeatures(data) {
+  if (data === undefined || data === null) return '{}';
+  if (typeof data === 'string') return data;
+  try {
+    return JSON.stringify(data);
+  } catch (err) {
+    return String(data);
+  }
+}
 function setupAgentPanel() {
   const panel = doc.getElementById('panel-agents');
   if (!panel) return;
@@ -1560,11 +1580,13 @@ function setupAgentPanel() {
     events.forEach((event) => {
       const item = doc.createElement('div');
       item.className = 'timeline-item';
+      const confidenceText = formatNumber(event.confidence * 100, 2);
+      const errorHtml = event.error ? `<div class="inline-error">${escapeHtml(event.error)}</div>` : '';
       item.innerHTML = `
-        <div class="meta"><span title="${event.utc}">${event.label}</span><span>${event.agent}</span></div>
-        <div><strong>${event.intent}</strong> @ ${formatNumber(event.confidence * 100, 2)}%</div>
-        <div class="panel-status">${event.features}</div>
-        ${event.error ? `<div class="inline-error">${event.error}</div>` : ''}
+        <div class="meta"><span title="${escapeHtml(event.utc)}">${escapeHtml(event.label)}</span><span>${escapeHtml(event.agent)}</span></div>
+        <div><strong>${escapeHtml(event.intent)}</strong> @ ${escapeHtml(confidenceText)}%</div>
+        <div class="panel-status">${escapeHtml(event.features)}</div>
+        ${errorHtml}
       `;
       timeline.appendChild(item);
     });
@@ -1597,8 +1619,8 @@ function setupAgentPanel() {
             agent: row.agent_id || row.agent || 'unknown',
             intent: row.intent || 'hold',
             confidence: Number(row.confidence || 0),
-            features: JSON.stringify(row.features || {}),
-            error: row.error || null
+            features: formatAgentFeatures(row.features ?? row.metrics),
+            error: row.error !== undefined && row.error !== null ? String(row.error) : null
           };
         });
         events = mapped;
@@ -1638,8 +1660,8 @@ function setupAgentPanel() {
             agent: row.agent_id || row.agent || row.source || 'unknown',
             intent: row.intent || row.action || 'hold',
             confidence: Number(row.confidence || row.score || 0),
-            features: JSON.stringify(row.features || row.metrics || {}),
-            error: row.error || null
+            features: formatAgentFeatures(row.features ?? row.metrics),
+            error: row.error !== undefined && row.error !== null ? String(row.error) : null
           });
         });
         events.sort((a, b) => a.ts - b.ts);
