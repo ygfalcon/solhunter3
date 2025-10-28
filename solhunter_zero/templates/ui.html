@@ -837,6 +837,25 @@
     }
     navigator.clipboard.writeText(text).catch((err) => console.error('copy failed', err));
   }
+  function resolveWsUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
+    if (rawUrl.startsWith('ws://') || rawUrl.startsWith('wss://')) {
+      return rawUrl;
+    }
+    try {
+      if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
+        const parsed = new URL(rawUrl);
+        parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+        return parsed.toString();
+      }
+      const resolved = new URL(rawUrl, window.location.href);
+      resolved.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return resolved.toString();
+    } catch (err) {
+      console.warn('resolveWsUrl failed, falling back to raw url', err);
+      return rawUrl;
+    }
+  }
   function createWsConnection({url, panelId, errorNode, onMessage, onStatus}) {
     let socket = null;
     let closed = false;
@@ -851,7 +870,8 @@
       if (closed) return;
       attempts += 1;
       try {
-        socket = new WebSocket(url);
+        const resolvedUrl = resolveWsUrl(url);
+        socket = new WebSocket(resolvedUrl);
       } catch (err) {
         if (errorNode) errorNode.textContent = `${panelId} ws error: ${err.message}`;
         scheduleReconnect();
