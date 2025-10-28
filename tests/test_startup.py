@@ -322,6 +322,63 @@ def test_startup_task_failure(monkeypatch, capsys):
     assert "failed" in out.lower()
 
 
+def test_startup_passthrough_args(monkeypatch, tmp_path):
+    import types
+    import sys
+
+    from scripts import startup
+    import solhunter_zero.startup_runner as startup_runner
+
+    captured: dict[str, list[str]] = {}
+
+    start_all_mod = types.ModuleType("scripts.start_all")
+
+    def fake_start_all_main(args):
+        captured["args"] = list(args)
+        return 0
+
+    start_all_mod.main = fake_start_all_main
+    healthcheck_mod = types.ModuleType("scripts.healthcheck")
+    healthcheck_mod.main = lambda *a, **k: 0
+
+    monkeypatch.setitem(sys.modules, "scripts.start_all", start_all_mod)
+    monkeypatch.setitem(sys.modules, "scripts.healthcheck", healthcheck_mod)
+    monkeypatch.setattr(startup_runner, "preflight", types.SimpleNamespace(CHECKS=[]))
+
+    class DummyAgentManager:
+        @classmethod
+        def from_config(cls, config):
+            return cls()
+
+    agent_manager_mod = types.ModuleType("solhunter_zero.agent_manager")
+    agent_manager_mod.AgentManager = DummyAgentManager
+    monkeypatch.setitem(sys.modules, "solhunter_zero.agent_manager", agent_manager_mod)
+    monkeypatch.setattr(startup_runner, "log_startup_info", lambda **kwargs: None)
+    monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
+    monkeypatch.setattr(startup_runner, "log_startup", lambda msg: None)
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", tmp_path / "startup.log")
+    monkeypatch.setattr("solhunter_zero.config.find_config_file", lambda: str(tmp_path / "config.toml"))
+    monkeypatch.setattr("solhunter_zero.config.load_config", lambda path: {})
+    monkeypatch.setattr("solhunter_zero.logging_utils.log_startup", lambda msg: None)
+    monkeypatch.setattr("solhunter_zero.logging_utils.rotate_preflight_log", lambda: None)
+
+    code = startup.main(
+        [
+            "--skip-preflight",
+            "--skip-rpc-check",
+            "--skip-endpoint-check",
+            "--skip-setup",
+            "--skip-deps",
+            "--offline",
+            "--no-diagnostics",
+            "--user-flag",
+        ]
+    )
+
+    assert code == 0
+    assert captured.get("args") == ["--user-flag", "--foreground"]
+
+
 def test_startup_repair_clears_markers(monkeypatch, capsys):
     import platform
     import types, sys
