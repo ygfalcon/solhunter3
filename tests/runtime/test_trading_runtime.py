@@ -238,7 +238,12 @@ async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
 
     runtime = TradingRuntime()
 
-    monkeypatch.setattr(runtime_module, "ensure_local_redis_if_needed", lambda *_a, **_k: None)
+    ensure_calls: Dict[str, int] = {"count": 0}
+
+    def _fake_ensure(*_a, **_k):
+        ensure_calls["count"] += 1
+
+    monkeypatch.setattr(runtime_module, "ensure_local_redis_if_needed", _fake_ensure)
     monkeypatch.setattr(resource_monitor, "start_monitor", lambda: None)
 
     assigned_port: Dict[str, int] = {"value": 0}
@@ -312,6 +317,7 @@ async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
         await conn.close()
         assert connection_urls[-1] == expected_url
         assert assigned_port["value"] == listen_port
+        assert ensure_calls["count"] == 1
     finally:
         try:
             await event_bus.disconnect_ws()

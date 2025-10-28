@@ -45,6 +45,7 @@ from ..memory import Memory
 from ..portfolio import Portfolio
 from ..exit_management import ExitManager
 from ..schemas import RuntimeLog
+from ..redis_util import ensure_local_redis_if_needed
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..golden_pipeline.flags import (
@@ -52,7 +53,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         resolve_momentum_flag,
     )
     from ..golden_pipeline.service import GoldenPipelineService
-    from ..redis_util import ensure_local_redis_if_needed
 from ..ui import UIState, UIServer
 from ..util import parse_bool_env
 from .runtime_wiring import resolve_golden_enabled
