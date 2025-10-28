@@ -951,17 +951,18 @@
       return null;
     }
   }
-  function attachSortableTable(table, rowsRef, renderFn, storageKey) {
+  function attachSortableTable(table, rowsRef, renderFn, storageKey, sortKeyMap = {}) {
     if (!table) return;
     const headers = table.querySelectorAll('th[data-sort]');
     let sortState = restoreSort(storageKey) || {key: headers[0] ? headers[0].dataset.sort : '', direction: 'desc'};
     function sortRows() {
       if (!sortState.key) return;
       const {key, direction} = sortState;
+      const accessor = sortKeyMap[key] || key;
       const factor = direction === 'asc' ? 1 : -1;
       rowsRef.sort((a, b) => {
-        const av = a[key];
-        const bv = b[key];
+        const av = a[accessor];
+        const bv = b[accessor];
         if (av === bv) return 0;
         if (av === undefined || av === null) return 1 * factor;
         if (bv === undefined || bv === null) return -1 * factor;
@@ -1837,13 +1838,15 @@ function setupOrdersPanel() {
       const row = doc.createElement('tr');
       const timeCell = formatTimestamp(order.ts);
       const txHref = order.txid ? `https://solscan.io/tx/${order.txid}` : '#';
+      const quotePriceLabel = formatNumber(order.quote_price, 6);
+      const fillPriceLabel = formatNumber(order.fill_price, 6);
       row.innerHTML = `
         <td title="${timeCell.utc}">${timeCell.label}</td>
         <td>${order.mint}</td>
         <td>${order.side}</td>
         <td>${formatNumber(order.qty, 4)}</td>
         <td>${order.route}</td>
-        <td>${order.quote_price} → ${order.fill_price}</td>
+        <td>${quotePriceLabel} → ${fillPriceLabel}</td>
         <td class="${order.slippage_bps > 0 ? 'numeric-down' : 'numeric-up'}">${formatNumber(order.slippage_bps, 2)}</td>
         <td>${formatCurrency(order.fees)}</td>
         <td>${order.status}${order.txid ? ` · <a class="link-out" data-txid="${order.txid}" href="${txHref}" target="_blank" rel="noreferrer">tx</a>` : ''}</td>
@@ -1874,7 +1877,10 @@ function setupOrdersPanel() {
     });
     summaryNode.textContent = summaryParts.join(' | ') || '—';
   }
-  const sortAndRender = attachSortableTable(table, ordersRows, render, 'orders-sort');
+  const sortAndRender = attachSortableTable(table, ordersRows, render, 'orders-sort', {
+    price: 'price_value',
+    slippage: 'slippage_bps'
+  });
   function updateOrders() {
     const windowSec = Number(state.ordersWindow);
     const windowMs = windowSec > 0 ? windowSec * 1000 : null;
@@ -1888,19 +1894,26 @@ function setupOrdersPanel() {
     try {
       const data = await safeFetchJson(ENDPOINTS.fillsSnapshot, 'orders', errorNode, {headers: {Accept: 'application/json'}});
       if (Array.isArray(data)) {
-        state.orders = data.map((row) => ({
-          ts: toMillis(row.ts || row.timestamp),
-          mint: row.mint || row.token || '—',
-          side: row.side || '—',
-          qty: Number(row.qty || row.quantity || 0),
-          route: row.route || (Array.isArray(row.routes) ? row.routes.join(', ') : '—'),
-          quote_price: row.quote_price !== undefined ? formatNumber(row.quote_price, 6) : '—',
-          fill_price: row.fill_price !== undefined ? formatNumber(row.fill_price, 6) : '—',
-          slippage_bps: Number(row.slippage_bps || row.slippage || 0),
-          fees: Number(row.fees || 0),
-          status: row.status || 'pending',
-          txid: row.txid || row.signature || null
-        }));
+        state.orders = data.map((row) => {
+          const qty = maybeNumber(row.qty ?? row.quantity ?? row.base_amount) ?? 0;
+          const quotePrice = maybeNumber(row.quote_price ?? row.quote ?? row.price ?? row.px ?? row.price_usd);
+          const fillPrice = maybeNumber(row.fill_price ?? row.execution_price ?? row.price_usd ?? row.price ?? row.px);
+          const slippage = maybeNumber(row.slippage_bps ?? row.slippage);
+          return {
+            ts: toMillis(row.ts || row.timestamp),
+            mint: row.mint || row.token || '—',
+            side: row.side || '—',
+            qty,
+            route: row.route || (Array.isArray(row.routes) ? row.routes.join(', ') : '—'),
+            quote_price: quotePrice,
+            fill_price: fillPrice,
+            price_value: fillPrice ?? quotePrice ?? null,
+            slippage_bps: slippage ?? 0,
+            fees: maybeNumber(row.fees ?? row.fee) ?? 0,
+            status: row.status || 'pending',
+            txid: row.txid || row.signature || null
+          };
+        });
         hydration.orders = true;
         updateOrders();
         statusNode.textContent = 'Live';
@@ -1928,16 +1941,21 @@ function setupOrdersPanel() {
         const parsed = safeJsonParse(payload, 'orders', errorNode);
         const rows = unwrapStreamPayload(parsed, ['fills', 'orders', 'executions']);
         rows.forEach((row) => {
+          const qty = maybeNumber(row.qty ?? row.quantity ?? row.base_amount) ?? 0;
+          const quotePrice = maybeNumber(row.quote_price ?? row.quote ?? row.price ?? row.px ?? row.price_usd);
+          const fillPrice = maybeNumber(row.fill_price ?? row.execution_price ?? row.price_usd ?? row.price ?? row.px);
+          const slippage = maybeNumber(row.slippage_bps ?? row.slippage);
           const order = {
             ts: toMillis(row.ts || row.timestamp),
             mint: row.mint || row.token || '—',
             side: row.side || row.direction || row.intent || '—',
-            qty: Number(row.qty || row.quantity || row.base_amount || 0),
+            qty,
             route: row.route || row.router || (Array.isArray(row.routes) ? row.routes.join(', ') : '—'),
-            quote_price: row.quote_price !== undefined ? formatNumber(row.quote_price, 6) : '—',
-            fill_price: row.fill_price !== undefined ? formatNumber(row.fill_price, 6) : (row.price_usd !== undefined ? formatNumber(row.price_usd, 6) : '—'),
-            slippage_bps: Number(row.slippage_bps || row.slippage || 0),
-            fees: Number(row.fees || row.fee || 0),
+            quote_price: quotePrice,
+            fill_price: fillPrice,
+            price_value: fillPrice ?? quotePrice ?? null,
+            slippage_bps: slippage ?? 0,
+            fees: maybeNumber(row.fees ?? row.fee) ?? 0,
             status: row.status || row.fill_status || 'pending',
             txid: row.txid || row.signature || row.tx || null
           };
