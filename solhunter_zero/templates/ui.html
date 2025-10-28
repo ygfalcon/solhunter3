@@ -1501,6 +1501,7 @@ function setupTokenPanel() {
   });
   selectedMintStore.subscribe((mint) => {
     state.selectedMint = mint;
+    doc.dispatchEvent(new CustomEvent('token-panel-mint-applied', {detail: {mint}}));
     if (state.discoveryEvents.length) {
       // highlight timeline selection
       state.discoveryEvents.forEach((event) => {
@@ -2525,6 +2526,8 @@ function setupPositionsPanel() {
       const button = doc.getElementById('self-check-btn');
       const statusLabel = doc.getElementById('self-check-status');
       if (!button) return;
+      const reactionEvent = 'token-panel-mint-applied';
+      const reactionTimeoutMs = 3000;
       let running = false;
       async function runSelfCheck() {
         if (running) return;
@@ -2534,10 +2537,23 @@ function setupPositionsPanel() {
         const start = Date.now();
         const originalMint = selectedMintStore.get();
         const testMint = 'SELF_CHECK_MINT';
-        selectedMintStore.set(testMint);
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        const mintPropagation = state.selectedMint === testMint;
-        selectedMintStore.set(originalMint || null);
+        const mintPropagation = await new Promise((resolve) => {
+          let timeoutId = null;
+          function cleanup(result) {
+            doc.removeEventListener(reactionEvent, handleReaction);
+            if (timeoutId) window.clearTimeout(timeoutId);
+            resolve(result);
+          }
+          function handleReaction(event) {
+            if (!event || !event.detail || event.detail.mint !== testMint) return;
+            cleanup(true);
+          }
+          doc.addEventListener(reactionEvent, handleReaction);
+          timeoutId = window.setTimeout(() => cleanup(false), reactionTimeoutMs);
+          selectedMintStore.set(testMint);
+        }).finally(() => {
+          selectedMintStore.set(originalMint || null);
+        });
         const interval = window.setInterval(() => {
           const elapsed = Math.floor((Date.now() - start) / 1000);
           statusLabel.textContent = `Self-Check running (${elapsed}s)…`;
