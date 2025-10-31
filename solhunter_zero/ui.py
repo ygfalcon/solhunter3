@@ -29,6 +29,7 @@ from werkzeug.serving import BaseWSGIServer, make_server
 from . import event_bus
 from .health_runtime import resolve_rl_health_url
 from .production import load_production_env
+from .runtime_defaults import DEFAULT_UI_PORT
 from .util import parse_bool_env
 
 
@@ -1906,7 +1907,7 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
         manifest[f"{channel}_ws"] = urlunparse((scheme, netloc, path, "", "", ""))
 
     ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
-    manifest["ui_port"] = _parse_port(ui_port_value, 5000)
+    manifest["ui_port"] = _parse_port(ui_port_value, DEFAULT_UI_PORT)
     return manifest
 def _shutdown_state(state: _WebsocketState) -> None:
     loop = state.loop

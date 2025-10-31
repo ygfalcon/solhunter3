@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
+from ..runtime_defaults import DEFAULT_UI_PORT
 from .trading_runtime import TradingRuntime
 
 
@@ -19,7 +21,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ui-port",
         help="UI bind port",
-        default=os.getenv("UI_PORT", "5001"),
+        default=os.getenv("UI_PORT", str(DEFAULT_UI_PORT)),
     )
     parser.add_argument(
         "--loop-delay",
