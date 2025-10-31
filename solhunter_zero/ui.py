@@ -349,7 +349,6 @@ def create_app(state: UIState | None = None) -> Flask:
         <head>
             <meta charset="utf-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1" />
-            <meta http-equiv="refresh" content="5" />
             <title>SolHunter Zero Dashboard</title>
             <style>
                 :root {
@@ -455,6 +454,30 @@ def create_app(state: UIState | None = None) -> Flask:
                 }
                 header h1 { font-size: 1.8rem; margin-bottom: 12px; }
                 header .meta { text-align: right; font-size: 0.9rem; color: var(--muted); }
+                .meta-controls {
+                    display: flex;
+                    gap: 8px;
+                    align-items: center;
+                    justify-content: flex-end;
+                    margin: 8px 0;
+                }
+                .meta button {
+                    background: rgba(88, 166, 255, 0.15);
+                    color: var(--text);
+                    border: 1px solid rgba(88, 166, 255, 0.4);
+                    border-radius: 999px;
+                    padding: 6px 14px;
+                    cursor: pointer;
+                    font-size: 0.85rem;
+                    transition: background 0.2s ease, border-color 0.2s ease;
+                }
+                .meta button:hover {
+                    background: rgba(88, 166, 255, 0.25);
+                }
+                .meta button[aria-pressed="true"] {
+                    background: rgba(139, 148, 158, 0.2);
+                    border-color: rgba(139, 148, 158, 0.5);
+                }
                 header .headline { display: flex; flex-direction: column; gap: 12px; }
                 header .stat-tiles {
                     display: grid;
@@ -696,21 +719,25 @@ def create_app(state: UIState | None = None) -> Flask:
             <header>
                 <div class="headline">
                     <h1>SolHunter Zero Dashboard</h1>
-                    <div class="stat-tiles">
+                    <div class="stat-tiles" data-role="stat-tiles">
                         {% for tile in stat_tiles %}
                             <div class="stat-tile {{ tile.css_class }}">
                                 <div class="stat-icon" aria-hidden="true">{{ tile.icon | safe }}</div>
                                 <div class="stat-content">
                                     <div class="stat-label">{{ tile.title }}</div>
-                                    <div class="stat-value {% if tile.css_class == 'heartbeat' %}heartbeat-value{% endif %}">{{ tile.value }}</div>
-                                    <div class="stat-caption">{{ tile.caption }}</div>
+                                    <div class="stat-value {% if tile.css_class == 'heartbeat' %}heartbeat-value{% endif %}" data-stat-value="{{ tile.css_class }}">{{ tile.value }}</div>
+                                    <div class="stat-caption" data-stat-caption="{{ tile.css_class }}">{{ tile.caption }}</div>
                                 </div>
                             </div>
                         {% endfor %}
                     </div>
                 </div>
-                <div class="meta">
-                    <div>Auto-refreshing every 5s</div>
+                <div class="meta" data-role="refresh-meta">
+                    <div><span data-role="refresh-status">Live updates</span> every <span data-role="refresh-interval">5s</span></div>
+                    <div class="meta-controls">
+                        <button type="button" id="toggleRefresh" aria-pressed="false">Pause</button>
+                        <span class="muted" data-role="last-updated"></span>
+                    </div>
                     <div>JSON view: <a href="/?format=json">/?format=json</a></div>
                 </div>
             </header>
@@ -718,7 +745,7 @@ def create_app(state: UIState | None = None) -> Flask:
             <section class="grid">
                 <div class="panel">
                     <h2>Status</h2>
-                    <div class="status-grid">
+                    <div class="status-grid" data-role="status-grid">
                         {% for key, value in status.items() %}
                             {% if key not in ('recent_tokens', 'last_iteration', 'iterations_completed', 'trade_count', 'activity_count', 'heartbeat', 'pipeline_tokens', 'pipeline_size', 'rl_daemon_status') %}
                                 <div class="status-card">
@@ -752,89 +779,95 @@ def create_app(state: UIState | None = None) -> Flask:
                             {% endif %}
                         {% endfor %}
                     </div>
-                    {% if status.get('last_iteration') %}
-                        <div style="margin-top:16px;">
-                            <div class="muted">Last iteration</div>
-                            <div style="margin-top:6px;">Timestamp: {{ status['last_iteration'].get('timestamp') or 'n/a' }}</div>
-                            <div>Actions: {{ status['last_iteration'].get('actions') or 0 }} · Discovered: {{ status['last_iteration'].get('discovered') or 0 }} · Duration: {{ status['last_iteration'].get('elapsed_s') or 0 }}s</div>
-                            <div>Fallback used: {{ 'Yes' if status['last_iteration'].get('fallback_used') else 'No' }}</div>
-                        </div>
-                    {% endif %}
-                    {% if status.get('pipeline_tokens') %}
-                        <div style="margin-top:16px;">
-                            <div class="muted">Pipeline ({{ status.get('pipeline_size', 0) }} queued)</div>
-                            <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">
-                                {% for token in status.get('pipeline_tokens')[:12] %}
-                                    <span class="badge">{{ token }}</span>
-                                {% endfor %}
+                    <div data-role="status-last-iteration">
+                        {% if status.get('last_iteration') %}
+                            <div style="margin-top:16px;">
+                                <div class="muted">Last iteration</div>
+                                <div style="margin-top:6px;">Timestamp: {{ status['last_iteration'].get('timestamp') or 'n/a' }}</div>
+                                <div>Actions: {{ status['last_iteration'].get('actions') or 0 }} · Discovered: {{ status['last_iteration'].get('discovered') or 0 }} · Duration: {{ status['last_iteration'].get('elapsed_s') or 0 }}s</div>
+                                <div>Fallback used: {{ 'Yes' if status['last_iteration'].get('fallback_used') else 'No' }}</div>
                             </div>
-                        </div>
-                    {% endif %}
+                        {% endif %}
+                    </div>
+                    <div data-role="status-pipeline">
+                        {% if status.get('pipeline_tokens') %}
+                            <div style="margin-top:16px;">
+                                <div class="muted">Pipeline ({{ status.get('pipeline_size', 0) }} queued)</div>
+                                <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">
+                                    {% for token in status.get('pipeline_tokens')[:12] %}
+                                        <span class="badge">{{ token }}</span>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        {% endif %}
+                    </div>
                 </div>
 
                 <div class="panel">
                     <h2>Iteration Summary</h2>
-                    {% if summary %}
-                        <table>
-                            <tr><th>Timestamp</th><td>{{ summary.get('timestamp') }}</td></tr>
-                            <tr><th>Elapsed</th><td>{{ summary.get('elapsed_s') or '—' }} s</td></tr>
-                            <tr><th>Actions</th><td>{{ summary.get('actions_count') }}</td></tr>
-                            <tr><th>Any trade</th><td>{{ 'Yes' if summary.get('any_trade') else 'No' }}</td></tr>
-                            <tr><th>Discovered</th><td>{{ summary.get('discovered_count') }}</td></tr>
-                            <tr><th>Picked Tokens</th><td>{{ summary.get('picked_tokens') }}</td></tr>
-                            <tr><th>Committed</th><td>{{ 'Yes' if summary.get('committed') else 'No' }}</td></tr>
-                        </table>
-                        {% set telemetry = summary.get('telemetry') or {} %}
-                        {% if telemetry %}
-                            <div style="margin-top:12px;">
-                                <div class="muted">Telemetry</div>
-                                <table style="margin-top:6px;">
-                                    {% if telemetry.get('evaluation') %}
-                                        <tr>
-                                            <th>Eval Workers</th>
-                                            <td>{{ telemetry['evaluation'].get('workers') }} · avg {{ '%.2f'|format(telemetry['evaluation'].get('latency_avg', 0)) }}s · max {{ '%.2f'|format(telemetry['evaluation'].get('latency_max', 0)) }}s</td>
-                                        </tr>
-                                        <tr><th>Evaluations</th><td>{{ telemetry['evaluation'].get('completed') }}</td></tr>
-                                    {% endif %}
-                                    {% if telemetry.get('execution') %}
-                                        <tr>
-                                            <th>Execution Lanes</th>
-                                            <td>
-                                                {% for lane, size in (telemetry['execution'].get('lanes') or {}).items() %}
-                                                    <span class="badge">{{ lane }}: {{ size }}</span>
-                                                {% else %}
-                                                    none
-                                                {% endfor %}
-                                            </td>
-                                        </tr>
-                                        <tr><th>Submitted</th><td>{{ telemetry['execution'].get('submitted') }} · workers {{ telemetry['execution'].get('lane_workers') }}</td></tr>
-                                    {% endif %}
-                                    {% if telemetry.get('pipeline') %}
-                                        <tr><th>Queued</th><td>{{ telemetry['pipeline'].get('queued') }} / {{ telemetry['pipeline'].get('limit') }}</td></tr>
-                                    {% endif %}
-                                </table>
-                            </div>
+                    <div data-role="iteration-summary">
+                        {% if summary %}
+                            <table>
+                                <tr><th>Timestamp</th><td>{{ summary.get('timestamp') }}</td></tr>
+                                <tr><th>Elapsed</th><td>{{ summary.get('elapsed_s') or '—' }} s</td></tr>
+                                <tr><th>Actions</th><td>{{ summary.get('actions_count') }}</td></tr>
+                                <tr><th>Any trade</th><td>{{ 'Yes' if summary.get('any_trade') else 'No' }}</td></tr>
+                                <tr><th>Discovered</th><td>{{ summary.get('discovered_count') }}</td></tr>
+                                <tr><th>Picked Tokens</th><td>{{ summary.get('picked_tokens') }}</td></tr>
+                                <tr><th>Committed</th><td>{{ 'Yes' if summary.get('committed') else 'No' }}</td></tr>
+                            </table>
+                            {% set telemetry = summary.get('telemetry') or {} %}
+                            {% if telemetry %}
+                                <div style="margin-top:12px;">
+                                    <div class="muted">Telemetry</div>
+                                    <table style="margin-top:6px;">
+                                        {% if telemetry.get('evaluation') %}
+                                            <tr>
+                                                <th>Eval Workers</th>
+                                                <td>{{ telemetry['evaluation'].get('workers') }} · avg {{ '%.2f'|format(telemetry['evaluation'].get('latency_avg', 0)) }}s · max {{ '%.2f'|format(telemetry['evaluation'].get('latency_max', 0)) }}s</td>
+                                            </tr>
+                                            <tr><th>Evaluations</th><td>{{ telemetry['evaluation'].get('completed') }}</td></tr>
+                                        {% endif %}
+                                        {% if telemetry.get('execution') %}
+                                            <tr>
+                                                <th>Execution Lanes</th>
+                                                <td>
+                                                    {% for lane, size in (telemetry['execution'].get('lanes') or {}).items() %}
+                                                        <span class="badge">{{ lane }}: {{ size }}</span>
+                                                    {% else %}
+                                                        none
+                                                    {% endfor %}
+                                                </td>
+                                            </tr>
+                                            <tr><th>Submitted</th><td>{{ telemetry['execution'].get('submitted') }} · workers {{ telemetry['execution'].get('lane_workers') }}</td></tr>
+                                        {% endif %}
+                                        {% if telemetry.get('pipeline') %}
+                                            <tr><th>Queued</th><td>{{ telemetry['pipeline'].get('queued') }} / {{ telemetry['pipeline'].get('limit') }}</td></tr>
+                                        {% endif %}
+                                    </table>
+                                </div>
+                            {% endif %}
+                            {% if summary.get('errors') %}
+                                <div style="margin-top:12px;">
+                                    <div class="muted">Errors</div>
+                                    <ul>
+                                        {% for err in summary.get('errors') %}
+                                            <li style="color: var(--danger);">{{ err }}</li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                            {% endif %}
+                        {% else %}
+                            <div class="muted">Trading loop has not completed an iteration yet.</div>
                         {% endif %}
-                        {% if summary.get('errors') %}
-                            <div style="margin-top:12px;">
-                                <div class="muted">Errors</div>
-                                <ul>
-                                    {% for err in summary.get('errors') %}
-                                        <li style="color: var(--danger);">{{ err }}</li>
-                                    {% endfor %}
-                                </ul>
-                            </div>
-                        {% endif %}
-                    {% else %}
-                        <div class="muted">Trading loop has not completed an iteration yet.</div>
-                    {% endif %}
+                    </div>
                 </div>
 
                 <div class="panel">
                     <h2>Discovery</h2>
-                    <details class="collapsible">
+                    <details class="collapsible" data-role="discovery">
                         <summary>
-                            <div class="collapsible-summary">
+                            <div class="collapsible-summary" data-role="discovery-summary">
                                 <div class="summary-stack">
                                     <div class="summary-title">Recent Tokens</div>
                                     <div class="summary-count">{{ discovery_recent_total }} tracked</div>
@@ -851,7 +884,7 @@ def create_app(state: UIState | None = None) -> Flask:
                             </div>
                             <span class="caret" aria-hidden="true"></span>
                         </summary>
-                        <div class="collapsible-body">
+                        <div class="collapsible-body" data-role="discovery-body">
                             {% if discovery_recent_display %}
                                 <div class="muted">Newest {{ discovery_recent_display|length }} tokens shown below.</div>
                                 <div class="collapsible-scroll">
@@ -878,7 +911,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Counts</h2>
-                    <table>
+                    <table data-role="counts-table">
                         {% for key, val in counts.items() %}
                             <tr><th>{{ key }}</th><td>{{ val }}</td></tr>
                         {% endfor %}
@@ -895,62 +928,63 @@ def create_app(state: UIState | None = None) -> Flask:
             <section class="grid" style="margin-top:24px;">
                 <div class="panel" style="grid-column: span 2;">
                     <h2>Iteration Charts</h2>
-                    {% if history %}
-                        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:20px;">
-                            <canvas id="actionsChart" height="180"></canvas>
-                            <canvas id="latencyChart" height="180"></canvas>
-                        </div>
-                    {% else %}
-                        <div class="muted">Waiting for iteration history…</div>
-                    {% endif %}
+                    <div class="muted" data-role="history-empty"{% if history %} style="display:none;"{% endif %}>Waiting for iteration history…</div>
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:20px;" data-role="history-charts"{% if not history %} style="display:none;"{% endif %}>
+                        <canvas id="actionsChart" height="180"></canvas>
+                        <canvas id="latencyChart" height="180"></canvas>
+                    </div>
                 </div>
             </section>
 
             <section class="grid" style="margin-top:24px;">
                 <div class="panel">
                     <h2>Token Results</h2>
-                    {% if summary and summary.get('token_results') %}
-                        <table>
-                            <tr><th>Token</th><th>Actions</th><th>Errors</th><th>Score</th></tr>
-                            {% for result in summary.get('token_results')[:15] %}
-                                <tr>
-                                    <td>{{ result.get('token') }}</td>
-                                    <td>{{ result.get('actions')|length }}</td>
-                                    <td>{{ result.get('errors')|length }}</td>
-                                    <td>{{ '%.3f'|format(result.get('score', 0)) }}</td>
-                                </tr>
-                            {% endfor %}
-                        </table>
-                    {% else %}
-                        <div class="muted">No token results captured yet.</div>
-                    {% endif %}
+                    <div data-role="token-results">
+                        {% if summary and summary.get('token_results') %}
+                            <table>
+                                <tr><th>Token</th><th>Actions</th><th>Errors</th><th>Score</th></tr>
+                                {% for result in summary.get('token_results')[:15] %}
+                                    <tr>
+                                        <td>{{ result.get('token') }}</td>
+                                        <td>{{ result.get('actions')|length }}</td>
+                                        <td>{{ result.get('errors')|length }}</td>
+                                        <td>{{ '%.3f'|format(result.get('score', 0)) }}</td>
+                                    </tr>
+                                {% endfor %}
+                            </table>
+                        {% else %}
+                            <div class="muted">No token results captured yet.</div>
+                        {% endif %}
+                    </div>
                 </div>
 
                 <div class="panel">
                     <h2>Recent Actions</h2>
-                    {% if actions %}
-                        <table>
-                            <tr><th>Agent</th><th>Token</th><th>Side</th><th>Amount</th><th>Result</th></tr>
-                            {% for action in actions[-15:]|reverse %}
-                                <tr>
-                                    <td>{{ action.get('agent') or '—' }}</td>
-                                    <td>{{ action.get('token') or '—' }}</td>
-                                    <td>{{ action.get('side') or '—' }}</td>
-                                    <td>{{ action.get('amount') or '—' }}</td>
-                                    <td>{{ action.get('result') or '—' }}</td>
-                                </tr>
-                            {% endfor %}
-                        </table>
-                    {% else %}
-                        <div class="muted">No actions recorded yet.</div>
-                    {% endif %}
+                    <div data-role="recent-actions">
+                        {% if actions %}
+                            <table>
+                                <tr><th>Agent</th><th>Token</th><th>Side</th><th>Amount</th><th>Result</th></tr>
+                                {% for action in actions[-15:]|reverse %}
+                                    <tr>
+                                        <td>{{ action.get('agent') or '—' }}</td>
+                                        <td>{{ action.get('token') or '—' }}</td>
+                                        <td>{{ action.get('side') or '—' }}</td>
+                                        <td>{{ action.get('amount') or '—' }}</td>
+                                        <td>{{ action.get('result') or '—' }}</td>
+                                    </tr>
+                                {% endfor %}
+                            </table>
+                        {% else %}
+                            <div class="muted">No actions recorded yet.</div>
+                        {% endif %}
+                    </div>
                 </div>
 
                 <div class="panel">
                     <h2>Event Log</h2>
-                    <details class="collapsible">
+                    <details class="collapsible" data-role="logs">
                         <summary>
-                            <div class="collapsible-summary">
+                            <div class="collapsible-summary" data-role="logs-summary">
                                 <div class="summary-stack">
                                     <div class="summary-title">Latest Events</div>
                                     <div class="summary-count">{{ logs_total }} recorded</div>
@@ -968,7 +1002,7 @@ def create_app(state: UIState | None = None) -> Flask:
                             </div>
                             <span class="caret" aria-hidden="true"></span>
                         </summary>
-                        <div class="collapsible-body">
+                        <div class="collapsible-body" data-role="logs-body">
                             {% if logs_display %}
                                 <div class="muted">Showing the freshest {{ logs_display|length }} entries.</div>
                                 <div class="collapsible-scroll">
@@ -989,11 +1023,12 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Weights</h2>
-                    {% if weights_labels %}
-                        <div class="weights-chart-container">
+                    <div data-role="weights-container">
+                        <div class="muted" data-role="weights-empty"{% if weights_labels %} style="display:none;"{% endif %}>Weights unavailable. The coordinator has not provided agent weights yet.</div>
+                        <div class="weights-chart-container" data-role="weights-chart-wrap"{% if not weights_labels %} style="display:none;"{% endif %}>
                             <canvas id="weightsChart" role="img" aria-label="{{ weights_aria_label }}" data-summary="{{ weights_aria_label }}"></canvas>
                         </div>
-                        <div class="weights-legend" id="weightsLegend" role="list">
+                        <div class="weights-legend" id="weightsLegend" role="list"{% if not weights_labels %} style="display:none;"{% endif %}>
                             {% for name, value in weights_sorted %}
                                 <span role="listitem" aria-label="{{ name }} weight {{ '%.6f'|format(value) }}" data-index="{{ loop.index0 }}">
                                     <span class="legend-dot" aria-hidden="true"></span>
@@ -1003,20 +1038,18 @@ def create_app(state: UIState | None = None) -> Flask:
                             {% endfor %}
                         </div>
                         <div class="sr-only" id="weightsTextSummary">{{ weights_aria_label }}</div>
-                    {% else %}
-                        <div class="muted">Weights unavailable. The coordinator has not provided agent weights yet.</div>
-                    {% endif %}
+                    </div>
                 </div>
 
                 <div class="panel">
                     <h2>Configuration</h2>
                     <div class="muted">Active agents:</div>
-                    <div style="margin:10px 0;">
+                    <div style="margin:10px 0;" data-role="config-agents">
                         {% for agent in config_overview.get('agents') or [] %}
                             <span class="badge">{{ agent }}</span>
                         {% endfor %}
                     </div>
-                    <div class="two-column">
+                    <div class="two-column" data-role="config-details">
                         <div>
                             <div class="muted">Loop delay</div>
                             <div>{{ config_overview.get('loop_delay') }}s</div>
@@ -1039,127 +1072,514 @@ def create_app(state: UIState | None = None) -> Flask:
 
             <section class="panel" style="margin-top:24px;">
                 <h2>Raw Summary JSON</h2>
-                <pre>{{ summary | tojson(indent=2) }}</pre>
+                <pre data-role="summary-json">{{ summary | tojson(indent=2) }}</pre>
             </section>
-            <script>
-            (function() {
-                const history = {{ history | tojson | safe }};
-                const weightLabels = {{ weights_labels | tojson | safe }};
-                const weightValues = {{ weights_values | tojson | safe }};
-                if (history && history.length) {
-                    const labels = history.map(h => (h.timestamp || '').slice(11, 19));
-                    const actionsData = history.map(h => h.actions_count || 0);
-                    const discoveredData = history.map(h => h.discovered_count || 0);
-                    const committedData = history.map(h => (h.committed ? 1 : 0));
-                    const latencyData = history.map(h => (h.elapsed_s || 0));
-                    let budgetData = history.map(h => {
-                        const telemetry = h.telemetry || {};
-                        const pipeline = telemetry.pipeline || {};
-                        return pipeline.budget || null;
-                    });
-                    const wantsBudget = budgetData.some(v => typeof v === 'number');
-                    const ctxA = document.getElementById('actionsChart');
-                    if (ctxA && window.Chart) {
-                        new Chart(ctxA.getContext('2d'), {
-                            type: 'line',
-                            data: {
-                                labels,
-                                datasets: [
-                                    {
-                                        label: 'Actions',
-                                        data: actionsData,
-                                        borderColor: '#58a6ff',
-                                        backgroundColor: 'rgba(88,166,255,0.2)',
-                                        tension: 0.3,
-                                    },
-                                    {
-                                        label: 'Discovered',
-                                        data: discoveredData,
-                                        borderColor: '#3fb950',
-                                        backgroundColor: 'rgba(63,185,80,0.2)',
-                                        tension: 0.3,
-                                    },
-                                    {
-                                        label: 'Committed',
-                                        data: committedData,
-                                        borderColor: '#ffdf5d',
-                                        backgroundColor: 'rgba(255,223,93,0.2)',
-                                        tension: 0.1,
-                                        yAxisID: 'y2',
-                                        stepped: true,
-                                    },
-                                ],
-                            },
-                            options: {
-                                plugins: {
-                                    legend: { labels: { color: '#e6edf3' } },
-                                },
-                                scales: {
-                                    x: {
-                                        ticks: { color: '#8b949e' },
-                                        grid: { color: 'rgba(48,54,61,0.4)' },
-                                    },
-                                    y: {
-                                        ticks: { color: '#8b949e' },
-                                        grid: { color: 'rgba(48,54,61,0.4)' },
-                                    },
-                                    y2: {
-                                        position: 'right',
-                                        ticks: { color: '#8b949e', callback: value => (value ? 'Yes' : 'No') },
-                                        grid: { display: false },
-                                        suggestedMax: 1,
-                                        suggestedMin: 0,
-                                    },
-                                },
-                            },
-                        });
-                    }
-                    const ctxL = document.getElementById('latencyChart');
-                    if (ctxL && window.Chart) {
-                        const datasets = [
-                            {
-                                label: 'Iteration Seconds',
-                                data: latencyData,
-                                borderColor: '#ff7b72',
-                                backgroundColor: 'rgba(255,123,114,0.25)',
-                                tension: 0.2,
-                            },
-                        ];
-                        if (wantsBudget) {
-                            datasets.push({
-                                label: 'Budget',
-                                data: budgetData,
-                                borderColor: '#8b949e',
-                                borderDash: [6, 6],
-                                fill: false,
-                            });
-                        }
-                        new Chart(ctxL.getContext('2d'), {
-                            type: 'line',
-                            data: { labels, datasets },
-                            options: {
-                                plugins: { legend: { labels: { color: '#e6edf3' } } },
-                                scales: {
-                                    x: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
-                                    y: { ticks: { color: '#8b949e' }, grid: { color: 'rgba(48,54,61,0.4)' } },
-                                },
-                            },
-                        });
+            <script type="module">
+            const REFRESH_INTERVAL_MS = 5000;
+            const COUNT_ORDER = ['activity', 'trades', 'logs', 'weights', 'actions'];
+            const PALETTE = ['#7afcff', '#f6a6ff', '#9effa9', '#ffe29a', '#b5b0ff', '#ffb8a5', '#aff8db', '#f3c4fb'];
+            const initialState = {
+                status: {{ status | tojson | safe }},
+                summary: {{ summary | tojson | safe }},
+                discovery: {{ discovery | tojson | safe }},
+                actions: {{ actions | tojson | safe }},
+                activity: {{ activity | tojson | safe }},
+                trades: {{ trades | tojson | safe }},
+                logs: { entries: {{ logs | tojson | safe }} },
+                weights: {{ weights | tojson | safe }},
+                config: {{ config_overview | tojson | safe }},
+                history: {{ history | tojson | safe }},
+            };
+            let historyData = Array.isArray(initialState.history) ? [...initialState.history] : [];
+            let paused = false;
+            let inFlight = false;
+
+            const charts = { actions: null, latency: null, weights: null };
+
+            const elements = {
+                statusGrid: document.querySelector('[data-role="status-grid"]'),
+                statusLastIteration: document.querySelector('[data-role="status-last-iteration"]'),
+                statusPipeline: document.querySelector('[data-role="status-pipeline"]'),
+                iterationSummary: document.querySelector('[data-role="iteration-summary"]'),
+                discoverySummary: document.querySelector('[data-role="discovery-summary"]'),
+                discoveryBody: document.querySelector('[data-role="discovery-body"]'),
+                countsTable: document.querySelector('[data-role="counts-table"]'),
+                historyCharts: document.querySelector('[data-role="history-charts"]'),
+                historyEmpty: document.querySelector('[data-role="history-empty"]'),
+                tokenResults: document.querySelector('[data-role="token-results"]'),
+                recentActions: document.querySelector('[data-role="recent-actions"]'),
+                logsSummary: document.querySelector('[data-role="logs-summary"]'),
+                logsBody: document.querySelector('[data-role="logs-body"]'),
+                weightsChartWrap: document.querySelector('[data-role="weights-chart-wrap"]'),
+                weightsEmpty: document.querySelector('[data-role="weights-empty"]'),
+                weightsLegend: document.getElementById('weightsLegend'),
+                weightsCanvas: document.getElementById('weightsChart'),
+                weightsTextSummary: document.getElementById('weightsTextSummary'),
+                configAgents: document.querySelector('[data-role="config-agents"]'),
+                configDetails: document.querySelector('[data-role="config-details"]'),
+                summaryJson: document.querySelector('[data-role="summary-json"]'),
+                refreshStatus: document.querySelector('[data-role="refresh-status"]'),
+                refreshInterval: document.querySelector('[data-role="refresh-interval"]'),
+                lastUpdated: document.querySelector('[data-role="last-updated"]'),
+                toggleRefresh: document.getElementById('toggleRefresh'),
+                actionsChartCanvas: document.getElementById('actionsChart'),
+                latencyChartCanvas: document.getElementById('latencyChart'),
+            };
+
+            if (elements.refreshInterval) {
+                elements.refreshInterval.textContent = `${(REFRESH_INTERVAL_MS / 1000).toFixed(0)}s`;
+            }
+
+            function escapeHtml(value) {
+                if (value === null || value === undefined) {
+                    return '';
+                }
+                return String(value)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
+
+            function formatNumber(value) {
+                if (value === null || value === undefined || value === '') {
+                    return '—';
+                }
+                const num = Number(value);
+                if (Number.isFinite(num)) {
+                    return num.toLocaleString();
+                }
+                return escapeHtml(value);
+            }
+
+            function formatFloat(value, digits = 2) {
+                const num = Number(value);
+                if (Number.isFinite(num)) {
+                    return num.toFixed(digits);
+                }
+                return '0.00';
+            }
+
+            function asNumber(value) {
+                const num = Number(value);
+                return Number.isFinite(num) ? num : null;
+            }
+
+            function setStat(key, value, caption) {
+                const valueEl = document.querySelector(`[data-stat-value="${key}"]`);
+                const captionEl = document.querySelector(`[data-stat-caption="${key}"]`);
+                if (valueEl) {
+                    valueEl.textContent = value ?? '—';
+                }
+                if (captionEl) {
+                    captionEl.textContent = caption ?? '';
+                }
+            }
+
+            function computeMetrics(status, summary, trades) {
+                const safeStatus = status && typeof status === 'object' ? status : {};
+                const safeSummary = summary && typeof summary === 'object' ? summary : {};
+                const heartbeatRaw = safeStatus.heartbeat;
+                const heartbeatValue = heartbeatRaw === null || heartbeatRaw === undefined ? 'n/a' : String(heartbeatRaw);
+                const heartbeatCaption = safeStatus.trading_loop || safeStatus.event_bus ? 'Trading loop online' : 'Loop offline';
+                const iterationsRaw = safeStatus.iterations_completed ?? safeStatus.iterations ?? safeStatus.iterations_complete;
+                const iterations = asNumber(iterationsRaw) ?? 0;
+                const tradeCountRaw = safeStatus.trade_count ?? (Array.isArray(trades) ? trades.length : 0);
+                const tradeCount = asNumber(tradeCountRaw);
+                const tradeCountValue = tradeCount === null ? (Array.isArray(trades) ? trades.length : 0) : tradeCount;
+                let lastElapsed = null;
+                if (safeSummary && safeSummary.elapsed_s !== undefined && safeSummary.elapsed_s !== null) {
+                    const maybeElapsed = Number(safeSummary.elapsed_s);
+                    if (Number.isFinite(maybeElapsed)) {
+                        lastElapsed = maybeElapsed;
                     }
                 }
-                const weightsCanvas = document.getElementById('weightsChart');
-                if (weightsCanvas && window.Chart && weightLabels.length) {
-                    const palette = ['#7afcff', '#f6a6ff', '#9effa9', '#ffe29a', '#b5b0ff', '#ffb8a5', '#aff8db', '#f3c4fb'];
-                    const backgroundColors = weightLabels.map((_, index) => palette[index % palette.length]);
-                    const totalWeight = weightValues.reduce((acc, value) => acc + value, 0);
-                    new Chart(weightsCanvas.getContext('2d'), {
+                const tradesPerIteration = iterations ? tradeCountValue / iterations : 0;
+                const iterationCaption = iterations
+                    ? (lastElapsed !== null ? `Last run ${lastElapsed.toFixed(1)}s` : 'Tracking iterations')
+                    : 'Awaiting first iteration';
+                const tradesCaption = iterations ? `${tradesPerIteration.toFixed(2)} per iteration` : 'No iterations yet';
+                return {
+                    heartbeatValue,
+                    heartbeatCaption,
+                    iterationsCompleted: iterations,
+                    iterationCaption,
+                    tradeCount: tradeCountValue,
+                    tradesCaption,
+                };
+            }
+
+            function updateStatTiles(status, summary, trades) {
+                const metrics = computeMetrics(status, summary, trades);
+                setStat('heartbeat', metrics.heartbeatValue, metrics.heartbeatCaption);
+                setStat('iterations', formatNumber(metrics.iterationsCompleted), metrics.iterationCaption);
+                setStat('trades', formatNumber(metrics.tradeCount), metrics.tradesCaption);
+            }
+
+            function renderStatusCard(key, value, status) {
+                const label = escapeHtml(key);
+                let valueHtml;
+                if (key === 'rl_daemon' && status && typeof status.rl_daemon_status === 'object') {
+                    const rl = status.rl_daemon_status;
+                    if (!rl.enabled) {
+                        valueHtml = '<span class="badge disabled">DISABLED</span>';
+                    } else {
+                        const running = !!rl.running;
+                        valueHtml = `<span class="badge ${running ? 'success' : 'danger'}">${running ? 'ONLINE' : 'OFFLINE'}</span>`;
+                    }
+                } else if (typeof value === 'boolean') {
+                    valueHtml = `<span class="badge ${value ? 'success' : 'danger'}">${value ? 'ONLINE' : 'OFFLINE'}</span>`;
+                } else if (value === null || value === undefined || value === '') {
+                    valueHtml = '—';
+                } else {
+                    valueHtml = escapeHtml(value);
+                }
+
+                let metaHtml = '';
+                if (key === 'rl_daemon' && status && typeof status.rl_daemon_status === 'object') {
+                    const rl = status.rl_daemon_status;
+                    const pieces = [];
+                    if (rl.source) {
+                        const source = String(rl.source);
+                        pieces.push(`${escapeHtml(source.charAt(0).toUpperCase() + source.slice(1))} daemon`);
+                    }
+                    if (rl.error) {
+                        pieces.push(escapeHtml(rl.error));
+                    }
+                    if (pieces.length) {
+                        metaHtml = `<div class="muted" style="font-size:0.75rem; margin-top:4px;">${pieces.join(' · ')}</div>`;
+                    }
+                }
+
+                return `<div class="status-card"><div class="muted">${label}</div><div style="font-size:1.2rem; font-weight:600; margin-top:4px;">${valueHtml}</div>${metaHtml}</div>`;
+            }
+
+            function renderStatusGrid(status) {
+                const safeStatus = status && typeof status === 'object' ? status : {};
+                const skip = new Set([
+                    'recent_tokens',
+                    'last_iteration',
+                    'iterations_completed',
+                    'trade_count',
+                    'activity_count',
+                    'heartbeat',
+                    'pipeline_tokens',
+                    'pipeline_size',
+                    'rl_daemon_status',
+                ]);
+                return Object.entries(safeStatus)
+                    .filter(([key]) => !skip.has(key))
+                    .map(([key, value]) => renderStatusCard(key, value, safeStatus))
+                    .join('');
+            }
+
+            function renderLastIteration(status) {
+                const last = status && typeof status.last_iteration === 'object' ? status.last_iteration : null;
+                if (!last) {
+                    return '';
+                }
+                const timestamp = last.timestamp ?? 'n/a';
+                const actionsCount = asNumber(last.actions);
+                const discoveredCount = asNumber(last.discovered);
+                const elapsedVal = asNumber(last.elapsed_s);
+                const fallbackUsed = last.fallback_used ? 'Yes' : 'No';
+                const actionsText = Number.isFinite(actionsCount) ? formatNumber(actionsCount) : '0';
+                const discoveredText = Number.isFinite(discoveredCount) ? formatNumber(discoveredCount) : '0';
+                const durationText = Number.isFinite(elapsedVal) ? String(elapsedVal) : '0';
+                return `
+                    <div style="margin-top:16px;">
+                        <div class="muted">Last iteration</div>
+                        <div style="margin-top:6px;">Timestamp: ${escapeHtml(timestamp)}</div>
+                        <div>Actions: ${actionsText} · Discovered: ${discoveredText} · Duration: ${escapeHtml(durationText)}s</div>
+                        <div>Fallback used: ${fallbackUsed}</div>
+                    </div>
+                `;
+            }
+
+            function renderPipeline(status) {
+                const tokens = Array.isArray(status?.pipeline_tokens) ? status.pipeline_tokens.slice(0, 12) : [];
+                if (!tokens.length) {
+                    return '';
+                }
+                const size = asNumber(status?.pipeline_size);
+                const queued = Number.isFinite(size) ? formatNumber(size) : formatNumber(tokens.length);
+                const chips = tokens.map(token => `<span class="badge">${escapeHtml(token)}</span>`).join('');
+                return `
+                    <div style="margin-top:16px;">
+                        <div class="muted">Pipeline (${queued} queued)</div>
+                        <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">${chips}</div>
+                    </div>
+                `;
+            }
+
+            function updateStatusSection(status) {
+                if (elements.statusGrid) {
+                    elements.statusGrid.innerHTML = renderStatusGrid(status);
+                }
+                if (elements.statusLastIteration) {
+                    elements.statusLastIteration.innerHTML = renderLastIteration(status);
+                }
+                if (elements.statusPipeline) {
+                    elements.statusPipeline.innerHTML = renderPipeline(status);
+                }
+            }
+
+            function updateIterationSummary(summary) {
+                if (!elements.iterationSummary) {
+                    return;
+                }
+                const safeSummary = summary && typeof summary === 'object' ? summary : null;
+                if (!safeSummary || Object.keys(safeSummary).length === 0) {
+                    elements.iterationSummary.innerHTML = '<div class="muted">Trading loop has not completed an iteration yet.</div>';
+                    return;
+                }
+                const rows = [
+                    ['Timestamp', escapeHtml(safeSummary.timestamp ?? '—')],
+                    ['Elapsed', `${escapeHtml(safeSummary.elapsed_s ?? '—')} s`],
+                    ['Actions', formatNumber(safeSummary.actions_count)],
+                    ['Any trade', safeSummary.any_trade ? 'Yes' : 'No'],
+                    ['Discovered', formatNumber(safeSummary.discovered_count)],
+                    ['Picked Tokens', escapeHtml(safeSummary.picked_tokens ?? '—')],
+                    ['Committed', safeSummary.committed ? 'Yes' : 'No'],
+                ];
+                const tableHtml = rows
+                    .map(([label, value]) => `<tr><th>${label}</th><td>${value}</td></tr>`)
+                    .join('');
+                let extraHtml = '';
+                const telemetry = safeSummary.telemetry && typeof safeSummary.telemetry === 'object' ? safeSummary.telemetry : {};
+                if (Object.keys(telemetry).length) {
+                    let telemetryRows = '';
+                    if (telemetry.evaluation && typeof telemetry.evaluation === 'object') {
+                        const evalData = telemetry.evaluation;
+                        const workers = formatNumber(evalData.workers);
+                        const avg = formatFloat(evalData.latency_avg);
+                        const max = formatFloat(evalData.latency_max);
+                        telemetryRows += `<tr><th>Eval Workers</th><td>${workers} · avg ${avg}s · max ${max}s</td></tr>`;
+                        telemetryRows += `<tr><th>Evaluations</th><td>${formatNumber(evalData.completed)}</td></tr>`;
+                    }
+                    if (telemetry.execution && typeof telemetry.execution === 'object') {
+                        const execData = telemetry.execution;
+                        const lanes = execData.lanes && typeof execData.lanes === 'object' ? Object.entries(execData.lanes) : [];
+                        const laneHtml = lanes.length
+                            ? lanes
+                                .map(([lane, size]) => `<span class="badge">${escapeHtml(lane)}: ${formatNumber(size)}</span>`)
+                                .join('')
+                            : 'none';
+                        telemetryRows += `<tr><th>Execution Lanes</th><td>${laneHtml}</td></tr>`;
+                        telemetryRows += `<tr><th>Submitted</th><td>${formatNumber(execData.submitted)} · workers ${formatNumber(execData.lane_workers)}</td></tr>`;
+                    }
+                    if (telemetry.pipeline && typeof telemetry.pipeline === 'object') {
+                        const pipe = telemetry.pipeline;
+                        telemetryRows += `<tr><th>Queued</th><td>${formatNumber(pipe.queued)} / ${formatNumber(pipe.limit)}</td></tr>`;
+                    }
+                    if (telemetryRows) {
+                        extraHtml += `
+                            <div style="margin-top:12px;">
+                                <div class="muted">Telemetry</div>
+                                <table style="margin-top:6px;">${telemetryRows}</table>
+                            </div>
+                        `;
+                    }
+                }
+                if (Array.isArray(safeSummary.errors) && safeSummary.errors.length) {
+                    const errorsHtml = safeSummary.errors
+                        .map(err => `<li style="color: var(--danger);">${escapeHtml(err)}</li>`)
+                        .join('');
+                    extraHtml += `
+                        <div style="margin-top:12px;">
+                            <div class="muted">Errors</div>
+                            <ul>${errorsHtml}</ul>
+                        </div>
+                    `;
+                }
+                elements.iterationSummary.innerHTML = `<table>${tableHtml}</table>${extraHtml}`;
+            }
+
+            function updateDiscovery(discovery) {
+                const data = discovery && typeof discovery === 'object' ? discovery : {};
+                const recent = Array.isArray(data.recent) ? data.recent : [];
+                const summaryTokens = recent.slice(-3).reverse();
+                const displayTokens = recent.slice(-120).reverse();
+                const latestTokens = Array.isArray(data.latest_iteration_tokens) ? data.latest_iteration_tokens : [];
+                if (elements.discoverySummary) {
+                    const peek = summaryTokens.length
+                        ? summaryTokens.map(token => `<span class="peek-chip">${escapeHtml(token)}</span>`).join('')
+                        : '<span class="muted">Waiting for discovery results…</span>';
+                    elements.discoverySummary.innerHTML = `
+                        <div class="summary-stack">
+                            <div class="summary-title">Recent Tokens</div>
+                            <div class="summary-count">${formatNumber(recent.length)} tracked</div>
+                        </div>
+                        <div class="summary-peek" aria-hidden="true">${peek}</div>
+                    `;
+                }
+                if (elements.discoveryBody) {
+                    let bodyHtml = '';
+                    if (displayTokens.length) {
+                        const list = displayTokens.map(token => `<li>${escapeHtml(token)}</li>`).join('');
+                        bodyHtml += `
+                            <div class="muted">Newest ${formatNumber(displayTokens.length)} tokens shown below.</div>
+                            <div class="collapsible-scroll"><ul>${list}</ul></div>
+                        `;
+                    } else {
+                        bodyHtml += '<div class="muted">Waiting for discovery results…</div>';
+                    }
+                    if (latestTokens.length) {
+                        const chips = latestTokens.slice(0, 20)
+                            .map(token => `<span class="peek-chip" role="listitem">${escapeHtml(token)}</span>`)
+                            .join('');
+                        bodyHtml += `
+                            <div class="muted" style="margin-top:14px;">Latest iteration tokens (${formatNumber(latestTokens.length)}):</div>
+                            <div class="chip-group" role="list">${chips}</div>
+                        `;
+                    }
+                    elements.discoveryBody.innerHTML = bodyHtml;
+                }
+            }
+
+            function updateCounts(counts) {
+                if (!elements.countsTable) {
+                    return;
+                }
+                const rows = COUNT_ORDER.map(key => `<tr><th>${escapeHtml(key)}</th><td>${formatNumber(counts[key])}</td></tr>`).join('');
+                elements.countsTable.innerHTML = rows;
+            }
+
+            function updateTokenResults(summary) {
+                if (!elements.tokenResults) {
+                    return;
+                }
+                const results = summary && Array.isArray(summary.token_results) ? summary.token_results : [];
+                if (!results.length) {
+                    elements.tokenResults.innerHTML = '<div class="muted">No token results captured yet.</div>';
+                    return;
+                }
+                const rows = results.slice(0, 15)
+                    .map(result => {
+                        const actions = Array.isArray(result.actions) ? result.actions.length : result.actions;
+                        const errors = Array.isArray(result.errors) ? result.errors.length : result.errors;
+                        return `
+                            <tr>
+                                <td>${escapeHtml(result.token ?? '—')}</td>
+                                <td>${formatNumber(actions)}</td>
+                                <td>${formatNumber(errors)}</td>
+                                <td>${formatFloat(result.score, 3)}</td>
+                            </tr>
+                        `;
+                    })
+                    .join('');
+                elements.tokenResults.innerHTML = `<table><tr><th>Token</th><th>Actions</th><th>Errors</th><th>Score</th></tr>${rows}</table>`;
+            }
+
+            function updateRecentActions(actions) {
+                if (!elements.recentActions) {
+                    return;
+                }
+                const list = Array.isArray(actions) ? actions.slice(-15).reverse() : [];
+                if (!list.length) {
+                    elements.recentActions.innerHTML = '<div class="muted">No actions recorded yet.</div>';
+                    return;
+                }
+                const rows = list
+                    .map(action => `
+                        <tr>
+                            <td>${escapeHtml(action.agent ?? '—')}</td>
+                            <td>${escapeHtml(action.token ?? '—')}</td>
+                            <td>${escapeHtml(action.side ?? '—')}</td>
+                            <td>${escapeHtml(action.amount ?? '—')}</td>
+                            <td>${escapeHtml(action.result ?? '—')}</td>
+                        </tr>
+                    `)
+                    .join('');
+                elements.recentActions.innerHTML = `<table><tr><th>Agent</th><th>Token</th><th>Side</th><th>Amount</th><th>Result</th></tr>${rows}</table>`;
+            }
+
+            function extractLogDetail(entry) {
+                if (!entry || typeof entry !== 'object') {
+                    return '';
+                }
+                const payload = entry.payload && typeof entry.payload === 'object' ? entry.payload : {};
+                let detail = payload.detail ?? entry.detail ?? entry.message;
+                if (detail === null || detail === undefined || detail === '') {
+                    detail = JSON.stringify(entry);
+                }
+                return typeof detail === 'string' ? detail : JSON.stringify(detail);
+            }
+
+            function extractLogStage(entry) {
+                if (!entry || typeof entry !== 'object') {
+                    return '—';
+                }
+                const payload = entry.payload && typeof entry.payload === 'object' ? entry.payload : {};
+                return payload.stage ?? entry.topic ?? '—';
+            }
+
+            function updateLogs(logEntries) {
+                if (!elements.logsSummary || !elements.logsBody) {
+                    return;
+                }
+                const entries = Array.isArray(logEntries) ? logEntries : [];
+                const logsTotal = entries.length;
+                const summaryEntries = entries.slice(-3).reverse();
+                const peek = summaryEntries.length
+                    ? summaryEntries.map(entry => `<span class="peek-chip">${escapeHtml(extractLogStage(entry))}</span>`).join('')
+                    : '<span class="muted">No log entries yet.</span>';
+                elements.logsSummary.innerHTML = `
+                    <div class="summary-stack">
+                        <div class="summary-title">Latest Events</div>
+                        <div class="summary-count">${formatNumber(logsTotal)} recorded</div>
+                    </div>
+                    <div class="summary-peek" aria-hidden="true">${peek}</div>
+                `;
+                const displayEntries = entries.slice(-200).reverse();
+                if (!displayEntries.length) {
+                    elements.logsBody.innerHTML = '<div class="muted">No log entries yet.</div>';
+                    return;
+                }
+                const list = displayEntries
+                    .map(entry => {
+                        const timestamp = escapeHtml(entry.timestamp ?? '');
+                        const stage = escapeHtml(extractLogStage(entry));
+                        const detail = escapeHtml(extractLogDetail(entry));
+                        return `<li><span class="muted">${timestamp}</span> · <strong>${stage}</strong> — ${detail}</li>`;
+                    })
+                    .join('');
+                elements.logsBody.innerHTML = `
+                    <div class="muted">Showing the freshest ${formatNumber(displayEntries.length)} entries.</div>
+                    <div class="collapsible-scroll"><ul>${list}</ul></div>
+                `;
+            }
+
+            function parseWeights(weights) {
+                if (!weights || typeof weights !== 'object' || Array.isArray(weights)) {
+                    return [];
+                }
+                return Object.entries(weights)
+                    .map(([name, value]) => {
+                        const num = Number(value);
+                        if (!Number.isFinite(num)) {
+                            return null;
+                        }
+                        return [String(name), num];
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => b[1] - a[1]);
+            }
+
+            function ensureWeightsChart() {
+                if (!window.Chart || !elements.weightsCanvas) {
+                    return null;
+                }
+                if (!charts.weights) {
+                    charts.weights = new Chart(elements.weightsCanvas.getContext('2d'), {
                         type: 'doughnut',
                         data: {
-                            labels: weightLabels,
+                            labels: [],
                             datasets: [
                                 {
-                                    data: weightValues,
-                                    backgroundColor: backgroundColors,
+                                    data: [],
+                                    backgroundColor: [],
                                     borderColor: '#0d1117',
                                     borderWidth: 2,
                                 },
@@ -1173,7 +1593,9 @@ def create_app(state: UIState | None = None) -> Flask:
                                     callbacks: {
                                         label(context) {
                                             const value = context.parsed || 0;
-                                            const percent = totalWeight ? ((value / totalWeight) * 100).toFixed(1) : '0.0';
+                                            const total = context.chart.data.datasets[0].data
+                                                .reduce((acc, current) => (Number.isFinite(current) ? acc + current : acc), 0);
+                                            const percent = total ? ((value / total) * 100).toFixed(1) : '0.0';
                                             return `${context.label}: ${value} (${percent}%)`;
                                         },
                                     },
@@ -1181,23 +1603,409 @@ def create_app(state: UIState | None = None) -> Flask:
                             },
                         },
                     });
-                    const legendEl = document.getElementById('weightsLegend');
-                    if (legendEl) {
-                        legendEl.querySelectorAll('[data-index]').forEach((pill, index) => {
-                            const color = backgroundColors[index % backgroundColors.length];
-                            pill.style.borderColor = `${color}55`;
-                            const dot = pill.querySelector('.legend-dot');
-                            if (dot) {
-                                dot.style.background = color;
-                            }
-                        });
-                    }
-                    const summary = weightsCanvas.getAttribute('data-summary');
-                    if (summary) {
-                        weightsCanvas.setAttribute('aria-label', summary);
-                    }
                 }
-            })();
+                return charts.weights;
+            }
+
+            function updateWeights(weights) {
+                const entries = parseWeights(weights);
+                const hasData = entries.length > 0;
+                if (elements.weightsEmpty) {
+                    elements.weightsEmpty.style.display = hasData ? 'none' : '';
+                }
+                if (elements.weightsChartWrap) {
+                    elements.weightsChartWrap.style.display = hasData ? '' : 'none';
+                }
+                if (elements.weightsLegend) {
+                    elements.weightsLegend.style.display = hasData ? '' : 'none';
+                }
+                if (!hasData) {
+                    if (charts.weights) {
+                        charts.weights.destroy();
+                        charts.weights = null;
+                    }
+                    if (elements.weightsLegend) {
+                        elements.weightsLegend.innerHTML = '';
+                    }
+                    const unavailable = 'Agent weights unavailable';
+                    if (elements.weightsTextSummary) {
+                        elements.weightsTextSummary.textContent = unavailable;
+                    }
+                    if (elements.weightsCanvas) {
+                        elements.weightsCanvas.setAttribute('aria-label', unavailable);
+                    }
+                    return;
+                }
+                const labels = entries.map(([name]) => name);
+                const values = entries.map(([, value]) => value);
+                const colors = labels.map((_, index) => PALETTE[index % PALETTE.length]);
+                const weightsChart = ensureWeightsChart();
+                if (weightsChart) {
+                    weightsChart.data.labels = labels;
+                    weightsChart.data.datasets[0].data = values;
+                    weightsChart.data.datasets[0].backgroundColor = colors;
+                    weightsChart.update();
+                }
+                if (elements.weightsLegend) {
+                    elements.weightsLegend.innerHTML = labels
+                        .map((label, index) => {
+                            const value = values[index];
+                            return `
+                                <span role="listitem" aria-label="${escapeHtml(label)} weight ${formatFloat(value, 6)}" data-index="${index}">
+                                    <span class="legend-dot" aria-hidden="true"></span>
+                                    <span class="legend-label">${escapeHtml(label)}</span>
+                                    <span class="legend-value" aria-hidden="true">${formatFloat(value, 4)}</span>
+                                </span>
+                            `;
+                        })
+                        .join('');
+                    elements.weightsLegend.querySelectorAll('[data-index]').forEach((pill, index) => {
+                        const color = colors[index % colors.length];
+                        pill.style.borderColor = `${color}55`;
+                        const dot = pill.querySelector('.legend-dot');
+                        if (dot) {
+                            dot.style.background = color;
+                        }
+                    });
+                }
+                const summaryText = `Agent weights distribution: ${entries
+                    .map(([name, value]) => `${name} weight ${value}`)
+                    .join(', ')}`;
+                if (elements.weightsTextSummary) {
+                    elements.weightsTextSummary.textContent = summaryText;
+                }
+                if (elements.weightsCanvas) {
+                    elements.weightsCanvas.setAttribute('aria-label', summaryText);
+                }
+            }
+
+            function updateConfig(config) {
+                if (elements.configAgents) {
+                    const agents = config && Array.isArray(config.agents) ? config.agents : [];
+                    elements.configAgents.innerHTML = agents.map(agent => `<span class="badge">${escapeHtml(agent)}</span>`).join('');
+                }
+                if (elements.configDetails) {
+                    const details = [
+                        ['Loop delay', config?.loop_delay !== undefined ? `${escapeHtml(config.loop_delay)}s` : '—'],
+                        ['Min delay', config?.min_delay !== undefined ? `${escapeHtml(config.min_delay)}s` : '—'],
+                        ['Max delay', config?.max_delay !== undefined ? `${escapeHtml(config.max_delay)}s` : '—'],
+                        ['Config path', escapeHtml(config?.config_path ?? '—')],
+                    ];
+                    elements.configDetails.innerHTML = details
+                        .map(([label, value]) => `
+                            <div>
+                                <div class="muted">${label}</div>
+                                <div style="word-break: break-all;">${value}</div>
+                            </div>
+                        `)
+                        .join('');
+                }
+            }
+
+            function updateRawSummary(summary) {
+                if (!elements.summaryJson) {
+                    return;
+                }
+                try {
+                    elements.summaryJson.textContent = JSON.stringify(summary ?? {}, null, 2);
+                } catch (error) {
+                    elements.summaryJson.textContent = '{}';
+                }
+            }
+
+            function integrateSummaryIntoHistory(summary) {
+                if (!summary || typeof summary !== 'object' || !summary.timestamp) {
+                    return;
+                }
+                const copy = JSON.parse(JSON.stringify(summary));
+                const existingIndex = historyData.findIndex(item => item && item.timestamp === copy.timestamp);
+                if (existingIndex === -1) {
+                    historyData.push(copy);
+                } else {
+                    historyData[existingIndex] = copy;
+                }
+                historyData = historyData
+                    .filter(item => item && typeof item === 'object')
+                    .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
+                    .slice(-200);
+            }
+
+            function ensureActionsChart() {
+                if (!window.Chart || !elements.actionsChartCanvas) {
+                    return null;
+                }
+                if (!charts.actions) {
+                    charts.actions = new Chart(elements.actionsChartCanvas.getContext('2d'), {
+                        type: 'line',
+                        data: {
+                            labels: [],
+                            datasets: [
+                                {
+                                    label: 'Actions',
+                                    data: [],
+                                    borderColor: '#58a6ff',
+                                    backgroundColor: 'rgba(88,166,255,0.2)',
+                                    tension: 0.3,
+                                },
+                                {
+                                    label: 'Discovered',
+                                    data: [],
+                                    borderColor: '#3fb950',
+                                    backgroundColor: 'rgba(63,185,80,0.2)',
+                                    tension: 0.3,
+                                },
+                                {
+                                    label: 'Committed',
+                                    data: [],
+                                    borderColor: '#ffdf5d',
+                                    backgroundColor: 'rgba(255,223,93,0.2)',
+                                    tension: 0.1,
+                                    yAxisID: 'y2',
+                                    stepped: true,
+                                },
+                            ],
+                        },
+                        options: {
+                            plugins: {
+                                legend: { labels: { color: '#e6edf3' } },
+                            },
+                            scales: {
+                                x: {
+                                    ticks: { color: '#8b949e' },
+                                    grid: { color: 'rgba(48,54,61,0.4)' },
+                                },
+                                y: {
+                                    ticks: { color: '#8b949e' },
+                                    grid: { color: 'rgba(48,54,61,0.4)' },
+                                },
+                                y2: {
+                                    position: 'right',
+                                    ticks: {
+                                        color: '#8b949e',
+                                        callback: value => (value ? 'Yes' : 'No'),
+                                    },
+                                    grid: { display: false },
+                                    suggestedMax: 1,
+                                    suggestedMin: 0,
+                                },
+                            },
+                        },
+                    });
+                }
+                return charts.actions;
+            }
+
+            function ensureLatencyChart() {
+                if (!window.Chart || !elements.latencyChartCanvas) {
+                    return null;
+                }
+                if (!charts.latency) {
+                    charts.latency = new Chart(elements.latencyChartCanvas.getContext('2d'), {
+                        type: 'line',
+                        data: {
+                            labels: [],
+                            datasets: [
+                                {
+                                    label: 'Iteration Seconds',
+                                    data: [],
+                                    borderColor: '#ff7b72',
+                                    backgroundColor: 'rgba(255,123,114,0.25)',
+                                    tension: 0.2,
+                                },
+                                {
+                                    label: 'Budget',
+                                    data: [],
+                                    borderColor: '#8b949e',
+                                    borderDash: [6, 6],
+                                    fill: false,
+                                    spanGaps: true,
+                                    hidden: true,
+                                },
+                            ],
+                        },
+                        options: {
+                            plugins: {
+                                legend: { labels: { color: '#e6edf3' } },
+                            },
+                            scales: {
+                                x: {
+                                    ticks: { color: '#8b949e' },
+                                    grid: { color: 'rgba(48,54,61,0.4)' },
+                                },
+                                y: {
+                                    ticks: { color: '#8b949e' },
+                                    grid: { color: 'rgba(48,54,61,0.4)' },
+                                },
+                            },
+                        },
+                    });
+                }
+                return charts.latency;
+            }
+
+            function updateHistoryCharts() {
+                const hasHistory = historyData.length > 0;
+                if (elements.historyEmpty) {
+                    elements.historyEmpty.style.display = hasHistory ? 'none' : '';
+                }
+                if (elements.historyCharts) {
+                    elements.historyCharts.style.display = hasHistory ? '' : 'none';
+                }
+                if (!hasHistory) {
+                    return;
+                }
+                const entries = historyData.filter(item => item && typeof item === 'object');
+                const labels = entries.map(entry => (entry.timestamp || '').slice(11, 19));
+                const actionsData = entries.map(entry => asNumber(entry.actions_count) ?? 0);
+                const discoveredData = entries.map(entry => asNumber(entry.discovered_count) ?? 0);
+                const committedData = entries.map(entry => (entry.committed ? 1 : 0));
+                const latencyData = entries.map(entry => asNumber(entry.elapsed_s) ?? 0);
+                const budgetData = entries.map(entry => {
+                    const telemetry = entry.telemetry && typeof entry.telemetry === 'object' ? entry.telemetry : {};
+                    const pipeline = telemetry.pipeline && typeof telemetry.pipeline === 'object' ? telemetry.pipeline : {};
+                    const budget = asNumber(pipeline.budget);
+                    return budget === null ? null : budget;
+                });
+                const wantsBudget = budgetData.some(value => typeof value === 'number');
+                const actionsChart = ensureActionsChart();
+                if (actionsChart) {
+                    actionsChart.data.labels = labels;
+                    actionsChart.data.datasets[0].data = actionsData;
+                    actionsChart.data.datasets[1].data = discoveredData;
+                    actionsChart.data.datasets[2].data = committedData;
+                    actionsChart.update();
+                }
+                const latencyChart = ensureLatencyChart();
+                if (latencyChart) {
+                    latencyChart.data.labels = labels;
+                    latencyChart.data.datasets[0].data = latencyData;
+                    latencyChart.data.datasets[1].data = budgetData;
+                    latencyChart.data.datasets[1].hidden = !wantsBudget;
+                    latencyChart.update();
+                }
+            }
+
+            function setLastUpdated(date) {
+                if (!elements.lastUpdated) {
+                    return;
+                }
+                elements.lastUpdated.textContent = date ? `Last updated: ${date.toLocaleTimeString()}` : '';
+            }
+
+            function updateRefreshIndicators() {
+                if (elements.refreshStatus) {
+                    elements.refreshStatus.textContent = paused ? 'Paused' : 'Live updates';
+                }
+                if (elements.toggleRefresh) {
+                    elements.toggleRefresh.textContent = paused ? 'Resume' : 'Pause';
+                    elements.toggleRefresh.setAttribute('aria-pressed', paused ? 'true' : 'false');
+                }
+            }
+
+            function applyData(data) {
+                const status = data.status && typeof data.status === 'object' ? data.status : {};
+                const summary = data.summary && typeof data.summary === 'object' ? data.summary : {};
+                const discovery = data.discovery && typeof data.discovery === 'object' ? data.discovery : {};
+                const actions = Array.isArray(data.actions) ? data.actions : [];
+                const activity = Array.isArray(data.activity) ? data.activity : [];
+                const trades = Array.isArray(data.trades) ? data.trades : [];
+                const logsEntries = Array.isArray(data.logs?.entries) ? data.logs.entries : (Array.isArray(data.logs) ? data.logs : []);
+                const weights = data.weights && typeof data.weights === 'object' && !Array.isArray(data.weights) ? data.weights : {};
+                const config = data.config && typeof data.config === 'object' ? data.config : {};
+                updateStatTiles(status, summary, trades);
+                updateStatusSection(status);
+                updateIterationSummary(summary);
+                updateDiscovery(discovery);
+                updateCounts({
+                    activity: activity.length,
+                    trades: trades.length,
+                    logs: logsEntries.length,
+                    weights: Object.keys(weights).length,
+                    actions: actions.length,
+                });
+                updateTokenResults(summary);
+                updateRecentActions(actions);
+                updateLogs(logsEntries);
+                updateWeights(weights);
+                updateConfig(config);
+                updateRawSummary(summary);
+                integrateSummaryIntoHistory(summary);
+                updateHistoryCharts();
+                setLastUpdated(new Date());
+            }
+
+            async function fetchJson(path) {
+                const response = await fetch(path, { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error(`${path} responded with ${response.status}`);
+                }
+                return response.json();
+            }
+
+            async function refresh() {
+                if (paused || inFlight) {
+                    return;
+                }
+                inFlight = true;
+                try {
+                    const [status, summary, discovery, actions, activityResp, trades, weights, logs, config] = await Promise.all([
+                        '/status',
+                        '/summary',
+                        '/tokens',
+                        '/actions',
+                        '/activity',
+                        '/trades',
+                        '/weights',
+                        '/logs',
+                        '/config',
+                    ].map(fetchJson));
+                    const activity = Array.isArray(activityResp?.entries) ? activityResp.entries : (Array.isArray(activityResp) ? activityResp : []);
+                    applyData({
+                        status,
+                        summary,
+                        discovery,
+                        actions: Array.isArray(actions) ? actions : [],
+                        activity,
+                        trades: Array.isArray(trades) ? trades : [],
+                        weights,
+                        logs,
+                        config,
+                    });
+                    updateRefreshIndicators();
+                } catch (error) {
+                    console.error('Failed to refresh dashboard', error);
+                    if (elements.refreshStatus) {
+                        elements.refreshStatus.textContent = 'Update failed';
+                    }
+                    if (elements.lastUpdated) {
+                        elements.lastUpdated.textContent = `Last attempt failed: ${error.message}`;
+                    }
+                } finally {
+                    inFlight = false;
+                }
+            }
+
+            if (elements.toggleRefresh) {
+                elements.toggleRefresh.addEventListener('click', () => {
+                    paused = !paused;
+                    updateRefreshIndicators();
+                    if (!paused) {
+                        refresh();
+                    }
+                });
+            }
+
+            window.addEventListener('visibilitychange', () => {
+                if (!document.hidden && !paused) {
+                    refresh();
+                }
+            });
+
+            applyData(initialState);
+            updateRefreshIndicators();
+            updateHistoryCharts();
+            const intervalId = setInterval(refresh, REFRESH_INTERVAL_MS);
+            refresh();
             </script>
         </body>
         </html>
