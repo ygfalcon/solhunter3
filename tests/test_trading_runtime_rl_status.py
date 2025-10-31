@@ -1,5 +1,8 @@
 import asyncio
 import json
+import logging
+import socketserver
+import threading
 import sys
 import types
 
@@ -178,3 +181,66 @@ async def test_rl_status_watcher_detects_external_daemon(monkeypatch, tmp_path):
     assert runtime._rl_status_info["url"] == payload["url"]
 
     await runtime.stop()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_ui_startup_aborts_on_port_collision(
+    monkeypatch, free_tcp_port, caplog
+):
+    runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1", ui_port=free_tcp_port)
+
+    async def fake_prepare_configuration(self):
+        self.cfg = {}
+        self.runtime_cfg = {}
+        self.depth_proc = None
+        self.status.depth_service = False
+
+    async def fake_start_event_bus(self):
+        return None
+
+    async def fake_start_agents(self):
+        return None
+
+    async def fake_start_loop(self):
+        return None
+
+    monkeypatch.setattr(
+        trading_runtime.TradingRuntime,
+        "_prepare_configuration",
+        fake_prepare_configuration,
+    )
+    monkeypatch.setattr(
+        trading_runtime.TradingRuntime, "_start_event_bus", fake_start_event_bus
+    )
+    monkeypatch.setattr(
+        trading_runtime.TradingRuntime, "_start_agents", fake_start_agents
+    )
+    monkeypatch.setattr(
+        trading_runtime.TradingRuntime, "_start_loop", fake_start_loop
+    )
+
+    class _CloseImmediately(socketserver.BaseRequestHandler):
+        def handle(self) -> None:  # pragma: no cover - trivial
+            try:
+                self.request.close()
+            except Exception:
+                pass
+
+    caplog.set_level(logging.ERROR)
+    server = socketserver.TCPServer(("127.0.0.1", free_tcp_port), _CloseImmediately)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            await runtime.start()
+
+        assert "UI server failed to start" in str(excinfo.value)
+        entries = runtime.activity.snapshot()
+        assert any(entry["stage"] == "ui" and entry["ok"] is False for entry in entries)
+        assert "UI server failed to start" in caplog.text
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+        await runtime.stop()

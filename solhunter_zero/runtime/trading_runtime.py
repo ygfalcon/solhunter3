@@ -232,7 +232,12 @@ class TradingRuntime:
             except NotImplementedError:  # pragma: no cover - non-posix
                 pass
 
-        await self.start()
+        try:
+            await self.start()
+        except Exception:
+            with contextlib.suppress(Exception):
+                await self.stop()
+            raise
         await self.stop_event.wait()
         await self.stop()
 
@@ -431,7 +436,41 @@ class TradingRuntime:
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
-        self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
+
+        ui_url = f"http://{self.ui_host}:{self.ui_port}"
+        health_url = f"{ui_url}/health"
+        deadline = time.monotonic() + 2.0
+        last_error: Optional[BaseException] = None
+
+        def _probe_health() -> tuple[bool, Optional[BaseException]]:
+            try:
+                with urllib.request.urlopen(health_url, timeout=0.5) as response:
+                    status = getattr(response, "status", None)
+                    if status is None and hasattr(response, "getcode"):
+                        try:
+                            status = response.getcode()
+                        except Exception:
+                            status = None
+                    if status is None or 200 <= int(status) < 400:
+                        return True, None
+                    return False, RuntimeError(f"unexpected status {status}")
+            except Exception as exc:  # pragma: no cover - best effort diagnostics
+                return False, exc
+
+        while time.monotonic() < deadline:
+            ok, err = await asyncio.to_thread(_probe_health)
+            if ok:
+                self.activity.add("ui", ui_url)
+                log.info("UI server available at %s", ui_url)
+                break
+            last_error = err
+            await asyncio.sleep(0.1)
+        else:
+            error_detail = str(last_error) if last_error else "timeout"
+            detail = f"UI server failed to start: {error_detail}"
+            self.activity.add("ui", detail, ok=False)
+            log.error(detail)
+            raise RuntimeError(detail)
 
     async def _start_agents(self) -> None:
         memory_path = self.cfg.get("memory_path", "sqlite:///memory.db")

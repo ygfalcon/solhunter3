@@ -2176,7 +2176,7 @@ class UIServer:
                 # ``use_reloader`` must be False otherwise Flask tries to spawn
                 # a new process.
                 self.app.run(host=self.host, port=self.port, use_reloader=False)
-            except Exception:  # pragma: no cover - best effort logging
+            except BaseException:  # pragma: no cover - best effort logging
                 log.exception("UI server crashed")
 
         self._thread = threading.Thread(target=_serve, daemon=True)
