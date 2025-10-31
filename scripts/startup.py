@@ -53,6 +53,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     startup_cli.render_banner()
     args, rest = startup_cli.parse_args(raw_args)
+    if getattr(args, "offline", False):
+        os.environ["SOLHUNTER_OFFLINE"] = "1"
     if getattr(args, "quiet", False):
         os.environ.setdefault("RUST_LOG", "warn")
         os.environ.setdefault("CARGO_TERM_COLOR", "never")
@@ -60,7 +62,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
         logging.basicConfig(level=logging.WARNING)
     if args.non_interactive:
-        return startup_runner.launch_only(rest)
+        return startup_runner.launch_only(rest, offline=getattr(args, "offline", False))
     ctx = startup_checks.perform_checks(
         args,
         rest,

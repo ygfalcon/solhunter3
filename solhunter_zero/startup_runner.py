@@ -41,10 +41,18 @@ def log_startup_info(
         log_startup(line)
 
 
-def launch_only(rest: List[str], *, subprocess_module=subprocess) -> int:
+def _env_offline_enabled(env: dict[str, str]) -> bool:
+    value = env.get("SOLHUNTER_OFFLINE", "")
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def launch_only(
+    rest: List[str], *, offline: bool | None = None, subprocess_module=subprocess
+) -> int:
     """Launch start_all.py directly."""
     env = os.environ.copy()
-    if "--offline" in rest:
+    offline_enabled = offline if offline is not None else _env_offline_enabled(env)
+    if offline_enabled or "--offline" in rest:
         env["SOLHUNTER_OFFLINE"] = "1"
     proc = subprocess_module.run([sys.executable, "scripts/start_all.py", *rest], env=env)
     return proc.returncode
@@ -122,7 +130,7 @@ def run(
     # Arguments to start_all
     rest = list(ctx.get("rest", []))
     if args.non_interactive:
-        return launch_only(rest, subprocess_module=subprocess_module)
+        return launch_only(rest, offline=getattr(args, "offline", False), subprocess_module=subprocess_module)
 
     rest = [*rest, "--foreground"]
 

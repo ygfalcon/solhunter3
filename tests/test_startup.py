@@ -1671,6 +1671,116 @@ def test_bootstrap_aborts_on_low_balance(monkeypatch, tmp_path):
         bootstrap.bootstrap(one_click=True)
 
 
+def test_startup_non_interactive_offline_sets_env(monkeypatch):
+    import types
+    from scripts import startup as startup_mod
+
+    monkeypatch.delenv("SOLHUNTER_OFFLINE", raising=False)
+    monkeypatch.setattr(startup_mod.startup_cli, "render_banner", lambda: None)
+    monkeypatch.setattr("solhunter_zero.logging_utils.log_startup", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.logging_utils.rotate_preflight_log", lambda *a, **k: None)
+
+    def fake_parse_args(_):
+        return types.SimpleNamespace(offline=True, non_interactive=True, quiet=False), []
+
+    captured = {}
+
+    def fake_launch_only(rest, *, offline=None, subprocess_module=None):
+        captured["rest"] = list(rest)
+        captured["offline"] = offline
+        captured["env"] = os.environ.get("SOLHUNTER_OFFLINE")
+        return 0
+
+    monkeypatch.setattr(startup_mod.startup_cli, "parse_args", fake_parse_args)
+    monkeypatch.setattr("solhunter_zero.startup_runner.launch_only", fake_launch_only)
+
+    code = startup_mod._main_impl(["--offline", "--non-interactive"])
+
+    assert code == 0
+    assert captured["offline"] is True
+    assert captured["env"] == "1"
+
+
+def test_startup_interactive_offline_propagates_to_start_all(monkeypatch):
+    import types
+    from scripts import startup as startup_mod
+
+    monkeypatch.delenv("SOLHUNTER_OFFLINE", raising=False)
+    monkeypatch.setattr(startup_mod.startup_cli, "render_banner", lambda: None)
+    monkeypatch.setattr("solhunter_zero.logging_utils.log_startup", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.logging_utils.rotate_preflight_log", lambda *a, **k: None)
+
+    def fake_parse_args(_):
+        return (
+            types.SimpleNamespace(
+                offline=True,
+                non_interactive=False,
+                quiet=False,
+                skip_deps=False,
+                skip_setup=False,
+                skip_rpc_check=False,
+                skip_endpoint_check=False,
+                skip_preflight=False,
+            ),
+            [],
+        )
+
+    fake_checks = types.SimpleNamespace(
+        perform_checks=lambda *a, **k: {
+            "rest": [],
+            "config_path": Path("cfg.toml"),
+            "config": {},
+            "summary_rows": [],
+        }
+    )
+
+    monkeypatch.setattr(startup_mod, "_startup_checks", lambda: fake_checks)
+    monkeypatch.setattr(startup_mod.startup_cli, "parse_args", fake_parse_args)
+
+    captured = {}
+
+    def fake_start_all_main(rest):
+        captured["rest"] = list(rest)
+        captured["env"] = os.environ.get("SOLHUNTER_OFFLINE")
+        return 0
+
+    monkeypatch.setattr(
+        "solhunter_zero.agent_manager.AgentManager.from_config",
+        classmethod(lambda cls, cfg: object()),
+    )
+    monkeypatch.setattr("scripts.start_all.main", fake_start_all_main)
+    monkeypatch.setattr("scripts.healthcheck.main", lambda *a, **k: 0)
+    monkeypatch.setattr("scripts.preflight.CHECKS", [])
+
+    code = startup_mod._main_impl(["--offline"])
+
+    assert code == 0
+    assert captured["env"] == "1"
+    assert captured["rest"] and captured["rest"][-1] == "--foreground"
+
+
+def test_launch_only_sets_env_when_offline(monkeypatch):
+    from types import SimpleNamespace
+    from solhunter_zero import startup_runner
+
+    monkeypatch.delenv("SOLHUNTER_OFFLINE", raising=False)
+
+    captured = {}
+
+    class DummySubprocess:
+        def run(self, cmd, env):
+            captured["cmd"] = cmd
+            captured["env"] = env
+            return SimpleNamespace(returncode=0)
+
+    code = startup_runner.launch_only(
+        ["--foo"], offline=True, subprocess_module=DummySubprocess()
+    )
+
+    assert code == 0
+    assert captured["env"].get("SOLHUNTER_OFFLINE") == "1"
+
+
 def test_disk_space_threshold_uses_config(monkeypatch):
     from scripts import startup
 
