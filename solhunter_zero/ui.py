@@ -2037,7 +2037,37 @@ def create_app(state: UIState | None = None) -> Flask:
 
     @app.get("/health")
     def health() -> Any:
-        return {"ok": True}
+        status_snapshot = state.snapshot_status()
+
+        def _flag_ok(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value != 0
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"", "0", "false", "offline", "stopped", "error"}:
+                    return False
+                return True
+            if value is None:
+                return False
+            return bool(value)
+
+        critical_components = {
+            "event_bus": _flag_ok(status_snapshot.get("event_bus")),
+            "trading_loop": _flag_ok(status_snapshot.get("trading_loop")),
+            "heartbeat": _flag_ok(status_snapshot.get("heartbeat")),
+        }
+        failing = sorted(name for name, ok in critical_components.items() if not ok)
+        payload: Dict[str, Any] = {
+            "ok": not failing,
+            "components": critical_components,
+            "status": status_snapshot,
+        }
+        if failing:
+            payload["failing"] = failing
+            return jsonify(payload), 503
+        return jsonify(payload)
 
     @app.get("/status")
     def status() -> Any:
