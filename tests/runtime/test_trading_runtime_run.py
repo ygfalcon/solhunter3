@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import socket
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -63,3 +64,34 @@ async def test_trading_runtime_run_cleans_up_on_start_failure(monkeypatch, caplo
         "Trading runtime failed during run" in record.getMessage()
         for record in caplog.records
     )
+
+
+@pytest.mark.anyio("asyncio")
+async def test_trading_runtime_start_ui_reports_port_in_use(caplog):
+    runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
+
+    busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        busy_sock.bind(("127.0.0.1", 0))
+        busy_sock.listen(1)
+        runtime.ui_port = busy_sock.getsockname()[1]
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(OSError):
+                await runtime._start_ui()
+
+        entries = runtime.activity.snapshot()
+        assert any(
+            entry["stage"] == "ui"
+            and entry["ok"] is False
+            and "failed to start" in entry["detail"]
+            for entry in entries
+        )
+
+        assert runtime.ui_server is None
+        assert any(
+            "failed to start UI server" in record.getMessage()
+            for record in caplog.records
+        )
+    finally:
+        busy_sock.close()

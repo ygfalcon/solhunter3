@@ -2324,20 +2324,26 @@ class UIServer:
         if self._thread and self._thread.is_alive():
             return
 
+        from werkzeug.serving import BaseWSGIServer, make_server
+
+        try:
+            server: BaseWSGIServer = make_server(
+                self.host,
+                self.port,
+                self.app,
+                threaded=True,
+            )
+        except SystemExit as exc:
+            raise OSError(
+                f"failed to bind UI server on {self.host}:{self.port}"
+            ) from exc
+        self._server = server
+        # ``make_server`` may assign a random port when ``self.port`` is 0.
+        # Capture the final port so callers observe the actual binding.
+        self.port = int(server.server_port)
+
         def _serve() -> None:
             try:
-                from werkzeug.serving import BaseWSGIServer, make_server
-
-                server: BaseWSGIServer = make_server(
-                    self.host,
-                    self.port,
-                    self.app,
-                    threaded=True,
-                )
-                self._server = server
-                # ``make_server`` may assign a random port when ``self.port`` is 0.
-                # Capture the final port so callers observe the actual binding.
-                self.port = int(server.server_port)
                 server.serve_forever()
             except Exception:  # pragma: no cover - best effort logging
                 log.exception("UI server crashed")
