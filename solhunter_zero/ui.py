@@ -2942,7 +2942,12 @@ def create_app(state: UIState | None = None) -> Flask:
             }
             return jsonify(_json_ready(payload))
 
-        return render_template("ui.html", ui_schema_version=UI_SCHEMA_VERSION)
+        market_snapshot = state.snapshot_market_state()
+        return render_template(
+            "ui.html",
+            ui_schema_version=UI_SCHEMA_VERSION,
+            market_snapshot=market_snapshot,
+        )
 
     @app.get("/api/run/state")
     def api_run_state() -> Any:
@@ -3250,6 +3255,10 @@ def create_app(state: UIState | None = None) -> Flask:
             resource_ok = not bool(payload.get("resource", {}).get("exit_active"))
             payload["ok"] = event_bus_ok and heartbeat_ok and resource_ok
         return jsonify(_json_ready(payload))
+
+    @app.get("/swarm/exits")
+    def swarm_exits() -> Any:
+        return jsonify(state.snapshot_exit())
 
     @app.get("/__shutdown__")
     def _shutdown() -> Any:  # pragma: no cover - invoked via HTTP
