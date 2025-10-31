@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="refresh" content="5" />
+    <title>SolHunter Zero Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}" />
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <header>
+        <div class="headline">
+            <h1>SolHunter Zero Dashboard</h1>
+            <div class="stat-tiles">
+                {% for tile in stat_tiles %}
+                    <div class="stat-tile {{ tile.css_class }}">
+                        <div class="stat-icon" aria-hidden="true">{{ tile.icon | safe }}</div>
+                        <div class="stat-content">
+                            <div class="stat-label">{{ tile.title }}</div>
+                            <div class="stat-value {% if tile.css_class == 'heartbeat' %}heartbeat-value{% endif %}">{{ tile.value }}</div>
+                            <div class="stat-caption">{{ tile.caption }}</div>
+                        </div>
+                    </div>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="meta">
+            <div>Auto-refreshing every 5s</div>
+            <div>JSON view: <a href="/?format=json">/?format=json</a></div>
+        </div>
+    </header>
+
+    <section class="grid">
+        <div class="panel">
+            <h2>Status</h2>
+            <div class="status-grid">
+                {% for key, value in status.items() %}
+                    {% if key not in ('recent_tokens', 'last_iteration', 'iterations_completed', 'trade_count', 'activity_count', 'heartbeat', 'pipeline_tokens', 'pipeline_size', 'rl_daemon_status') %}
+                        <div class="status-card">
+                            <div class="muted">{{ key }}</div>
+                            <div style="font-size:1.2rem; font-weight:600; margin-top:4px;">
+                                {% if key == 'rl_daemon' and status.get('rl_daemon_status') %}
+                                    {% set rl = status.get('rl_daemon_status') %}
+                                    {% if not rl.get('enabled', False) %}
+                                        <span class="badge disabled">DISABLED</span>
+                                    {% else %}
+                                        <span class="badge {{ 'success' if rl.get('running') else 'danger' }}">{{ 'ONLINE' if rl.get('running') else 'OFFLINE' }}</span>
+                                    {% endif %}
+                                {% elif value in (True, False) %}
+                                    <span class="badge {{ 'success' if value else 'danger' }}">{{ 'ONLINE' if value else 'OFFLINE' }}</span>
+                                {% else %}
+                                    {{ value if value is not none else '—' }}
+                                {% endif %}
+                            </div>
+                            {% if key == 'rl_daemon' and status.get('rl_daemon_status') %}
+                                {% set rl = status.get('rl_daemon_status') %}
+                                {% if rl.get('source') or rl.get('error') %}
+                                    <div class="muted" style="font-size:0.75rem; margin-top:4px;">
+                                        {% if rl.get('source') %}{{ rl.get('source').capitalize() }} daemon{% endif %}
+                                        {% if rl.get('error') %}
+                                            {% if rl.get('source') %} · {% endif %}{{ rl.get('error') }}
+                                        {% endif %}
+                                    </div>
+                                {% endif %}
+                            {% endif %}
+                        </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+            {% if status.get('last_iteration') %}
+                <div style="margin-top:16px;">
+                    <div class="muted">Last iteration</div>
+                    <div style="margin-top:6px;">Timestamp: {{ status['last_iteration'].get('timestamp') or 'n/a' }}</div>
+                    <div>Actions: {{ status['last_iteration'].get('actions') or 0 }} · Discovered: {{ status['last_iteration'].get('discovered') or 0 }} · Duration: {{ status['last_iteration'].get('elapsed_s') or 0 }}s</div>
+                    <div>Fallback used: {{ 'Yes' if status['last_iteration'].get('fallback_used') else 'No' }}</div>
+                </div>
+            {% endif %}
+            {% if status.get('pipeline_tokens') %}
+                <div style="margin-top:16px;">
+                    <div class="muted">Pipeline ({{ status.get('pipeline_size', 0) }} queued)</div>
+                    <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">
+                        {% for token in status.get('pipeline_tokens')[:12] %}
+                            <span class="badge">{{ token }}</span>
+                        {% endfor %}
+                    </div>
+                </div>
+            {% endif %}
+        </div>
+
+        <div class="panel">
+            <h2>Iteration Summary</h2>
+            {% if summary %}
+                <table>
+                    <tr><th>Timestamp</th><td>{{ summary.get('timestamp') }}</td></tr>
+                    <tr><th>Elapsed</th><td>{{ summary.get('elapsed_s') or '—' }} s</td></tr>
+                    <tr><th>Actions</th><td>{{ summary.get('actions_count') }}</td></tr>
+                    <tr><th>Any trade</th><td>{{ 'Yes' if summary.get('any_trade') else 'No' }}</td></tr>
+                    <tr><th>Discovered</th><td>{{ summary.get('discovered_count') }}</td></tr>
+                    <tr><th>Picked Tokens</th><td>{{ summary.get('picked_tokens') }}</td></tr>
+                    <tr><th>Committed</th><td>{{ 'Yes' if summary.get('committed') else 'No' }}</td></tr>
+                </table>
+                {% set telemetry = summary.get('telemetry') or {} %}
+                {% if telemetry %}
+                    <div style="margin-top:12px;">
+                        <div class="muted">Telemetry</div>
+                        <table style="margin-top:6px;">
+                            {% if telemetry.get('evaluation') %}
+                                <tr>
+                                    <th>Eval Workers</th>
+                                    <td>{{ telemetry['evaluation'].get('workers') }} · avg {{ '%.2f'|format(telemetry['evaluation'].get('latency_avg', 0)) }}s · max {{ '%.2f'|format(telemetry['evaluation'].get('latency_max', 0)) }}s</td>
+                                </tr>
+                                <tr><th>Evaluations</th><td>{{ telemetry['evaluation'].get('completed') }}</td></tr>
+                            {% endif %}
+                            {% if telemetry.get('execution') %}
+                                <tr>
+                                    <th>Execution Lanes</th>
+                                    <td>
+                                        {% for lane, size in (telemetry['execution'].get('lanes') or {}).items() %}
+                                            <span class="badge">{{ lane }}: {{ size }}</span>
+                                        {% else %}
+                                            none
+                                        {% endfor %}
+                                    </td>
+                                </tr>
+                                <tr><th>Submitted</th><td>{{ telemetry['execution'].get('submitted') }} · workers {{ telemetry['execution'].get('lane_workers') }}</td></tr>
+                            {% endif %}
+                            {% if telemetry.get('pipeline') %}
+                                <tr><th>Queued</th><td>{{ telemetry['pipeline'].get('queued') }} / {{ telemetry['pipeline'].get('limit') }}</td></tr>
+                            {% endif %}
+                        </table>
+                    </div>
+                {% endif %}
+                {% if summary.get('errors') %}
+                    <div style="margin-top:12px;">
+                        <div class="muted">Errors</div>
+                        <ul>
+                            {% for err in summary.get('errors') %}
+                                <li style="color: var(--danger);">{{ err }}</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                {% endif %}
+            {% else %}
+                <div class="muted">Trading loop has not completed an iteration yet.</div>
+            {% endif %}
+        </div>
+
+        <div class="panel">
+            <h2>Discovery</h2>
+            <details class="collapsible">
+                <summary>
+                    <div class="collapsible-summary">
+                        <div class="summary-stack">
+                            <div class="summary-title">Recent Tokens</div>
+                            <div class="summary-count">{{ discovery_recent_total }} tracked</div>
+                        </div>
+                        <div class="summary-peek" aria-hidden="true">
+                            {% if discovery_recent_summary %}
+                                {% for token in discovery_recent_summary %}
+                                    <span class="peek-chip">{{ token }}</span>
+                                {% endfor %}
+                            {% else %}
+                                <span class="muted">Waiting for discovery results…</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <span class="caret" aria-hidden="true"></span>
+                </summary>
+                <div class="collapsible-body">
+                    {% if discovery_recent_display %}
+                        <div class="muted">Newest {{ discovery_recent_display|length }} tokens shown below.</div>
+                        <div class="collapsible-scroll">
+                            <ul>
+                                {% for token in discovery_recent_display %}
+                                    <li>{{ token }}</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    {% else %}
+                        <div class="muted">Waiting for discovery results…</div>
+                    {% endif %}
+                    {% if discovery.get('latest_iteration_tokens') %}
+                        <div class="muted" style="margin-top:14px;">Latest iteration tokens ({{ discovery.get('latest_iteration_tokens')|length }}):</div>
+                        <div class="chip-group" role="list">
+                            {% for token in discovery.get('latest_iteration_tokens')[:20] %}
+                                <span class="peek-chip" role="listitem">{{ token }}</span>
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+                </div>
+            </details>
+        </div>
+
+        <div class="panel">
+            <h2>Counts</h2>
+            <table>
+                {% for key, val in counts.items() %}
+                    <tr><th>{{ key }}</th><td>{{ val }}</td></tr>
+                {% endfor %}
+            </table>
+            <div style="margin-top: 14px;" class="muted">Endpoints</div>
+            <div class="endpoint-list">
+                {% for link in ['health','status','summary','tokens','actions','activity','trades','weights','rl/status','config','logs'] %}
+                    <a href="/{{ link }}">/{{ link }}</a>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+
+    <section class="grid" style="margin-top:24px;">
+        <div class="panel" style="grid-column: span 2;">
+            <h2>Iteration Charts</h2>
+            {% if history %}
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:20px;">
+                    <canvas id="actionsChart" height="180"></canvas>
+                    <canvas id="latencyChart" height="180"></canvas>
+                </div>
+            {% else %}
+                <div class="muted">Waiting for iteration history…</div>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="grid" style="margin-top:24px;">
+        <div class="panel">
+            <h2>Token Results</h2>
+            {% if summary and summary.get('token_results') %}
+                <table>
+                    <tr><th>Token</th><th>Actions</th><th>Errors</th><th>Score</th></tr>
+                    {% for result in summary.get('token_results')[:15] %}
+                        <tr>
+                            <td>{{ result.get('token') }}</td>
+                            <td>{{ result.get('actions')|length }}</td>
+                            <td>{{ result.get('errors')|length }}</td>
+                            <td>{{ '%.3f'|format(result.get('score', 0)) }}</td>
+                        </tr>
+                    {% endfor %}
+                </table>
+            {% else %}
+                <div class="muted">No token results captured yet.</div>
+            {% endif %}
+        </div>
+
+        <div class="panel">
+            <h2>Recent Actions</h2>
+            {% if actions %}
+                <table>
+                    <tr><th>Agent</th><th>Token</th><th>Side</th><th>Amount</th><th>Result</th></tr>
+                    {% for action in actions[-15:]|reverse %}
+                        <tr>
+                            <td>{{ action.get('agent') or '—' }}</td>
+                            <td>{{ action.get('token') or '—' }}</td>
+                            <td>{{ action.get('side') or '—' }}</td>
+                            <td>{{ action.get('amount') or '—' }}</td>
+                            <td>{{ action.get('result') or '—' }}</td>
+                        </tr>
+                    {% endfor %}
+                </table>
+            {% else %}
+                <div class="muted">No actions recorded yet.</div>
+            {% endif %}
+        </div>
+
+        <div class="panel">
+            <h2>Event Log</h2>
+            <details class="collapsible">
+                <summary>
+                    <div class="collapsible-summary">
+                        <div class="summary-stack">
+                            <div class="summary-title">Latest Events</div>
+                            <div class="summary-count">{{ logs_total }} recorded</div>
+                        </div>
+                        <div class="summary-peek" aria-hidden="true">
+                            {% if logs_summary %}
+                                {% for entry in logs_summary %}
+                                    {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
+                                    <span class="peek-chip">{{ stage }}</span>
+                                {% endfor %}
+                            {% else %}
+                                <span class="muted">No log entries yet.</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <span class="caret" aria-hidden="true"></span>
+                </summary>
+                <div class="collapsible-body">
+                    {% if logs_display %}
+                        <div class="muted">Showing the freshest {{ logs_display|length }} entries.</div>
+                        <div class="collapsible-scroll">
+                            <ul>
+                                {% for entry in logs_display %}
+                                    {% set detail = entry.get('payload', {}).get('detail') or entry %}
+                                    {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
+                                    <li><span class="muted">{{ entry.get('timestamp') }}</span> · <strong>{{ stage }}</strong> — {{ detail }}</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    {% else %}
+                        <div class="muted">No log entries yet.</div>
+                    {% endif %}
+                </div>
+            </details>
+        </div>
+
+        <div class="panel">
+            <h2>Weights</h2>
+            {% if weights_labels %}
+                <div class="weights-chart-container">
+                    <canvas id="weightsChart" role="img" aria-label="{{ weights_aria_label }}" data-summary="{{ weights_aria_label }}"></canvas>
+                </div>
+                <div class="weights-legend" id="weightsLegend" role="list">
+                    {% for name, value in weights_sorted %}
+                        <span role="listitem" aria-label="{{ name }} weight {{ '%.6f'|format(value) }}" data-index="{{ loop.index0 }}">
+                            <span class="legend-dot" aria-hidden="true"></span>
+                            <span class="legend-label">{{ name }}</span>
+                            <span class="legend-value" aria-hidden="true">{{ '%.4f'|format(value) }}</span>
+                        </span>
+                    {% endfor %}
+                </div>
+                <div class="sr-only" id="weightsTextSummary">{{ weights_aria_label }}</div>
+            {% else %}
+                <div class="muted">Weights unavailable. The coordinator has not provided agent weights yet.</div>
+            {% endif %}
+        </div>
+
+        <div class="panel">
+            <h2>Configuration</h2>
+            <div class="muted">Active agents:</div>
+            <div style="margin:10px 0;">
+                {% for agent in config_overview.get('agents') or [] %}
+                    <span class="badge">{{ agent }}</span>
+                {% endfor %}
+            </div>
+            <div class="two-column">
+                <div>
+                    <div class="muted">Loop delay</div>
+                    <div>{{ config_overview.get('loop_delay') }}s</div>
+                </div>
+                <div>
+                    <div class="muted">Min delay</div>
+                    <div>{{ config_overview.get('min_delay') }}s</div>
+                </div>
+                <div>
+                    <div class="muted">Max delay</div>
+                    <div>{{ config_overview.get('max_delay') }}s</div>
+                </div>
+                <div>
+                    <div class="muted">Config path</div>
+                    <div style="word-break: break-all;">{{ config_overview.get('config_path') }}</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="panel" style="margin-top:24px;">
+        <h2>Raw Summary JSON</h2>
+        <pre>{{ summary | tojson(indent=2) }}</pre>
+    </section>
+
+    <script id="dashboard-data" type="application/json">
+        {{ dashboard_data | tojson }}
+    </script>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+
+</body>
+</html>

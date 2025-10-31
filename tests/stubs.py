@@ -479,8 +479,16 @@ def stub_flask() -> None:
     request = types.SimpleNamespace(json=None, files={})
 
     class Flask:
-        def __init__(self, name, static_folder=None):
+        def __init__(
+            self,
+            name,
+            static_folder=None,
+            template_folder=None,
+            **_kwargs,
+        ):
             self.routes = {}
+            self.static_folder = static_folder
+            self.template_folder = template_folder
 
         def route(self, path, methods=None):
             if methods is None:
@@ -529,14 +537,14 @@ def stub_flask() -> None:
     def jsonify(obj=None):
         return obj if obj is not None else {}
 
-    def render_template_string(tpl):
-        return tpl
+    def render_template(name, **context):
+        return {"template": name, "context": context}
 
     flask.Flask = Flask
     flask.Blueprint = Flask
     flask.jsonify = jsonify
     flask.request = request
-    flask.render_template_string = render_template_string
+    flask.render_template = render_template
     sys.modules.setdefault('flask', flask)
 
 
