@@ -232,9 +232,15 @@ class TradingRuntime:
             except NotImplementedError:  # pragma: no cover - non-posix
                 pass
 
-        await self.start()
-        await self.stop_event.wait()
-        await self.stop()
+        try:
+            await self.start()
+            await self.stop_event.wait()
+        except Exception as exc:
+            self.activity.add("runtime", f"failed: {exc}", ok=False)
+            log.exception("Trading runtime failed during run")
+            raise
+        finally:
+            await self.stop()
 
     async def start(self) -> None:
         self.activity.add("runtime", "starting")
