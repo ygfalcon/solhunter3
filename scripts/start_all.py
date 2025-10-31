@@ -50,7 +50,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-delay", type=float, default=None, help="Minimum inter-iteration delay")
     parser.add_argument("--max-delay", type=float, default=None, help="Maximum inter-iteration delay")
     parser.add_argument("--skip-clean", action="store_true", help="Skip process cleanup")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    try:
+        args.ui_port = int(args.ui_port)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"Invalid value for --ui-port: {args.ui_port!r}. Must be an integer."
+        ) from exc
+
+    return args
 
 
 def kill_lingering_processes() -> None:
@@ -106,7 +115,7 @@ def launch_foreground(args: argparse.Namespace, cfg_path: str) -> int:
     runtime = TradingRuntime(
         config_path=cfg_path,
         ui_host=args.ui_host,
-        ui_port=int(args.ui_port),
+        ui_port=args.ui_port,
         loop_delay=args.loop_delay,
         min_delay=args.min_delay,
         max_delay=args.max_delay,
