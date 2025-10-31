@@ -290,6 +290,8 @@ def rl_health_gate() -> str:
 
 
 def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
+    ui_port = str(args.ui_port)
+    os.environ["UI_PORT"] = ui_port
     cmd = [
         sys.executable,
         "-m",
@@ -306,7 +308,14 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
         cmd.append(f"--max-delay={args.max_delay}")
 
     log.info("Launching runtime in detached mode: %s", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    env = os.environ.copy()
+    env["UI_PORT"] = ui_port
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
     time.sleep(0.5)
     if proc.poll() is not None:
         raise RuntimeError(
@@ -319,6 +328,7 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
 
 def launch_foreground(args: argparse.Namespace, cfg_path: str) -> int:
     log.info("Starting TradingRuntime in foreground mode")
+    os.environ["UI_PORT"] = str(args.ui_port)
     runtime = TradingRuntime(
         config_path=cfg_path,
         ui_host=args.ui_host,
