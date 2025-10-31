@@ -385,6 +385,27 @@ PRODUCTION_PROVIDERS: list[Provider] = [
 ]
 
 
+_PROVIDER_OPTIONALITY: dict[str, bool] = {provider.name: provider.optional for provider in PRODUCTION_PROVIDERS}
+
+_PROBE_PROVIDER_MAP: dict[str, str] = {
+    "solana-rpc": "Solana",
+    "solana-ws": "Solana",
+    "helius-rest": "Helius",
+    "helius-das": "Helius-DAS",
+    "redis": "Redis",
+    "ui-ws": "UI",
+    "ui-http": "UI",
+    "ws-gateway": "UI",
+}
+
+
+def _probe_required(name: str) -> bool:
+    provider = _PROBE_PROVIDER_MAP.get(name)
+    if provider is None:
+        return True
+    return not _PROVIDER_OPTIONALITY.get(provider, False)
+
+
 def _load_production_environment() -> dict[str, str]:
     return load_production_env(overwrite=True)
 
@@ -408,7 +429,10 @@ def _connectivity_check() -> list[dict[str, object]]:
     async def _run() -> list[dict[str, object]]:
         results = await checker.check_all()
         formatted: list[dict[str, object]] = []
+        fatal: tuple[str, str, str] | None = None
+        event_bus_error: str | None = None
         for result in results:
+            required = _probe_required(result.name)
             status = "OK" if result.ok else f"FAIL ({result.error or result.status})"
             log.info(
                 "Connectivity %s → %s (%.2f ms)",
@@ -421,26 +445,34 @@ def _connectivity_check() -> list[dict[str, object]]:
                     "name": result.name,
                     "target": result.target,
                     "ok": result.ok,
+                    "required": required,
                     "latency_ms": result.latency_ms,
                     "status": result.status,
                     "status_code": result.status_code,
                     "error": result.error,
                 }
             )
-        for result in results:
-            if result.name == "redis" and not result.ok:
-                message = result.error or "Redis connectivity failed"
-                raise SystemExit(f"Redis unavailable: {message}")
+            if required and not result.ok and fatal is None:
+                reason = result.error or result.status or "unavailable"
+                fatal = (result.name, reason, result.target)
             if (
                 result.name == "ui-http"
                 and not result.ok
                 and result.error
                 and "event bus" in result.error.lower()
             ):
-                raise SystemExit(
+                event_bus_error = (
                     "Event bus unavailable: "
                     f"{result.error} ({result.target})"
                 )
+        if event_bus_error:
+            raise SystemExit(event_bus_error)
+        if fatal:
+            name, reason, target = fatal
+            raise SystemExit(
+                "Connectivity requirement failed: "
+                f"{name} — {reason} ({target})"
+            )
         return formatted
 
     return asyncio.run(_run())

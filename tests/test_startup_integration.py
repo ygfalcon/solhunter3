@@ -8,6 +8,38 @@ from unittest.mock import patch
 import pytest
 
 
+def test_connectivity_check_aborts_on_required_probe_failure(monkeypatch):
+    import scripts.start_all as start_module
+    from solhunter_zero.production.connectivity import ConnectivityResult
+
+    async def fake_check_all(_self):
+        return [
+            ConnectivityResult(
+                name="solana-rpc",
+                target="https://rpc.example",
+                ok=False,
+                error="rpc timeout",
+            ),
+            ConnectivityResult(
+                name="ui-http",
+                target="https://ui.example/health",
+                ok=True,
+            ),
+        ]
+
+    monkeypatch.setattr(
+        start_module.ConnectivityChecker,
+        "check_all",
+        fake_check_all,
+        raising=False,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        start_module._connectivity_check()
+
+    assert "solana-rpc" in str(exc.value)
+
+
 def test_start_all_respects_ui_selftest_exit_code(monkeypatch):
     import start_all
 
