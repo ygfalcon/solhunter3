@@ -180,6 +180,8 @@ class TradingRuntime:
         self._subscriptions: List[tuple[str, Any]] = []
         self._trades: Deque[Dict[str, Any]] = deque(maxlen=200)
         self._ui_logs: Deque[Dict[str, Any]] = deque(maxlen=200)
+        self._trades_lock = threading.Lock()
+        self._ui_logs_lock = threading.Lock()
         self._last_iteration: Dict[str, Any] = {}
         self._iteration_lock = threading.Lock()
         self._iteration_count = 0
@@ -466,7 +468,7 @@ class TradingRuntime:
                 "result": _serialize(result),
                 "timestamp": datetime.utcnow().isoformat() + "Z",
             }
-            self._trades.append(entry)
+            self._append_trade(entry)
 
         async def _on_log(event: Any) -> None:
             entry = {
@@ -474,7 +476,7 @@ class TradingRuntime:
                 "payload": _serialize(getattr(event, "payload", event)),
                 "timestamp": datetime.utcnow().isoformat() + "Z",
             }
-            self._ui_logs.append(entry)
+            self._append_ui_log(entry)
 
         self._subscriptions.append(("action_executed", _on_action))
         subscribe("action_executed", _on_action)
@@ -484,10 +486,10 @@ class TradingRuntime:
     async def _start_ui(self) -> None:
         self.ui_state.status_provider = self._collect_status
         self.ui_state.activity_provider = self.activity.snapshot
-        self.ui_state.trades_provider = lambda: list(self._trades)
+        self.ui_state.trades_provider = self._snapshot_trades
         self.ui_state.weights_provider = self._collect_weights
         self.ui_state.rl_status_provider = self._collect_rl_status
-        self.ui_state.logs_provider = lambda: list(self._ui_logs)
+        self.ui_state.logs_provider = self._snapshot_ui_logs
         self.ui_state.summary_provider = self._collect_iteration
         self.ui_state.discovery_provider = self._collect_discovery
         self.ui_state.config_provider = self._collect_config
@@ -799,6 +801,8 @@ class TradingRuntime:
         rl_snapshot = self._collect_rl_status()
         rl_running = bool(rl_snapshot.get("running")) if rl_snapshot else False
         self.status.rl_daemon = rl_running
+        with self._trades_lock:
+            trade_count = len(self._trades)
         status = {
             "event_bus": self.status.event_bus,
             "trading_loop": self.status.trading_loop,
@@ -807,7 +811,7 @@ class TradingRuntime:
             "rl_daemon_status": rl_snapshot,
             "heartbeat": self.status.heartbeat_ts,
             "iterations_completed": self._iteration_count,
-            "trade_count": len(self._trades),
+            "trade_count": trade_count,
             "activity_count": len(self.activity.snapshot()),
         }
         if hasattr(self.state, "last_tokens"):
@@ -946,6 +950,22 @@ class TradingRuntime:
     def _collect_actions(self) -> List[Dict[str, Any]]:
         with self._iteration_lock:
             return list(self._last_actions)
+
+    def _append_trade(self, entry: Dict[str, Any]) -> None:
+        with self._trades_lock:
+            self._trades.append(entry)
+
+    def _snapshot_trades(self) -> List[Dict[str, Any]]:
+        with self._trades_lock:
+            return list(self._trades)
+
+    def _append_ui_log(self, entry: Dict[str, Any]) -> None:
+        with self._ui_logs_lock:
+            self._ui_logs.append(entry)
+
+    def _snapshot_ui_logs(self) -> List[Dict[str, Any]]:
+        with self._ui_logs_lock:
+            return list(self._ui_logs)
 
     def _emit_action_decisions(self, actions: Iterable[Dict[str, Any]]) -> int:
         count = 0
@@ -1194,7 +1214,7 @@ class TradingRuntime:
                         "payload": sample,
                         "timestamp": datetime.utcfromtimestamp(sample.get("timestamp", time.time())).isoformat() + "Z",
                     }
-                    self._ui_logs.append(entry)
+                    self._append_ui_log(entry)
                 index = len(samples)
             await asyncio.sleep(1.0)
     def _collect_history(self) -> List[Dict[str, Any]]:
