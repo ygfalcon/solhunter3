@@ -6,6 +6,7 @@ import pytest
 from flask import Flask
 
 import solhunter_zero.ui as ui
+from solhunter_zero.runtime_defaults import DEFAULT_UI_PORT
 
 
 @pytest.fixture(scope="module")
@@ -194,6 +195,15 @@ def test_token_depth_endpoint(monkeypatch, client):
     resp = client.get("/api/depth/abc")
     assert resp.status_code == 200
     assert resp.get_json() == {"mint": "abc", "bids": []}
+
+
+def test_manifest_ui_port_defaults(monkeypatch):
+    monkeypatch.delenv("UI_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+
+    manifest = ui.build_ui_manifest()
+
+    assert manifest["ui_port"] == DEFAULT_UI_PORT
 
 
 def test_agent_events_without_mint(client):
