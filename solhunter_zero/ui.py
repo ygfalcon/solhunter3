@@ -48,6 +48,9 @@ ListProvider = Callable[[], Iterable[Dict[str, Any]]]
 DictProvider = Callable[[], Dict[str, Any]]
 
 
+HISTORY_MAX_ENTRIES = 200
+
+
 @dataclass
 class UIState:
     """Holds callables that provide live data to the UI endpoints."""
@@ -167,6 +170,7 @@ def create_app(state: UIState | None = None) -> Flask:
             logs = state.snapshot_logs()
             weights = state.snapshot_weights()
             config_summary = state.snapshot_config()
+            history = state.snapshot_history()
             return jsonify(
                 {
                     "message": "SolHunter Zero UI",
@@ -191,7 +195,9 @@ def create_app(state: UIState | None = None) -> Flask:
                         "/rl/status",
                         "/config",
                         "/logs",
+                        "/history",
                     ],
+                    "history": history[-HISTORY_MAX_ENTRIES:],
                 }
             )
 
@@ -206,6 +212,7 @@ def create_app(state: UIState | None = None) -> Flask:
         actions = state.snapshot_actions()
         config_summary = state.snapshot_config()
         history = state.snapshot_history()
+        history_recent = history[-HISTORY_MAX_ENTRIES:]
 
         counts = {
             "activity": len(activity),
@@ -933,7 +940,7 @@ def create_app(state: UIState | None = None) -> Flask:
                     </table>
                     <div style="margin-top: 14px;" class="muted">Endpoints</div>
                     <div class="endpoint-list">
-                        {% for link in ['health','status','summary','tokens','actions','activity','trades','weights','rl/status','config','logs'] %}
+                        {% for link in ['health','status','summary','tokens','actions','activity','trades','weights','rl/status','config','logs','history'] %}
                             <a href="/{{ link }}">/{{ link }}</a>
                         {% endfor %}
                     </div>
@@ -2134,7 +2141,7 @@ def create_app(state: UIState | None = None) -> Flask:
             logs_display=logs_display,
             logs_summary=logs_summary,
             logs_total=logs_total,
-            history=history,
+            history=history_recent,
             weights=weights,
             weights_sorted=weights_sorted,
             weights_labels=weights_labels,
@@ -2230,6 +2237,11 @@ def create_app(state: UIState | None = None) -> Flask:
     @app.get("/logs")
     def logs() -> Any:
         return jsonify({"entries": state.snapshot_logs()})
+
+    @app.get("/history")
+    def history_endpoint() -> Any:
+        entries = list(state.snapshot_history())
+        return jsonify(entries[-HISTORY_MAX_ENTRIES:])
 
     @app.get("/discovery")
     def discovery_settings() -> Any:
