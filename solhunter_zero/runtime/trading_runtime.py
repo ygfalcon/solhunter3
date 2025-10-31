@@ -373,20 +373,79 @@ class TradingRuntime:
         os.environ["EVENT_BUS_URL"] = event_bus_url
         os.environ.setdefault("BROKER_WS_URLS", event_bus_url)
 
-        try:
-            await start_ws_server("127.0.0.1", ws_port)
-            self.bus_started = True
-            self.activity.add("event_bus", f"listening on {event_bus_url}")
-        except Exception as exc:
-            self.activity.add("event_bus", f"failed: {exc}", ok=False)
-            log.exception("Failed to start event bus websocket")
+        local_ws_disabled = parse_bool_env("EVENT_BUS_DISABLE_LOCAL")
+        start_attempts = 3
+        start_delay = 0.25
+        start_error: Optional[BaseException] = None
 
-        ok = await verify_broker_connection(timeout=2.0)
-        self.status.event_bus = ok
-        if not ok:
-            self.activity.add("broker", "verification failed", ok=False)
-        else:
-            self.activity.add("broker", "verified")
+        for attempt in range(1, start_attempts + 1):
+            try:
+                server = await start_ws_server("127.0.0.1", ws_port)
+            except Exception as exc:
+                start_error = exc
+                log.exception(
+                    "Failed to start event bus websocket on attempt %s", attempt
+                )
+            else:
+                if server is None and not local_ws_disabled:
+                    start_error = RuntimeError(
+                        "start_ws_server returned no server instance"
+                    )
+                else:
+                    self.bus_started = bool(server)
+                    detail = (
+                        "local websocket disabled via EVENT_BUS_DISABLE_LOCAL"
+                        if local_ws_disabled
+                        else f"listening on {event_bus_url}"
+                    )
+                    self.activity.add("event_bus", detail)
+                    start_error = None
+                    break
+
+            if attempt < start_attempts:
+                await asyncio.sleep(start_delay)
+                start_delay = min(start_delay * 2, 2.0)
+
+        if start_error is not None:
+            message = (
+                "failed to start event bus websocket after "
+                f"{start_attempts} attempts: {start_error}"
+            )
+            self.activity.add("event_bus", message, ok=False)
+            self.status.event_bus = False
+            raise RuntimeError(message) from start_error
+
+        verify_attempts = 3
+        verify_delay = 0.5
+        verify_error: Optional[BaseException] = None
+        broker_ok = False
+
+        for attempt in range(1, verify_attempts + 1):
+            try:
+                broker_ok = await verify_broker_connection(timeout=2.0)
+            except Exception as exc:
+                verify_error = exc
+                broker_ok = False
+                log.exception(
+                    "Broker verification failed on attempt %s", attempt
+                )
+            if broker_ok:
+                break
+            if attempt < verify_attempts:
+                await asyncio.sleep(verify_delay)
+                verify_delay = min(verify_delay * 2, 4.0)
+
+        if not broker_ok:
+            reason = "broker verification failed"
+            if verify_error is not None:
+                reason = f"{reason}: {verify_error}"
+            message = f"{reason} after {verify_attempts} attempts"
+            self.activity.add("broker", message, ok=False)
+            self.status.event_bus = False
+            raise RuntimeError(message) from verify_error
+
+        self.status.event_bus = True
+        self.activity.add("broker", "verified")
 
         self._subscribe_to_events()
 
