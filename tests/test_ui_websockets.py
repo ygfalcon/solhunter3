@@ -1,4 +1,5 @@
 import importlib
+import os
 import socket
 import sys
 import time
@@ -88,3 +89,65 @@ def test_websocket_port_in_use():
                 loop.call_soon_threadsafe(loop.stop)
         for t in threads.values() if 'threads' in locals() else []:
             t.join(timeout=1)
+
+
+def _reload_ui_module():
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault(
+        "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet"))
+    from solhunter_zero import ui
+    importlib.reload(ui)
+    return ui
+
+
+def test_manifest_omits_zero_ports():
+    ui = _reload_ui_module()
+
+    for key in (
+        "UI_EVENTS_WS",
+        "UI_EVENTS_WS_URL",
+        "UI_WS_URL",
+        "UI_RL_WS",
+        "UI_RL_WS_URL",
+        "UI_LOGS_WS",
+        "UI_LOG_WS_URL",
+        "UI_EVENTS_WS_PORT",
+        "EVENTS_WS_PORT",
+        "UI_RL_WS_PORT",
+        "RL_WS_PORT",
+        "UI_LOG_WS_PORT",
+        "LOG_WS_PORT",
+    ):
+        os.environ.pop(key, None)
+
+    for state in ui._WS_CHANNELS.values():
+        state.port = 0
+        state.host = None
+    ui._RL_WS_PORT = ui._RL_WS_PORT_DEFAULT
+    ui._EVENT_WS_PORT = ui._EVENT_WS_PORT_DEFAULT
+    ui._LOG_WS_PORT = ui._LOG_WS_PORT_DEFAULT
+
+    urls = ui.get_ws_urls()
+    for value in urls.values():
+        assert value is None
+
+    manifest = ui.build_ui_manifest(None)
+    for channel in ("rl", "events", "logs"):
+        ws_key = f"{channel}_ws"
+        available_key = f"{channel}_ws_available"
+        assert manifest[ws_key] is None
+        assert manifest[available_key] is False
+
+    app = ui.create_app()
+    client = app.test_client()
+    response = client.get("/ui/ws-config")
+    assert response.status_code == 200
+    payload = response.get_json()
+    for channel in ("rl", "events", "logs"):
+        ws_key = f"{channel}_ws"
+        available_key = f"{channel}_ws_available"
+        assert payload[ws_key] is None
+        assert payload[available_key] is False

@@ -1849,7 +1849,7 @@ def _channel_path(channel: str) -> str:
     return candidate
 
 
-def get_ws_urls() -> dict[str, str]:
+def get_ws_urls() -> dict[str, str | None]:
     """Return websocket URLs for RL, events, and logs channels."""
 
     channel_env_keys: dict[str, tuple[str, ...]] = {
@@ -1857,7 +1857,7 @@ def get_ws_urls() -> dict[str, str]:
         "rl": ("UI_RL_WS", "UI_RL_WS_URL"),
         "logs": ("UI_LOGS_WS", "UI_LOG_WS_URL"),
     }
-    urls: dict[str, str] = {}
+    urls: dict[str, str | None] = {}
     for channel, env_keys in channel_env_keys.items():
         resolved: str | None = None
         for env_key in env_keys:
@@ -1874,6 +1874,9 @@ def get_ws_urls() -> dict[str, str]:
                 port = state.port or _EVENT_WS_PORT
             else:
                 port = state.port or _LOG_WS_PORT
+            if not port:
+                urls[channel] = None
+                continue
             path = _channel_path(channel)
             scheme = _infer_ws_scheme()
             resolved = f"{scheme}://{url_host}:{port}{path}"
@@ -1890,20 +1893,25 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
 
     manifest: Dict[str, Any] = {}
     for channel in ("rl", "events", "logs"):
-        raw_url = urls.get(channel, "")
-        parsed = urlparse(raw_url)
-        host = public_host or parsed.hostname or request_host or _resolve_host()
-        port = parsed.port
-        path = parsed.path or ""
-        if path in {"", "/", "/ws"}:
-            path = _channel_path(channel)
-        if not path.startswith("/"):
-            path = "/" + path.lstrip("/")
-        scheme = parsed.scheme or scheme_hint
-        netloc = host or ""
-        if port:
-            netloc = f"{host}:{port}"
-        manifest[f"{channel}_ws"] = urlunparse((scheme, netloc, path, "", "", ""))
+        raw_url = urls.get(channel)
+        if raw_url:
+            parsed = urlparse(raw_url)
+            host = public_host or parsed.hostname or request_host or _resolve_host()
+            port = parsed.port
+            path = parsed.path or ""
+            if path in {"", "/", "/ws"}:
+                path = _channel_path(channel)
+            if not path.startswith("/"):
+                path = "/" + path.lstrip("/")
+            scheme = parsed.scheme or scheme_hint
+            netloc = host or ""
+            if port:
+                netloc = f"{host}:{port}"
+            manifest[f"{channel}_ws"] = urlunparse((scheme, netloc, path, "", "", ""))
+            manifest[f"{channel}_ws_available"] = True
+        else:
+            manifest[f"{channel}_ws"] = None
+            manifest[f"{channel}_ws_available"] = False
 
     ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
     manifest["ui_port"] = _parse_port(ui_port_value, 5000)
@@ -3048,13 +3056,15 @@ def create_app(state: UIState | None = None) -> Flask:
             logs = logs[-lines:]
         return jsonify(logs)
 
-    def _ws_config_payload() -> Dict[str, str]:
+    def _ws_config_payload() -> Dict[str, Any]:
         manifest = build_ui_manifest(request)
-        return {
-            "rl_ws": manifest["rl_ws"],
-            "events_ws": manifest["events_ws"],
-            "logs_ws": manifest["logs_ws"],
-        }
+        payload: Dict[str, Any] = {}
+        for channel in ("rl", "events", "logs"):
+            key = f"{channel}_ws"
+            available_key = f"{channel}_ws_available"
+            payload[key] = manifest.get(key)
+            payload[available_key] = manifest.get(available_key, bool(manifest.get(key)))
+        return payload
 
     def _ui_meta_payload() -> Dict[str, Any]:
         manifest = build_ui_manifest(request)
@@ -3066,13 +3076,13 @@ def create_app(state: UIState | None = None) -> Flask:
                 host = f"127.0.0.1:{manifest.get('ui_port', 5000)}"
             base_url = f"{scheme}://{host}"
         meta_snapshot = get_ui_meta_snapshot()
-        return {
-            "url": base_url,
-            "rl_ws": manifest["rl_ws"],
-            "events_ws": manifest["events_ws"],
-            "logs_ws": manifest["logs_ws"],
-            "meta": meta_snapshot,
-        }
+        payload: Dict[str, Any] = {"url": base_url, "meta": meta_snapshot}
+        for channel in ("rl", "events", "logs"):
+            key = f"{channel}_ws"
+            available_key = f"{channel}_ws_available"
+            payload[key] = manifest.get(key)
+            payload[available_key] = manifest.get(available_key, bool(manifest.get(key)))
+        return payload
 
     def _probe_ws(url: str | None, *, timeout: float = 1.5) -> tuple[str, Optional[str]]:
         if not url:
