@@ -6,6 +6,7 @@ import types
 import contextlib
 import importlib.machinery
 import sys
+from datetime import datetime, timezone
 import pytest
 
 # Skip this module when running lightweight CI self-tests
@@ -168,6 +169,50 @@ from solhunter_zero.portfolio import Position
 # ``solhunter_zero.ui`` no longer creates a Flask application at import time.
 # Instantiate one explicitly for tests.
 ui.app = ui.create_app()
+
+
+def test_format_heartbeat_value_relative():
+    now = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    two_minutes_ago = now.timestamp() - 125
+    assert ui._format_heartbeat_value(two_minutes_ago, now=now) == "2m ago"
+
+
+def test_format_heartbeat_value_invalid():
+    now = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    assert ui._format_heartbeat_value(None, now=now) == "n/a"
+    assert ui._format_heartbeat_value("not-a-timestamp", now=now) == "n/a"
+    assert ui._format_heartbeat_value(False, now=now) == "n/a"
+
+
+def test_dashboard_renders_formatted_heartbeat_tile():
+    iso_value = "2023-12-30T12:00:00Z"
+
+    state = ui.UIState(
+        status_provider=lambda: {
+            "event_bus": True,
+            "trading_loop": True,
+            "heartbeat": iso_value,
+            "iterations_completed": 3,
+            "trade_count": 5,
+        },
+        summary_provider=lambda: {},
+        discovery_provider=lambda: {"recent": []},
+        actions_provider=lambda: [],
+        activity_provider=lambda: [],
+        trades_provider=lambda: [],
+        logs_provider=lambda: [],
+        weights_provider=lambda: {},
+        config_provider=lambda: {},
+        history_provider=lambda: [],
+    )
+
+    app = ui.create_app(state)
+    client = app.test_client()
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "Heartbeat" in body
+    assert "2023-12-30 12:00:00Z" in body
 
 
 def test_ensure_active_keypair_selects_single(monkeypatch):

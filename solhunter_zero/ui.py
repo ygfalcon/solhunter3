@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -46,6 +47,77 @@ log = logging.getLogger(__name__)
 StatusProvider = Callable[[], Dict[str, Any]]
 ListProvider = Callable[[], Iterable[Dict[str, Any]]]
 DictProvider = Callable[[], Dict[str, Any]]
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    """Convert *value* into a timezone-aware ``datetime`` if possible."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            if value <= 0:
+                return None
+        except TypeError:  # pragma: no cover - safety net for weird objects
+            return None
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            numeric = float(stripped)
+        except ValueError:
+            iso_value = stripped
+            if iso_value.endswith("Z"):
+                iso_value = iso_value[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(iso_value)
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            else:
+                parsed = parsed.astimezone(timezone.utc)
+            return parsed
+        else:
+            if numeric <= 0:
+                return None
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    return None
+
+
+def _format_heartbeat_value(value: Any, *, now: Optional[datetime] = None) -> str:
+    """Return a human-readable representation of *value*.
+
+    Unknown or unparsable values fall back to ``"n/a"``.
+    """
+
+    timestamp = _parse_timestamp(value)
+    if timestamp is None:
+        return "n/a"
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if timestamp > now:
+        return timestamp.strftime("%Y-%m-%d %H:%M:%SZ")
+    delta = now - timestamp
+    seconds = int(delta.total_seconds())
+    if seconds < 5:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 7:
+        return f"{days}d ago"
+    return timestamp.strftime("%Y-%m-%d %H:%M:%SZ")
 
 
 @dataclass
@@ -214,7 +286,7 @@ def create_app(state: UIState | None = None) -> Flask:
             "weights": len(weights),
             "actions": len(actions),
         }
-        heartbeat_value = status.get("heartbeat") or "n/a"
+        heartbeat_value = _format_heartbeat_value(status.get("heartbeat"))
         iterations_completed_raw = (
             status.get("iterations_completed")
             or status.get("iterations")
@@ -2016,6 +2088,9 @@ def create_app(state: UIState | None = None) -> Flask:
             status=status,
             summary=summary,
             discovery=discovery,
+            activity=activity,
+            trades=trades,
+            logs=logs,
             discovery_recent_display=discovery_recent_display,
             discovery_recent_summary=discovery_recent_summary,
             discovery_recent_total=discovery_recent_total,
