@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from .trading_runtime import TradingRuntime
@@ -19,7 +20,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ui-port",
         help="UI bind port",
-        default=os.getenv("UI_PORT", "5001"),
+        type=int,
+        default=int(os.getenv("UI_PORT", "5001")),
     )
     parser.add_argument(
         "--loop-delay",
@@ -47,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     runtime = TradingRuntime(
         config_path=args.config,
         ui_host=args.ui_host,
-        ui_port=int(args.ui_port),
+        ui_port=args.ui_port,
         loop_delay=args.loop_delay,
         min_delay=args.min_delay,
         max_delay=args.max_delay,
