@@ -176,6 +176,7 @@ class TradingRuntime:
         self.activity = ActivityLog()
         self.status = RuntimeStatus()
         self.stop_event = asyncio.Event()
+        self._discovery_refresh_event = asyncio.Event()
         self._tasks: List[asyncio.Task] = []
         self._subscriptions: List[tuple[str, Any]] = []
         self._trades: Deque[Dict[str, Any]] = deque(maxlen=200)
@@ -411,10 +412,15 @@ class TradingRuntime:
             }
             self._ui_logs.append(entry)
 
+        async def _on_discovery_updated(event: Any) -> None:
+            self._discovery_refresh_event.set()
+
         self._subscriptions.append(("action_executed", _on_action))
         subscribe("action_executed", _on_action)
         self._subscriptions.append(("runtime.log", _on_log))
         subscribe("runtime.log", _on_log)
+        self._subscriptions.append(("discovery.updated", _on_discovery_updated))
+        subscribe("discovery.updated", _on_discovery_updated)
 
     async def _start_ui(self) -> None:
         self.ui_state.status_provider = self._collect_status
@@ -643,11 +649,6 @@ class TradingRuntime:
                 min_delay = min(min_delay, 1.0)
             if self.explicit_max_delay is None and self.cfg.get("max_delay") is None:
                 max_delay = min(max_delay, 15.0)
-        discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
-        if discovery_method is None:
-            discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
-        if discovery_method is None:
-            discovery_method = DEFAULT_DISCOVERY_METHOD
         stop_loss = _maybe_float(self.cfg.get("stop_loss"))
         take_profit = _maybe_float(self.cfg.get("take_profit"))
         trailing_stop = _maybe_float(self.cfg.get("trailing_stop"))
@@ -658,6 +659,7 @@ class TradingRuntime:
         live_discovery = self.cfg.get("live_discovery")
 
         while not self.stop_event.is_set():
+            discovery_method = self._resolve_active_discovery_method()
             start = time.perf_counter()
             try:
                 summary = await run_iteration(
@@ -696,7 +698,21 @@ class TradingRuntime:
 
             elapsed = time.perf_counter() - start
             sleep_for = max(min_delay, min(max_delay, loop_delay - elapsed))
-            await asyncio.sleep(max(0.1, sleep_for))
+            sleep_timeout = max(0.1, sleep_for)
+            if self.stop_event.is_set():
+                break
+            if self._discovery_refresh_event.is_set():
+                self._discovery_refresh_event.clear()
+                continue
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._discovery_refresh_event.wait()),
+                    timeout=sleep_timeout,
+                )
+            except asyncio.TimeoutError:
+                continue
+            else:
+                self._discovery_refresh_event.clear()
 
         self.status.trading_loop = False
 
@@ -1114,6 +1130,14 @@ class TradingRuntime:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
+
+    def _resolve_active_discovery_method(self) -> str:
+        discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
+        if discovery_method is None:
+            discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if discovery_method is None:
+            discovery_method = DEFAULT_DISCOVERY_METHOD
+        return discovery_method
 
     def _config_float(
         self, key: str, explicit: Optional[float], default: float

@@ -38,6 +38,7 @@ from .agents.discovery import (
     DISCOVERY_METHODS,
     resolve_discovery_method,
 )
+from .event_bus import publish
 
 
 log = logging.getLogger(__name__)
@@ -2130,6 +2131,10 @@ def create_app(state: UIState | None = None) -> Flask:
                 400,
             )
         os.environ["DISCOVERY_METHOD"] = method
+        try:
+            publish("discovery.updated", {"method": method})
+        except Exception:
+            log.exception("Failed to publish discovery update event")
         return jsonify(
             {
                 "status": "ok",
