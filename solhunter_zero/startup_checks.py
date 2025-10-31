@@ -128,4 +128,4 @@ def perform_checks(args, rest, *_, **__) -> dict[str, Any]:
     else:
         ensure_endpoints()
 
-    return {"summary_rows": [], "rest": [], "code": 0}
+    return {"summary_rows": [], "rest": list(rest), "code": 0}
