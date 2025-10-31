@@ -31,7 +31,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, url_for
 
 from .agents.discovery import (
     DEFAULT_DISCOVERY_METHOD,
@@ -343,6 +343,7 @@ def create_app(state: UIState | None = None) -> Flask:
             "min_delay": config_summary.get("min_delay"),
             "max_delay": config_summary.get("max_delay"),
         }
+        chart_js_local = url_for("static", filename="vendor/chart.umd.min.js")
         template = """
         <!DOCTYPE html>
         <html lang="en">
@@ -713,7 +714,12 @@ def create_app(state: UIState | None = None) -> Flask:
                     margin-top: 10px;
                 }
             </style>
-            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+            <script src="{{ chart_js_local }}"></script>
+            <script>
+                if (typeof Chart === 'undefined') {
+                    document.write('<script src="https://cdn.jsdelivr.net/npm/chart.js"><\\/script>');
+                }
+            </script>
         </head>
         <body>
             <header>
@@ -2033,6 +2039,7 @@ def create_app(state: UIState | None = None) -> Flask:
             weights_values=weights_values,
             weights_aria_label=weights_aria_label,
             stat_tiles=stat_tiles,
+            chart_js_local=chart_js_local,
         )
 
     @app.get("/health")
