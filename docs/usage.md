@@ -10,6 +10,15 @@ python scripts/start_all.py autopilot
 ```
 Use the `--testnet` flag to submit orders to a testnet DEX endpoint, `--dry-run` to skip order submission entirely, `--offline` to avoid network requests and use a static token list, or `--token-list <file>` to load token addresses from a file. Use `--strategy-rotation-interval N` with one or more `--weight-config` files to automatically test and switch weight presets every `N` iterations.
 
+## Dashboard
+
+The SolHunter Zero dashboard served from the UI module refreshes itself without reloading the page. A lightweight JavaScript loop
+fetches `/status` and `/summary` (plus supporting JSON feeds) every five seconds and patches the existing DOM so counters, charts
+and tables update in place. Because the page no longer uses a `<meta http-equiv="refresh">` tag the header, open `<details>`
+sections and scroll positions stay put instead of flickering on each update. The Discovery and Logs panels remember their
+expanded/collapsed state across refreshes using session storage, letting you keep frequently used panels open while watching live
+data.
+
 ## Investor Demo
 
 Run a small rolling backtest and generate lightweight reports:
