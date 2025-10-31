@@ -3058,7 +3058,9 @@ def create_app(state: UIState | None = None) -> Flask:
         except (TypeError, ValueError):
             lines = 500
         logs = state.snapshot_logs()
-        if lines >= 0:
+        if lines <= 0:
+            logs = []
+        else:
             logs = logs[-lines:]
         return jsonify(logs)
 

@@ -189,6 +189,14 @@ def test_logs_tail_endpoint(monkeypatch, client):
     assert resp.get_json() == [{"msg": "b"}]
 
 
+def test_logs_tail_endpoint_zero_lines(monkeypatch, client):
+    state = _active_state()
+    monkeypatch.setattr(state, "logs_provider", lambda: [{"msg": "a"}, {"msg": "b"}])
+    resp = client.get("/api/logs/tail?lines=0")
+    assert resp.status_code == 200
+    assert resp.get_json() == []
+
+
 def test_token_depth_endpoint(monkeypatch, client):
     state = _active_state()
     monkeypatch.setattr(state, "token_depth_provider", lambda mint: {"mint": mint, "bids": []})
