@@ -119,6 +119,14 @@ python -m solhunter_zero.ui --selftest
 ```
 This runs the same checks the full orchestrator will rely on, but isolated—so failures are clean and actionable.
 
+### Offline dashboard assets
+
+The bundled Flask dashboard now serves a local copy of Chart.js from
+`solhunter_zero/static/vendor/chart.umd.min.js`.  When you load the UI it
+will prefer that local asset and only reach for the CDN if the vendored file
+is missing, keeping the charts functional when you are developing or running
+offline.
+
 ### Full-stack smoke (paper-safe)
 Run the on-demand smoke locally:
 ```bash
