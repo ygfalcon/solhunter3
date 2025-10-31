@@ -117,3 +117,10 @@ To run the static analysis checks used in CI, execute:
 python -m compileall .
 flake8
 ```
+
+## Manual QA – Dashboard refresh
+
+1. Start the UI server (for example via `python start_all.py ui` or by running the trading orchestrator).
+2. Open the dashboard in a browser and expand the **Discovery** and **Event Log** panels.
+3. Observe the header badge labelled *Live updates* ticking every five seconds while the page stays in place.
+4. Confirm the expanded panels remain open as new data arrives and that the view no longer flashes or jumps between refreshes.

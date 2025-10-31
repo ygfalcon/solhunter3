@@ -865,7 +865,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Discovery</h2>
-                    <details class="collapsible" data-role="discovery">
+                    <details class="collapsible" data-role="discovery" data-state-key="discovery">
                         <summary>
                             <div class="collapsible-summary" data-role="discovery-summary">
                                 <div class="summary-stack">
@@ -982,7 +982,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Event Log</h2>
-                    <details class="collapsible" data-role="logs">
+                    <details class="collapsible" data-role="logs" data-state-key="logs">
                         <summary>
                             <div class="collapsible-summary" data-role="logs-summary">
                                 <div class="summary-stack">
@@ -1129,6 +1129,79 @@ def create_app(state: UIState | None = None) -> Flask:
             if (elements.refreshInterval) {
                 elements.refreshInterval.textContent = `${(REFRESH_INTERVAL_MS / 1000).toFixed(0)}s`;
             }
+
+            const PANEL_STATE_STORAGE_KEY = 'solhunter:ui:panel-state';
+            let storageUnavailable = false;
+            const panelState = loadPanelState();
+
+            function loadPanelState() {
+                if (storageUnavailable) {
+                    return {};
+                }
+                try {
+                    const raw = window.sessionStorage?.getItem(PANEL_STATE_STORAGE_KEY);
+                    if (!raw) {
+                        return {};
+                    }
+                    const parsed = JSON.parse(raw);
+                    return parsed && typeof parsed === 'object' ? parsed : {};
+                } catch (error) {
+                    storageUnavailable = true;
+                    console.debug('Unable to read dashboard state, continuing with defaults', error);
+                    return {};
+                }
+            }
+
+            function persistPanelState() {
+                if (storageUnavailable) {
+                    return;
+                }
+                try {
+                    window.sessionStorage?.setItem(PANEL_STATE_STORAGE_KEY, JSON.stringify(panelState));
+                } catch (error) {
+                    storageUnavailable = true;
+                    console.debug('Unable to persist dashboard state', error);
+                }
+            }
+
+            function keyForDetail(detail) {
+                if (!detail) {
+                    return '';
+                }
+                return detail.dataset.stateKey || detail.dataset.role || '';
+            }
+
+            function registerDetailStateHandlers() {
+                document.querySelectorAll('details[data-state-key]').forEach(detail => {
+                    const key = keyForDetail(detail);
+                    if (!key) {
+                        return;
+                    }
+                    if (!Object.prototype.hasOwnProperty.call(panelState, key)) {
+                        panelState[key] = detail.open;
+                        persistPanelState();
+                    }
+                    detail.addEventListener('toggle', () => {
+                        panelState[key] = detail.open;
+                        persistPanelState();
+                    });
+                });
+            }
+
+            function restoreDetailState() {
+                document.querySelectorAll('details[data-state-key]').forEach(detail => {
+                    const key = keyForDetail(detail);
+                    if (!key) {
+                        return;
+                    }
+                    if (Object.prototype.hasOwnProperty.call(panelState, key)) {
+                        detail.open = !!panelState[key];
+                    }
+                });
+            }
+
+            registerDetailStateHandlers();
+            restoreDetailState();
 
             function escapeHtml(value) {
                 if (value === null || value === undefined) {
@@ -1932,6 +2005,7 @@ def create_app(state: UIState | None = None) -> Flask:
                 integrateSummaryIntoHistory(summary);
                 updateHistoryCharts();
                 setLastUpdated(new Date());
+                restoreDetailState();
             }
 
             async function fetchJson(path) {
