@@ -170,6 +170,21 @@ from solhunter_zero.portfolio import Position
 ui.app = ui.create_app()
 
 
+def test_index_html_uses_recent_count_over_length():
+    state = ui.UIState(
+        discovery_provider=lambda: {
+            "recent": [f"Token {i}" for i in range(120)],
+            "recent_count": 500,
+        }
+    )
+    app = ui.create_app(state)
+    client = app.test_client()
+    resp = client.get("/")
+    html = resp.get_data(as_text=True)
+    assert "500 tracked" in html
+    assert "Newest 120 tokens shown below." in html
+
+
 def test_ensure_active_keypair_selects_single(monkeypatch):
     monkeypatch.setattr(ui.wallet, "get_active_keypair_name", lambda: None)
     monkeypatch.setattr(ui.wallet, "list_keypairs", lambda: ["only"])
