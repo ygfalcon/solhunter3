@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -63,6 +64,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def kill_lingering_processes() -> None:
+    pkill_path = shutil.which("pkill")
+    if not pkill_path:
+        log.warning("Skipping lingering process cleanup: pkill not found on PATH")
+        return
     patterns = [
         "solhunter_zero.primary_entry_point",
         "solhunter_zero.runtime.launch",
@@ -70,7 +75,12 @@ def kill_lingering_processes() -> None:
         "run_rl_daemon.py",
     ]
     for pat in patterns:
-        subprocess.run(["pkill", "-f", pat], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            [pkill_path, "-f", pat],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     time.sleep(0.5)
 
 
