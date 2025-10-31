@@ -612,15 +612,25 @@ class TradingRuntime:
                 break
 
     async def _start_loop(self) -> None:
-        if self._use_new_pipeline and self.pipeline is not None:
-            await self.pipeline.start()
-            self.status.trading_loop = True
-            poller = asyncio.create_task(self._pipeline_telemetry_poller(), name="pipeline_telemetry")
-            self._tasks.append(poller)
-        else:
-            task = asyncio.create_task(self._trading_loop(), name="trading_loop")
-            self.trading_task = task
-            self._tasks.append(task)
+        try:
+            if self._use_new_pipeline and self.pipeline is not None:
+                await self.pipeline.start()
+                self.status.trading_loop = True
+                self.activity.add("loop", "started (pipeline)")
+                poller = asyncio.create_task(
+                    self._pipeline_telemetry_poller(), name="pipeline_telemetry"
+                )
+                self._tasks.append(poller)
+            else:
+                task = asyncio.create_task(self._trading_loop(), name="trading_loop")
+                self.trading_task = task
+                self.status.trading_loop = True
+                self.activity.add("loop", "started")
+                self._tasks.append(task)
+        except Exception:
+            self.status.trading_loop = False
+            self.activity.add("loop", "failed to start", ok=False)
+            raise
 
     # ------------------------------------------------------------------
     # Trading loop
@@ -631,74 +641,89 @@ class TradingRuntime:
         assert self.memory is not None
         assert self.portfolio is not None
 
-        fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
+        cancelled = False
+        failure: Optional[BaseException] = None
+        try:
+            fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 
-        loop_delay = self._config_float("loop_delay", self.explicit_loop_delay, 30.0)
-        min_delay = self._config_float("min_delay", self.explicit_min_delay, 5.0)
-        max_delay = self._config_float("max_delay", self.explicit_max_delay, 120.0)
-        if fast_mode:
-            if self.explicit_loop_delay is None and self.cfg.get("loop_delay") is None:
-                loop_delay = min(loop_delay, 5.0)
-            if self.explicit_min_delay is None and self.cfg.get("min_delay") is None:
-                min_delay = min(min_delay, 1.0)
-            if self.explicit_max_delay is None and self.cfg.get("max_delay") is None:
-                max_delay = min(max_delay, 15.0)
-        discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
-        if discovery_method is None:
-            discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
-        if discovery_method is None:
-            discovery_method = DEFAULT_DISCOVERY_METHOD
-        stop_loss = _maybe_float(self.cfg.get("stop_loss"))
-        take_profit = _maybe_float(self.cfg.get("take_profit"))
-        trailing_stop = _maybe_float(self.cfg.get("trailing_stop"))
-        max_drawdown = _maybe_float(self.cfg.get("max_drawdown"), 1.0)
-        volatility_factor = _maybe_float(self.cfg.get("volatility_factor"), 1.0)
-        arbitrage_threshold = _maybe_float(self.cfg.get("arbitrage_threshold"), 0.0)
-        arbitrage_amount = _maybe_float(self.cfg.get("arbitrage_amount"), 0.0)
-        live_discovery = self.cfg.get("live_discovery")
+            loop_delay = self._config_float("loop_delay", self.explicit_loop_delay, 30.0)
+            min_delay = self._config_float("min_delay", self.explicit_min_delay, 5.0)
+            max_delay = self._config_float("max_delay", self.explicit_max_delay, 120.0)
+            if fast_mode:
+                if self.explicit_loop_delay is None and self.cfg.get("loop_delay") is None:
+                    loop_delay = min(loop_delay, 5.0)
+                if self.explicit_min_delay is None and self.cfg.get("min_delay") is None:
+                    min_delay = min(min_delay, 1.0)
+                if self.explicit_max_delay is None and self.cfg.get("max_delay") is None:
+                    max_delay = min(max_delay, 15.0)
+            discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
+            if discovery_method is None:
+                discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+            if discovery_method is None:
+                discovery_method = DEFAULT_DISCOVERY_METHOD
+            stop_loss = _maybe_float(self.cfg.get("stop_loss"))
+            take_profit = _maybe_float(self.cfg.get("take_profit"))
+            trailing_stop = _maybe_float(self.cfg.get("trailing_stop"))
+            max_drawdown = _maybe_float(self.cfg.get("max_drawdown"), 1.0)
+            volatility_factor = _maybe_float(self.cfg.get("volatility_factor"), 1.0)
+            arbitrage_threshold = _maybe_float(self.cfg.get("arbitrage_threshold"), 0.0)
+            arbitrage_amount = _maybe_float(self.cfg.get("arbitrage_amount"), 0.0)
+            live_discovery = self.cfg.get("live_discovery")
 
-        while not self.stop_event.is_set():
-            start = time.perf_counter()
-            try:
-                summary = await run_iteration(
-                    self.memory,
-                    self.portfolio,
-                    self.state,
-                    cfg=self.runtime_cfg,
-                    testnet=False,
-                    dry_run=False,
-                    offline=False,
-                    token_file=None,
-                    discovery_method=discovery_method,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    trailing_stop=trailing_stop,
-                    max_drawdown=max_drawdown if max_drawdown is not None else 1.0,
-                    volatility_factor=volatility_factor
-                    if volatility_factor is not None
-                    else 1.0,
-                    arbitrage_threshold=arbitrage_threshold,
-                    arbitrage_amount=arbitrage_amount,
-                    strategy_manager=None,
-                    agent_manager=self.agent_manager,
-                )
-                if not isinstance(summary, dict):
-                    summary = {}
-                await self._apply_iteration_summary(summary, stage="loop")
-            except FirstTradeTimeoutError:
-                self.activity.add("loop", "first trade timeout", ok=False)
-                publish("runtime.log", {"stage": "loop", "detail": "timeout"})
-            except Exception as exc:
-                self.activity.add("loop", f"error: {exc}", ok=False)
-                log.exception("Trading iteration failed")
-                await asyncio.sleep(min_delay)
-                continue
+            while not self.stop_event.is_set():
+                start = time.perf_counter()
+                try:
+                    summary = await run_iteration(
+                        self.memory,
+                        self.portfolio,
+                        self.state,
+                        cfg=self.runtime_cfg,
+                        testnet=False,
+                        dry_run=False,
+                        offline=False,
+                        token_file=None,
+                        discovery_method=discovery_method,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        trailing_stop=trailing_stop,
+                        max_drawdown=max_drawdown if max_drawdown is not None else 1.0,
+                        volatility_factor=volatility_factor
+                        if volatility_factor is not None
+                        else 1.0,
+                        arbitrage_threshold=arbitrage_threshold,
+                        arbitrage_amount=arbitrage_amount,
+                        strategy_manager=None,
+                        agent_manager=self.agent_manager,
+                    )
+                    if not isinstance(summary, dict):
+                        summary = {}
+                    await self._apply_iteration_summary(summary, stage="loop")
+                except FirstTradeTimeoutError:
+                    self.activity.add("loop", "first trade timeout", ok=False)
+                    publish("runtime.log", {"stage": "loop", "detail": "timeout"})
+                except Exception as exc:
+                    self.activity.add("loop", f"error: {exc}", ok=False)
+                    log.exception("Trading iteration failed")
+                    await asyncio.sleep(min_delay)
+                    continue
 
-            elapsed = time.perf_counter() - start
-            sleep_for = max(min_delay, min(max_delay, loop_delay - elapsed))
-            await asyncio.sleep(max(0.1, sleep_for))
-
-        self.status.trading_loop = False
+                elapsed = time.perf_counter() - start
+                sleep_for = max(min_delay, min(max_delay, loop_delay - elapsed))
+                await asyncio.sleep(max(0.1, sleep_for))
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        except Exception as exc:
+            failure = exc
+            raise
+        finally:
+            self.status.trading_loop = False
+            if failure is not None:
+                self.activity.add("loop", f"stopped with error: {failure}", ok=False)
+            else:
+                ok = cancelled or self.stop_event.is_set()
+                detail = "stopped" if ok else "stopped unexpectedly"
+                self.activity.add("loop", detail, ok=ok)
 
     # ------------------------------------------------------------------
     # UI data helpers

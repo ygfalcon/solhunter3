@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import sys
 import types
@@ -178,3 +179,44 @@ async def test_rl_status_watcher_detects_external_daemon(monkeypatch, tmp_path):
     assert runtime._rl_status_info["url"] == payload["url"]
 
     await runtime.stop()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_trading_loop_status_sets_immediately(monkeypatch):
+    runtime = trading_runtime.TradingRuntime()
+    runtime.cfg = {}
+    runtime.runtime_cfg = {}
+    runtime.memory = object()
+    runtime.portfolio = object()
+    runtime.agent_manager = object()
+    runtime.explicit_loop_delay = 0.0
+    runtime.explicit_min_delay = 0.0
+    runtime.explicit_max_delay = 0.0
+
+    iteration_started = asyncio.Event()
+    resume_iteration = asyncio.Event()
+
+    async def fake_run_iteration(*args, **kwargs):
+        iteration_started.set()
+        await resume_iteration.wait()
+        runtime.stop_event.set()
+        return {}
+
+    monkeypatch.setattr(trading_runtime, "run_iteration", fake_run_iteration)
+
+    await runtime._start_loop()
+
+    assert runtime.status.trading_loop is True
+    snapshot = runtime.activity.snapshot()
+    assert snapshot
+    assert snapshot[-1]["detail"].startswith("started")
+
+    await iteration_started.wait()
+    resume_iteration.set()
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(runtime.trading_task, timeout=1.0)
+
+    runtime._tasks.clear()
+
+    assert runtime.status.trading_loop is False
