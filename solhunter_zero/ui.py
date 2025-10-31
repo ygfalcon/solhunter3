@@ -325,7 +325,16 @@ def create_app(state: UIState | None = None) -> Flask:
             "actions": actions[-5:],
         }
         discovery_recent_all = list(discovery.get("recent", []))
-        discovery_recent_total = len(discovery_recent_all)
+        discovery_recent_total_raw = discovery.get("recent_count")
+        if discovery_recent_total_raw is None:
+            discovery_recent_total = len(discovery_recent_all)
+        else:
+            try:
+                discovery_recent_total = int(discovery_recent_total_raw)
+            except (TypeError, ValueError):
+                discovery_recent_total = len(discovery_recent_all)
+        if discovery_recent_total < len(discovery_recent_all):
+            discovery_recent_total = len(discovery_recent_all)
         discovery_recent_summary = list(
             reversed(discovery_recent_all[-3:])
         )
@@ -1399,6 +1408,22 @@ def create_app(state: UIState | None = None) -> Flask:
             function updateDiscovery(discovery) {
                 const data = discovery && typeof discovery === 'object' ? discovery : {};
                 const recent = Array.isArray(data.recent) ? data.recent : [];
+                const rawRecentTotal = (() => {
+                    const raw = data.recent_count;
+                    if (typeof raw === 'number' && Number.isFinite(raw)) {
+                        return raw;
+                    }
+                    if (typeof raw === 'string') {
+                        const parsed = Number.parseInt(raw, 10);
+                        if (Number.isFinite(parsed)) {
+                            return parsed;
+                        }
+                    }
+                    return Number.NaN;
+                })();
+                const recentTotal = Number.isFinite(rawRecentTotal)
+                    ? Math.max(rawRecentTotal, recent.length)
+                    : recent.length;
                 const summaryTokens = recent.slice(-3).reverse();
                 const displayTokens = recent.slice(-120).reverse();
                 const latestTokens = Array.isArray(data.latest_iteration_tokens) ? data.latest_iteration_tokens : [];
@@ -1409,7 +1434,7 @@ def create_app(state: UIState | None = None) -> Flask:
                     elements.discoverySummary.innerHTML = `
                         <div class="summary-stack">
                             <div class="summary-title">Recent Tokens</div>
-                            <div class="summary-count">${formatNumber(recent.length)} tracked</div>
+                            <div class="summary-count">${formatNumber(recentTotal)} tracked</div>
                         </div>
                         <div class="summary-peek" aria-hidden="true">${peek}</div>
                     `;
@@ -2023,6 +2048,9 @@ def create_app(state: UIState | None = None) -> Flask:
             samples=samples,
             config_overview=config_overview,
             actions=actions,
+            activity=activity,
+            trades=trades,
+            logs=logs,
             logs_display=logs_display,
             logs_summary=logs_summary,
             logs_total=logs_total,
