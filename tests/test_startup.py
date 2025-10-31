@@ -84,6 +84,74 @@ def startup_stubs(monkeypatch, tmp_path):
     )
 
 
+def test_startup_passes_extra_rest_to_start_all(monkeypatch):
+    import types
+
+    from scripts import startup as startup_mod
+    from solhunter_zero import startup_checks
+    import solhunter_zero.startup_runner as startup_runner
+    import scripts.start_all as start_all_module
+    import solhunter_zero.logging_utils as logging_utils
+
+    monkeypatch.setattr(startup_checks, "ensure_rpc", lambda warn_only=True: None)
+    monkeypatch.setattr(startup_checks, "ensure_endpoints", lambda: None)
+
+    monkeypatch.setattr(logging_utils, "log_startup", lambda *a, **k: None)
+    monkeypatch.setattr(logging_utils, "rotate_preflight_log", lambda: None)
+    monkeypatch.setattr(startup_mod.startup_cli, "render_banner", lambda: None)
+
+    extra_rest = ["--ui-port", "6000"]
+
+    def fake_parse_args(argv):
+        args = types.SimpleNamespace(
+            quiet=False,
+            non_interactive=False,
+            skip_deps=False,
+            skip_setup=False,
+            skip_rpc_check=False,
+            skip_endpoint_check=False,
+            offline=False,
+            skip_preflight=False,
+        )
+        return args, list(extra_rest)
+
+    monkeypatch.setattr(startup_mod.startup_cli, "parse_args", fake_parse_args)
+
+    captured_ctx: dict[str, dict] = {}
+
+    def fake_run(args, ctx, log_startup=None):
+        captured_ctx["ctx"] = ctx
+        rest_args = list(ctx.get("rest", []))
+        return start_all_module.main([*rest_args, "--foreground"])
+
+    monkeypatch.setattr(startup_runner, "run", fake_run)
+
+    captured_parse: dict[str, list[str]] = {}
+
+    def fake_start_all_parse_args(argv):
+        captured_parse["parse_args"] = list(argv)
+        return types.SimpleNamespace()
+
+    def fake_start_all_main(argv):
+        captured_parse["main_args"] = list(argv)
+        fake_start_all_parse_args(argv)
+        return 0
+
+    monkeypatch.setattr(start_all_module, "parse_args", fake_start_all_parse_args)
+    monkeypatch.setattr(start_all_module, "main", fake_start_all_main)
+
+    exit_code = startup_mod.main(["--ui-port", "6000"])
+
+    assert exit_code == 0
+    assert captured_parse["parse_args"] == ["--ui-port", "6000", "--foreground"]
+    assert captured_parse["main_args"] == ["--ui-port", "6000", "--foreground"]
+
+    ctx = captured_ctx["ctx"]
+    assert isinstance(ctx.get("rest"), list)
+    assert ctx["rest"] == extra_rest
+    assert ctx.get("summary_rows") == []
+
+
 def test_startup_help():
     result = subprocess.run([sys.executable, 'scripts/startup.py', '--help'], capture_output=True, text=True)
     assert result.returncode == 0
