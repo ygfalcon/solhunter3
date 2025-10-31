@@ -25,6 +25,7 @@ front of it if richer dashboards are required.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import threading
@@ -2166,6 +2167,7 @@ class UIServer:
         self.port = int(port)
         self.app = create_app(state)
         self._thread: Optional[threading.Thread] = None
+        self._server: Optional["BaseWSGIServer"] = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -2173,11 +2175,23 @@ class UIServer:
 
         def _serve() -> None:
             try:
-                # ``use_reloader`` must be False otherwise Flask tries to spawn
-                # a new process.
-                self.app.run(host=self.host, port=self.port, use_reloader=False)
+                from werkzeug.serving import BaseWSGIServer, make_server
+
+                server: BaseWSGIServer = make_server(
+                    self.host,
+                    self.port,
+                    self.app,
+                    threaded=True,
+                )
+                self._server = server
+                # ``make_server`` may assign a random port when ``self.port`` is 0.
+                # Capture the final port so callers observe the actual binding.
+                self.port = int(server.server_port)
+                server.serve_forever()
             except Exception:  # pragma: no cover - best effort logging
                 log.exception("UI server crashed")
+            finally:
+                self._server = None
 
         self._thread = threading.Thread(target=_serve, daemon=True)
         self._thread.start()
@@ -2188,11 +2202,40 @@ class UIServer:
         try:
             import urllib.request
 
+            shutdown_host = self._resolve_shutdown_host()
+            formatted_host = self._format_host_for_url(shutdown_host)
             urllib.request.urlopen(
-                f"http://{self.host}:{self.port}/__shutdown__", timeout=1
+                f"http://{formatted_host}:{self.port}/__shutdown__", timeout=1
             )
         except Exception:
-            pass
+            self._shutdown_directly()
         if self._thread:
             self._thread.join(timeout=2)
         self._thread = None
+
+    def _resolve_shutdown_host(self) -> str:
+        raw_host = (self.host or "").strip()
+        if not raw_host:
+            return "127.0.0.1"
+        try:
+            ip = ipaddress.ip_address(raw_host)
+        except ValueError:
+            return raw_host
+        if ip.is_unspecified:
+            return "::1" if ip.version == 6 else "127.0.0.1"
+        return raw_host
+
+    @staticmethod
+    def _format_host_for_url(host: str) -> str:
+        if ":" in host and not host.startswith("["):
+            return f"[{host}]"
+        return host
+
+    def _shutdown_directly(self) -> None:
+        server = self._server
+        if server is None:
+            return
+        try:
+            server.shutdown()
+        except Exception:  # pragma: no cover - best effort fallback
+            pass

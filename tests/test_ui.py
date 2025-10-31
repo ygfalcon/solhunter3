@@ -6,6 +6,10 @@ import types
 import contextlib
 import importlib.machinery
 import sys
+import socket
+import time
+import urllib.error
+import urllib.request
 import pytest
 
 # Skip this module when running lightweight CI self-tests
@@ -1194,3 +1198,81 @@ def test_upload_config_rejects_bad_name(monkeypatch, bad_name):
     assert not called
     ui.request.files = {}
     ui.request.form = {}
+
+
+def _allocate_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _format_host_for_url(host: str) -> str:
+    return host if ":" not in host or host.startswith("[") else f"[{host}]"
+
+
+def _wait_for_status(host: str, port: int, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    formatted_host = _format_host_for_url(host)
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(
+                f"http://{formatted_host}:{port}/status", timeout=0.5
+            ) as resp:
+                if getattr(resp, "status", 200) == 200:
+                    return
+        except Exception as exc:  # pragma: no cover - transient startup errors
+            last_error = exc
+            time.sleep(0.05)
+        else:
+            time.sleep(0.05)
+    raise AssertionError(f"UI server did not start: {last_error}")
+
+
+@pytest.mark.parametrize(
+    "host, probe_host",
+    [("127.0.0.1", "127.0.0.1"), ("0.0.0.0", "127.0.0.1")],
+)
+def test_ui_server_stop_handles_loopback(host: str, probe_host: str) -> None:
+    port = _allocate_port()
+    server = ui.UIServer(ui.UIState(), host=host, port=port)
+    thread = None
+    try:
+        server.start()
+        _wait_for_status(probe_host, server.port)
+        thread = server._thread
+        assert thread is not None and thread.is_alive()
+    finally:
+        server.stop()
+    assert server._thread is None
+    if thread is not None:
+        assert not thread.is_alive()
+
+
+def test_ui_server_stop_fallback(monkeypatch) -> None:
+    port = _allocate_port()
+    server = ui.UIServer(ui.UIState(), host="127.0.0.1", port=port)
+    shutdown_called = False
+    try:
+        server.start()
+        _wait_for_status("127.0.0.1", server.port)
+        base_server = server._server
+        assert base_server is not None
+
+        original_shutdown = base_server.shutdown
+
+        def _record_shutdown(*args, **kwargs):
+            nonlocal shutdown_called
+            shutdown_called = True
+            return original_shutdown(*args, **kwargs)
+
+        monkeypatch.setattr(base_server, "shutdown", _record_shutdown)
+
+        def _raise(*args, **kwargs):
+            raise urllib.error.URLError("boom")
+
+        monkeypatch.setattr(urllib.request, "urlopen", _raise)
+    finally:
+        server.stop()
+    assert shutdown_called
+    assert server._thread is None
