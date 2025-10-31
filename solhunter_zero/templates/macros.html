@@ -1,0 +1,33 @@
+{% macro collapsible_section(title, count_text='', count_value=None, count_aria=None, peek='', body_aria=None, details_id=None, open_state=False) -%}
+<details class="collapsible"{% if open_state %} open{% endif %}{% if details_id %} id="{{ details_id }}"{% endif %}>
+    <summary>
+        <div class="collapsible-summary">
+            <div class="summary-stack">
+                <div class="summary-title">{{ title }}</div>
+                {% if count_text %}
+                    <div class="summary-count"{% if count_aria %} aria-label="{{ count_aria }}"{% endif %}{% if count_value is not none %} data-count="{{ count_value }}"{% endif %}>{{ count_text }}</div>
+                {% endif %}
+            </div>
+            <div class="summary-peek" aria-hidden="true">
+                {{ peek | safe }}
+            </div>
+        </div>
+        <span class="caret" aria-hidden="true"></span>
+    </summary>
+    <div class="collapsible-body"{% if body_aria %} aria-label="{{ body_aria }}"{% endif %}>
+        {{ caller() }}
+    </div>
+</details>
+{%- endmacro %}
+
+{% macro render_list(items, aria_label='', role='', list_class='', empty_message='', item_class='') -%}
+    {% if items %}
+        <ul{% if list_class %} class="{{ list_class }}"{% endif %}{% if role %} role="{{ role }}"{% endif %}{% if aria_label %} aria-label="{{ aria_label }}"{% endif %} data-count="{{ items | length }}">
+            {% for item in items %}
+                <li{% if item_class %} class="{{ item_class }}"{% endif %}>{{ caller(item=item) }}</li>
+            {% endfor %}
+        </ul>
+    {% elif empty_message %}
+        <div class="muted">{{ empty_message }}</div>
+    {% endif %}
+{%- endmacro %}

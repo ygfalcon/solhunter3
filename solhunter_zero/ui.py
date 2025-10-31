@@ -693,6 +693,7 @@ def create_app(state: UIState | None = None) -> Flask:
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         </head>
         <body>
+            {% from 'macros.html' import collapsible_section, render_list %}
             <header>
                 <div class="headline">
                     <h1>SolHunter Zero Dashboard</h1>
@@ -832,48 +833,47 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Discovery</h2>
-                    <details class="collapsible">
-                        <summary>
-                            <div class="collapsible-summary">
-                                <div class="summary-stack">
-                                    <div class="summary-title">Recent Tokens</div>
-                                    <div class="summary-count">{{ discovery_recent_total }} tracked</div>
-                                </div>
-                                <div class="summary-peek" aria-hidden="true">
-                                    {% if discovery_recent_summary %}
-                                        {% for token in discovery_recent_summary %}
-                                            <span class="peek-chip">{{ token }}</span>
-                                        {% endfor %}
-                                    {% else %}
-                                        <span class="muted">Waiting for discovery results…</span>
-                                    {% endif %}
-                                </div>
+                    {% set recent_total = discovery_recent_total | default(0) %}
+                    {% set discovery_peek %}
+                        {% if discovery_recent_summary %}
+                            {% for token in discovery_recent_summary %}
+                                <span class="peek-chip">{{ token }}</span>
+                            {% endfor %}
+                        {% else %}
+                            <span class="muted">Waiting for discovery results…</span>
+                        {% endif %}
+                    {% endset %}
+                    {% call collapsible_section(
+                        title="Recent Tokens",
+                        count_text=recent_total ~ " tracked",
+                        count_value=recent_total,
+                        count_aria="Tracking " ~ recent_total ~ " tokens",
+                        peek=discovery_peek,
+                        body_aria="Recent discovery results"
+                    ) %}
+                        {% if discovery_recent_display %}
+                            <div class="muted">Newest {{ discovery_recent_display|length }} tokens shown below.</div>
+                            <div class="collapsible-scroll">
+                                {% call(item) render_list(
+                                    discovery_recent_display,
+                                    aria_label="Recently tracked tokens",
+                                    role="list"
+                                ) %}
+                                    {{ item }}
+                                {% endcall %}
                             </div>
-                            <span class="caret" aria-hidden="true"></span>
-                        </summary>
-                        <div class="collapsible-body">
-                            {% if discovery_recent_display %}
-                                <div class="muted">Newest {{ discovery_recent_display|length }} tokens shown below.</div>
-                                <div class="collapsible-scroll">
-                                    <ul>
-                                        {% for token in discovery_recent_display %}
-                                            <li>{{ token }}</li>
-                                        {% endfor %}
-                                    </ul>
-                                </div>
-                            {% else %}
-                                <div class="muted">Waiting for discovery results…</div>
-                            {% endif %}
-                            {% if discovery.get('latest_iteration_tokens') %}
-                                <div class="muted" style="margin-top:14px;">Latest iteration tokens ({{ discovery.get('latest_iteration_tokens')|length }}):</div>
-                                <div class="chip-group" role="list">
-                                    {% for token in discovery.get('latest_iteration_tokens')[:20] %}
-                                        <span class="peek-chip" role="listitem">{{ token }}</span>
-                                    {% endfor %}
-                                </div>
-                            {% endif %}
-                        </div>
-                    </details>
+                        {% else %}
+                            <div class="muted">Waiting for discovery results…</div>
+                        {% endif %}
+                        {% if discovery.get('latest_iteration_tokens') %}
+                            <div class="muted" style="margin-top:14px;">Latest iteration tokens ({{ discovery.get('latest_iteration_tokens')|length }}):</div>
+                            <div class="chip-group" role="list">
+                                {% for token in discovery.get('latest_iteration_tokens')[:20] %}
+                                    <span class="peek-chip" role="listitem">{{ token }}</span>
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                    {% endcall %}
                 </div>
 
                 <div class="panel">
@@ -948,43 +948,42 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Event Log</h2>
-                    <details class="collapsible">
-                        <summary>
-                            <div class="collapsible-summary">
-                                <div class="summary-stack">
-                                    <div class="summary-title">Latest Events</div>
-                                    <div class="summary-count">{{ logs_total }} recorded</div>
-                                </div>
-                                <div class="summary-peek" aria-hidden="true">
-                                    {% if logs_summary %}
-                                        {% for entry in logs_summary %}
-                                            {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
-                                            <span class="peek-chip">{{ stage }}</span>
-                                        {% endfor %}
-                                    {% else %}
-                                        <span class="muted">No log entries yet.</span>
-                                    {% endif %}
-                                </div>
+                    {% set logs_total_value = logs_total | default(0) %}
+                    {% set logs_peek %}
+                        {% if logs_summary %}
+                            {% for entry in logs_summary %}
+                                {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
+                                <span class="peek-chip">{{ stage }}</span>
+                            {% endfor %}
+                        {% else %}
+                            <span class="muted">No log entries yet.</span>
+                        {% endif %}
+                    {% endset %}
+                    {% call collapsible_section(
+                        title="Latest Events",
+                        count_text=logs_total_value ~ " recorded",
+                        count_value=logs_total_value,
+                        count_aria="Latest " ~ logs_total_value ~ " logged events",
+                        peek=logs_peek,
+                        body_aria="Event log entries"
+                    ) %}
+                        {% if logs_display %}
+                            <div class="muted">Showing the freshest {{ logs_display|length }} entries.</div>
+                            <div class="collapsible-scroll">
+                                {% call(entry) render_list(
+                                    logs_display,
+                                    aria_label="Latest event log entries",
+                                    role="list"
+                                ) %}
+                                    {% set detail = entry.get('payload', {}).get('detail') or entry %}
+                                    {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
+                                    <span class="muted">{{ entry.get('timestamp') }}</span> · <strong>{{ stage }}</strong> — {{ detail }}
+                                {% endcall %}
                             </div>
-                            <span class="caret" aria-hidden="true"></span>
-                        </summary>
-                        <div class="collapsible-body">
-                            {% if logs_display %}
-                                <div class="muted">Showing the freshest {{ logs_display|length }} entries.</div>
-                                <div class="collapsible-scroll">
-                                    <ul>
-                                        {% for entry in logs_display %}
-                                            {% set detail = entry.get('payload', {}).get('detail') or entry %}
-                                            {% set stage = entry.get('payload', {}).get('stage', entry.get('topic')) or '—' %}
-                                            <li><span class="muted">{{ entry.get('timestamp') }}</span> · <strong>{{ stage }}</strong> — {{ detail }}</li>
-                                        {% endfor %}
-                                    </ul>
-                                </div>
-                            {% else %}
-                                <div class="muted">No log entries yet.</div>
-                            {% endif %}
-                        </div>
-                    </details>
+                        {% else %}
+                            <div class="muted">No log entries yet.</div>
+                        {% endif %}
+                    {% endcall %}
                 </div>
 
                 <div class="panel">
