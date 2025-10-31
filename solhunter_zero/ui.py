@@ -29,6 +29,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from flask import Flask, jsonify, render_template_string, request
@@ -44,8 +45,58 @@ log = logging.getLogger(__name__)
 
 
 StatusProvider = Callable[[], Dict[str, Any]]
-ListProvider = Callable[[], Iterable[Dict[str, Any]]]
+ListProvider = Callable[..., Iterable[Dict[str, Any]]]
 DictProvider = Callable[[], Dict[str, Any]]
+
+
+DEFAULT_HISTORY_WINDOW = int(os.getenv("UI_HISTORY_WINDOW", "120") or 120)
+DEFAULT_HISTORY_PAGE_SIZE = int(os.getenv("UI_HISTORY_PAGE_SIZE", "200") or 200)
+MAX_HISTORY_PAGE_SIZE = int(os.getenv("UI_HISTORY_MAX_PAGE_SIZE", "1000") or 1000)
+
+
+def _history_timestamp(entry: Dict[str, Any]) -> float:
+    ts = entry.get("timestamp_epoch")
+    if isinstance(ts, (int, float)):
+        try:
+            return float(ts)
+        except (TypeError, ValueError):
+            return 0.0
+    if isinstance(ts, str):
+        try:
+            return float(ts)
+        except (TypeError, ValueError):
+            pass
+    stamp = entry.get("timestamp")
+    if isinstance(stamp, str) and stamp:
+        try:
+            normalized = stamp[:-1] if stamp.endswith("Z") else stamp
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _filter_history_window(
+    items: Iterable[Dict[str, Any]],
+    *,
+    limit: Optional[int] = None,
+    since: Optional[float] = None,
+    before: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    window = list(items)
+    if since is not None:
+        window = [entry for entry in window if _history_timestamp(entry) > since]
+    if before is not None:
+        window = [entry for entry in window if _history_timestamp(entry) < before]
+    if limit is not None:
+        try:
+            limit_value = int(limit)
+        except (TypeError, ValueError):
+            limit_value = 0
+        if limit_value <= 0:
+            return []
+        window = window[-limit_value:]
+    return window
 
 
 @dataclass
@@ -132,9 +183,26 @@ class UIState:
             log.exception("UI config provider failed")
             return {}
 
-    def snapshot_history(self) -> List[Dict[str, Any]]:
+    def snapshot_history(
+        self,
+        *,
+        limit: Optional[int] = None,
+        since: Optional[float] = None,
+        before: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         try:
-            return list(self.history_provider())
+            provider = self.history_provider
+            if limit is None and since is None and before is None:
+                data = provider()
+            else:
+                try:
+                    data = provider(limit=limit, since=since, before=before)
+                except TypeError:
+                    data = provider()
+            window = list(data)
+            return _filter_history_window(
+                window, limit=limit, since=since, before=before
+            )
         except Exception:  # pragma: no cover
             log.exception("UI history provider failed")
             return []
@@ -191,6 +259,7 @@ def create_app(state: UIState | None = None) -> Flask:
                         "/rl/status",
                         "/config",
                         "/logs",
+                        "/history",
                     ],
                 }
             )
@@ -205,7 +274,9 @@ def create_app(state: UIState | None = None) -> Flask:
         weights = weights_raw if isinstance(weights_raw, dict) else {}
         actions = state.snapshot_actions()
         config_summary = state.snapshot_config()
-        history = state.snapshot_history()
+        history_window = max(1, DEFAULT_HISTORY_WINDOW)
+        history = state.snapshot_history(limit=history_window)
+        history_page_size = max(1, min(DEFAULT_HISTORY_PAGE_SIZE, MAX_HISTORY_PAGE_SIZE))
 
         counts = {
             "activity": len(activity),
@@ -683,6 +754,29 @@ def create_app(state: UIState | None = None) -> Flask:
                     padding-right: 6px;
                     margin-top: 10px;
                 }
+                .chart-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                    gap: 20px;
+                }
+                .button {
+                    background: rgba(22, 27, 34, 0.85);
+                    border: 1px solid var(--border);
+                    border-radius: 12px;
+                    color: var(--text);
+                    cursor: pointer;
+                    font: inherit;
+                    padding: 8px 16px;
+                    transition: background 0.2s ease, border-color 0.2s ease;
+                }
+                .button:hover {
+                    background: rgba(88, 166, 255, 0.12);
+                    border-color: rgba(88, 166, 255, 0.6);
+                }
+                .button:disabled {
+                    opacity: 0.5;
+                    cursor: default;
+                }
                 .chip-group {
                     display: flex;
                     flex-wrap: wrap;
@@ -885,7 +979,7 @@ def create_app(state: UIState | None = None) -> Flask:
                     </table>
                     <div style="margin-top: 14px;" class="muted">Endpoints</div>
                     <div class="endpoint-list">
-                        {% for link in ['health','status','summary','tokens','actions','activity','trades','weights','rl/status','config','logs'] %}
+                        {% for link in ['health','status','summary','tokens','actions','activity','trades','weights','rl/status','config','logs','history'] %}
                             <a href="/{{ link }}">/{{ link }}</a>
                         {% endfor %}
                     </div>
@@ -895,14 +989,53 @@ def create_app(state: UIState | None = None) -> Flask:
             <section class="grid" style="margin-top:24px;">
                 <div class="panel" style="grid-column: span 2;">
                     <h2>Iteration Charts</h2>
-                    {% if history %}
-                        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:20px;">
-                            <canvas id="actionsChart" height="180"></canvas>
-                            <canvas id="latencyChart" height="180"></canvas>
+                    <div id="historyChartsPlaceholder" class="muted"{% if history %} style="display:none;"{% endif %}>
+                        Waiting for iteration history…
+                    </div>
+                    <div id="historyChartsGrid" class="chart-grid"{% if not history %} style="display:none;"{% endif %}>
+                        <canvas id="actionsChart" height="180"></canvas>
+                        <canvas id="latencyChart" height="180"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <section class="grid" style="margin-top:24px;">
+                <div class="panel" style="grid-column: span 2;">
+                    <details class="collapsible" id="historyDetails">
+                        <summary>
+                            <div class="collapsible-summary">
+                                <div class="summary-stack">
+                                    <div class="summary-title">Iteration History</div>
+                                    <div class="summary-count" id="historySummaryCount">Tap to load</div>
+                                </div>
+                                <div class="summary-peek" aria-hidden="true">
+                                    <span class="muted" id="historySummaryPeek">History loads on demand</span>
+                                </div>
+                            </div>
+                            <span class="caret" aria-hidden="true"></span>
+                        </summary>
+                        <div class="collapsible-body">
+                            <div class="muted" id="historyListStatus">History has not been loaded yet.</div>
+                            <div class="collapsible-scroll" id="historyTableContainer" style="display:none;">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>Timestamp</th>
+                                            <th>Actions</th>
+                                            <th>Discovered</th>
+                                            <th>Committed</th>
+                                            <th>Elapsed (s)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="historyTableBody"></tbody>
+                                </table>
+                            </div>
+                            <div style="margin-top:12px; display:flex; gap:12px;">
+                                <button class="button" id="historyLoadMore" type="button" disabled>Load older iterations</button>
+                                <div class="muted" id="historyLoadHint" style="align-self:center;"></div>
+                            </div>
                         </div>
-                    {% else %}
-                        <div class="muted">Waiting for iteration history…</div>
-                    {% endif %}
+                    </details>
                 </div>
             </section>
 
@@ -1043,24 +1176,65 @@ def create_app(state: UIState | None = None) -> Flask:
             </section>
             <script>
             (function() {
-                const history = {{ history | tojson | safe }};
+                const historySeed = {{ history | tojson | safe }};
+                const historyChartLimit = {{ history_window }};
+                const historyPageSize = {{ history_page_size }};
+                const historyEndpoint = '/history';
                 const weightLabels = {{ weights_labels | tojson | safe }};
                 const weightValues = {{ weights_values | tojson | safe }};
-                if (history && history.length) {
-                    const labels = history.map(h => (h.timestamp || '').slice(11, 19));
-                    const actionsData = history.map(h => h.actions_count || 0);
-                    const discoveredData = history.map(h => h.discovered_count || 0);
-                    const committedData = history.map(h => (h.committed ? 1 : 0));
-                    const latencyData = history.map(h => (h.elapsed_s || 0));
-                    let budgetData = history.map(h => {
-                        const telemetry = h.telemetry || {};
-                        const pipeline = telemetry.pipeline || {};
-                        return pipeline.budget || null;
+                const chartElements = {
+                    grid: document.getElementById('historyChartsGrid'),
+                    placeholder: document.getElementById('historyChartsPlaceholder'),
+                    actions: document.getElementById('actionsChart'),
+                    latency: document.getElementById('latencyChart'),
+                };
+                const chartState = { actions: null, latency: null };
+                let chartHistory = Array.isArray(historySeed) ? historySeed : [];
+
+                function updateHistoryCharts(historyData) {
+                    const hasData = Array.isArray(historyData) && historyData.length;
+                    if (!hasData) {
+                        if (chartElements.placeholder) {
+                            chartElements.placeholder.style.display = '';
+                        }
+                        if (chartElements.grid) {
+                            chartElements.grid.style.display = 'none';
+                        }
+                        if (chartState.actions) {
+                            chartState.actions.destroy();
+                            chartState.actions = null;
+                        }
+                        if (chartState.latency) {
+                            chartState.latency.destroy();
+                            chartState.latency = null;
+                        }
+                        return;
+                    }
+
+                    if (chartElements.placeholder) {
+                        chartElements.placeholder.style.display = 'none';
+                    }
+                    if (chartElements.grid) {
+                        chartElements.grid.style.display = '';
+                    }
+
+                    const labels = historyData.map(h => (h.timestamp || '').slice(11, 19));
+                    const actionsData = historyData.map(h => h.actions_count || 0);
+                    const discoveredData = historyData.map(h => h.discovered_count || 0);
+                    const committedData = historyData.map(h => (h.committed ? 1 : 0));
+                    const latencyData = historyData.map(h => (h.elapsed_s || 0));
+                    const budgetData = historyData.map(h => {
+                        const telemetry = h && h.telemetry ? h.telemetry : {};
+                        const pipeline = telemetry && telemetry.pipeline ? telemetry.pipeline : {};
+                        return typeof pipeline.budget === 'number' ? pipeline.budget : null;
                     });
                     const wantsBudget = budgetData.some(v => typeof v === 'number');
-                    const ctxA = document.getElementById('actionsChart');
-                    if (ctxA && window.Chart) {
-                        new Chart(ctxA.getContext('2d'), {
+
+                    if (chartState.actions) {
+                        chartState.actions.destroy();
+                    }
+                    if (chartElements.actions && window.Chart) {
+                        chartState.actions = new Chart(chartElements.actions.getContext('2d'), {
                             type: 'line',
                             data: {
                                 labels,
@@ -1114,8 +1288,11 @@ def create_app(state: UIState | None = None) -> Flask:
                             },
                         });
                     }
-                    const ctxL = document.getElementById('latencyChart');
-                    if (ctxL && window.Chart) {
+
+                    if (chartState.latency) {
+                        chartState.latency.destroy();
+                    }
+                    if (chartElements.latency && window.Chart) {
                         const datasets = [
                             {
                                 label: 'Iteration Seconds',
@@ -1134,7 +1311,7 @@ def create_app(state: UIState | None = None) -> Flask:
                                 fill: false,
                             });
                         }
-                        new Chart(ctxL.getContext('2d'), {
+                        chartState.latency = new Chart(chartElements.latency.getContext('2d'), {
                             type: 'line',
                             data: { labels, datasets },
                             options: {
@@ -1147,6 +1324,227 @@ def create_app(state: UIState | None = None) -> Flask:
                         });
                     }
                 }
+
+                updateHistoryCharts(chartHistory);
+
+                function refreshChartHistory() {
+                    const params = new URLSearchParams();
+                    params.set('limit', historyChartLimit);
+                    fetch(`${historyEndpoint}?${params.toString()}`)
+                        .then(response => (response.ok ? response.json() : null))
+                        .then(payload => {
+                            if (!payload || !Array.isArray(payload.items)) {
+                                return;
+                            }
+                            chartHistory = payload.items;
+                            updateHistoryCharts(chartHistory);
+                        })
+                        .catch(() => {});
+                }
+
+                refreshChartHistory();
+
+                const historyDetails = document.getElementById('historyDetails');
+                const historyTableBody = document.getElementById('historyTableBody');
+                const historyTableContainer = document.getElementById('historyTableContainer');
+                const historyListStatus = document.getElementById('historyListStatus');
+                const historyLoadMore = document.getElementById('historyLoadMore');
+                const historyLoadHint = document.getElementById('historyLoadHint');
+                const historySummaryCount = document.getElementById('historySummaryCount');
+                const historySummaryPeek = document.getElementById('historySummaryPeek');
+                let historyListCursor = null;
+                let historyHasMore = false;
+                let historyListLoaded = false;
+                let historyListLatestEntry = null;
+
+                function formatTimestamp(entry) {
+                    if (!entry) {
+                        return '—';
+                    }
+                    if (entry.timestamp) {
+                        return entry.timestamp;
+                    }
+                    const epoch = entry.timestamp_epoch;
+                    if (typeof epoch === 'number' && !Number.isNaN(epoch)) {
+                        try {
+                            return new Date(epoch * 1000).toISOString();
+                        } catch (err) {
+                            return String(epoch);
+                        }
+                    }
+                    return '—';
+                }
+
+                function formatNumber(value, fractionDigits) {
+                    if (typeof value === 'number' && Number.isFinite(value)) {
+                        if (typeof fractionDigits === 'number') {
+                            return value.toFixed(fractionDigits);
+                        }
+                        return value.toString();
+                    }
+                    if (value === 0) {
+                        return '0';
+                    }
+                    return value != null ? String(value) : '—';
+                }
+
+                function appendHistoryRows(items, append) {
+                    if (!historyTableBody || !Array.isArray(items) || !items.length) {
+                        if (!append && historyTableBody) {
+                            historyTableBody.innerHTML = '';
+                        }
+                        return;
+                    }
+                    const fragment = document.createDocumentFragment();
+                    const rows = items.slice().reverse();
+                    rows.forEach(item => {
+                        const tr = document.createElement('tr');
+                        const committedLabel = item && item.committed ? 'Yes' : 'No';
+                        const cells = [
+                            formatTimestamp(item),
+                            formatNumber(item ? item.actions_count : null),
+                            formatNumber(item ? item.discovered_count : null),
+                            committedLabel,
+                            formatNumber(item ? item.elapsed_s : null, 2),
+                        ];
+                        cells.forEach(text => {
+                            const td = document.createElement('td');
+                            td.textContent = text;
+                            tr.appendChild(td);
+                        });
+                        fragment.appendChild(tr);
+                    });
+                    if (!append) {
+                        historyTableBody.innerHTML = '';
+                    }
+                    historyTableBody.appendChild(fragment);
+                }
+
+                function updateHistorySummary(payload) {
+                    const totalRows = historyTableBody ? historyTableBody.children.length : 0;
+                    if (historySummaryCount) {
+                        if (totalRows) {
+                            const total = payload && typeof payload.total === 'number' && payload.total >= totalRows
+                                ? payload.total
+                                : null;
+                            historySummaryCount.textContent = total
+                                ? `${totalRows} of ${total} shown`
+                                : `${totalRows} shown`;
+                        } else {
+                            historySummaryCount.textContent = 'Tap to load';
+                        }
+                    }
+                    if (historySummaryPeek) {
+                        if (historyListLatestEntry) {
+                            historySummaryPeek.textContent = `Latest: ${formatTimestamp(historyListLatestEntry)}`;
+                        } else if (totalRows) {
+                            historySummaryPeek.textContent = 'Displaying iteration history';
+                        } else {
+                            historySummaryPeek.textContent = 'History loads on demand';
+                        }
+                    }
+                }
+
+                function loadHistoryList(options = {}) {
+                    const params = new URLSearchParams();
+                    params.set('limit', historyPageSize);
+                    if (options.before) {
+                        params.set('before', options.before);
+                    }
+                    fetch(`${historyEndpoint}?${params.toString()}`)
+                        .then(response => (response.ok ? response.json() : null))
+                        .then(payload => {
+                            if (!payload) {
+                                throw new Error('bad response');
+                            }
+                            const items = Array.isArray(payload.items) ? payload.items : [];
+                            historyListLoaded = true;
+
+                            if (!items.length && !options.append && (!historyTableBody || !historyTableBody.children.length)) {
+                                if (historyListStatus) {
+                                    historyListStatus.style.display = '';
+                                    historyListStatus.textContent = 'No iteration history is available yet.';
+                                }
+                                if (historyTableContainer) {
+                                    historyTableContainer.style.display = 'none';
+                                }
+                                if (historyLoadMore) {
+                                    historyLoadMore.disabled = true;
+                                }
+                                if (historyLoadHint) {
+                                    historyLoadHint.textContent = '';
+                                }
+                                historyListCursor = null;
+                                historyHasMore = false;
+                                historyListLatestEntry = null;
+                                updateHistorySummary(payload);
+                                return;
+                            }
+
+                            if (historyTableContainer) {
+                                historyTableContainer.style.display = '';
+                            }
+                            if (historyListStatus) {
+                                historyListStatus.style.display = 'none';
+                            }
+
+                            appendHistoryRows(items, Boolean(options.append));
+                            if (!options.append && items.length) {
+                                historyListLatestEntry = items[items.length - 1];
+                            }
+
+                            if (Array.isArray(items) && items.length) {
+                                const earliest = items[0];
+                                const earliestTs = earliest ? earliest.timestamp_epoch : null;
+                                if (typeof earliestTs === 'number' && !Number.isNaN(earliestTs)) {
+                                    historyListCursor = earliestTs;
+                                }
+                            }
+                            if (payload.next_before !== undefined && payload.next_before !== null) {
+                                historyListCursor = payload.next_before;
+                            }
+                            historyHasMore = Boolean(payload.has_more);
+                            if (historyLoadMore) {
+                                historyLoadMore.disabled = !historyHasMore;
+                            }
+                            if (historyLoadHint) {
+                                if (historyHasMore) {
+                                    historyLoadHint.textContent = '';
+                                } else if ((historyTableBody && historyTableBody.children.length) || items.length) {
+                                    historyLoadHint.textContent = 'Reached beginning of retained history.';
+                                } else {
+                                    historyLoadHint.textContent = '';
+                                }
+                            }
+                            updateHistorySummary(payload);
+                        })
+                        .catch(() => {
+                            if (historyListStatus) {
+                                historyListStatus.style.display = '';
+                                historyListStatus.textContent = 'Failed to load history data.';
+                            }
+                            if (historyLoadMore) {
+                                historyLoadMore.disabled = true;
+                            }
+                        });
+                }
+
+                if (historyDetails) {
+                    historyDetails.addEventListener('toggle', () => {
+                        if (historyDetails.open && !historyListLoaded) {
+                            loadHistoryList();
+                        }
+                    });
+                }
+                if (historyLoadMore) {
+                    historyLoadMore.addEventListener('click', () => {
+                        if (!historyHasMore || historyListCursor === null) {
+                            return;
+                        }
+                        loadHistoryList({ before: historyListCursor, append: true });
+                    });
+                }
+
                 const weightsCanvas = document.getElementById('weightsChart');
                 if (weightsCanvas && window.Chart && weightLabels.length) {
                     const palette = ['#7afcff', '#f6a6ff', '#9effa9', '#ffe29a', '#b5b0ff', '#ffb8a5', '#aff8db', '#f3c4fb'];
@@ -1225,6 +1623,53 @@ def create_app(state: UIState | None = None) -> Flask:
             weights_values=weights_values,
             weights_aria_label=weights_aria_label,
             stat_tiles=stat_tiles,
+            history_window=history_window,
+            history_page_size=history_page_size,
+        )
+
+    @app.get("/history")
+    def history_json() -> Any:
+        def parse_float_arg(name: str) -> Optional[float]:
+            raw = request.args.get(name)
+            if raw in (None, "", "null"):
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            limit_val = int(
+                request.args.get("limit", str(DEFAULT_HISTORY_PAGE_SIZE))
+                or DEFAULT_HISTORY_PAGE_SIZE
+            )
+        except (TypeError, ValueError):
+            limit_val = DEFAULT_HISTORY_PAGE_SIZE
+        limit_val = max(1, min(limit_val, MAX_HISTORY_PAGE_SIZE))
+        since_val = parse_float_arg("since")
+        before_val = parse_float_arg("before")
+
+        items = state.snapshot_history(limit=limit_val, since=since_val, before=before_val)
+        latest_ts = items[-1].get("timestamp_epoch") if items else None
+        next_before = items[0].get("timestamp_epoch") if items else None
+        has_more = False
+        if next_before is not None:
+            probe = state.snapshot_history(limit=1, before=next_before)
+            has_more = bool(probe)
+        total_entries = len(state.snapshot_history())
+
+        return jsonify(
+            {
+                "items": items,
+                "count": len(items),
+                "limit": limit_val,
+                "since": since_val,
+                "before": before_val,
+                "latest": latest_ts,
+                "next_before": next_before,
+                "has_more": has_more,
+                "total": total_entries,
+            }
         )
 
     @app.get("/health")

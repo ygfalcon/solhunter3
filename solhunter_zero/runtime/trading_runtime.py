@@ -959,6 +959,7 @@ class TradingRuntime:
             self._last_iteration_elapsed = summary.get("elapsed_s")
             snap = {
                 "timestamp": summary.get("timestamp"),
+                "timestamp_epoch": summary.get("timestamp_epoch"),
                 "elapsed_s": summary.get("elapsed_s"),
                 "actions_count": summary.get("actions_count"),
                 "discovered_count": summary.get("discovered_count"),
@@ -1107,9 +1108,40 @@ class TradingRuntime:
                     self._ui_logs.append(entry)
                 index = len(samples)
             await asyncio.sleep(1.0)
-    def _collect_history(self) -> List[Dict[str, Any]]:
+    def _collect_history(
+        self,
+        *,
+        limit: Optional[int] = None,
+        since: Optional[float] = None,
+        before: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         with self._history_lock:
-            return list(self._iteration_history)
+            entries = list(self._iteration_history)
+
+        if since is not None:
+            entries = [
+                item
+                for item in entries
+                if (item.get("timestamp_epoch") or 0.0) > since
+            ]
+
+        if before is not None:
+            entries = [
+                item
+                for item in entries
+                if (item.get("timestamp_epoch") or 0.0) < before
+            ]
+
+        if limit is not None:
+            try:
+                limit_value = int(limit)
+            except (TypeError, ValueError):
+                limit_value = 0
+            if limit_value <= 0:
+                return []
+            entries = entries[-limit_value:]
+
+        return entries
 
     # ------------------------------------------------------------------
     # Utilities
