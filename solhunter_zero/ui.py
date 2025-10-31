@@ -3271,11 +3271,20 @@ class UIServer:
         if self._thread and self._thread.is_alive():
             return
 
+        try:
+            server = make_server(self.host, self.port, self.app)
+        except BaseException as exc:  # pragma: no cover - defensive guard
+            self._server = None
+            self._thread = None
+            if isinstance(exc, SystemExit) and exc.__context__ is not None:
+                raise exc.__context__ from None  # type: ignore[misc]
+            raise
+
+        server.daemon_threads = True
+        self._server = server
+
         def _serve() -> None:
             try:
-                server = make_server(self.host, self.port, self.app)
-                server.daemon_threads = True
-                self._server = server
                 server.serve_forever()
             except Exception:  # pragma: no cover - best effort logging
                 log.exception("UI server crashed")
