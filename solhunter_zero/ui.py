@@ -62,6 +62,7 @@ class UIState:
     logs_provider: ListProvider = field(default=lambda: [])
     summary_provider: DictProvider = field(default=lambda: {})
     discovery_provider: DictProvider = field(default=lambda: {"recent": []})
+    set_discovery_method: Optional[Callable[[str], None]] = None
     config_provider: DictProvider = field(default=lambda: {})
     actions_provider: ListProvider = field(default=lambda: [])
     history_provider: ListProvider = field(default=lambda: [])
@@ -2129,7 +2130,33 @@ def create_app(state: UIState | None = None) -> Flask:
                 ),
                 400,
             )
-        os.environ["DISCOVERY_METHOD"] = method
+        setter = state.set_discovery_method
+        if setter is None:
+            os.environ["DISCOVERY_METHOD"] = method
+        else:
+            try:
+                setter(method)
+            except ValueError as exc:
+                return (
+                    jsonify(
+                        {
+                            "error": f"Failed to update discovery method: {exc}",
+                            "allowed_methods": sorted(DISCOVERY_METHODS),
+                        }
+                    ),
+                    400,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                log.exception("Discovery method callback failed")
+                return (
+                    jsonify(
+                        {
+                            "error": f"Failed to update discovery method: {exc}",
+                            "allowed_methods": sorted(DISCOVERY_METHODS),
+                        }
+                    ),
+                    500,
+                )
         return jsonify(
             {
                 "status": "ok",

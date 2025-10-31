@@ -7,6 +7,7 @@ import contextlib
 import importlib.machinery
 import sys
 import pytest
+from typing import Dict
 
 # Skip this module when running lightweight CI self-tests
 if os.getenv("SELFTEST_SKIP_ARTIFACTS") == "1" or os.getenv("CI") == "true":
@@ -557,6 +558,37 @@ def test_discovery_method_invalid_value(monkeypatch):
     data = resp.get_json()
     assert "Invalid discovery method" in data["error"]
     assert os.getenv("DISCOVERY_METHOD") is None
+
+
+def test_discovery_method_uses_callback(monkeypatch):
+    captured: Dict[str, str] = {}
+
+    def setter(method: str) -> None:
+        captured["method"] = method
+
+    state = ui.UIState()
+    state.set_discovery_method = setter
+    app = ui.create_app(state)
+    client = app.test_client()
+
+    resp = client.post("/discovery", json={"method": "mempool"})
+    assert resp.status_code == 200
+    assert captured["method"] == "mempool"
+
+
+def test_discovery_method_callback_error(monkeypatch):
+    def setter(method: str) -> None:
+        raise ValueError("runtime rejected update")
+
+    state = ui.UIState()
+    state.set_discovery_method = setter
+    app = ui.create_app(state)
+    client = app.test_client()
+
+    resp = client.post("/discovery", json={"method": "mempool"})
+    assert resp.status_code == 400
+    data = resp.get_json()
+    assert "runtime rejected update" in data["error"]
 
 
 def test_start_requires_env(monkeypatch):

@@ -186,6 +186,11 @@ class TradingRuntime:
         self._recent_tokens: Deque[str] = deque()
         self._discovery_seen: set[str] = set()
         self._discovery_lock = threading.Lock()
+        initial_discovery = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if initial_discovery is None:
+            initial_discovery = DEFAULT_DISCOVERY_METHOD
+        self._discovery_method = initial_discovery
+        self._discovery_method_lock = threading.Lock()
         self._recent_tokens_limit = int(os.getenv("UI_DISCOVERY_LIMIT", "200") or 200)
         self._start_time: Optional[float] = None
         self._last_iteration_elapsed: Optional[float] = None
@@ -361,6 +366,8 @@ class TradingRuntime:
         if os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is None:
             os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
+        self._configure_discovery_method()
+
     async def _start_event_bus(self) -> None:
         broker_urls = get_broker_urls(self.cfg) if self.cfg else []
         try:
@@ -428,6 +435,7 @@ class TradingRuntime:
         self.ui_state.config_provider = self._collect_config
         self.ui_state.actions_provider = self._collect_actions
         self.ui_state.history_provider = self._collect_history
+        self.ui_state.set_discovery_method = self._set_discovery_method
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
@@ -643,11 +651,6 @@ class TradingRuntime:
                 min_delay = min(min_delay, 1.0)
             if self.explicit_max_delay is None and self.cfg.get("max_delay") is None:
                 max_delay = min(max_delay, 15.0)
-        discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
-        if discovery_method is None:
-            discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
-        if discovery_method is None:
-            discovery_method = DEFAULT_DISCOVERY_METHOD
         stop_loss = _maybe_float(self.cfg.get("stop_loss"))
         take_profit = _maybe_float(self.cfg.get("take_profit"))
         trailing_stop = _maybe_float(self.cfg.get("trailing_stop"))
@@ -660,6 +663,7 @@ class TradingRuntime:
         while not self.stop_event.is_set():
             start = time.perf_counter()
             try:
+                discovery_method = self._get_discovery_method()
                 summary = await run_iteration(
                     self.memory,
                     self.portfolio,
@@ -703,6 +707,35 @@ class TradingRuntime:
     # ------------------------------------------------------------------
     # UI data helpers
     # ------------------------------------------------------------------
+
+    def _configure_discovery_method(self) -> None:
+        cfg_method = resolve_discovery_method(self.cfg.get("discovery_method")) if self.cfg else None
+        if cfg_method is not None:
+            self._update_discovery_method(cfg_method)
+            return
+
+        env_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if env_method is not None:
+            self._update_discovery_method(env_method)
+            return
+
+        self._update_discovery_method(DEFAULT_DISCOVERY_METHOD)
+
+    def _update_discovery_method(self, method: str) -> None:
+        with self._discovery_method_lock:
+            self._discovery_method = method
+        os.environ["DISCOVERY_METHOD"] = method
+
+    def _get_discovery_method(self) -> str:
+        with self._discovery_method_lock:
+            return self._discovery_method
+
+    def _set_discovery_method(self, method: str) -> None:
+        resolved = resolve_discovery_method(method)
+        if resolved is None:
+            raise ValueError(f"Unknown discovery method: {method}")
+        self._update_discovery_method(resolved)
+        self.activity.add("discovery", f"method -> {resolved}")
 
     def _collect_status(self) -> Dict[str, Any]:
         depth_ok = bool(self.depth_proc and self.depth_proc.poll() is None)
