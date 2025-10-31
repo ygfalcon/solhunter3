@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import copy
+import inspect
 import json
 import logging
 import math
@@ -59,6 +61,20 @@ from .runtime_wiring import resolve_golden_enabled
 from .schema_adapters import read_golden, read_ohlcv
 from .tuning import analyse_evaluation
 from .self_check import SelfCheckRunner
+
+try:  # optional redis helper
+    from ..redis_util import ensure_local_redis_if_needed
+except Exception:  # pragma: no cover - optional dependency guard
+    ensure_local_redis_if_needed = None  # type: ignore[assignment]
+
+try:  # optional golden pipeline flags
+    from ..golden_pipeline.flags import resolve_depth_flag, resolve_momentum_flag
+except Exception:  # pragma: no cover - optional dependency guard
+    def resolve_depth_flag(_cfg: Mapping[str, Any] | None) -> bool:
+        return False
+
+    def resolve_momentum_flag(_cfg: Mapping[str, Any] | None) -> bool:
+        return False
 
 
 log = logging.getLogger(__name__)
@@ -361,6 +377,8 @@ class TradingRuntime:
         self._exit_manager = ExitManager()
         self._exit_summary: Dict[str, Any] = _sanitize_exit_payload(None)
         self._exit_lock = threading.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -376,6 +394,8 @@ class TradingRuntime:
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
+        self._loop = loop
+        self._loop_thread = threading.current_thread()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
@@ -552,10 +572,11 @@ class TradingRuntime:
 
     async def _start_event_bus(self) -> None:
         broker_urls = get_broker_urls(self.cfg) if self.cfg else []
-        try:
-            ensure_local_redis_if_needed(broker_urls)
-        except Exception:
-            log.exception("Failed to ensure Redis broker")
+        if ensure_local_redis_if_needed is not None:
+            try:
+                ensure_local_redis_if_needed(broker_urls)
+            except Exception:
+                log.exception("Failed to ensure Redis broker")
 
         ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
         event_bus_url = f"ws://127.0.0.1:{ws_port}"
@@ -833,6 +854,7 @@ class TradingRuntime:
         self.ui_state.settings_provider = self._collect_settings_panel
         self.ui_state.exit_provider = self._collect_exit_panel
         self.ui_state.health_provider = self._collect_health_metrics
+        self.ui_state.close_position_handler = self._handle_close_request
 
         if not self._ui_enabled:
             self.ui_server = None
@@ -935,10 +957,18 @@ class TradingRuntime:
             try:
                 from ..golden_pipeline.service import GoldenPipelineService
 
+                kwargs: Dict[str, Any] = {}
+                try:
+                    params = inspect.signature(GoldenPipelineService.__init__).parameters
+                except (ValueError, TypeError):  # pragma: no cover - builtins
+                    params = {}
+                if "config" in params:
+                    kwargs["config"] = self.cfg
+
                 self._golden_service = GoldenPipelineService(
                     agent_manager=self.agent_manager,
                     portfolio=self.portfolio,
-                    config=self.cfg,
+                    **kwargs,
                 )
                 await self._golden_service.start()
                 self.activity.add("golden_pipeline", "enabled")
@@ -2233,6 +2263,67 @@ class TradingRuntime:
         self._refresh_exit_summary()
         with self._exit_lock:
             return copy.deepcopy(self._exit_summary)
+
+    def _handle_close_request(self, mint: str, qty: float) -> Dict[str, Any]:
+        token = str(mint or "").strip()
+        if not token:
+            return {"ok": False, "error": "mint is required"}
+        try:
+            size = float(qty)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "qty must be a number"}
+        if not math.isfinite(size) or size <= 0:
+            return {"ok": False, "error": "qty must be positive"}
+        if self.pipeline is None:
+            return {"ok": False, "error": "execution pipeline unavailable"}
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return {"ok": False, "error": "runtime loop not running"}
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._queue_manual_exit(token, size),
+            loop,
+        )
+
+        if self._loop_thread is threading.current_thread():
+            def _log_manual_exit(result_future: concurrent.futures.Future) -> None:
+                try:
+                    result_future.result()
+                except Exception:
+                    log.exception("Manual exit request failed (mint=%s)", token)
+
+            future.add_done_callback(_log_manual_exit)
+        else:
+            try:
+                future.result(timeout=5.0)
+            except concurrent.futures.TimeoutError:
+                log.warning(
+                    "Manual exit request timed out (mint=%s qty=%.6f)",
+                    token,
+                    size,
+                )
+                return {"ok": False, "error": "timed out waiting for exit submission"}
+            except Exception as exc:
+                log.exception("Manual exit request failed (mint=%s)", token)
+                return {"ok": False, "error": f"failed to queue exit: {exc}"}
+
+        return {"ok": True, "mint": token, "qty": size}
+
+    async def _queue_manual_exit(self, mint: str, qty: float) -> None:
+        if self.pipeline is None:
+            raise RuntimeError("execution pipeline unavailable")
+        metadata = {
+            "source": "manual_exit",
+            "side": "sell",
+            "qty": float(qty),
+            "notional_usd": 0.0,
+            "requested_at": time.time(),
+        }
+        pipeline = self.pipeline
+        try:
+            await pipeline.queue_manual_exit(mint, float(qty), metadata=metadata)
+        except AttributeError as exc:  # pragma: no cover - defensive
+            raise RuntimeError("pipeline does not support manual exits") from exc
 
     def _collect_shadow_panel(self) -> Dict[str, Any]:
         now = time.time()

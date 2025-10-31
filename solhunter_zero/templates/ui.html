@@ -252,6 +252,19 @@
   </style>
 </head>
 <body>
+  {% if market_snapshot %}
+  <div id="initial-market-state" style="display:none">
+    <table>
+      {% for entry in market_snapshot.get('markets', []) %}
+      <tr data-mint="{{ entry.get('mint') }}">
+        <td>{{ entry.get('mint') }}</td>
+        <td>{{ entry.get('close') }}</td>
+        <td>{{ entry.get('volume') }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
   <div class="live-console" data-ui-schema="{{ ui_schema_version }}">
     <header id="run-header">
       <div class="header-top">

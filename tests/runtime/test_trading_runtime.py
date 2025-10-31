@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import sys
+import threading
 import time
 import types
 from typing import Dict, List
@@ -172,6 +173,36 @@ async def test_market_panel_renders_pipeline_keys(monkeypatch):
     assert len(cells) >= 3
     assert cells[1] != "—", "close cell should show a price"
     assert cells[2] != "—", "volume cell should show a value"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_close_position_endpoint_uses_runtime_handler(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "0")
+    runtime = TradingRuntime()
+    runtime.pipeline = types.SimpleNamespace()
+    runtime._loop = asyncio.get_running_loop()
+    runtime._loop_thread = threading.current_thread()
+
+    recorded: Dict[str, float] = {}
+    executed = asyncio.Event()
+
+    async def _fake_queue(mint: str, qty: float) -> None:
+        recorded["mint"] = mint
+        recorded["qty"] = qty
+        executed.set()
+
+    monkeypatch.setattr(runtime, "_queue_manual_exit", _fake_queue)
+    await runtime._start_ui()
+
+    app = create_app(runtime.ui_state)
+    client = app.test_client()
+
+    response = client.post("/api/execution/close?mint=SOL&qty=2.5")
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "mint": "SOL", "qty": 2.5}
+
+    await executed.wait()
+    assert recorded == {"mint": "SOL", "qty": 2.5}
 
 
 def test_collect_health_metrics(monkeypatch):

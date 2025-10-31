@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import time
 from typing import Any, Dict, List, Optional, cast
@@ -356,6 +357,61 @@ class PipelineCoordinator:
             "execution_queue": self._execution_queue.qsize(),
             "no_action_cache": len(self._no_action_cache),
         }
+
+    async def queue_manual_exit(
+        self,
+        token: str,
+        qty: float,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        token = str(token or "").strip()
+        if not token:
+            raise ValueError("token is required")
+        try:
+            amount = float(qty)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("qty must be a number") from exc
+        if not math.isfinite(amount) or amount <= 0:
+            raise ValueError("qty must be positive")
+
+        base_metadata: Dict[str, Any] = {
+            "source": "manual_exit",
+            "side": "sell",
+            "qty": amount,
+            "manual_exit": True,
+            "notional_usd": 0.0,
+            "requested_at": time.time(),
+            "reason": "manual_exit",
+        }
+        if metadata:
+            base_metadata.update(dict(metadata))
+
+        action_metadata = {
+            "source": base_metadata.get("source"),
+            "manual_exit": True,
+            "requested_at": base_metadata.get("requested_at"),
+            "reason": base_metadata.get("reason", "manual_exit"),
+        }
+
+        bundle = ActionBundle(
+            token=token,
+            actions=
+            [
+                {
+                    "token": token,
+                    "side": "sell",
+                    "amount": amount,
+                    "size": amount,
+                    "reason": base_metadata.get("reason", "manual_exit"),
+                    "metadata": action_metadata,
+                }
+            ],
+            created_at=time.time(),
+            metadata=base_metadata,
+        )
+
+        await self._execution_queue.put(bundle)
 
     def _register_no_action(self, result: EvaluationResult) -> None:
         ttl = float(os.getenv("NO_ACTION_CACHE_TTL", "10") or 10.0)
