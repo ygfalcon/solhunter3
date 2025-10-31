@@ -497,7 +497,19 @@ class TradingRuntime:
         self.ui_state.history_provider = self._collect_history
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
-        self.ui_server.start()
+        try:
+            self.ui_server.start()
+        except Exception as exc:
+            self.activity.add("ui", f"failed to start: {exc}", ok=False)
+            log.exception(
+                "TradingRuntime: failed to start UI server on %s:%s",
+                self.ui_host,
+                self.ui_port,
+            )
+            self.ui_server = None
+            raise
+
+        self.ui_port = self.ui_server.port
         self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
 
     async def _start_agents(self) -> None:

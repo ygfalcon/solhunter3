@@ -1269,6 +1269,23 @@ def _wait_for_status(host: str, port: int, timeout: float = 5.0) -> None:
     raise AssertionError(f"UI server did not start: {last_error}")
 
 
+def test_ui_server_start_propagates_port_in_use() -> None:
+    busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        busy_sock.bind(("127.0.0.1", 0))
+        busy_sock.listen(1)
+        port = busy_sock.getsockname()[1]
+        server = ui.UIServer(ui.UIState(), host="127.0.0.1", port=port)
+
+        with pytest.raises(OSError):
+            server.start()
+
+        assert server._thread is None
+        assert server._server is None
+    finally:
+        busy_sock.close()
+
+
 @pytest.mark.parametrize(
     "host, probe_host",
     [("127.0.0.1", "127.0.0.1"), ("0.0.0.0", "127.0.0.1")],
