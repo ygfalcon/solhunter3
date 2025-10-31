@@ -690,6 +690,31 @@ def test_logs_endpoint(monkeypatch):
     assert logs[-1] == "beta"
 
 
+def test_history_endpoint_truncates_results():
+    history_entries = [{"iteration": i} for i in range(250)]
+    state = ui.UIState(history_provider=lambda: history_entries)
+    app = ui.create_app(state=state)
+    client = app.test_client()
+
+    resp = client.get("/history")
+    data = resp.get_json()
+
+    assert isinstance(data, list)
+    assert len(data) == 200
+    assert data[0]["iteration"] == 50
+    assert data[-1]["iteration"] == 249
+
+
+def test_index_json_includes_history_endpoint():
+    app = ui.create_app()
+    client = app.test_client()
+
+    resp = client.get("/?format=json")
+    payload = resp.get_json()
+
+    assert "/history" in payload["endpoints"]
+
+
 def test_autostart_env(monkeypatch):
     monkeypatch.setattr(ui, "load_config", lambda p=None: {})
     monkeypatch.setattr(ui, "apply_env_overrides", lambda c: c)
