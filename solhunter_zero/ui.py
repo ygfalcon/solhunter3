@@ -28,6 +28,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import secrets
 import threading
 from queue import Empty, Queue
 from dataclasses import dataclass, field
@@ -51,6 +52,18 @@ DictProvider = Callable[[], Dict[str, Any]]
 
 
 HISTORY_MAX_ENTRIES = 200
+
+SHUTDOWN_TOKEN_HEADER = "X-Shutdown-Token"
+
+
+def _is_loopback_address(address: str | None) -> bool:
+    if not address:
+        return False
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return ip.is_loopback
 
 
 @dataclass
@@ -2428,7 +2441,25 @@ def create_app(state: UIState | None = None) -> Flask:
     def _shutdown() -> Any:  # pragma: no cover - invoked via HTTP
         from flask import request
 
+        shutdown_token = app.config.get("SHUTDOWN_TOKEN")
+        provided_token = request.headers.get(SHUTDOWN_TOKEN_HEADER, "")
+
+        token_valid = bool(shutdown_token) and secrets.compare_digest(
+            str(provided_token), str(shutdown_token)
+        )
+        remote_valid = _is_loopback_address(request.remote_addr)
+
+        if not (remote_valid and token_valid):
+            log.warning(
+                "Rejected shutdown request from %s (token provided=%s)",
+                request.remote_addr,
+                bool(provided_token),
+            )
+            return jsonify({"error": "forbidden"}), 403
+
         func = request.environ.get("werkzeug.server.shutdown")
+        if func is None:
+            func = app.config.get("WSGI_SERVER_SHUTDOWN")
         if func is None:
             raise RuntimeError("Not running with the Werkzeug Server")
         func()
@@ -2455,6 +2486,8 @@ class UIServer:
         self.host = host
         self.port = int(port)
         self.app = create_app(state)
+        self._shutdown_token = secrets.token_hex(32)
+        self.app.config["SHUTDOWN_TOKEN"] = self._shutdown_token
         self._thread: Optional[threading.Thread] = None
         self._server: Optional["BaseWSGIServer"] = None
 
@@ -2480,6 +2513,7 @@ class UIServer:
                 f"failed to bind UI server on {self.host}:{self.port}: {exc}"
             ) from exc
         self._server = server
+        self.app.config["WSGI_SERVER_SHUTDOWN"] = server.shutdown
         # ``make_server`` may assign a random port when ``self.port`` is 0.
         # Capture the final port so callers observe the actual binding.
         self.port = int(server.server_port)
@@ -2540,9 +2574,11 @@ class UIServer:
 
             shutdown_host = self._resolve_shutdown_host()
             formatted_host = self._format_host_for_url(shutdown_host)
-            urllib.request.urlopen(
-                f"http://{formatted_host}:{self.port}/__shutdown__", timeout=1
+            request = urllib.request.Request(
+                f"http://{formatted_host}:{self.port}/__shutdown__",
+                headers={SHUTDOWN_TOKEN_HEADER: self._shutdown_token},
             )
+            urllib.request.urlopen(request, timeout=1)
         except Exception:
             self._shutdown_directly()
         if self._thread:
@@ -2575,3 +2611,4 @@ class UIServer:
             server.shutdown()
         except Exception:  # pragma: no cover - best effort fallback
             pass
+

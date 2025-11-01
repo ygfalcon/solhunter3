@@ -1402,6 +1402,38 @@ def test_ui_server_stop_handles_loopback(host: str, probe_host: str) -> None:
         assert not thread.is_alive()
 
 
+def test_ui_server_shutdown_requires_token() -> None:
+    port = _allocate_port()
+    server = ui.UIServer(ui.UIState(), host="127.0.0.1", port=port)
+    try:
+        server.start()
+        _wait_for_status("127.0.0.1", server.port)
+        formatted_host = _format_host_for_url(server._resolve_shutdown_host())
+        shutdown_url = f"http://{formatted_host}:{server.port}/__shutdown__"
+
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(shutdown_url, timeout=1)
+        assert excinfo.value.code == 403
+        excinfo.value.close()
+
+        thread = server._thread
+        assert thread is not None and thread.is_alive()
+
+        request = urllib.request.Request(
+            shutdown_url,
+            headers={ui.SHUTDOWN_TOKEN_HEADER: server._shutdown_token},
+        )
+        with urllib.request.urlopen(request, timeout=1):
+            pass
+
+        deadline = time.time() + 2
+        while thread.is_alive() and time.time() < deadline:
+            time.sleep(0.05)
+    finally:
+        server.stop()
+    assert server._thread is None
+
+
 def test_ui_server_stop_fallback(monkeypatch) -> None:
     port = _allocate_port()
     server = ui.UIServer(ui.UIState(), host="127.0.0.1", port=port)
