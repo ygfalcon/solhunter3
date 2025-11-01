@@ -213,6 +213,8 @@ class TradingRuntime:
             "detected": False,
             "configured": False,
         }
+        self._discovery_method_override: Optional[str] = None
+        self._discovery_method_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -506,6 +508,7 @@ class TradingRuntime:
         self.ui_state.logs_provider = self._snapshot_ui_logs
         self.ui_state.summary_provider = self._collect_iteration
         self.ui_state.discovery_provider = self._collect_discovery
+        self.ui_state.discovery_update_callback = self._on_discovery_method_update
         self.ui_state.config_provider = self._collect_config
         self.ui_state.actions_provider = self._collect_actions
         self.ui_state.history_provider = self._collect_history
@@ -749,11 +752,6 @@ class TradingRuntime:
                     min_delay = min(min_delay, 1.0)
                 if self.explicit_max_delay is None and self.cfg.get("max_delay") is None:
                     max_delay = min(max_delay, 15.0)
-            discovery_method = resolve_discovery_method(self.cfg.get("discovery_method"))
-            if discovery_method is None:
-                discovery_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
-            if discovery_method is None:
-                discovery_method = DEFAULT_DISCOVERY_METHOD
             stop_loss = _maybe_float(self.cfg.get("stop_loss"))
             take_profit = _maybe_float(self.cfg.get("take_profit"))
             trailing_stop = _maybe_float(self.cfg.get("trailing_stop"))
@@ -765,6 +763,7 @@ class TradingRuntime:
 
             while not self.stop_event.is_set():
                 start = time.perf_counter()
+                discovery_method = self._current_discovery_method()
                 try:
                     summary = await run_iteration(
                         self.memory,
@@ -958,6 +957,33 @@ class TradingRuntime:
             "last_iteration_timestamp": iteration.get("timestamp"),
             "sanitized_config": sanitized,
         }
+
+    def _on_discovery_method_update(self, method: str) -> None:
+        canonical = resolve_discovery_method(method)
+        if canonical is None:
+            return
+        with self._discovery_method_lock:
+            previous = self._discovery_method_override
+            self._discovery_method_override = canonical
+        if previous != canonical:
+            detail = f"method updated to {canonical}"
+            self.activity.add("discovery", detail)
+            try:
+                publish("runtime.log", {"stage": "discovery", "detail": detail})
+            except Exception:  # pragma: no cover - logging only
+                log.debug("Failed to publish discovery update", exc_info=True)
+
+    def _current_discovery_method(self) -> str:
+        with self._discovery_method_lock:
+            override = self._discovery_method_override
+        if override:
+            return override
+        method = resolve_discovery_method(self.cfg.get("discovery_method"))
+        if method is None:
+            method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        if method is None:
+            method = DEFAULT_DISCOVERY_METHOD
+        return method
 
     def _record_discovery(self, tokens: Iterable[str]) -> None:
         with self._discovery_lock:

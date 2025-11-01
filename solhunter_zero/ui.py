@@ -216,6 +216,7 @@ class UIState:
     config_provider: DictProvider = field(default=lambda: {})
     actions_provider: ListProvider = field(default=lambda: [])
     history_provider: ListProvider = field(default=lambda: [])
+    discovery_update_callback: Optional[Callable[[str], None]] = None
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -296,6 +297,15 @@ class UIState:
         except Exception:  # pragma: no cover
             log.exception("UI actions provider failed")
             return []
+
+    def notify_discovery_update(self, method: str) -> None:
+        callback = self.discovery_update_callback
+        if callback is None:
+            return
+        try:
+            callback(method)
+        except Exception:  # pragma: no cover - defensive logging
+            log.exception("Discovery update callback failed")
 
 
 
@@ -2770,6 +2780,7 @@ def create_app(state: UIState | None = None) -> Flask:
                 400,
             )
         os.environ["DISCOVERY_METHOD"] = method
+        state.notify_discovery_update(method)
         return jsonify(
             {
                 "status": "ok",
