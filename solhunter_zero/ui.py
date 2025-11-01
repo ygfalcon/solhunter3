@@ -29,6 +29,7 @@ import ipaddress
 import logging
 import os
 import threading
+from queue import Empty, Queue
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -2303,6 +2304,10 @@ def create_app(state: UIState | None = None) -> Flask:
     return app
 
 
+class UIStartupError(RuntimeError):
+    """Raised when the UI server fails to start."""
+
+
 class UIServer:
     """Utility wrapper that runs the Flask app in a background thread."""
 
@@ -2334,24 +2339,65 @@ class UIServer:
                 threaded=True,
             )
         except SystemExit as exc:
-            raise OSError(
-                f"failed to bind UI server on {self.host}:{self.port}"
+            raise UIStartupError(
+                f"failed to bind UI server on {self.host}:{self.port}: {exc}"
+            ) from exc
+        except Exception as exc:
+            raise UIStartupError(
+                f"failed to bind UI server on {self.host}:{self.port}: {exc}"
             ) from exc
         self._server = server
         # ``make_server`` may assign a random port when ``self.port`` is 0.
         # Capture the final port so callers observe the actual binding.
         self.port = int(server.server_port)
 
+        startup_event = threading.Event()
+        exception_queue: Queue[BaseException] = Queue(maxsize=1)
+
         def _serve() -> None:
             try:
+                startup_event.set()
                 server.serve_forever()
-            except Exception:  # pragma: no cover - best effort logging
+            except Exception as exc:  # pragma: no cover - best effort logging
+                try:
+                    exception_queue.put_nowait(exc)
+                except Exception:  # pragma: no cover - queue errors should not surface
+                    pass
                 log.exception("UI server crashed")
             finally:
+                startup_event.set()
                 self._server = None
 
         self._thread = threading.Thread(target=_serve, daemon=True)
         self._thread.start()
+
+        if not startup_event.wait(timeout=5):
+            self._thread.join(timeout=0.1)
+            self._thread = None
+            try:
+                server.server_close()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
+            self._server = None
+            raise UIStartupError(
+                f"UI server failed to start on {self.host}:{self.port}"
+            )
+
+        try:
+            exc = exception_queue.get_nowait()
+        except Empty:
+            return
+
+        self._thread.join(timeout=1)
+        self._thread = None
+        try:
+            server.server_close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+        self._server = None
+        raise UIStartupError(
+            f"UI server failed to start on {self.host}:{self.port}"
+        ) from exc
 
     def stop(self) -> None:
         if not self._thread:

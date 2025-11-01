@@ -1277,13 +1277,34 @@ def test_ui_server_start_propagates_port_in_use() -> None:
         port = busy_sock.getsockname()[1]
         server = ui.UIServer(ui.UIState(), host="127.0.0.1", port=port)
 
-        with pytest.raises(OSError):
+        with pytest.raises(ui.UIStartupError):
             server.start()
 
         assert server._thread is None
         assert server._server is None
     finally:
         busy_sock.close()
+
+
+def test_ui_server_start_surfaces_make_server_failure(monkeypatch) -> None:
+    class BoomError(RuntimeError):
+        pass
+
+    import werkzeug.serving
+
+    def _raise(*args, **kwargs):
+        raise BoomError("boom")
+
+    monkeypatch.setattr(werkzeug.serving, "make_server", _raise)
+
+    server = ui.UIServer(ui.UIState(), host="127.0.0.1", port=0)
+
+    with pytest.raises(ui.UIStartupError) as excinfo:
+        server.start()
+
+    assert "failed to bind" in str(excinfo.value)
+    assert server._thread is None
+    assert server._server is None
 
 
 @pytest.mark.parametrize(
