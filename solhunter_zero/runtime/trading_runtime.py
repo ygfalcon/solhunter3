@@ -40,7 +40,7 @@ from ..memory import Memory
 from ..portfolio import Portfolio
 from ..paths import ROOT
 from ..redis_util import ensure_local_redis_if_needed
-from ..ui import UIState, UIServer
+from ..ui import UIState, UIServer, UIStartupError
 from ..util import parse_bool_env
 
 
@@ -499,7 +499,7 @@ class TradingRuntime:
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         try:
             self.ui_server.start()
-        except Exception as exc:
+        except UIStartupError as exc:
             self.activity.add("ui", f"failed to start: {exc}", ok=False)
             log.exception(
                 "TradingRuntime: failed to start UI server on %s:%s",
