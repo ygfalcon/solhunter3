@@ -151,6 +151,166 @@ class UIState:
             return []
 
 
+
+
+def _build_dashboard_metrics(
+    state: UIState,
+    *,
+    status: Dict[str, Any] | None = None,
+    summary: Dict[str, Any] | None = None,
+    activity: Iterable[Dict[str, Any]] | None = None,
+    trades: Iterable[Dict[str, Any]] | None = None,
+    logs: Iterable[Dict[str, Any]] | None = None,
+    weights: Dict[str, Any] | None = None,
+    actions: Iterable[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    """Return derived dashboard metrics for templates and JSON consumers."""
+
+    def _ensure_list(values: Iterable[Dict[str, Any]] | None) -> List[Dict[str, Any]]:
+        if values is None:
+            return []
+        if isinstance(values, list):
+            return values
+        return list(values)
+
+    def _ensure_dict(data: Dict[str, Any] | None) -> Dict[str, Any]:
+        if data is None:
+            return {}
+        if isinstance(data, dict):
+            return dict(data)
+        return dict(data)
+
+    status_snapshot = _ensure_dict(status) if status is not None else state.snapshot_status()
+    summary_snapshot = (
+        _ensure_dict(summary) if summary is not None else state.snapshot_summary()
+    )
+    activity_entries = (
+        _ensure_list(activity) if activity is not None else state.snapshot_activity()
+    )
+    trades_entries = _ensure_list(trades) if trades is not None else state.snapshot_trades()
+    logs_entries = _ensure_list(logs) if logs is not None else state.snapshot_logs()
+    weights_raw = weights if weights is not None else state.snapshot_weights()
+    if isinstance(weights_raw, dict):
+        weights_snapshot = dict(weights_raw)
+    else:
+        try:
+            weights_snapshot = dict(weights_raw)
+        except Exception:
+            weights_snapshot = {}
+    actions_entries = _ensure_list(actions) if actions is not None else state.snapshot_actions()
+
+    counts = {
+        'activity': len(activity_entries),
+        'trades': len(trades_entries),
+        'logs': len(logs_entries),
+        'weights': len(weights_snapshot),
+        'actions': len(actions_entries),
+    }
+    heartbeat_value = status_snapshot.get('heartbeat') or 'n/a'
+    heartbeat_caption = (
+        'Trading loop online'
+        if status_snapshot.get('trading_loop') or status_snapshot.get('event_bus')
+        else 'Loop offline'
+    )
+    iterations_completed_raw = (
+        status_snapshot.get('iterations_completed')
+        or status_snapshot.get('iterations')
+        or status_snapshot.get('iterations_complete')
+    )
+    try:
+        iterations_completed = int(iterations_completed_raw)
+    except (TypeError, ValueError):
+        iterations_completed = 0
+    trade_count_raw = status_snapshot.get('trade_count')
+    if trade_count_raw is None:
+        trade_count_raw = len(trades_entries)
+    try:
+        trade_count = int(trade_count_raw)
+    except (TypeError, ValueError):
+        trade_count = len(trades_entries)
+    last_elapsed = None
+    if summary_snapshot:
+        elapsed_val = summary_snapshot.get('elapsed_s')
+        try:
+            last_elapsed = float(elapsed_val) if elapsed_val is not None else None
+        except (TypeError, ValueError):
+            last_elapsed = None
+    trades_per_iteration = (
+        trade_count / iterations_completed if iterations_completed else 0.0
+    )
+    if iterations_completed:
+        if last_elapsed is not None:
+            iteration_caption = f"Last run {last_elapsed:.1f}s"
+        else:
+            iteration_caption = 'Tracking iterations'
+    else:
+        iteration_caption = 'Awaiting first iteration'
+    trades_caption = (
+        f"{trades_per_iteration:.2f} per iteration"
+        if iterations_completed
+        else 'No iterations yet'
+    )
+    stat_tiles = [
+        {
+            'title': 'Heartbeat',
+            'value': heartbeat_value,
+            'caption': heartbeat_caption,
+            'icon': """
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4.318 6.318c-1.756 1.756-1.756 4.604 0 6.36L12 20.36l7.682-7.682c1.756-1.756 1.756-4.604 0-6.36-1.756-1.756-4.604-1.756-6.36 0L12 4.64l-1.322-1.322c-1.756-1.756-4.604-1.756-6.36 0z" />
+                    <polyline points="9 11.5 11 14 13 10 15 12" />
+                </svg>
+            """,
+            'css_class': 'heartbeat',
+        },
+        {
+            'title': 'Iterations',
+            'value': f"{iterations_completed:,}",
+            'caption': iteration_caption,
+            'icon': """
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 12a9 9 0 1 1 9 9" />
+                    <polyline points="3 3 3 9 9 9" />
+                    <path d="M12 7v5l3 2" />
+                </svg>
+            """,
+            'css_class': 'iterations',
+        },
+        {
+            'title': 'Trades',
+            'value': f"{trade_count:,}",
+            'caption': trades_caption,
+            'icon': """
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 6h18" />
+                    <path d="M5 6v14h14V6" />
+                    <path d="M9 10h6" />
+                    <path d="M9 14h4" />
+                </svg>
+            """,
+            'css_class': 'trades',
+        },
+    ]
+    stat_tile_map = {
+        tile['css_class']: {'value': tile['value'], 'caption': tile['caption']}
+        for tile in stat_tiles
+    }
+    return {
+        'counts': counts,
+        'stat_tiles': stat_tiles,
+        'stat_tile_map': stat_tile_map,
+        'raw': {
+            'heartbeat_value': heartbeat_value,
+            'heartbeat_caption': heartbeat_caption,
+            'iterations_completed': iterations_completed,
+            'iteration_caption': iteration_caption,
+            'trade_count': trade_count,
+            'trades_caption': trades_caption,
+            'trades_per_iteration': trades_per_iteration,
+            'last_iteration_elapsed_s': last_elapsed,
+        },
+    }
+
 def create_app(state: UIState | None = None) -> Flask:
     """Return a configured Flask application bound to *state*."""
 
@@ -165,13 +325,30 @@ def create_app(state: UIState | None = None) -> Flask:
             status = state.snapshot_status()
             summary = state.snapshot_summary()
             discovery = state.snapshot_discovery()
-            actions = state.snapshot_actions()
-            activity = state.snapshot_activity()
-            trades = state.snapshot_trades()
-            logs = state.snapshot_logs()
-            weights = state.snapshot_weights()
+            actions = list(state.snapshot_actions())
+            activity = list(state.snapshot_activity())
+            trades = list(state.snapshot_trades())
+            logs = list(state.snapshot_logs())
+            weights_snapshot = state.snapshot_weights()
+            if isinstance(weights_snapshot, dict):
+                weights = dict(weights_snapshot)
+            else:
+                try:
+                    weights = dict(weights_snapshot)
+                except Exception:
+                    weights = {}
             config_summary = state.snapshot_config()
-            history = state.snapshot_history()
+            history = list(state.snapshot_history())
+            metrics = _build_dashboard_metrics(
+                state,
+                status=status,
+                summary=summary,
+                activity=activity,
+                trades=trades,
+                logs=logs,
+                weights=weights,
+                actions=actions,
+            )
             return jsonify(
                 {
                     "message": "SolHunter Zero UI",
@@ -184,6 +361,7 @@ def create_app(state: UIState | None = None) -> Flask:
                     "logs": logs,
                     "weights": weights,
                     "config_overview": config_summary,
+                    "metrics": metrics,
                     "endpoints": [
                         "/health",
                         "/status",
@@ -205,109 +383,33 @@ def create_app(state: UIState | None = None) -> Flask:
         status = state.snapshot_status()
         summary = state.snapshot_summary()
         discovery = state.snapshot_discovery()
-        activity = state.snapshot_activity()
-        trades = state.snapshot_trades()
-        logs = state.snapshot_logs()
-        weights_raw = state.snapshot_weights()
-        weights = weights_raw if isinstance(weights_raw, dict) else {}
-        actions = state.snapshot_actions()
-        config_summary = state.snapshot_config()
-        history = state.snapshot_history()
-        history_recent = history[-HISTORY_MAX_ENTRIES:]
-
-        counts = {
-            "activity": len(activity),
-            "trades": len(trades),
-            "logs": len(logs),
-            "weights": len(weights),
-            "actions": len(actions),
-        }
-        heartbeat_value = status.get("heartbeat") or "n/a"
-        iterations_completed_raw = (
-            status.get("iterations_completed")
-            or status.get("iterations")
-            or status.get("iterations_complete")
-        )
-        try:
-            iterations_completed = int(iterations_completed_raw)
-        except (TypeError, ValueError):
-            iterations_completed = 0
-        trade_count_raw = status.get("trade_count")
-        if trade_count_raw is None:
-            trade_count_raw = len(trades)
-        try:
-            trade_count = int(trade_count_raw)
-        except (TypeError, ValueError):
-            trade_count = len(trades)
-        last_elapsed = None
-        if summary:
-            elapsed_val = summary.get("elapsed_s")
-            try:
-                last_elapsed = float(elapsed_val) if elapsed_val is not None else None
-            except (TypeError, ValueError):
-                last_elapsed = None
-        trades_per_iteration = (
-            trade_count / iterations_completed if iterations_completed else 0.0
-        )
-        iteration_caption: str
-        if iterations_completed:
-            if last_elapsed is not None:
-                iteration_caption = f"Last run {last_elapsed:.1f}s"
-            else:
-                iteration_caption = "Tracking iterations"
+        activity = list(state.snapshot_activity())
+        trades = list(state.snapshot_trades())
+        logs = list(state.snapshot_logs())
+        weights_snapshot = state.snapshot_weights()
+        if isinstance(weights_snapshot, dict):
+            weights = dict(weights_snapshot)
         else:
-            iteration_caption = "Awaiting first iteration"
-        trades_caption = (
-            f"{trades_per_iteration:.2f} per iteration"
-            if iterations_completed
-            else "No iterations yet"
+            try:
+                weights = dict(weights_snapshot)
+            except Exception:
+                weights = {}
+        actions = list(state.snapshot_actions())
+        config_summary = state.snapshot_config()
+        history = list(state.snapshot_history())
+        history_recent = history[-HISTORY_MAX_ENTRIES:]
+        metrics = _build_dashboard_metrics(
+            state,
+            status=status,
+            summary=summary,
+            activity=activity,
+            trades=trades,
+            logs=logs,
+            weights=weights,
+            actions=actions,
         )
-        heartbeat_caption = (
-            "Trading loop online"
-            if status.get("trading_loop") or status.get("event_bus")
-            else "Loop offline"
-        )
-        stat_tiles = [
-            {
-                "title": "Heartbeat",
-                "value": heartbeat_value,
-                "caption": heartbeat_caption,
-                "icon": """
-                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
-                        <path d=\"M4.318 6.318c-1.756 1.756-1.756 4.604 0 6.36L12 20.36l7.682-7.682c1.756-1.756 1.756-4.604 0-6.36-1.756-1.756-4.604-1.756-6.36 0L12 4.64l-1.322-1.322c-1.756-1.756-4.604-1.756-6.36 0z\" />
-                        <polyline points=\"9 11.5 11 14 13 10 15 12\" />
-                    </svg>
-                """,
-                "css_class": "heartbeat",
-            },
-            {
-                "title": "Iterations",
-                "value": f"{iterations_completed:,}",
-                "caption": iteration_caption,
-                "icon": """
-                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
-                        <path d=\"M3 12a9 9 0 1 1 9 9\" />
-                        <polyline points=\"3 3 3 9 9 9\" />
-                        <path d=\"M12 7v5l3 2\" />
-                    </svg>
-                """,
-                "css_class": "iterations",
-            },
-            {
-                "title": "Trades",
-                "value": f"{trade_count:,}",
-                "caption": trades_caption,
-                "icon": """
-                    <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\">
-                        <path d=\"M3 6h18\" />
-                        <path d=\"M5 6v14h14V6\" />
-                        <path d=\"M9 10h6\" />
-                        <path d=\"M9 14h4\" />
-                    </svg>
-                """,
-                "css_class": "trades",
-            },
-        ]
+        counts = metrics["counts"]
+        stat_tiles = metrics["stat_tiles"]
         weights_sample = dict(list(weights.items())[:10]) if weights else {}
         weight_items = []
         for name, value in weights.items():
@@ -1112,6 +1214,7 @@ def create_app(state: UIState | None = None) -> Flask:
                 weights: {{ weights | tojson | safe }},
                 config: {{ config_overview | tojson | safe }},
                 history: {{ history | tojson | safe }},
+                metrics: {{ metrics | tojson | safe }},
             };
             let historyData = Array.isArray(initialState.history) ? [...initialState.history] : [];
             let paused = false;
@@ -1273,44 +1376,20 @@ def create_app(state: UIState | None = None) -> Flask:
                 }
             }
 
-            function computeMetrics(status, summary, trades) {
-                const safeStatus = status && typeof status === 'object' ? status : {};
-                const safeSummary = summary && typeof summary === 'object' ? summary : {};
-                const heartbeatRaw = safeStatus.heartbeat;
-                const heartbeatValue = heartbeatRaw === null || heartbeatRaw === undefined ? 'n/a' : String(heartbeatRaw);
-                const heartbeatCaption = safeStatus.trading_loop || safeStatus.event_bus ? 'Trading loop online' : 'Loop offline';
-                const iterationsRaw = safeStatus.iterations_completed ?? safeStatus.iterations ?? safeStatus.iterations_complete;
-                const iterations = asNumber(iterationsRaw) ?? 0;
-                const tradeCountRaw = safeStatus.trade_count ?? (Array.isArray(trades) ? trades.length : 0);
-                const tradeCount = asNumber(tradeCountRaw);
-                const tradeCountValue = tradeCount === null ? (Array.isArray(trades) ? trades.length : 0) : tradeCount;
-                let lastElapsed = null;
-                if (safeSummary && safeSummary.elapsed_s !== undefined && safeSummary.elapsed_s !== null) {
-                    const maybeElapsed = Number(safeSummary.elapsed_s);
-                    if (Number.isFinite(maybeElapsed)) {
-                        lastElapsed = maybeElapsed;
-                    }
+            function applyStatTilesFromMetrics(metrics) {
+                if (!metrics || typeof metrics !== 'object') {
+                    return;
                 }
-                const tradesPerIteration = iterations ? tradeCountValue / iterations : 0;
-                const iterationCaption = iterations
-                    ? (lastElapsed !== null ? `Last run ${lastElapsed.toFixed(1)}s` : 'Tracking iterations')
-                    : 'Awaiting first iteration';
-                const tradesCaption = iterations ? `${tradesPerIteration.toFixed(2)} per iteration` : 'No iterations yet';
-                return {
-                    heartbeatValue,
-                    heartbeatCaption,
-                    iterationsCompleted: iterations,
-                    iterationCaption,
-                    tradeCount: tradeCountValue,
-                    tradesCaption,
-                };
-            }
-
-            function updateStatTiles(status, summary, trades) {
-                const metrics = computeMetrics(status, summary, trades);
-                setStat('heartbeat', metrics.heartbeatValue, metrics.heartbeatCaption);
-                setStat('iterations', formatNumber(metrics.iterationsCompleted), metrics.iterationCaption);
-                setStat('trades', formatNumber(metrics.tradeCount), metrics.tradesCaption);
+                const tileMap = metrics.stat_tile_map;
+                if (!tileMap || typeof tileMap !== 'object') {
+                    return;
+                }
+                Object.entries(tileMap).forEach(([key, tile]) => {
+                    if (!tile || typeof tile !== 'object') {
+                        return;
+                    }
+                    setStat(key, tile.value ?? '—', tile.caption ?? '');
+                });
             }
 
             function renderStatusCard(key, value, status) {
@@ -1363,6 +1442,8 @@ def create_app(state: UIState | None = None) -> Flask:
                     'pipeline_tokens',
                     'pipeline_size',
                     'rl_daemon_status',
+                    'metrics',
+                    'dashboard_metrics',
                 ]);
                 return Object.entries(safeStatus)
                     .filter(([key]) => !skip.has(key))
@@ -2015,26 +2096,44 @@ def create_app(state: UIState | None = None) -> Flask:
             }
 
             function applyData(data) {
-                const status = data.status && typeof data.status === 'object' ? data.status : {};
+                const rawStatus = data.status && typeof data.status === 'object' ? data.status : {};
                 const summary = data.summary && typeof data.summary === 'object' ? data.summary : {};
                 const discovery = data.discovery && typeof data.discovery === 'object' ? data.discovery : {};
                 const actions = Array.isArray(data.actions) ? data.actions : [];
                 const activity = Array.isArray(data.activity) ? data.activity : [];
                 const trades = Array.isArray(data.trades) ? data.trades : [];
-                const logsEntries = Array.isArray(data.logs?.entries) ? data.logs.entries : (Array.isArray(data.logs) ? data.logs : []);
-                const weights = data.weights && typeof data.weights === 'object' && !Array.isArray(data.weights) ? data.weights : {};
+                const logsEntries = Array.isArray(data.logs?.entries)
+                    ? data.logs.entries
+                    : (Array.isArray(data.logs) ? data.logs : []);
+                const weights = data.weights && typeof data.weights === 'object' && !Array.isArray(data.weights)
+                    ? data.weights
+                    : {};
                 const config = data.config && typeof data.config === 'object' ? data.config : {};
-                updateStatTiles(status, summary, trades);
+                const metrics =
+                    (data.metrics && typeof data.metrics === 'object')
+                        ? data.metrics
+                        : (rawStatus.dashboard_metrics && typeof rawStatus.dashboard_metrics === 'object')
+                            ? rawStatus.dashboard_metrics
+                            : (rawStatus.metrics && typeof rawStatus.metrics === 'object')
+                                ? rawStatus.metrics
+                                : null;
+                const status = { ...rawStatus };
+                delete status.dashboard_metrics;
+                delete status.metrics;
+                applyStatTilesFromMetrics(metrics);
                 updateStatusSection(status);
                 updateIterationSummary(summary);
                 updateDiscovery(discovery);
-                updateCounts({
-                    activity: activity.length,
-                    trades: trades.length,
-                    logs: logsEntries.length,
-                    weights: Object.keys(weights).length,
-                    actions: actions.length,
-                });
+                const counts = metrics && typeof metrics.counts === 'object'
+                    ? metrics.counts
+                    : {
+                        activity: activity.length,
+                        trades: trades.length,
+                        logs: logsEntries.length,
+                        weights: Object.keys(weights).length,
+                        actions: actions.length,
+                    };
+                updateCounts(counts);
                 updateTokenResults(summary);
                 updateRecentActions(actions);
                 updateLogs(logsEntries);
@@ -2073,6 +2172,14 @@ def create_app(state: UIState | None = None) -> Flask:
                         '/config',
                     ].map(fetchJson));
                     const activity = Array.isArray(activityResp?.entries) ? activityResp.entries : (Array.isArray(activityResp) ? activityResp : []);
+                    const metrics =
+                        status && typeof status === 'object'
+                            ? (status.dashboard_metrics && typeof status.dashboard_metrics === 'object'
+                                ? status.dashboard_metrics
+                                : (status.metrics && typeof status.metrics === 'object'
+                                    ? status.metrics
+                                    : null))
+                            : null;
                     applyData({
                         status,
                         summary,
@@ -2083,6 +2190,7 @@ def create_app(state: UIState | None = None) -> Flask:
                         weights,
                         logs,
                         config,
+                        metrics,
                     });
                     updateRefreshIndicators();
                 } catch (error) {
@@ -2133,6 +2241,7 @@ def create_app(state: UIState | None = None) -> Flask:
             discovery_recent_summary=discovery_recent_summary,
             discovery_recent_total=discovery_recent_total,
             counts=counts,
+            metrics=metrics,
             samples=samples,
             config_overview=config_overview,
             actions=actions,
@@ -2188,19 +2297,43 @@ def create_app(state: UIState | None = None) -> Flask:
 
     @app.get("/status")
     def status() -> Any:
-        data = state.snapshot_status()
-        summary = state.snapshot_summary()
-        discovery = state.snapshot_discovery()
-        data.setdefault("activity_count", len(state.snapshot_activity()))
-        data.setdefault("trade_count", len(state.snapshot_trades()))
-        if summary:
+        status_snapshot = state.snapshot_status()
+        summary_snapshot = state.snapshot_summary()
+        discovery_snapshot = state.snapshot_discovery()
+        activity_entries = list(state.snapshot_activity())
+        trades_entries = list(state.snapshot_trades())
+        logs_entries = list(state.snapshot_logs())
+        weights_snapshot_raw = state.snapshot_weights()
+        if isinstance(weights_snapshot_raw, dict):
+            weights_snapshot = dict(weights_snapshot_raw)
+        else:
+            try:
+                weights_snapshot = dict(weights_snapshot_raw)
+            except Exception:
+                weights_snapshot = {}
+        actions_entries = list(state.snapshot_actions())
+        metrics = _build_dashboard_metrics(
+            state,
+            status=status_snapshot,
+            summary=summary_snapshot,
+            activity=activity_entries,
+            trades=trades_entries,
+            logs=logs_entries,
+            weights=weights_snapshot,
+            actions=actions_entries,
+        )
+        data = dict(status_snapshot)
+        data.setdefault("activity_count", metrics["counts"]["activity"])
+        data.setdefault("trade_count", metrics["raw"]["trade_count"])
+        if summary_snapshot:
             data.setdefault("last_iteration", {
-                "timestamp": summary.get("timestamp"),
-                "actions": summary.get("actions_count"),
-                "discovered": summary.get("discovered_count"),
-                "elapsed_s": summary.get("elapsed_s"),
+                "timestamp": summary_snapshot.get("timestamp"),
+                "actions": summary_snapshot.get("actions_count"),
+                "discovered": summary_snapshot.get("discovered_count"),
+                "elapsed_s": summary_snapshot.get("elapsed_s"),
             })
-        data.setdefault("recent_tokens", discovery.get("recent", [])[:10])
+        data.setdefault("recent_tokens", discovery_snapshot.get("recent", [])[:10])
+        data["dashboard_metrics"] = metrics
         return jsonify(data)
 
     @app.get("/summary")
