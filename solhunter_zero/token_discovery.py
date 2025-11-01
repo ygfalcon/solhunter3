@@ -30,6 +30,9 @@ _OVERFETCH_FACTOR = float(os.getenv("DISCOVERY_OVERFETCH_FACTOR", "1.0") or 1.0)
 _CACHE_TTL = float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45)
 _MAX_OFFSET = int(os.getenv("DISCOVERY_MAX_OFFSET", "4000") or 4000)
 _MEMPOOL_LIMIT = int(os.getenv("DISCOVERY_MEMPOOL_LIMIT", "12") or 12)
+_MEMPOOL_SIGNAL_TIMEOUT = float(
+    os.getenv("DISCOVERY_MEMPOOL_SIGNAL_TIMEOUT", "0") or 0.0
+)
 _VOLUME_WEIGHT = float(os.getenv("DISCOVERY_VOLUME_WEIGHT", "0.45") or 0.45)
 _LIQUIDITY_WEIGHT = float(os.getenv("DISCOVERY_LIQUIDITY_WEIGHT", "0.55") or 0.55)
 _MEMPOOL_BONUS = float(os.getenv("DISCOVERY_MEMPOOL_BONUS", "5.0") or 5.0)
@@ -192,17 +195,49 @@ async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, 
     """Collect a small batch of ranked mempool candidates (with depth)."""
     scores: Dict[str, Dict[str, float]] = {}
     gen = None
+    timeout = max(float(_MEMPOOL_SIGNAL_TIMEOUT), 0.0)
+    deadline: float | None = None
+    if timeout:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - asyncio quirk
+            loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
     try:
         gen = stream_ranked_mempool_tokens_with_depth(rpc_url, threshold=threshold)
-        async for item in gen:
+        while len(scores) < _MEMPOOL_LIMIT:
+            try:
+                if deadline is None:
+                    item = await anext(gen)
+                else:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        logger.debug(
+                            "Mempool signal collection timed out after %.2fs; "
+                            "returning %d scores",
+                            timeout,
+                            len(scores),
+                        )
+                        break
+                    item = await asyncio.wait_for(anext(gen), timeout=remaining)
+            except asyncio.TimeoutError:
+                logger.debug(
+                    "Mempool signal collection timed out after %.2fs; returning %d scores",
+                    timeout,
+                    len(scores),
+                )
+                break
+            except StopAsyncIteration:
+                break
+            except Exception as exc:
+                logger.debug("Mempool stream unavailable: %s", exc)
+                break
             addr = item.get("address")
             if not addr:
                 continue
             scores[addr] = item
             if len(scores) >= _MEMPOOL_LIMIT:
                 break
-    except Exception as exc:
-        logger.debug("Mempool stream unavailable: %s", exc)
     finally:
         if gen is not None:
             with contextlib.suppress(Exception):
