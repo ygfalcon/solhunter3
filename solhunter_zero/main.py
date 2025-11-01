@@ -36,7 +36,10 @@ from . import arbitrage
 from .bootstrap import bootstrap
 from .config_runtime import Config
 from .connectivity import ensure_connectivity_async, ensure_connectivity
-from .services import start_depth_service as _start_depth_service
+from .services import (
+    start_depth_service as _start_depth_service,
+    DepthServiceStartupError,
+)
 from .loop import (
     place_order_async,
     trading_loop,
@@ -273,12 +276,15 @@ def main(
         cfg, runtime_cfg, proc = perform_startup(
             config_path, offline=offline, dry_run=dry_run
         )
-    except Exception as exc:
+    except DepthServiceStartupError as exc:
         logging.error("Failed to start depth_service: %s", exc)
         cfg = {"depth_service": False}
         runtime_cfg = Config.from_env(cfg)
         proc = None
         os.environ["DEPTH_SERVICE"] = "false"
+    except Exception:
+        logging.exception("Startup aborted during perform_startup; aborting")
+        raise
     metrics_aggregator.start()
 
     if not asyncio.run(event_bus.verify_broker_connection()):

@@ -23,6 +23,7 @@ sys.modules.setdefault("solana.rpc.api", fake_rpc.api)
 sys.modules.setdefault("solana.rpc.async_api", fake_rpc.async_api)
 
 import solhunter_zero.main as main
+from solhunter_zero.services import DepthServiceStartupError
 
 
 class DummyProc:
@@ -50,7 +51,7 @@ def test_depth_service_timeout(monkeypatch):
 
     monkeypatch.setenv("DEPTH_START_TIMEOUT", "0.01")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(DepthServiceStartupError):
         main._start_depth_service({"depth_service": True})
 
     assert dummy.terminated
