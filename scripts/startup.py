@@ -59,7 +59,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
         import logging
 
         logging.basicConfig(level=logging.WARNING)
-    if args.non_interactive:
+    if getattr(args, "diagnostics", False):
+        from scripts import diagnostics
+
+        return diagnostics.main()
+
+    if args.non_interactive and not getattr(args, "self_test", False):
         return startup_runner.launch_only(rest)
     ctx = startup_checks.perform_checks(
         args,
@@ -77,6 +82,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
     )
     code = ctx.pop("code", 0)
     if code:
+        return code
+    if getattr(args, "self_test", False):
         return code
     if ctx.get("config_path") is None:
         cfg = find_config_file() or "config.toml"
