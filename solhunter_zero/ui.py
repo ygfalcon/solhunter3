@@ -833,6 +833,15 @@ def create_app(state: UIState | None = None) -> Flask:
                     gap: 8px;
                     margin-top: 10px;
                 }
+                .endpoint-error {
+                    display: none;
+                    margin-top: 8px;
+                    color: var(--danger);
+                    font-size: 0.85rem;
+                }
+                .endpoint-error.is-visible {
+                    display: block;
+                }
             </style>
             <script src="{{ chart_js_local }}"></script>
             <script>
@@ -871,6 +880,7 @@ def create_app(state: UIState | None = None) -> Flask:
             <section class="grid">
                 <div class="panel">
                     <h2>Status</h2>
+                    <div class="endpoint-error" data-role="status-error" role="status" aria-live="polite" aria-hidden="true"></div>
                     <div class="status-grid" data-role="status-grid">
                         {% for key, value in status.items() %}
                             {% if key not in ('recent_tokens', 'last_iteration', 'iterations_completed', 'trade_count', 'activity_count', 'heartbeat', 'pipeline_tokens', 'pipeline_size', 'rl_daemon_status') %}
@@ -931,6 +941,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Iteration Summary</h2>
+                    <div class="endpoint-error" data-role="summary-error" role="status" aria-live="polite" aria-hidden="true"></div>
                     <div data-role="iteration-summary">
                         {% if summary %}
                             <table>
@@ -991,6 +1002,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Discovery</h2>
+                    <div class="endpoint-error" data-role="discovery-error" role="status" aria-live="polite" aria-hidden="true"></div>
                     <details class="collapsible" data-role="discovery" data-state-key="discovery">
                         <summary>
                             <div class="collapsible-summary" data-role="discovery-summary">
@@ -1037,6 +1049,8 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Counts</h2>
+                    <div class="endpoint-error" data-role="activity-error" role="status" aria-live="polite" aria-hidden="true"></div>
+                    <div class="endpoint-error" data-role="trades-error" role="status" aria-live="polite" aria-hidden="true"></div>
                     <table data-role="counts-table">
                         {% for key, val in counts.items() %}
                             <tr><th>{{ key }}</th><td>{{ val }}</td></tr>
@@ -1065,6 +1079,7 @@ def create_app(state: UIState | None = None) -> Flask:
             <section class="grid" style="margin-top:24px;">
                 <div class="panel">
                     <h2>Token Results</h2>
+                    <div class="endpoint-error" data-role="summary-tokens-error" role="status" aria-live="polite" aria-hidden="true"></div>
                     <div data-role="token-results">
                         {% if summary and summary.get('token_results') %}
                             <table>
@@ -1086,6 +1101,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Recent Actions</h2>
+                    <div class="endpoint-error" data-role="actions-error" role="status" aria-live="polite" aria-hidden="true"></div>
                     <div data-role="recent-actions">
                         {% if actions %}
                             <table>
@@ -1108,6 +1124,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Event Log</h2>
+                    <div class="endpoint-error" data-role="logs-error" role="status" aria-live="polite" aria-hidden="true"></div>
                     <details class="collapsible" data-role="logs" data-state-key="logs">
                         <summary>
                             <div class="collapsible-summary" data-role="logs-summary">
@@ -1149,6 +1166,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Weights</h2>
+                    <div class="endpoint-error" data-role="weights-error" role="status" aria-live="polite" aria-hidden="true"></div>
                     <div data-role="weights-container">
                         <div class="muted" data-role="weights-empty"{% if weights_labels %} style="display:none;"{% endif %}>Weights unavailable. The coordinator has not provided agent weights yet.</div>
                         <div class="weights-chart-container" data-role="weights-chart-wrap"{% if not weights_labels %} style="display:none;"{% endif %}>
@@ -1169,6 +1187,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
                 <div class="panel">
                     <h2>Configuration</h2>
+                    <div class="endpoint-error" data-role="config-error" role="status" aria-live="polite" aria-hidden="true"></div>
                     <div class="muted">Active agents:</div>
                     <div style="margin:10px 0;" data-role="config-agents">
                         {% for agent in config_overview.get('agents') or [] %}
@@ -1198,12 +1217,24 @@ def create_app(state: UIState | None = None) -> Flask:
 
             <section class="panel" style="margin-top:24px;">
                 <h2>Raw Summary JSON</h2>
+                <div class="endpoint-error" data-role="summary-json-error" role="status" aria-live="polite" aria-hidden="true"></div>
                 <pre data-role="summary-json">{{ summary | tojson(indent=2) }}</pre>
             </section>
             <script type="module">
             const REFRESH_INTERVAL_MS = 5000;
             const COUNT_ORDER = ['activity', 'trades', 'logs', 'weights', 'actions'];
             const PALETTE = ['#7afcff', '#f6a6ff', '#9effa9', '#ffe29a', '#b5b0ff', '#ffb8a5', '#aff8db', '#f3c4fb'];
+            const ENDPOINTS = [
+                { key: 'status', path: '/status', label: 'Status' },
+                { key: 'summary', path: '/summary', label: 'Summary' },
+                { key: 'tokens', path: '/tokens', label: 'Discovery' },
+                { key: 'actions', path: '/actions', label: 'Recent actions' },
+                { key: 'activity', path: '/activity', label: 'Activity' },
+                { key: 'trades', path: '/trades', label: 'Trades' },
+                { key: 'weights', path: '/weights', label: 'Weights' },
+                { key: 'logs', path: '/logs', label: 'Event log' },
+                { key: 'config', path: '/config', label: 'Configuration' },
+            ];
             const initialState = {
                 status: {{ status | tojson | safe }},
                 summary: {{ summary | tojson | safe }},
@@ -1220,6 +1251,8 @@ def create_app(state: UIState | None = None) -> Flask:
             let historyData = Array.isArray(initialState.history) ? [...initialState.history] : [];
             let paused = false;
             let inFlight = false;
+            let currentData = { ...initialState };
+            const AUTO_REFRESH = typeof window !== 'undefined' ? window.__solhunterAutoRefresh !== false : true;
 
             const charts = { actions: null, latency: null, weights: null };
 
@@ -1228,6 +1261,17 @@ def create_app(state: UIState | None = None) -> Flask:
                 statusLastIteration: document.querySelector('[data-role="status-last-iteration"]'),
                 statusPipeline: document.querySelector('[data-role="status-pipeline"]'),
                 iterationSummary: document.querySelector('[data-role="iteration-summary"]'),
+                statusError: document.querySelector('[data-role="status-error"]'),
+                summaryError: document.querySelector('[data-role="summary-error"]'),
+                discoveryError: document.querySelector('[data-role="discovery-error"]'),
+                actionsError: document.querySelector('[data-role="actions-error"]'),
+                activityError: document.querySelector('[data-role="activity-error"]'),
+                tradesError: document.querySelector('[data-role="trades-error"]'),
+                weightsError: document.querySelector('[data-role="weights-error"]'),
+                logsError: document.querySelector('[data-role="logs-error"]'),
+                configError: document.querySelector('[data-role="config-error"]'),
+                summaryTokensError: document.querySelector('[data-role="summary-tokens-error"]'),
+                summaryJsonError: document.querySelector('[data-role="summary-json-error"]'),
                 discoverySummary: document.querySelector('[data-role="discovery-summary"]'),
                 discoveryBody: document.querySelector('[data-role="discovery-body"]'),
                 countsTable: document.querySelector('[data-role="counts-table"]'),
@@ -1252,6 +1296,20 @@ def create_app(state: UIState | None = None) -> Flask:
                 actionsChartCanvas: document.getElementById('actionsChart'),
                 latencyChartCanvas: document.getElementById('latencyChart'),
             };
+            const endpointErrors = {
+                status: elements.statusError,
+                summary: elements.summaryError,
+                tokens: elements.discoveryError,
+                actions: elements.actionsError,
+                activity: elements.activityError,
+                trades: elements.tradesError,
+                weights: elements.weightsError,
+                logs: elements.logsError,
+                config: elements.configError,
+            };
+            const endpointMeta = Object.fromEntries(ENDPOINTS.map(endpoint => [endpoint.key, endpoint]));
+            const refreshListeners = new Set();
+            let lastRefreshOutcome = null;
 
             if (elements.refreshInterval) {
                 elements.refreshInterval.textContent = `${(REFRESH_INTERVAL_MS / 1000).toFixed(0)}s`;
@@ -1391,6 +1449,57 @@ def create_app(state: UIState | None = None) -> Flask:
                     }
                     setStat(key, tile.value ?? '—', tile.caption ?? '');
                 });
+            }
+
+            function setElementError(element, message) {
+                if (!element) {
+                    return;
+                }
+                if (message) {
+                    element.textContent = message;
+                    element.classList.add('is-visible');
+                    element.setAttribute('aria-hidden', 'false');
+                } else {
+                    element.textContent = '';
+                    element.classList.remove('is-visible');
+                    element.setAttribute('aria-hidden', 'true');
+                }
+            }
+
+            function setSectionError(endpointKey, message) {
+                const element = endpointErrors[endpointKey];
+                if (!element) {
+                    return;
+                }
+                setElementError(element, message);
+            }
+
+            function notifyRefreshComplete(outcome) {
+                lastRefreshOutcome = outcome;
+                refreshListeners.forEach(listener => {
+                    try {
+                        listener(outcome);
+                    } catch (error) {
+                        console.error('Refresh listener failed', error);
+                    }
+                });
+            }
+
+            function waitForNextRefresh() {
+                return new Promise(resolve => {
+                    const handler = outcome => {
+                        refreshListeners.delete(handler);
+                        resolve(outcome);
+                    };
+                    refreshListeners.add(handler);
+                });
+            }
+
+            function formatEndpointError(key, reason) {
+                const meta = endpointMeta[key];
+                const label = meta?.label ?? key;
+                const text = typeof reason === 'string' && reason ? reason : 'Request failed';
+                return `${label} update failed: ${text}`;
             }
 
             function renderStatusCard(key, value, status) {
@@ -2079,16 +2188,32 @@ def create_app(state: UIState | None = None) -> Flask:
                 }
             }
 
-            function setLastUpdated(date) {
+            function setLastUpdated(date, options = {}) {
                 if (!elements.lastUpdated) {
                     return;
                 }
-                elements.lastUpdated.textContent = date ? `Last updated: ${date.toLocaleTimeString()}` : '';
+                if (!date) {
+                    elements.lastUpdated.textContent = '';
+                    return;
+                }
+                const label = options.partial ? 'Partial update at' : 'Last updated';
+                elements.lastUpdated.textContent = `${label}: ${date.toLocaleTimeString()}`;
             }
 
-            function updateRefreshIndicators() {
+            function updateRefreshIndicators(state = {}) {
+                const { partial = false, failed = false } = state;
                 if (elements.refreshStatus) {
-                    elements.refreshStatus.textContent = paused ? 'Paused' : 'Live updates';
+                    let statusText;
+                    if (paused) {
+                        statusText = 'Paused';
+                    } else if (failed) {
+                        statusText = 'Update failed';
+                    } else if (partial) {
+                        statusText = 'Partial update';
+                    } else {
+                        statusText = 'Live updates';
+                    }
+                    elements.refreshStatus.textContent = statusText;
                 }
                 if (elements.toggleRefresh) {
                     elements.toggleRefresh.textContent = paused ? 'Resume' : 'Pause';
@@ -2096,7 +2221,14 @@ def create_app(state: UIState | None = None) -> Flask:
                 }
             }
 
-            function applyData(data) {
+            function applyData(partialData, errors = {}) {
+                currentData = { ...currentData, ...partialData };
+                Object.entries(endpointErrors).forEach(([key]) => {
+                    setSectionError(key, errors[key]);
+                });
+                setElementError(elements.summaryTokensError, errors.summary);
+                setElementError(elements.summaryJsonError, errors.summary);
+                const data = currentData;
                 const rawStatus = data.status && typeof data.status === 'object' ? data.status : {};
                 const summary = data.summary && typeof data.summary === 'object' ? data.summary : {};
                 const discovery = data.discovery && typeof data.discovery === 'object' ? data.discovery : {};
@@ -2143,7 +2275,6 @@ def create_app(state: UIState | None = None) -> Flask:
                 updateRawSummary(summary);
                 integrateSummaryIntoHistory(summary);
                 updateHistoryCharts();
-                setLastUpdated(new Date());
                 restoreDetailState();
             }
 
@@ -2160,50 +2291,105 @@ def create_app(state: UIState | None = None) -> Flask:
                     return;
                 }
                 inFlight = true;
+                let outcome = {
+                    successCount: 0,
+                    errorCount: 0,
+                    partial: false,
+                    success: false,
+                    errors: {},
+                    failedMessage: '',
+                    timestamp: Date.now(),
+                };
                 try {
-                    const [status, summary, discovery, actions, activityResp, trades, weights, logs, config] = await Promise.all([
-                        '/status',
-                        '/summary',
-                        '/tokens',
-                        '/actions',
-                        '/activity',
-                        '/trades',
-                        '/weights',
-                        '/logs',
-                        '/config',
-                    ].map(fetchJson));
-                    const activity = Array.isArray(activityResp?.entries) ? activityResp.entries : (Array.isArray(activityResp) ? activityResp : []);
+                    const settled = await Promise.allSettled(
+                        ENDPOINTS.map(endpoint => fetchJson(endpoint.path))
+                    );
+                    const partialData = {};
+                    const endpointErrorsMap = {};
+                    settled.forEach((result, index) => {
+                        const endpoint = ENDPOINTS[index];
+                        if (!endpoint) {
+                            return;
+                        }
+                        if (result.status === 'fulfilled') {
+                            partialData[endpoint.key] = result.value;
+                        } else {
+                            const reason = result.reason;
+                            const message =
+                                reason && typeof reason.message === 'string'
+                                    ? reason.message
+                                    : typeof reason === 'string'
+                                        ? reason
+                                        : `${endpoint.path} request failed`;
+                            endpointErrorsMap[endpoint.key] = formatEndpointError(endpoint.key, message);
+                            console.error(`Failed to refresh ${endpoint.path}`, reason);
+                        }
+                    });
+                    outcome.errorCount = Object.keys(endpointErrorsMap).length;
+                    outcome.successCount = ENDPOINTS.length - outcome.errorCount;
+                    outcome.errors = endpointErrorsMap;
+                    if ('activity' in partialData) {
+                        const activityResp = partialData.activity;
+                        partialData.activity = Array.isArray(activityResp?.entries)
+                            ? activityResp.entries
+                            : (Array.isArray(activityResp) ? activityResp : []);
+                    }
+                    if ('logs' in partialData && partialData.logs && typeof partialData.logs === 'object') {
+                        partialData.logs = partialData.logs;
+                    }
+                    const statusData = partialData.status && typeof partialData.status === 'object'
+                        ? partialData.status
+                        : (currentData.status && typeof currentData.status === 'object' ? currentData.status : {});
                     const metrics =
-                        status && typeof status === 'object'
-                            ? (status.dashboard_metrics && typeof status.dashboard_metrics === 'object'
-                                ? status.dashboard_metrics
-                                : (status.metrics && typeof status.metrics === 'object'
-                                    ? status.metrics
+                        statusData && typeof statusData === 'object'
+                            ? (statusData.dashboard_metrics && typeof statusData.dashboard_metrics === 'object'
+                                ? statusData.dashboard_metrics
+                                : (statusData.metrics && typeof statusData.metrics === 'object'
+                                    ? statusData.metrics
                                     : null))
                             : null;
-                    applyData({
-                        status,
-                        summary,
-                        discovery,
-                        actions: Array.isArray(actions) ? actions : [],
-                        activity,
-                        trades: Array.isArray(trades) ? trades : [],
-                        weights,
-                        logs,
-                        config,
-                        metrics,
-                    });
-                    updateRefreshIndicators();
+                    if (metrics !== null) {
+                        partialData.metrics = metrics;
+                    }
+                    if (outcome.successCount > 0) {
+                        applyData(partialData, endpointErrorsMap);
+                        updateRefreshIndicators({ partial: outcome.errorCount > 0 });
+                        setLastUpdated(new Date(), { partial: outcome.errorCount > 0 });
+                        outcome.partial = outcome.errorCount > 0;
+                        outcome.success = true;
+                    } else {
+                        applyData({}, endpointErrorsMap);
+                        updateRefreshIndicators({ failed: true });
+                        const firstError = Object.values(endpointErrorsMap)[0] ?? 'All endpoints failed';
+                        outcome.failedMessage = firstError;
+                        if (elements.lastUpdated) {
+                            elements.lastUpdated.textContent = `Last attempt failed: ${firstError}`;
+                        }
+                    }
                 } catch (error) {
                     console.error('Failed to refresh dashboard', error);
-                    if (elements.refreshStatus) {
-                        elements.refreshStatus.textContent = 'Update failed';
-                    }
+                    const message =
+                        error && typeof error.message === 'string'
+                            ? error.message
+                            : typeof error === 'string'
+                                ? error
+                                : 'Unexpected error';
+                    outcome = {
+                        successCount: 0,
+                        errorCount: 1,
+                        partial: false,
+                        success: false,
+                        errors: {},
+                        failedMessage: message,
+                        timestamp: Date.now(),
+                    };
+                    updateRefreshIndicators({ failed: true });
                     if (elements.lastUpdated) {
-                        elements.lastUpdated.textContent = `Last attempt failed: ${error.message}`;
+                        elements.lastUpdated.textContent = `Last attempt failed: ${message}`;
                     }
                 } finally {
                     inFlight = false;
+                    notifyRefreshComplete(outcome);
                 }
             }
 
@@ -2226,8 +2412,30 @@ def create_app(state: UIState | None = None) -> Flask:
             applyData(initialState);
             updateRefreshIndicators();
             updateHistoryCharts();
-            const intervalId = setInterval(refresh, REFRESH_INTERVAL_MS);
-            refresh();
+            let intervalId = null;
+            if (AUTO_REFRESH) {
+                intervalId = setInterval(refresh, REFRESH_INTERVAL_MS);
+                refresh();
+            }
+            if (typeof window !== 'undefined') {
+                window.__solhunterDashboardTest = {
+                    refresh,
+                    applyData,
+                    waitForNextRefresh,
+                    getLastRefreshOutcome: () => lastRefreshOutcome,
+                    getCurrentData: () => JSON.parse(JSON.stringify(currentData)),
+                    getEndpointErrors: () => Object.fromEntries(
+                        Object.entries(endpointErrors).map(([key, element]) => [
+                            key,
+                            element ? element.textContent : '',
+                        ]),
+                    ),
+                    setPaused: value => {
+                        paused = !!value;
+                        updateRefreshIndicators();
+                    },
+                };
+            }
             </script>
         </body>
         </html>
