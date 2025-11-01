@@ -378,8 +378,6 @@ class TradingRuntime:
 
         ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
         event_bus_url = f"ws://127.0.0.1:{ws_port}"
-        os.environ["EVENT_BUS_URL"] = event_bus_url
-        os.environ.setdefault("BROKER_WS_URLS", event_bus_url)
 
         local_ws_disabled = parse_bool_env("EVENT_BUS_DISABLE_LOCAL")
         start_attempts = 3
@@ -401,6 +399,22 @@ class TradingRuntime:
                     )
                 else:
                     self.bus_started = bool(server)
+                    if server is not None and not local_ws_disabled:
+                        bound_port = ws_port
+                        try:
+                            sockets = getattr(server, "sockets", None)
+                            if sockets:
+                                sock = sockets[0]
+                                sockname = sock.getsockname()
+                                if isinstance(sockname, (tuple, list)) and len(sockname) >= 2:
+                                    bound_port = int(sockname[1])
+                                elif isinstance(sockname, int):
+                                    bound_port = sockname
+                        except Exception:
+                            bound_port = ws_port
+                        event_bus_url = f"ws://127.0.0.1:{bound_port}"
+                        os.environ["EVENT_BUS_URL"] = event_bus_url
+                        os.environ["BROKER_WS_URLS"] = event_bus_url
                     detail = (
                         "local websocket disabled via EVENT_BUS_DISABLE_LOCAL"
                         if local_ws_disabled
