@@ -33,6 +33,13 @@ class PipelineCoordinator:
         execution_lanes: Optional[int] = None,
         on_evaluation = None,
         on_execution = None,
+        offline: bool = False,
+        token_file: Optional[str] = None,
+        discovery_empty_cache_ttl: Optional[float] = None,
+        discovery_backoff_factor: Optional[float] = None,
+        discovery_max_backoff: Optional[float] = None,
+        discovery_limit: Optional[int] = None,
+        discovery_startup_clones: Optional[int] = None,
     ) -> None:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
@@ -84,11 +91,73 @@ class PipelineCoordinator:
         self._execution_queue: asyncio.Queue[ActionBundle] = asyncio.Queue(maxsize=64)
         self._portfolio_service = PortfolioManagementService(portfolio)
 
+        discovery_kwargs: Dict[str, Any] = {}
+        if discovery_empty_cache_ttl is not None:
+            try:
+                discovery_kwargs["empty_cache_ttl"] = float(discovery_empty_cache_ttl)
+            except (TypeError, ValueError):
+                log.warning(
+                    "Invalid discovery_empty_cache_ttl=%r; ignoring",
+                    discovery_empty_cache_ttl,
+                )
+        if discovery_backoff_factor is not None:
+            try:
+                discovery_kwargs["backoff_factor"] = float(discovery_backoff_factor)
+            except (TypeError, ValueError):
+                log.warning(
+                    "Invalid discovery_backoff_factor=%r; ignoring",
+                    discovery_backoff_factor,
+                )
+        if discovery_max_backoff is not None:
+            try:
+                discovery_kwargs["max_backoff"] = float(discovery_max_backoff)
+            except (TypeError, ValueError):
+                log.warning(
+                    "Invalid discovery_max_backoff=%r; ignoring",
+                    discovery_max_backoff,
+                )
+        if discovery_startup_clones is not None:
+            try:
+                discovery_kwargs["startup_clones"] = int(discovery_startup_clones)
+            except (TypeError, ValueError):
+                log.warning(
+                    "Invalid discovery_startup_clones=%r; ignoring",
+                    discovery_startup_clones,
+                )
+
+        limit_override: Optional[int] = None
+        if discovery_limit is not None:
+            try:
+                limit_override = int(discovery_limit)
+            except (TypeError, ValueError):
+                log.warning("Invalid discovery_limit=%r; ignoring", discovery_limit)
+            else:
+                if limit_override <= 0:
+                    limit_override = None
+        else:
+            raw_limit = os.getenv("DISCOVERY_LIMIT")
+            if raw_limit:
+                try:
+                    parsed_limit = int(raw_limit)
+                except ValueError:
+                    log.warning("Invalid DISCOVERY_LIMIT=%r; ignoring", raw_limit)
+                else:
+                    if parsed_limit > 0:
+                        limit_override = parsed_limit
+
+        if limit_override is not None:
+            discovery_kwargs["limit"] = limit_override
+
+        self.offline = bool(offline)
+        self.token_file = str(token_file) if token_file else None
+
         self._discovery_service = DiscoveryService(
             self._discovery_queue,
             interval=self.discovery_interval,
             cache_ttl=self.discovery_cache_ttl,
-            limit=int(os.getenv("DISCOVERY_LIMIT", "0") or 0) or None,
+            offline=self.offline,
+            token_file=self.token_file,
+            **discovery_kwargs,
         )
         self._scoring_service = ScoringService(
             self._discovery_queue,
