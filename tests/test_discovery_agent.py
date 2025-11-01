@@ -98,7 +98,7 @@ def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
 
     async def run():
         with caplog.at_level("WARNING"):
-            return await agent.discover_tokens(offline=True)
+            return await agent.discover_tokens(offline=False)
 
     tokens = asyncio.run(run())
     assert tokens == ["tok"]
@@ -144,6 +144,50 @@ def test_discover_tokens_retries_on_empty_merge(monkeypatch, caplog):
     assert len(calls) == 2
     assert sleep_calls == [0.0]
     assert "No tokens discovered" in caplog.text
+
+
+def test_offline_discovery_uses_fallback(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    async def fail(*_args, **_kwargs):  # pragma: no cover - defensive
+        raise AssertionError("network method should not be called")
+
+    monkeypatch.setattr(discovery_mod, "scan_tokens_async", fail)
+    monkeypatch.setattr(discovery_mod, "merge_sources", fail)
+    monkeypatch.setattr(discovery_mod, "scan_tokens_onchain", fail)
+    monkeypatch.setattr(discovery_mod, "enrich_tokens_async", fail)
+    monkeypatch.setattr(discovery_mod, "_CACHE", {"tokens": [], "ts": 0.0, "limit": 0, "method": ""})
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0")
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
+
+    agent = DiscoveryAgent()
+
+    tokens = asyncio.run(agent.discover_tokens(offline=True))
+
+    assert tokens == discovery_mod._STATIC_FALLBACK[: agent.limit]
+    assert agent.last_method == "file"
+
+
+def test_offline_discovery_with_network_override(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    async def fail(*_args, **_kwargs):  # pragma: no cover - defensive
+        raise AssertionError("network method should not be called")
+
+    monkeypatch.setattr(discovery_mod, "scan_tokens_async", fail)
+    monkeypatch.setattr(discovery_mod, "merge_sources", fail)
+    monkeypatch.setattr(discovery_mod, "scan_tokens_onchain", fail)
+    monkeypatch.setattr(discovery_mod, "enrich_tokens_async", fail)
+    monkeypatch.setattr(discovery_mod, "_CACHE", {"tokens": [], "ts": 0.0, "limit": 0, "method": ""})
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0")
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
+
+    agent = DiscoveryAgent()
+
+    tokens = asyncio.run(agent.discover_tokens(offline=True, method="helius"))
+
+    assert tokens == discovery_mod._STATIC_FALLBACK[: agent.limit]
+    assert agent.last_method == "file"
 
 
 def test_discovery_agent_passes_ws_url(monkeypatch):

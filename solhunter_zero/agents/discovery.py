@@ -31,6 +31,8 @@ _STATIC_FALLBACK = [
 ]
 
 DEFAULT_DISCOVERY_METHOD = "helius"
+OFFLINE_DEFAULT_METHOD = "file"
+_OFFLINE_SAFE_METHODS = frozenset({OFFLINE_DEFAULT_METHOD})
 
 _DISCOVERY_METHOD_ALIASES: dict[str, str] = {
     "helius": "helius",
@@ -167,10 +169,10 @@ class DiscoveryAgent:
         ttl = self.cache_ttl
         method_override = method is not None
         requested_method = resolve_discovery_method(method)
-        if requested_method is None and offline and not method_override:
-            requested_method = "helius"
         if requested_method is None:
             active_method = self.default_method or DEFAULT_DISCOVERY_METHOD
+            if offline and not method_override:
+                active_method = OFFLINE_DEFAULT_METHOD
             if method_override and isinstance(method, str) and method.strip():
                 logger.warning(
                     "Unsupported discovery method %r; falling back to %s",
@@ -179,6 +181,15 @@ class DiscoveryAgent:
                 )
         else:
             active_method = requested_method
+
+        if offline and active_method not in _OFFLINE_SAFE_METHODS:
+            if method_override and isinstance(method, str) and method.strip():
+                logger.warning(
+                    "Offline discovery cannot use %s; falling back to %s",
+                    active_method,
+                    OFFLINE_DEFAULT_METHOD,
+                )
+            active_method = OFFLINE_DEFAULT_METHOD
         cached_tokens = (
             list(_CACHE.get("tokens", []))
             if isinstance(_CACHE.get("tokens"), list)
@@ -259,6 +270,10 @@ class DiscoveryAgent:
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Failed to read token_file %s: %s", token_file, exc)
                 return [], {}
+
+        if offline:
+            if method != "file" or not token_file:
+                return self._fallback_tokens(), {}
 
         if method == "websocket":
             results = await merge_sources(
