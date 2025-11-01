@@ -104,3 +104,27 @@ async def test_empty_backoff_grows_and_resets(monkeypatch):
     assert await service._fetch() == ["tok"]
     assert service._consecutive_empty == 0
     assert service._cooldown_until == pytest.approx(now["value"] + service.cache_ttl)
+
+
+@pytest.mark.anyio
+async def test_emit_tokens_publishes_event(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    events: list[list[str]] = []
+
+    def fake_publish(topic, payload, *args, **kwargs):
+        if topic == "token_discovered":
+            events.append(list(payload))
+
+    monkeypatch.setattr(
+        "solhunter_zero.pipeline.discovery_service.publish", fake_publish
+    )
+
+    await service._emit_tokens(["TokA", "TokB"], fresh=True)
+    batch = await queue.get()
+    assert [candidate.token for candidate in batch] == ["TokA", "TokB"]
+    assert events == [["TokA", "TokB"]]
+
+    await service._emit_tokens(["TokA", "TokB"], fresh=False)
+    assert events == [["TokA", "TokB"]]

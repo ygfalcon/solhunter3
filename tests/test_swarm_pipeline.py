@@ -363,6 +363,40 @@ def test_discovery_refreshes_cache(monkeypatch):
     assert pipeline._discovery_cache_expiry > time.time()
 
 
+def test_discovery_emits_token_event(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
+
+    events: list[list[str]] = []
+
+    def fake_publish(topic, payload, *args, **kwargs):
+        if topic == "token_discovered":
+            events.append(list(payload))
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", fake_publish)
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline._score_token",
+        lambda token, pf: {"New": 5.0, "Alt": 4.0, "Old": 3.0}.get(token, 1.0),
+    )
+
+    pipeline = SwarmPipeline(_DummyAgentManager([]), Portfolio(path=None), dry_run=True)
+    pipeline.discovery_cache_limit = 8
+    pipeline.discovery_cache_ttl = 0.0
+    pipeline._discovery_cache_tokens = ["Old"]
+    pipeline._discovery_cache_scores = {"Old": 3.0}
+    pipeline._discovery_cache_expiry = 0.0
+
+    class _StubAgent:
+        async def discover_tokens(self, **kwargs):
+            return ["New", "Alt"]
+
+    pipeline._discovery_agent = _StubAgent()
+
+    stage = asyncio.run(pipeline._run_discovery())
+
+    assert stage.tokens == ["New", "Alt", "Old"]
+    assert events == [stage.tokens]
+
+
 def test_execution_skips_missing_price(monkeypatch, caplog):
     _install_torch_stub(monkeypatch)
     from solhunter_zero.swarm_pipeline import (

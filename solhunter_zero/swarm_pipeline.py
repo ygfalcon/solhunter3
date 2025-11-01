@@ -1076,6 +1076,7 @@ class SwarmPipeline:
         stage = DiscoveryStage()
         now = time.time()
         cached_tokens = list(self._discovery_cache_tokens)
+        previous_cache_tokens = list(cached_tokens)
         cache_hit = False
         cache_refreshed = False
 
@@ -1182,6 +1183,7 @@ class SwarmPipeline:
         stage.scores = scores
         ranked = sorted(stage.tokens, key=lambda t: scores.get(t, 0.0), reverse=True)
         stage.tokens = ranked[:limit]
+        tokens_changed = bool(stage.tokens and stage.tokens != previous_cache_tokens)
         if token_queue is not None and stage.tokens:
             for tok in stage.tokens:
                 await token_queue.put((tok, stage.scores.get(tok, 0.0)))
@@ -1189,6 +1191,8 @@ class SwarmPipeline:
             "runtime.log",
             RuntimeLog(stage="pipeline", detail=f"queue:{len(stage.tokens)}/{len(scores)}"),
         )
+        if tokens_changed:
+            publish("token_discovered", list(stage.tokens))
         refresh_ttl = not cache_hit and not cache_refreshed
         ttl_override = None
         if refresh_ttl and not stage.discovered:
