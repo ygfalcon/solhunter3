@@ -560,6 +560,28 @@ class TradingRuntime:
                     )
                     evaluation_cache_ttl = None
 
+            offline_mode, dry_run_mode = self._derive_offline_modes()
+            token_file = self._resolve_token_file()
+            use_offline_discovery = bool(offline_mode or dry_run_mode)
+            discovery_limit_cfg = _maybe_int(
+                self.cfg.get("discovery_limit", self.cfg.get("discovery_max_tokens"))
+            )
+            discovery_empty_cache = _maybe_float(
+                self.cfg.get("discovery_empty_cache_ttl")
+            )
+            discovery_backoff = _maybe_float(self.cfg.get("discovery_backoff_factor"))
+            discovery_max_backoff = _maybe_float(self.cfg.get("discovery_max_backoff"))
+            discovery_startup_clones = _maybe_int(
+                self.cfg.get("discovery_startup_clones")
+            )
+
+            log.info(
+                "TradingRuntime: pipeline discovery offline=%s dry_run=%s token_file=%s",
+                use_offline_discovery,
+                bool(dry_run_mode),
+                token_file or "<static>",
+            )
+
             self.pipeline = PipelineCoordinator(
                 self.agent_manager,
                 self.portfolio,
@@ -571,6 +593,13 @@ class TradingRuntime:
                 execution_lanes=self._determine_execution_lanes(fast_mode),
                 on_evaluation=self._pipeline_on_evaluation,
                 on_execution=self._pipeline_on_execution,
+                offline=use_offline_discovery,
+                token_file=token_file,
+                discovery_empty_cache_ttl=discovery_empty_cache,
+                discovery_backoff_factor=discovery_backoff,
+                discovery_max_backoff=discovery_max_backoff,
+                discovery_limit=discovery_limit_cfg,
+                discovery_startup_clones=discovery_startup_clones,
             )
             log.info(
                 "TradingRuntime: pipeline created; evaluations will run through AgentManager swarm"
@@ -1250,6 +1279,64 @@ class TradingRuntime:
         except Exception:
             return default
 
+    def _derive_offline_modes(self) -> tuple[bool, bool]:
+        offline_env_raw = os.getenv("SOLHUNTER_OFFLINE")
+        dry_run_env_raw = os.getenv("DRY_RUN")
+        live_discovery_env_raw = os.getenv("LIVE_DISCOVERY")
+
+        offline_env = (
+            parse_bool_env("SOLHUNTER_OFFLINE", False)
+            if offline_env_raw is not None
+            else None
+        )
+        dry_run_env = (
+            parse_bool_env("DRY_RUN", False) if dry_run_env_raw is not None else None
+        )
+        live_discovery_env = (
+            parse_bool_env("LIVE_DISCOVERY", False)
+            if live_discovery_env_raw is not None
+            else None
+        )
+
+        offline_cfg = _maybe_bool(self.cfg.get("offline"))
+        dry_run_cfg = _maybe_bool(self.cfg.get("dry_run"))
+        live_discovery_cfg = _maybe_bool(self.cfg.get("live_discovery"))
+
+        if offline_env is not None:
+            offline_mode = offline_env
+        elif offline_cfg is not None:
+            offline_mode = offline_cfg
+        else:
+            live_flag = (
+                live_discovery_env
+                if live_discovery_env is not None
+                else live_discovery_cfg
+            )
+            offline_mode = not live_flag if live_flag is not None else False
+
+        if dry_run_env is not None:
+            dry_run_mode = dry_run_env
+        elif dry_run_cfg is not None:
+            dry_run_mode = dry_run_cfg
+        else:
+            dry_run_mode = False
+
+        return bool(offline_mode), bool(dry_run_mode)
+
+    def _resolve_token_file(self) -> Optional[str]:
+        candidate = self.cfg.get("token_file")
+        if not candidate:
+            candidate = self.cfg.get("token_list")
+        if not candidate:
+            candidate = os.getenv("TOKEN_FILE") or os.getenv("TOKEN_LIST")
+        if not candidate:
+            return None
+        try:
+            path = Path(str(candidate)).expanduser()
+        except Exception:
+            return str(candidate)
+        return str(path)
+
 
 def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     if value in (None, "", "null"):
@@ -1258,6 +1345,33 @@ def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]
         return float(value)
     except Exception:
         return default
+
+
+def _maybe_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if not text:
+            return None
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _maybe_int(value: Any) -> Optional[int]:
+    if value in (None, "", "null"):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _serialize(value: Any) -> Any:
