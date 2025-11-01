@@ -132,7 +132,7 @@ class RuntimeOrchestrator:
             t.start()
             await self._publish_stage("ui:http", True, f"host={os.getenv('UI_HOST','127.0.0.1')} port={os.getenv('UI_PORT', os.getenv('PORT','5000'))}")
 
-    async def start_agents(self) -> None:
+    async def start_agents(self) -> bool:
         # Use existing startup path to ensure consistent connectivity + depth_service
         await self._publish_stage("agents:startup", True)
         cfg, runtime_cfg, proc = await perform_startup_async(self.config_path, offline=False, dry_run=False)
@@ -151,18 +151,27 @@ class RuntimeOrchestrator:
         strategies = cfg.get("strategies")
         if isinstance(strategies, str):
             strategies = [s.strip() for s in strategies.split(",") if s.strip()]
+        strategy_manager: StrategyManager | None = None
         if cfg.get("agents"):
             agent_manager = AgentManager.from_config(cfg)
-            strategy_manager = None
             if agent_manager is None:
                 strategy_manager = StrategyManager(strategies)
         else:
             agent_manager = AgentManager.from_default()
             strategy_manager = None if agent_manager is not None else StrategyManager(strategies)
 
+        active_manager = agent_manager or AgentManager.from_default()
+        if active_manager is None:
+            await self._publish_stage(
+                "agents:loaded",
+                False,
+                "no agents available; configure agents or install defaults",
+            )
+            return False
+
         # Announce loaded agents
         try:
-            names = [a.name for a in (agent_manager.agents if agent_manager else [])]
+            names = [a.name for a in active_manager.agents]
             await self._publish_stage("agents:loaded", True, f"count={len(names)} names={','.join(names[:10])}{'...' if len(names)>10 else ''}")
         except Exception:
             pass
@@ -235,7 +244,7 @@ class RuntimeOrchestrator:
                 arbitrage_threshold=arbitrage_threshold,
                 arbitrage_amount=arbitrage_amount,
                 strategy_manager=strategy_manager,
-                agent_manager=agent_manager,
+                agent_manager=active_manager,
                 market_ws_url=cfg.get("market_ws_url"),
                 order_book_ws_url=cfg.get("order_book_ws_url"),
                 arbitrage_tokens=arbitrage_tokens,
@@ -249,7 +258,7 @@ class RuntimeOrchestrator:
             task = asyncio.create_task(_run_classic(), name="trading_loop")
             self.handles.tasks.append(task)
             await self._publish_stage("agents:loop", True)
-            return
+            return True
 
         # Event-driven mode: start agent runtime, swarm coordinator and executor
         from ..agents.runtime import AgentRuntime
@@ -257,7 +266,7 @@ class RuntimeOrchestrator:
         from ..agents.discovery import DiscoveryAgent
         from ..loop import _init_rl_training as _init_rl_training  # type: ignore
 
-        aruntime = AgentRuntime(agent_manager or AgentManager.from_default(), portfolio)
+        aruntime = AgentRuntime(active_manager, portfolio)
         await aruntime.start()
         execu = TradeExecutor(memory, portfolio)
         execu.start()
@@ -276,15 +285,15 @@ class RuntimeOrchestrator:
 
         async def _evolve_loop():
             # Evolve/mutate/cull continually based on success metrics
-            interval = int(getattr(agent_manager, "evolve_interval", 30) or 30)
+            interval = int(getattr(active_manager, "evolve_interval", 30) or 30)
             while True:
                 try:
-                    if agent_manager is not None:
-                        await agent_manager.evolve(
-                            threshold=getattr(agent_manager, "mutation_threshold", 0.0)
+                    if active_manager is not None:
+                        await active_manager.evolve(
+                            threshold=getattr(active_manager, "mutation_threshold", 0.0)
                         )
-                        await agent_manager.update_weights()
-                        agent_manager.save_weights()
+                        await active_manager.update_weights()
+                        active_manager.save_weights()
                 except Exception:
                     pass
                 await asyncio.sleep(max(5, interval))
@@ -302,6 +311,7 @@ class RuntimeOrchestrator:
         self.handles.tasks.append(asyncio.create_task(_discovery_loop(), name="discovery_loop"))
         self.handles.tasks.append(asyncio.create_task(_evolve_loop(), name="evolve_loop"))
         await self._publish_stage("agents:event_runtime", True)
+        return True
 
     async def start(self) -> None:
         # Make orchestrator subscribe to control messages
@@ -331,7 +341,10 @@ class RuntimeOrchestrator:
             self._risk_ctl.start()
         except Exception:
             self._risk_ctl = None
-        await self.start_agents()
+        agents_ready = await self.start_agents()
+        if not agents_ready:
+            await self.stop_all()
+            return
         await self._publish_stage("runtime:ready", True)
 
     async def stop_all(self) -> None:
