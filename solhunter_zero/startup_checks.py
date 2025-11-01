@@ -108,6 +108,20 @@ def perform_checks(*args, **kwargs) -> dict[str, Any]:
     Compatibility shim so scripts.startup can still call startup_checks.perform_checks.
     This simply ensures RPC + endpoint checks run, but doesn't duplicate startup_runner.
     """
-    ensure_rpc(warn_only=True)
-    ensure_endpoints()
-    return {"summary_rows": [], "rest": [], "code": 0}
+    parsed_args: Any = args[0] if args else None
+    rest: list[str] = args[1] if len(args) > 1 else []
+
+    offline = bool(getattr(parsed_args, "offline", False))
+    skip_rpc = bool(getattr(parsed_args, "skip_rpc_check", False))
+    skip_endpoints = bool(getattr(parsed_args, "skip_endpoint_check", False))
+
+    if not offline and not skip_rpc:
+        try:
+            ensure_rpc(warn_only=True)
+        except TypeError:  # pragma: no cover - legacy shims without keyword support
+            ensure_rpc(True)  # type: ignore[misc]
+
+    if not offline and not skip_endpoints:
+        ensure_endpoints()
+
+    return {"summary_rows": [], "rest": rest, "code": 0}
