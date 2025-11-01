@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, Optional
 from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
 from .types import TokenCandidate
+from ..event_bus import publish
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +206,9 @@ class DiscoveryService:
         batch = self._build_candidates(seq)
         await self.queue.put(batch)
         log.info("DiscoveryService queued %d tokens", len(batch))
+        previous = list(self._last_emitted)
+        if seq and seq != previous:
+            publish("token_discovered", list(seq))
         self._last_emitted = list(seq)
 
     def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
