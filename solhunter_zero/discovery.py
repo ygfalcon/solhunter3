@@ -66,13 +66,15 @@ async def _collect_mempool_candidates(
         return []
 
     results: List[Dict[str, Any]] = []
+    seen: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
     gen = None
     timeouts = 0
     timeout = max(_MEMPOOL_TIMEOUT, 0.1)
     target_url = ws_url or rpc_url
     try:
         gen = stream_ranked_mempool_tokens_with_depth(target_url, threshold=threshold)
-        while len(results) < limit:
+        while len(order) < limit:
             try:
                 item = await asyncio.wait_for(anext(gen), timeout=timeout)
             except asyncio.TimeoutError:
@@ -95,13 +97,24 @@ async def _collect_mempool_candidates(
             address = item.get("address")
             if not isinstance(address, str) or not address.strip():
                 continue
-            results.append(item)
-            if len(results) >= limit:
-                break
+            score = _coerce_float(
+                item.get("combined_score", item.get("score", 0.0))
+            )
+            existing = seen.get(address)
+            if existing is not None:
+                existing_score = _coerce_float(
+                    existing.get("combined_score", existing.get("score", 0.0))
+                )
+                if score > existing_score:
+                    seen[address] = item
+                continue
+            seen[address] = item
+            order.append(address)
     finally:
         if gen is not None:
             with contextlib.suppress(Exception):
                 await gen.aclose()
+    results.extend(seen[address] for address in order)
     return results
 
 
