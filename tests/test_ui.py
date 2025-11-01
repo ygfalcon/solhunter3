@@ -189,6 +189,81 @@ def test_index_html_uses_recent_count_over_length():
     assert "Newest 120 tokens shown below." in html
 
 
+def test_build_dashboard_metrics_returns_expected_values():
+    state = ui.UIState(
+        status_provider=lambda: {
+            "heartbeat": "alive",
+            "trading_loop": True,
+            "iterations_completed": 5,
+            "trade_count": "7",
+        },
+        summary_provider=lambda: {"elapsed_s": 1.25},
+        activity_provider=lambda: [{"id": 1}],
+        trades_provider=lambda: [{"id": "t1"}, {"id": "t2"}],
+        logs_provider=lambda: [{"message": "log"}],
+        weights_provider=lambda: {"alpha": 0.6, "beta": 0.4},
+        actions_provider=lambda: [{"action": "run"}],
+    )
+    metrics = ui._build_dashboard_metrics(
+        state,
+        status=state.snapshot_status(),
+        summary=state.snapshot_summary(),
+        activity=state.snapshot_activity(),
+        trades=state.snapshot_trades(),
+        logs=state.snapshot_logs(),
+        weights=state.snapshot_weights(),
+        actions=state.snapshot_actions(),
+    )
+    assert metrics["counts"] == {
+        "activity": 1,
+        "trades": 2,
+        "logs": 1,
+        "weights": 2,
+        "actions": 1,
+    }
+    tile_map = metrics["stat_tile_map"]
+    assert tile_map["heartbeat"]["value"] == "alive"
+    assert tile_map["iterations"]["value"] == "5"
+    assert tile_map["trades"]["value"] == "7"
+    assert tile_map["trades"]["caption"] == "1.40 per iteration"
+    assert metrics["raw"]["trade_count"] == 7
+    assert metrics["raw"]["iterations_completed"] == 5
+
+
+def test_status_endpoint_includes_dashboard_metrics():
+    state = ui.UIState(
+        status_provider=lambda: {"heartbeat": "ok", "trading_loop": True},
+        summary_provider=lambda: {
+            "timestamp": "2024-01-01T00:00:00Z",
+            "actions_count": 3,
+            "discovered_count": 4,
+            "elapsed_s": 2.0,
+        },
+        discovery_provider=lambda: {"recent": ["AAA", "BBB"]},
+        activity_provider=lambda: [{"id": 1}, {"id": 2}],
+        trades_provider=lambda: [{"id": "t"}],
+        logs_provider=lambda: [{"message": "log"}],
+        weights_provider=lambda: {"agent": 0.9},
+        actions_provider=lambda: [{"action": "trade"}],
+    )
+    app = ui.create_app(state)
+    client = app.test_client()
+    resp = client.get("/status")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["activity_count"] == 2
+    assert payload["trade_count"] == 1
+    metrics = payload.get("dashboard_metrics")
+    assert metrics is not None
+    assert metrics["counts"]["activity"] == 2
+    assert metrics["counts"]["trades"] == 1
+    assert metrics["counts"]["actions"] == 1
+    assert metrics["stat_tile_map"]["heartbeat"]["value"] == "ok"
+    assert metrics["raw"]["trade_count"] == 1
+    assert payload["recent_tokens"] == ["AAA", "BBB"]
+
+
+
 def test_ensure_active_keypair_selects_single(monkeypatch):
     monkeypatch.setattr(ui.wallet, "get_active_keypair_name", lambda: None)
     monkeypatch.setattr(ui.wallet, "list_keypairs", lambda: ["only"])
