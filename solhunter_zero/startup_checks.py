@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 try:
     import aiohttp  # type: ignore
@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 # Endpoints / env
 BIRDEYE_API = os.getenv("BIRDEYE_API", "https://public-api.birdeye.so/defi/tokenlist")
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY")
-SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d")
+SOLANA_RPC_URL = os.getenv(
+    "SOLANA_RPC_URL", "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
+)
 
 
 # -----------------------------
@@ -53,6 +55,45 @@ async def _probe_birdeye(session: "aiohttp.ClientSession") -> tuple[bool, str]:
             return False, f"BirdEye HTTP {resp.status}: {text[:200]}"
     except Exception as exc:
         return False, f"BirdEye error: {exc!s}"
+
+
+def _resolve_active_config(kwargs: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """Use injected helpers to load the active configuration for connectivity checks."""
+
+    load_config = kwargs.get("load_config")
+    config: Optional[Mapping[str, Any]] = None
+
+    if callable(load_config):
+        try:
+            config = load_config()
+        except Exception as exc:  # pragma: no cover - configuration optional for checks
+            logger.warning("Unable to load configuration for startup checks: %s", exc)
+
+    apply_env_overrides = kwargs.get("apply_env_overrides")
+    if callable(apply_env_overrides) and config is not None:
+        try:
+            config = apply_env_overrides(config)
+        except Exception as exc:  # pragma: no cover - configuration optional for checks
+            logger.warning("Unable to apply environment overrides: %s", exc)
+
+    return config
+
+
+def _apply_config_to_globals(config: Optional[Mapping[str, Any]]) -> None:
+    """Update module-level connectivity settings from ``config``."""
+
+    if not config:
+        return
+
+    global SOLANA_RPC_URL, BIRDEYE_API_KEY
+
+    rpc_url = config.get("solana_rpc_url")
+    if isinstance(rpc_url, str) and rpc_url:
+        SOLANA_RPC_URL = rpc_url
+
+    api_key = config.get("birdeye_api_key")
+    if api_key:
+        BIRDEYE_API_KEY = str(api_key)
 
 
 # -----------------------------
@@ -108,6 +149,9 @@ def perform_checks(*args, **kwargs) -> dict[str, Any]:
     Compatibility shim so scripts.startup can still call startup_checks.perform_checks.
     This simply ensures RPC + endpoint checks run, but doesn't duplicate startup_runner.
     """
+    config = _resolve_active_config(kwargs)
+    _apply_config_to_globals(config)
+
     ensure_rpc(warn_only=True)
     ensure_endpoints()
     return {"summary_rows": [], "rest": [], "code": 0}
