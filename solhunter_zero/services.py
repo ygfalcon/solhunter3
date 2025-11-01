@@ -18,6 +18,10 @@ _SERVICE_MANIFEST = (
     Path(__file__).resolve().parent.parent / "depth_service" / "Cargo.toml"
 )
 
+
+class DepthServiceStartupError(RuntimeError):
+    """Raised when the depth service fails to start successfully."""
+
 # Default Jupiter stats WS used upstream in some configs; we do NOT want to pass it
 # unless the user has explicitly set a non-empty override.
 _DEFAULT_JUPITER_WS = "wss://stats.jup.ag/ws"
@@ -91,7 +95,10 @@ def start_depth_service(cfg: dict) -> subprocess.Popen | None:
     socket_path.parent.mkdir(parents=True, exist_ok=True)
 
     logging.debug("Launching depth_service with args: %s", " ".join(args))
-    proc = subprocess.Popen(args)
+    try:
+        proc = subprocess.Popen(args)
+    except Exception as exc:  # pragma: no cover - delegated to caller for fallback
+        raise DepthServiceStartupError("Failed to launch depth_service process") from exc
 
     timeout = float(os.getenv("DEPTH_START_TIMEOUT", "10") or 10)
 
@@ -116,7 +123,9 @@ def start_depth_service(cfg: dict) -> subprocess.Popen | None:
                    bool(cfg.get("depth_service_optional", False)):
                     logging.warning("depth_service unavailable; continuing without it (optional mode)")
                     return None
-                raise RuntimeError(f"Failed to start depth_service within {timeout}s")
+                raise DepthServiceStartupError(
+                    f"Failed to start depth_service within {timeout}s"
+                )
             time.sleep(0.05)
     return proc
 
