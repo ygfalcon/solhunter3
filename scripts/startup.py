@@ -53,6 +53,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
     startup_cli.render_banner()
     args, rest = startup_cli.parse_args(raw_args)
+    setattr(args, "_startup_rest", rest)
     if getattr(args, "quiet", False):
         os.environ.setdefault("RUST_LOG", "warn")
         os.environ.setdefault("CARGO_TERM_COLOR", "never")

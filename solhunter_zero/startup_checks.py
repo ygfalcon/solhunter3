@@ -103,11 +103,11 @@ def ensure_endpoints(_cfg: Optional[dict[str, Any]] = None) -> None:
 # -----------------------------
 # Compatibility shim
 # -----------------------------
-def perform_checks(*args, **kwargs) -> dict[str, Any]:
+def perform_checks(args, rest, **kwargs) -> dict[str, Any]:
     """
     Compatibility shim so scripts.startup can still call startup_checks.perform_checks.
     This simply ensures RPC + endpoint checks run, but doesn't duplicate startup_runner.
     """
     ensure_rpc(warn_only=True)
     ensure_endpoints()
-    return {"summary_rows": [], "rest": [], "code": 0}
+    return {"summary_rows": [], "rest": rest, "code": 0}
