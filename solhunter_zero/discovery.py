@@ -5,7 +5,7 @@ import contextlib
 import logging
 import math
 import os
-from typing import Any, Dict, List
+from typing import Any, Awaitable, Callable, Dict, List
 
 from . import onchain_metrics
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
@@ -19,6 +19,9 @@ _DEFAULT_MEMPOOL_THRESHOLD = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 
 _MEMPOOL_TIMEOUT = float(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT", "2.5") or 2.5)
 _MEMPOOL_TIMEOUT_RETRIES = max(
     1, int(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT_RETRIES", "3") or 3)
+)
+_METRIC_BATCH_SIZE = max(
+    1, int(os.getenv("DISCOVERY_METRIC_BATCH_SIZE", "8") or 8)
 )
 
 
@@ -135,6 +138,36 @@ def _combine_score(entry: Dict[str, Any]) -> float:
     return base
 
 
+async def _gather_metrics_in_batches(
+    tokens: List[str],
+    rpc_url: str,
+    fetcher: Callable[[str, str], Awaitable[Any]],
+    batch_size: int,
+) -> List[Any]:
+    if not tokens:
+        return []
+
+    size = max(1, int(batch_size or 1))
+    if size <= 1:
+        results: List[Any] = []
+        for token in tokens:
+            try:
+                results.append(await fetcher(token, rpc_url))
+            except Exception as exc:  # pragma: no cover - defensive
+                results.append(exc)
+        return results
+
+    collected: List[Any] = []
+    for start in range(0, len(tokens), size):
+        batch = tokens[start : start + size]
+        batch_results = await asyncio.gather(
+            *[fetcher(token, rpc_url) for token in batch],
+            return_exceptions=True,
+        )
+        collected.extend(batch_results)
+    return collected
+
+
 async def merge_sources(
     rpc_url: str,
     *,
@@ -184,22 +217,17 @@ async def merge_sources(
             tok for tok in onchain_result if isinstance(tok, dict)
         ]
 
-    volume_tasks = [
-        asyncio.create_task(onchain_metrics.fetch_volume_onchain_async(tok, rpc_url))
-        for tok in trending_tokens
-    ]
-    liquidity_tasks = [
-        asyncio.create_task(
-            onchain_metrics.fetch_liquidity_onchain_async(tok, rpc_url)
-        )
-        for tok in trending_tokens
-    ]
-
-    volumes = await asyncio.gather(*volume_tasks, return_exceptions=True) if volume_tasks else []
-    liquidities = (
-        await asyncio.gather(*liquidity_tasks, return_exceptions=True)
-        if liquidity_tasks
-        else []
+    volumes = await _gather_metrics_in_batches(
+        trending_tokens,
+        rpc_url,
+        onchain_metrics.fetch_volume_onchain_async,
+        _METRIC_BATCH_SIZE,
+    )
+    liquidities = await _gather_metrics_in_batches(
+        trending_tokens,
+        rpc_url,
+        onchain_metrics.fetch_liquidity_onchain_async,
+        _METRIC_BATCH_SIZE,
     )
 
     combined: Dict[str, Dict[str, Any]] = {}
