@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -81,6 +82,129 @@ def startup_stubs(monkeypatch, tmp_path):
         str(tmp_path / "active"),
         raising=False,
     )
+
+
+def test_main_impl_self_test_short_circuit(monkeypatch):
+    from scripts import diagnostics as diagnostics_mod
+    from scripts import startup
+
+    class DummyChecks:
+        def __init__(self) -> None:
+            self.called = False
+
+        def perform_checks(self, *args, **kwargs):
+            self.called = True
+            assert "ensure_deps" in kwargs
+            return {"code": 7}
+
+        def ensure_target(self, *args, **kwargs):
+            return None
+
+        def ensure_wallet_cli(self, *args, **kwargs):
+            return None
+
+        def run_quick_setup(self, *args, **kwargs):
+            return None
+
+        def ensure_cargo(self, *args, **kwargs):
+            return None
+
+    dummy_checks = DummyChecks()
+    monkeypatch.setattr(startup, "_startup_checks", lambda: dummy_checks)
+    monkeypatch.setattr("solhunter_zero.logging_utils.rotate_preflight_log", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.logging_utils.log_startup", lambda *a, **k: None)
+    monkeypatch.setattr(startup.startup_cli, "render_banner", lambda: None)
+
+    def fake_parse_args(argv):
+        return SimpleNamespace(
+            diagnostics=False,
+            self_test=True,
+            quiet=False,
+            non_interactive=False,
+        ), ["--stub"]
+
+    monkeypatch.setattr(startup.startup_cli, "parse_args", fake_parse_args)
+
+    def fail_diagnostics():
+        raise AssertionError("diagnostics should not run")
+
+    monkeypatch.setattr(diagnostics_mod, "main", fail_diagnostics)
+
+    def fail_launch_only(*_a, **_k):
+        raise AssertionError("launch_only should not run")
+
+    def fail_run(*_a, **_k):
+        raise AssertionError("start_all should not run")
+
+    monkeypatch.setattr("solhunter_zero.bootstrap_utils.ensure_deps", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.bootstrap_utils.ensure_endpoints", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.rpc_utils.ensure_rpc", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.startup_runner.launch_only", fail_launch_only)
+    monkeypatch.setattr("solhunter_zero.startup_runner.run", fail_run)
+
+    result = startup._main_impl([])
+    assert result == 7
+    assert dummy_checks.called is True
+
+
+def test_main_impl_diagnostics_short_circuit(monkeypatch):
+    from scripts import diagnostics as diagnostics_mod
+    from scripts import startup
+
+    class DummyChecks:
+        def perform_checks(self, *args, **kwargs):
+            raise AssertionError("perform_checks should not run")
+
+        def ensure_target(self, *args, **kwargs):
+            return None
+
+        def ensure_wallet_cli(self, *args, **kwargs):
+            return None
+
+        def run_quick_setup(self, *args, **kwargs):
+            return None
+
+        def ensure_cargo(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(startup, "_startup_checks", lambda: DummyChecks())
+    monkeypatch.setattr("solhunter_zero.logging_utils.rotate_preflight_log", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.logging_utils.log_startup", lambda *a, **k: None)
+    monkeypatch.setattr(startup.startup_cli, "render_banner", lambda: None)
+
+    def fake_parse_args(argv):
+        return SimpleNamespace(
+            diagnostics=True,
+            self_test=False,
+            quiet=False,
+            non_interactive=False,
+        ), []
+
+    monkeypatch.setattr(startup.startup_cli, "parse_args", fake_parse_args)
+
+    diag_called = {}
+
+    def fake_diagnostics():
+        diag_called["called"] = True
+        return 11
+
+    monkeypatch.setattr(diagnostics_mod, "main", fake_diagnostics)
+
+    def fail_launch_only(*_a, **_k):
+        raise AssertionError("launch_only should not run")
+
+    def fail_run(*_a, **_k):
+        raise AssertionError("start_all should not run")
+
+    monkeypatch.setattr("solhunter_zero.bootstrap_utils.ensure_deps", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.bootstrap_utils.ensure_endpoints", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.rpc_utils.ensure_rpc", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.startup_runner.launch_only", fail_launch_only)
+    monkeypatch.setattr("solhunter_zero.startup_runner.run", fail_run)
+
+    result = startup._main_impl(["--diagnostics"])
+    assert result == 11
+    assert diag_called["called"] is True
 
 
 def test_startup_help():
