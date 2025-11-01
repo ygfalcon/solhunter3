@@ -67,6 +67,8 @@ class RuntimeOrchestrator:
         await self._publish_stage("bus:init", True)
         # Choose event-bus WS port early and export URLs so init sees them
         ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
+        original_event_bus_url = os.environ.get("EVENT_BUS_URL")
+        original_broker_ws_urls = os.environ.get("BROKER_WS_URLS")
         os.environ.setdefault("EVENT_BUS_URL", f"ws://127.0.0.1:{ws_port}")
         os.environ.setdefault("BROKER_WS_URLS", f"ws://127.0.0.1:{ws_port}")
         # Load config early so event bus has proper env/urls
@@ -91,15 +93,31 @@ class RuntimeOrchestrator:
             pass
         initialize_event_bus()
         # Prefer a dedicated local WS port to avoid conflicts
+        local_ws_bound = False
         try:
             await event_bus.start_ws_server("localhost", ws_port)
+            local_ws_bound = True
             self.handles.bus_started = True
             await self._publish_stage("bus:ws", True, f"port={ws_port}")
         except Exception as exc:
-            await self._publish_stage("bus:ws", False, f"{exc}")
-        # Ensure peers point to the local WS
-        os.environ["BROKER_WS_URLS"] = f"ws://127.0.0.1:{ws_port}"
-        os.environ["EVENT_BUS_URL"] = f"ws://127.0.0.1:{ws_port}"
+            detail = f"{exc}; keeping remote broker configuration"
+            await self._publish_stage("bus:ws", False, detail)
+            log.info("Local event bus websocket unavailable; %s", detail)
+
+        if local_ws_bound:
+            # Ensure peers point to the local WS
+            os.environ["BROKER_WS_URLS"] = f"ws://127.0.0.1:{ws_port}"
+            os.environ["EVENT_BUS_URL"] = f"ws://127.0.0.1:{ws_port}"
+        else:
+            # Restore original broker configuration when local WS is unavailable
+            if original_broker_ws_urls is None:
+                os.environ.pop("BROKER_WS_URLS", None)
+            else:
+                os.environ["BROKER_WS_URLS"] = original_broker_ws_urls
+            if original_event_bus_url is None:
+                os.environ.pop("EVENT_BUS_URL", None)
+            else:
+                os.environ["EVENT_BUS_URL"] = original_event_bus_url
         ok = await event_bus.verify_broker_connection(timeout=1.0)
         if not ok:
             await self._publish_stage("bus:verify", False, "broker roundtrip failed")
