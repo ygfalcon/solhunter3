@@ -28,6 +28,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import subprocess
 import threading
 from queue import Empty, Queue
 from dataclasses import dataclass, field
@@ -40,6 +41,8 @@ from .agents.discovery import (
     DISCOVERY_METHODS,
     resolve_discovery_method,
 )
+from . import wallet
+from . import config as config_module
 
 
 log = logging.getLogger(__name__)
@@ -51,6 +54,149 @@ DictProvider = Callable[[], Dict[str, Any]]
 
 
 HISTORY_MAX_ENTRIES = 200
+
+
+# ---------------------------------------------------------------------------
+# Compatibility helpers
+# ---------------------------------------------------------------------------
+
+start_all_thread: threading.Thread | None = None
+"""Handle to the legacy background thread that spawned services."""
+
+start_all_proc: subprocess.Popen | None = None
+"""Handle to the legacy ``start_all`` process when launched via the UI."""
+
+start_all_ready = threading.Event()
+"""Event toggled once the background start helper signals readiness."""
+
+
+def list_keypairs() -> List[str]:
+    """Return available keypair names via :mod:`wallet`."""
+
+    return wallet.list_keypairs()
+
+
+def select_keypair(name: str) -> None:
+    """Select *name* as the active keypair via :mod:`wallet`."""
+
+    wallet.select_keypair(name)
+
+
+def get_active_keypair_name() -> Optional[str]:
+    """Return the active keypair name if one is selected."""
+
+    return wallet.get_active_keypair_name()
+
+
+def load_selected_keypair() -> Optional[Any]:
+    """Load the currently selected keypair if available."""
+
+    return wallet.load_selected_keypair()
+
+
+def ensure_active_keypair() -> Optional[str]:
+    """Ensure a keypair is selected and ``KEYPAIR_PATH`` is populated.
+
+    The helper mirrors the historical UI surface so existing CLI helpers can
+    depend on it again.  If no keypair is active and exactly one keypair is
+    present on disk we automatically select it.  The resolved path is returned
+    for convenience.
+    """
+
+    env_path = os.getenv("KEYPAIR_PATH")
+    if env_path:
+        return env_path
+
+    active = get_active_keypair_name()
+    if not active:
+        keypairs = list_keypairs()
+        if len(keypairs) != 1:
+            return None
+        active = keypairs[0]
+        try:
+            select_keypair(active)
+        except FileNotFoundError:
+            log.warning("Keypair %s missing during ensure_active_keypair", active)
+            return None
+
+    keypair_path = os.path.join(wallet.KEYPAIR_DIR, f"{active}.json")
+    os.environ["KEYPAIR_PATH"] = keypair_path
+    return keypair_path
+
+
+def list_configs() -> List[str]:
+    """Return available configuration files."""
+
+    return config_module.list_configs()
+
+
+def select_config(name: str) -> None:
+    """Select *name* as the active configuration."""
+
+    config_module.select_config(name)
+
+
+def get_active_config_name() -> Optional[str]:
+    """Return the active configuration name if set."""
+
+    return config_module.get_active_config_name()
+
+
+def load_selected_config() -> Dict[str, Any]:
+    """Load the currently selected configuration file."""
+
+    return config_module.load_selected_config()
+
+
+def set_env_from_config(config: Dict[str, Any]) -> None:
+    """Populate environment variables from *config*."""
+
+    config_module.set_env_from_config(config)
+
+
+def apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose :func:`config.apply_env_overrides` for compatibility."""
+
+    return config_module.apply_env_overrides(config)
+
+
+def initialize_event_bus() -> None:
+    """Re-export :func:`config.initialize_event_bus` for callers."""
+
+    config_module.initialize_event_bus()
+
+
+def ensure_active_config() -> Dict[str, Any]:
+    """Ensure a configuration is selected and environment variables are set.
+
+    When no configuration is active and exactly one configuration file exists
+    we automatically select it to match the historic UI workflow.  The loaded
+    configuration dictionary is returned so callers can reuse it without
+    re-reading from disk.
+    """
+
+    name = get_active_config_name()
+    if not name:
+        configs = list_configs()
+        if len(configs) != 1:
+            cfg = load_selected_config()
+            if cfg:
+                set_env_from_config(cfg)
+            return cfg
+        candidate = configs[0]
+        try:
+            select_config(candidate)
+            name = candidate
+        except FileNotFoundError:
+            log.warning(
+                "Configuration %s missing during ensure_active_config", candidate
+            )
+            return {}
+
+    cfg = load_selected_config()
+    if cfg:
+        set_env_from_config(cfg)
+    return cfg
 
 
 @dataclass
