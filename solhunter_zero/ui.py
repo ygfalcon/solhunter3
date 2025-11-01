@@ -25,13 +25,16 @@ front of it if richer dashboards are required.
 
 from __future__ import annotations
 
+import argparse
+import json
 import ipaddress
 import logging
 import os
+import sys
 import threading
 from queue import Empty, Queue
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import IO, Any, Callable, Dict, Iterable, List, Optional
 
 from flask import Flask, jsonify, render_template_string, request, url_for
 
@@ -40,6 +43,17 @@ from .agents.discovery import (
     DISCOVERY_METHODS,
     resolve_discovery_method,
 )
+from ._preflight import (
+    check_artifacts,
+    derive_ws_url,
+    load_and_validate_config,
+    resolve_keypair,
+    rpc_blockhash,
+    rpc_ping,
+    validate_agent_weights,
+    verify_flashloan_prereqs,
+)
+from .config import find_config_file
 
 
 log = logging.getLogger(__name__)
@@ -2575,3 +2589,286 @@ class UIServer:
             server.shutdown()
         except Exception:  # pragma: no cover - best effort fallback
             pass
+
+
+def ui_selftest(
+    config_path: str | None = None,
+    *,
+    json_output: bool = False,
+    stream: IO[str] | None = None,
+) -> int:
+    """Run lightweight startup checks expected by integration tests.
+
+    The routine intentionally mirrors the self-test performed by the legacy
+    startup pipeline so callers (and CI) can quickly surface configuration or
+    dependency issues without spinning up the full runtime stack.
+    """
+
+    output_stream = stream or sys.stdout
+    emit_text = not json_output
+    results: List[Dict[str, Any]] = []
+    failures: List[str] = []
+    context: Dict[str, Any] = {}
+    config_data: Dict[str, Any] | None = None
+
+    def record(
+        name: str,
+        ok: bool,
+        message: str | None = None,
+        data: Dict[str, Any] | None = None,
+    ) -> None:
+        entry: Dict[str, Any] = {"check": name, "status": "ok" if ok else "error"}
+        if message:
+            entry["message"] = message
+        if data:
+            entry["data"] = data
+        results.append(entry)
+        if emit_text:
+            status_label = "OK" if ok else "FAIL"
+            line = f"[{status_label}] {name}"
+            if message:
+                line = f"{line}: {message}"
+            print(line, file=output_stream)
+
+    def load_basic_config(path: str) -> Dict[str, Any]:
+        from pathlib import Path
+        import tomllib
+
+        file_path = Path(path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {path}")
+        suffix = file_path.suffix.lower()
+        if suffix in {".toml", ".tml"}:
+            with file_path.open("rb") as fh:
+                data = tomllib.load(fh)
+        elif suffix == ".json":
+            with file_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        elif suffix in {".yaml", ".yml"}:
+            try:
+                import yaml  # type: ignore
+            except Exception as exc:  # pragma: no cover - optional dependency
+                raise RuntimeError("PyYAML is required to parse YAML configs") from exc
+            with file_path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+        else:
+            raise ValueError(f"Unsupported config format: {file_path.suffix}")
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be a mapping")
+        for key in ("solana_rpc_url", "dex_base_url", "agents"):
+            if key not in data or not data[key]:
+                raise KeyError(f"config missing `{key}`")
+        return data
+
+    # ------------------------------------------------------------------
+    # Artifact presence (skippable in CI)
+    # ------------------------------------------------------------------
+    skip_artifacts = os.getenv("SELFTEST_SKIP_ARTIFACTS") == "1" or os.getenv("CI") == "true"
+    if skip_artifacts:
+        record(
+            "artifacts",
+            True,
+            "Skipped (SELFTEST_SKIP_ARTIFACTS/CI set)",
+        )
+    else:
+        try:
+            check_artifacts()
+            record("artifacts", True, "Required native artifacts present")
+        except Exception as exc:  # pragma: no cover - exercised in integration
+            failures.append("artifacts")
+            record("artifacts", False, f"{exc}")
+
+    # ------------------------------------------------------------------
+    # Configuration load & normalisation
+    # ------------------------------------------------------------------
+    cfg_source = config_path or os.getenv("SOLHUNTER_CONFIG")
+    if not cfg_source:
+        cfg_source = find_config_file()
+    if cfg_source:
+        cfg_source = str(cfg_source)
+        context["config_path"] = cfg_source
+    else:
+        context["config_path"] = None
+
+    context["config_parser"] = None
+
+    if not cfg_source:
+        failures.append("config")
+        record(
+            "config",
+            False,
+            "No configuration file found (set SOLHUNTER_CONFIG or add config.toml)",
+        )
+    else:
+        try:
+            config_data = load_and_validate_config(cfg_source)
+            os.environ.setdefault("SOLHUNTER_CONFIG", cfg_source)
+            context["config_parser"] = "strict"
+            record(
+                "config",
+                True,
+                f"Loaded configuration from {cfg_source}",
+                {"agents": list(config_data.get("agents", []))},
+            )
+        except Exception:
+            try:
+                config_data = load_basic_config(cfg_source)
+                os.environ.setdefault("SOLHUNTER_CONFIG", cfg_source)
+                context["config_parser"] = "basic"
+                record(
+                    "config",
+                    True,
+                    f"Loaded configuration from {cfg_source} (basic parser)",
+                    {"agents": list(config_data.get("agents", []))},
+                )
+            except Exception as exc:
+                failures.append("config")
+                context["config_parser"] = None
+                record("config", False, f"Failed to load config: {exc}")
+                config_data = None
+
+    # ------------------------------------------------------------------
+    # Keypair discovery
+    # ------------------------------------------------------------------
+    if config_data is not None:
+        try:
+            keypair_path = resolve_keypair()
+            context["keypair_path"] = str(keypair_path)
+            record("keypair", True, f"Using {keypair_path}")
+        except Exception as exc:
+            failures.append("keypair")
+            context["keypair_path"] = None
+            record("keypair", False, f"Failed to resolve keypair: {exc}")
+    else:
+        context["keypair_path"] = None
+
+    # ------------------------------------------------------------------
+    # Agent weighting & flash-loan prerequisites
+    # ------------------------------------------------------------------
+    if config_data is not None:
+        try:
+            weights = validate_agent_weights(config_data)
+            record("agent-weights", True, f"Normalised {len(weights)} agent weights")
+        except Exception as exc:
+            failures.append("agent-weights")
+            record("agent-weights", False, f"Failed to normalise agent weights: {exc}")
+
+        try:
+            verify_flashloan_prereqs(config_data)
+            use_flash = config_data.get("use_flash_loans", False)
+            if isinstance(use_flash, str):
+                use_flash = use_flash.strip().lower() in {"1", "true", "yes"}
+            elif isinstance(use_flash, (int, float)):
+                use_flash = bool(use_flash)
+            if use_flash:
+                detail = "Flash loan prerequisites satisfied"
+            else:
+                detail = "Flash loans disabled"
+            record("flash-loan-prereqs", True, detail)
+        except Exception as exc:
+            failures.append("flash-loan-prereqs")
+            record("flash-loan-prereqs", False, f"Flash loan prerequisites failed: {exc}")
+
+    # ------------------------------------------------------------------
+    # RPC reachability (version + blockhash) & websocket derivation
+    # ------------------------------------------------------------------
+    if config_data is not None:
+        rpc_url = str(config_data.get("solana_rpc_url", "")).strip()
+        if rpc_url:
+            context["solana_rpc_url"] = rpc_url
+            try:
+                version_resp = rpc_ping(rpc_url)
+                version_data = version_resp.get("result", version_resp)
+                message = "RPC responded"
+                if isinstance(version_data, dict) and version_data.get("solana-core"):
+                    message = f"RPC version: {version_data['solana-core']}"
+                record("rpc-version", True, message, {"response": version_data})
+            except Exception as exc:
+                failures.append("rpc-version")
+                record("rpc-version", False, f"RPC version check failed: {exc}")
+
+            try:
+                blockhash_resp = rpc_blockhash(rpc_url)
+                blockhash_value: Optional[str] = None
+                if isinstance(blockhash_resp, dict):
+                    result = blockhash_resp.get("result", {})
+                    if isinstance(result, dict):
+                        value = result.get("value", {})
+                        if isinstance(value, dict):
+                            blockhash_value = value.get("blockhash")
+                if blockhash_value:
+                    detail = f"Latest blockhash {blockhash_value}"
+                else:
+                    detail = "Fetched latest blockhash"
+                record("rpc-blockhash", True, detail, {"response": blockhash_resp})
+            except Exception as exc:
+                failures.append("rpc-blockhash")
+                record("rpc-blockhash", False, f"RPC blockhash check failed: {exc}")
+
+            try:
+                ws_url = config_data.get("solana_ws_url") or derive_ws_url(rpc_url)
+                context["solana_ws_url"] = ws_url
+                record("rpc-websocket", True, f"Websocket URL {ws_url}")
+            except Exception as exc:
+                failures.append("rpc-websocket")
+                record("rpc-websocket", False, f"Failed to derive websocket URL: {exc}")
+        else:
+            failures.append("rpc-version")
+            record("rpc-version", False, "Configuration missing solana_rpc_url")
+
+    rc = 0 if not failures else 1
+
+    if json_output:
+        payload: Dict[str, Any] = {
+            "status": "ok" if rc == 0 else "error",
+            "checks": results,
+        }
+        if context:
+            payload["context"] = context
+        json.dump(payload, output_stream)
+        output_stream.write("\n")
+    elif emit_text:
+        print("", file=output_stream)
+        if rc == 0:
+            print("Self-test completed successfully.", file=output_stream)
+        else:
+            print(
+                f"Self-test failed ({len(failures)} check{'s' if len(failures) != 1 else ''} failed)",
+                file=output_stream,
+            )
+
+    return rc
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="SolHunter Zero UI utilities")
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="Run the UI preflight self-test and exit",
+    )
+    parser.add_argument(
+        "--config",
+        help="Path to configuration file used for the self-test",
+        default=None,
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Emit machine-readable JSON instead of human-readable text",
+    )
+    return parser
+
+
+def main(argv: List[str] | None = None) -> int:
+    parser = _build_cli_parser()
+    args = parser.parse_args(argv)
+    if args.selftest:
+        return ui_selftest(args.config, json_output=args.json_output)
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - manual CLI invocation
+    raise SystemExit(main(sys.argv[1:]))

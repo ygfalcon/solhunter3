@@ -118,6 +118,7 @@ The default workflow is intentionally simple:
 python -m solhunter_zero.ui --selftest
 ```
 This runs the same checks the full orchestrator will rely on, but isolated—so failures are clean and actionable.
+The command exits with ``0`` on success (non-zero otherwise) and accepts ``--json`` when you need machine-readable output for automation.
 
 ### Offline dashboard assets
 

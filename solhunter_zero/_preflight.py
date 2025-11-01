@@ -83,8 +83,10 @@ def resolve_keypair(dir_="keypairs", auto_env="AUTO_SELECT_KEYPAIR") -> Path:
             return path
         return (Path(dir_) / path).resolve()
 
+    auto_select = os.getenv(auto_env, "").strip().lower()
+
     kp_env = os.getenv("KEYPAIR_PATH")
-    if kp_env:
+    if kp_env and auto_select not in {"1", "true", "yes"}:
         candidate = _normalize(Path(kp_env).expanduser())
         if not candidate.exists():
             raise FileNotFoundError(f"KEYPAIR_PATH not found: {candidate}")
@@ -97,12 +99,17 @@ def resolve_keypair(dir_="keypairs", auto_env="AUTO_SELECT_KEYPAIR") -> Path:
     if not candidates:
         raise FileNotFoundError(f"No keypairs in {kp_dir}")
 
-    auto_select = os.getenv(auto_env, "").strip().lower()
-    if auto_select in {"1", "true", "yes"} or len(candidates) == 1:
+    if len(candidates) == 1:
         chosen = candidates[0]
         os.environ.setdefault("KEYPAIR_PATH", str(chosen))
         os.environ.setdefault("SOLANA_KEYPAIR", str(chosen))
         return chosen
+
+    if auto_select in {"1", "true", "yes"}:
+        raise RuntimeError(
+            "Multiple keypairs available and AUTO_SELECT_KEYPAIR is enabled. "
+            "Export KEYPAIR_PATH to select one explicitly."
+        )
 
     raise RuntimeError(
         "Multiple keypairs available and KEYPAIR_PATH not set. "
