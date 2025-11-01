@@ -120,7 +120,10 @@ def run(
         return 1
 
     # Arguments to start_all
-    rest = list(ctx.get("rest", []))
+    if "rest" in ctx:
+        rest = list(ctx["rest"] or [])
+    else:
+        rest = list(getattr(args, "_startup_rest", []))
     if args.non_interactive:
         return launch_only(rest, subprocess_module=subprocess_module)
 
