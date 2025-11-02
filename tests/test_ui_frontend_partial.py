@@ -19,8 +19,160 @@ def _extract_module_script(html: str) -> str:
     return html[start:end]
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for frontend smoke test")
-def test_dashboard_refresh_recovers_from_partial_failures() -> None:
+def _render_dashboard_module_script(state: UIState) -> str:
+    app = create_app(state=state)
+    client = app.test_client()
+    html = client.get("/").data.decode("utf-8")
+    return _extract_module_script(html)
+
+
+def _simulate_dashboard_refreshes(module_script: str, scenarios: list[dict[str, object]]) -> list[dict[str, object]]:
+    node_script = textwrap.dedent(
+        f"""
+        const vm = require('vm');
+
+        const scenarios = {json.dumps(scenarios)};
+        let scenarioIndex = 0;
+
+        const elementStore = new Map();
+        function createElement(name) {{
+            return {{
+                name,
+                innerHTML: '',
+                textContent: '',
+                dataset: {{}},
+                style: {{ display: '' }},
+                classList: {{
+                    add() {{}},
+                    remove() {{}},
+                }},
+                setAttribute() {{}},
+                removeAttribute() {{}},
+                querySelectorAll() {{ return []; }},
+                querySelector() {{ return null; }},
+                addEventListener() {{}},
+                getContext() {{ return {{}}; }},
+            }};
+        }}
+
+        const document = {{
+            hidden: false,
+            querySelector(selector) {{
+                if (!elementStore.has(selector)) {{
+                    elementStore.set(selector, createElement(selector));
+                }}
+                return elementStore.get(selector);
+            }},
+            querySelectorAll() {{
+                return [];
+            }},
+            getElementById(id) {{
+                const key = `#${{id}}`;
+                if (!elementStore.has(key)) {{
+                    const el = createElement(key);
+                    if (id === 'actionsChart' || id === 'latencyChart' || id === 'weightsChart') {{
+                        el.getContext = () => ({{}});
+                    }}
+                    elementStore.set(key, el);
+                }}
+                return elementStore.get(key);
+            }},
+            addEventListener() {{}},
+        }};
+
+        const windowObj = {{
+            document,
+            addEventListener() {{}},
+            Chart: class {{
+                constructor() {{
+                    this.data = {{ labels: [], datasets: [
+                        {{ data: [], hidden: false }},
+                        {{ data: [], hidden: false }},
+                        {{ data: [], hidden: false }},
+                    ] }};
+                }}
+                update() {{}}
+                destroy() {{}}
+            }},
+            sessionStorage: {{
+                _store: new Map(),
+                getItem(key) {{ return this._store.has(key) ? this._store.get(key) : null; }},
+                setItem(key, value) {{ this._store.set(key, String(value)); }},
+                removeItem(key) {{ this._store.delete(key); }},
+            }},
+            __solhunterAutoRefresh: false,
+        }};
+
+        global.window = windowObj;
+        global.document = document;
+        global.navigator = {{ userAgent: 'node' }};
+        global.Chart = windowObj.Chart;
+        global.console = console;
+        global.setInterval = () => 1;
+        global.clearInterval = () => {{}};
+
+        global.fetch = async (path) => {{
+            const response = scenarios[scenarioIndex][path];
+            if (!response) {{
+                throw new Error(`Missing mock for ${{path}} in scenario ${{scenarioIndex}}`);
+            }}
+            if (response.ok === false) {{
+                return {{
+                    ok: false,
+                    status: response.status ?? 500,
+                    json: async () => response.body ?? null,
+                }};
+            }}
+            return {{
+                ok: true,
+                status: 200,
+                json: async () => response.body,
+            }};
+        }};
+
+        const moduleSource = {json.dumps(module_script)};
+        vm.runInContext(moduleSource, vm.createContext(global));
+
+        const hooks = window.__solhunterDashboardTest;
+        if (!hooks) {{
+            throw new Error('Dashboard test hooks were not initialised');
+        }}
+
+        async function runScenario(index) {{
+            scenarioIndex = index;
+            await hooks.refresh();
+            return {{
+                data: hooks.getCurrentData(),
+                errors: hooks.getEndpointErrors(),
+                outcome: hooks.getLastRefreshOutcome(),
+            }};
+        }}
+
+        (async () => {{
+            const results = [];
+            for (let i = 0; i < scenarios.length; i += 1) {{
+                results.push(await runScenario(i));
+            }}
+            process.stdout.write(JSON.stringify(results));
+        }})().catch(err => {{
+            console.error(err);
+            process.exit(1);
+        }});
+        """
+    )
+
+    proc = subprocess.run(
+        ["node", "-"],
+        input=node_script,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    return json.loads(proc.stdout)
+
+
+def _build_dashboard_refresh_test_inputs() -> tuple[str, list[dict[str, object]], dict[str, object], dict[str, object]]:
     initial_summary = {
         "timestamp": "2024-01-01T00:00:00Z",
         "elapsed_s": 4,
@@ -60,10 +212,7 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
         history_provider=lambda: [],
     )
 
-    app = create_app(state=state)
-    client = app.test_client()
-    html = client.get("/").data.decode("utf-8")
-    module_script = _extract_module_script(html)
+    module_script = _render_dashboard_module_script(state)
 
     summary_success = {
         "timestamp": "2024-01-01T00:05:00Z",
@@ -207,155 +356,14 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
         },
     ]
 
-    node_script = textwrap.dedent(
-        f"""
-        const vm = require('vm');
+    return module_script, scenarios, initial_summary, summary_success
 
-        const scenarios = {json.dumps(scenarios)};
-        let scenarioIndex = 0;
 
-        const elementStore = new Map();
-        function createElement(name) {{
-            return {{
-                name,
-                innerHTML: '',
-                textContent: '',
-                dataset: {{}},
-                style: {{ display: '' }},
-                classList: {{
-                    add() {{}},
-                    remove() {{}},
-                }},
-                setAttribute() {{}},
-                removeAttribute() {{}},
-                querySelectorAll() {{ return []; }},
-                querySelector() {{ return null; }},
-                addEventListener() {{}},
-                getContext() {{ return {{}}; }},
-            }};
-        }}
-
-        const document = {{
-            hidden: false,
-            querySelector(selector) {{
-                if (!elementStore.has(selector)) {{
-                    elementStore.set(selector, createElement(selector));
-                }}
-                return elementStore.get(selector);
-            }},
-            querySelectorAll() {{
-                return [];
-            }},
-            getElementById(id) {{
-                const key = `#${{id}}`;
-                if (!elementStore.has(key)) {{
-                    const el = createElement(key);
-                    if (id === 'actionsChart' || id === 'latencyChart' || id === 'weightsChart') {{
-                        el.getContext = () => ({{}});
-                    }}
-                    elementStore.set(key, el);
-                }}
-                return elementStore.get(key);
-            }},
-            addEventListener() {{}},
-        }};
-
-        const windowObj = {{
-            document,
-            addEventListener() {{}},
-            Chart: class {{
-                constructor() {{
-                    this.data = {{ labels: [], datasets: [
-                        {{ data: [], hidden: false }},
-                        {{ data: [], hidden: false }},
-                        {{ data: [], hidden: false }},
-                    ] }};
-                }}
-                update() {{}}
-                destroy() {{}}
-            }},
-            sessionStorage: {{
-                _store: new Map(),
-                getItem(key) {{ return this._store.has(key) ? this._store.get(key) : null; }},
-                setItem(key, value) {{ this._store.set(key, String(value)); }},
-                removeItem(key) {{ this._store.delete(key); }},
-            }},
-            __solhunterAutoRefresh: false,
-        }};
-
-        global.window = windowObj;
-        global.document = document;
-        global.navigator = {{ userAgent: 'node' }};
-        global.Chart = windowObj.Chart;
-        global.console = console;
-        global.setInterval = () => 1;
-        global.clearInterval = () => {{}};
-
-        global.fetch = async (path) => {{
-            const response = scenarios[scenarioIndex][path];
-            if (!response) {{
-                throw new Error(`Missing mock for ${{path}} in scenario ${{scenarioIndex}}`);
-            }}
-            if (response.ok === false) {{
-                return {{
-                    ok: false,
-                    status: response.status ?? 500,
-                    json: async () => response.body ?? null,
-                }};
-            }}
-            return {{
-                ok: true,
-                status: 200,
-                json: async () => response.body,
-            }};
-        }};
-
-        const moduleSource = {json.dumps(module_script)};
-        vm.runInContext(moduleSource, vm.createContext(global));
-
-        const hooks = window.__solhunterDashboardTest;
-        if (!hooks) {{
-            throw new Error('Dashboard test hooks were not initialised');
-        }}
-
-        function setScenario(index) {{
-            scenarioIndex = index;
-        }}
-
-        (async () => {{
-            setScenario(0);
-            await hooks.refresh();
-            const first = {{
-                data: hooks.getCurrentData(),
-                errors: hooks.getEndpointErrors(),
-                outcome: hooks.getLastRefreshOutcome(),
-            }};
-            setScenario(1);
-            await hooks.refresh();
-            const second = {{
-                data: hooks.getCurrentData(),
-                errors: hooks.getEndpointErrors(),
-                outcome: hooks.getLastRefreshOutcome(),
-            }};
-            process.stdout.write(JSON.stringify({{ first, second }}));
-        }})().catch(err => {{
-            console.error(err);
-            process.exit(1);
-        }});
-        """
-    )
-
-    proc = subprocess.run(
-        ["node", "-"],
-        input=node_script,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-
-    payload = json.loads(proc.stdout)
-    first = payload["first"]
-    second = payload["second"]
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for frontend smoke test")
+def test_dashboard_refresh_recovers_from_partial_failures() -> None:
+    module_script, scenarios, initial_summary, summary_success = _build_dashboard_refresh_test_inputs()
+    results = _simulate_dashboard_refreshes(module_script, scenarios)
+    first, second = results
 
     assert first["data"]["status"]["iterations_completed"] == 10
     assert first["data"]["summary"]["timestamp"] == initial_summary["timestamp"]
@@ -369,3 +377,38 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
     assert second["outcome"]["partial"] is False
     assert second["outcome"]["successCount"] == 9
     assert second["outcome"]["errorCount"] == 0
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for frontend smoke test")
+def test_dashboard_refresh_tracks_successful_sections() -> None:
+    module_script, scenarios, initial_summary, _ = _build_dashboard_refresh_test_inputs()
+    results = _simulate_dashboard_refreshes(module_script, scenarios)
+    first, second = results
+
+    expected_endpoints = {
+        "status",
+        "summary",
+        "tokens",
+        "actions",
+        "activity",
+        "trades",
+        "weights",
+        "logs",
+        "config",
+    }
+
+    assert set(first["outcome"]["successfulEndpoints"]) == expected_endpoints - {"summary"}
+    assert set(first["outcome"]["failedEndpoints"]) == {"summary"}
+    assert first["outcome"]["success"] is True
+    assert first["outcome"]["partial"] is True
+    assert first["data"]["summary"]["timestamp"] == initial_summary["timestamp"]
+    assert all(
+        message == ""
+        for key, message in first["errors"].items()
+        if key != "summary"
+    )
+
+    assert set(second["outcome"]["successfulEndpoints"]) == expected_endpoints
+    assert set(second["outcome"]["failedEndpoints"]) == set()
+    assert second["outcome"]["success"] is True
+    assert second["outcome"]["partial"] is False

@@ -2454,23 +2454,23 @@ def create_app(state: UIState | None = None) -> Flask:
                     success: false,
                     errors: {},
                     failedMessage: '',
+                    successfulEndpoints: [],
+                    failedEndpoints: [],
                     timestamp: Date.now(),
                 };
                 try {
-                    const settled = await Promise.allSettled(
-                        ENDPOINTS.map(endpoint => fetchJson(endpoint.path))
-                    );
                     const partialData = {};
                     const endpointErrorsMap = {};
-                    settled.forEach((result, index) => {
-                        const endpoint = ENDPOINTS[index];
+                    const successfulEndpoints = new Set();
+                    for (const endpoint of ENDPOINTS) {
                         if (!endpoint) {
-                            return;
+                            continue;
                         }
-                        if (result.status === 'fulfilled') {
-                            partialData[endpoint.key] = result.value;
-                        } else {
-                            const reason = result.reason;
+                        try {
+                            const data = await fetchJson(endpoint.path);
+                            partialData[endpoint.key] = data;
+                            successfulEndpoints.add(endpoint.key);
+                        } catch (reason) {
                             const message =
                                 reason && typeof reason.message === 'string'
                                     ? reason.message
@@ -2480,10 +2480,12 @@ def create_app(state: UIState | None = None) -> Flask:
                             endpointErrorsMap[endpoint.key] = formatEndpointError(endpoint.key, message);
                             console.error(`Failed to refresh ${endpoint.path}`, reason);
                         }
-                    });
+                    }
                     outcome.errorCount = Object.keys(endpointErrorsMap).length;
-                    outcome.successCount = ENDPOINTS.length - outcome.errorCount;
+                    outcome.successCount = successfulEndpoints.size;
                     outcome.errors = endpointErrorsMap;
+                    outcome.successfulEndpoints = Array.from(successfulEndpoints);
+                    outcome.failedEndpoints = Object.keys(endpointErrorsMap);
                     if ('activity' in partialData) {
                         const activityResp = partialData.activity;
                         partialData.activity = Array.isArray(activityResp?.entries)
@@ -2518,6 +2520,7 @@ def create_app(state: UIState | None = None) -> Flask:
                         updateRefreshIndicators({ failed: true });
                         const firstError = Object.values(endpointErrorsMap)[0] ?? 'All endpoints failed';
                         outcome.failedMessage = firstError;
+                        outcome.failedEndpoints = Object.keys(endpointErrorsMap);
                         if (elements.lastUpdated) {
                             elements.lastUpdated.textContent = `Last attempt failed: ${firstError}`;
                         }
@@ -2537,6 +2540,8 @@ def create_app(state: UIState | None = None) -> Flask:
                         success: false,
                         errors: {},
                         failedMessage: message,
+                        successfulEndpoints: [],
+                        failedEndpoints: ENDPOINTS.map(endpoint => endpoint.key),
                         timestamp: Date.now(),
                     };
                     updateRefreshIndicators({ failed: true });
