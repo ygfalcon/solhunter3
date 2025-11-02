@@ -31,7 +31,8 @@ from ..event_bus import (
     stop_ws_server,
     verify_broker_connection,
 )
-from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
+from .. import discovery_state
+from ..agents.discovery import resolve_discovery_method
 from ..loop import FirstTradeTimeoutError, run_iteration, _init_rl_training
 from ..pipeline import PipelineCoordinator
 from ..main import perform_startup_async
@@ -213,8 +214,6 @@ class TradingRuntime:
             "detected": False,
             "configured": False,
         }
-        self._discovery_method_override: Optional[str] = None
-        self._discovery_method_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -991,28 +990,19 @@ class TradingRuntime:
         canonical = resolve_discovery_method(method)
         if canonical is None:
             return
-        with self._discovery_method_lock:
-            previous = self._discovery_method_override
-            self._discovery_method_override = canonical
-        if previous != canonical:
-            detail = f"method updated to {canonical}"
-            self.activity.add("discovery", detail)
-            try:
-                publish("runtime.log", {"stage": "discovery", "detail": detail})
-            except Exception:  # pragma: no cover - logging only
-                log.debug("Failed to publish discovery update", exc_info=True)
+        previous = discovery_state.get_override()
+        discovery_state.set_override(canonical)
+        if previous == canonical:
+            return
+        detail = f"method updated to {canonical}"
+        self.activity.add("discovery", detail)
+        try:
+            publish("runtime.log", {"stage": "discovery", "detail": detail})
+        except Exception:  # pragma: no cover - logging only
+            log.debug("Failed to publish discovery update", exc_info=True)
 
     def _current_discovery_method(self) -> str:
-        with self._discovery_method_lock:
-            override = self._discovery_method_override
-        if override:
-            return override
-        method = resolve_discovery_method(self.cfg.get("discovery_method"))
-        if method is None:
-            method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
-        if method is None:
-            method = DEFAULT_DISCOVERY_METHOD
-        return method
+        return discovery_state.current_method(config=self.cfg)
 
     def _record_discovery(self, tokens: Iterable[str]) -> None:
         with self._discovery_lock:

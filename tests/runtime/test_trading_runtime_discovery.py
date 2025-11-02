@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from solhunter_zero import ui
+from solhunter_zero import discovery_state, ui
 from solhunter_zero.runtime import trading_runtime
 
 
@@ -15,6 +15,7 @@ def anyio_backend():
 @pytest.mark.anyio("asyncio")
 async def test_discovery_post_updates_method_without_restart(monkeypatch):
     monkeypatch.delenv("DISCOVERY_METHOD", raising=False)
+    discovery_state.clear_override()
 
     runtime = trading_runtime.TradingRuntime()
     runtime.agent_manager = Mock()

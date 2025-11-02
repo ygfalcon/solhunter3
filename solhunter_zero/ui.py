@@ -41,7 +41,7 @@ from .agents.discovery import (
     DISCOVERY_METHODS,
     resolve_discovery_method,
 )
-from . import wallet
+from . import discovery_state, wallet
 from . import config as config_module
 
 
@@ -298,14 +298,16 @@ class UIState:
             log.exception("UI actions provider failed")
             return []
 
-    def notify_discovery_update(self, method: str) -> None:
+    def notify_discovery_update(self, method: str) -> bool:
         callback = self.discovery_update_callback
         if callback is None:
-            return
+            return False
         try:
             callback(method)
+            return True
         except Exception:  # pragma: no cover - defensive logging
             log.exception("Discovery update callback failed")
+            return False
 
 
 
@@ -2863,7 +2865,9 @@ def create_app(state: UIState | None = None) -> Flask:
                 400,
             )
         os.environ["DISCOVERY_METHOD"] = method
-        state.notify_discovery_update(method)
+        handled = state.notify_discovery_update(method)
+        if not handled:
+            discovery_state.set_override(method)
         return jsonify(
             {
                 "status": "ok",
