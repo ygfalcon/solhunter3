@@ -138,25 +138,30 @@ def _start_event_bus(url: str) -> None:
     _EVENT_THREAD = thread
     thread.start()
 
-    async def _check() -> None:
+    async def _check() -> str:
         listen_host, listen_port = event_bus.get_ws_address()
         local_url = f"ws://{listen_host}:{listen_port}"
-        os.environ["EVENT_BUS_URL"] = local_url
         async with websockets.connect(local_url):
-            return None
+            return local_url
 
     deadline = time.time() + 5
+    local_url: str | None = None
     while time.time() < deadline:
         try:
-            asyncio.run(asyncio.wait_for(_check(), 1))
-            return
+            local_url = asyncio.run(asyncio.wait_for(_check(), 1))
+            break
         except Exception:
             time.sleep(0.1)
-    raise RuntimeError(f"Event bus failed to start at {url}")
+    if not local_url:
+        raise RuntimeError(f"Event bus failed to start at {url}")
+
+    os.environ["EVENT_BUS_URL"] = local_url
 
 
 def _maybe_start_event_bus(cfg: dict) -> None:
     """Start a local event bus if ``EVENT_BUS_URL`` points to localhost."""
+    if os.getenv("EVENT_BUS_DISABLE_LOCAL", "").strip().lower() in {"1", "true", "yes"}:
+        return
     url = os.getenv("EVENT_BUS_URL") or cfg.get("event_bus_url")
     if not url:
         _start_event_bus(DEFAULT_WS_URL)

@@ -1,7 +1,9 @@
 import asyncio
 import importlib
+import os
 import sys
 import types
+from urllib.parse import urlparse
 
 import pytest
 
@@ -57,6 +59,17 @@ def test_maybe_start_event_bus_default(monkeypatch):
     assert called["url"] == ap.DEFAULT_WS_URL
 
 
+def test_maybe_start_event_bus_disabled(monkeypatch):
+    ap = _load_autopilot(monkeypatch)
+    called = {}
+    monkeypatch.setattr(ap, "_start_event_bus", lambda url: called.setdefault("url", url))
+    monkeypatch.setenv("EVENT_BUS_DISABLE_LOCAL", "1")
+    monkeypatch.setenv("EVENT_BUS_URL", "wss://remote.example/ws")
+    ap._maybe_start_event_bus({})
+    assert "url" not in called
+    assert os.getenv("EVENT_BUS_URL") == "wss://remote.example/ws"
+
+
 def test_start_event_bus_invokes_readiness(monkeypatch):
     ap = _load_autopilot(monkeypatch)
     called = {}
@@ -85,7 +98,10 @@ def test_start_event_bus_invokes_readiness(monkeypatch):
     ap._start_event_bus("ws://localhost:8769")
     assert called["host"] == "localhost"
     assert called["port"] == 8769
-    assert called["url"] == "ws://localhost:8769"
+    parsed = urlparse(called["url"])
+    assert parsed.scheme == "ws"
+    assert parsed.hostname in {"localhost", "127.0.0.1"}
+    assert parsed.port == 8769
     assert called.get("connect") is True
     if ap._EVENT_LOOP:
         fut = asyncio.run_coroutine_threadsafe(
