@@ -394,3 +394,41 @@ def test_start_handles_are_exposed():
     assert hasattr(ui, "start_all_thread")
     assert hasattr(ui, "start_all_proc")
     assert hasattr(ui, "start_all_ready")
+
+
+def test_uiserver_start_raises_when_background_thread_fails(monkeypatch):
+    state = ui.UIState()
+
+    class _FailingServer:
+        def __init__(self) -> None:
+            self.server_port = 9999
+            self.closed = False
+            self.shutdown_called = False
+
+        def serve_forever(self) -> None:
+            raise OSError("simulated bind failure")
+
+        def server_close(self) -> None:
+            self.closed = True
+
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+
+    created_servers: list[_FailingServer] = []
+
+    def _make_server(host, port, app, threaded):
+        server = _FailingServer()
+        created_servers.append(server)
+        return server
+
+    monkeypatch.setattr("werkzeug.serving.make_server", _make_server)
+
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+
+    with pytest.raises(ui.UIStartupError) as excinfo:
+        server.start()
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert "simulated bind failure" in str(excinfo.value.__cause__)
+    assert created_servers and created_servers[0].closed is True
+    assert server._thread is None

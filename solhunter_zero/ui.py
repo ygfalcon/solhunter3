@@ -2853,10 +2853,10 @@ class UIServer:
         exception_queue: Queue[BaseException] = Queue(maxsize=1)
 
         def _serve() -> None:
+            startup_event.set()
             try:
-                startup_event.set()
                 server.serve_forever()
-            except Exception as exc:  # pragma: no cover - best effort logging
+            except BaseException as exc:  # pragma: no cover - best effort logging
                 try:
                     exception_queue.put_nowait(exc)
                 except Exception:  # pragma: no cover - queue errors should not surface
