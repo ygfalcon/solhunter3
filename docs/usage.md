@@ -13,8 +13,8 @@ Use the `--testnet` flag to submit orders to a testnet DEX endpoint, `--dry-run`
 ## Dashboard
 
 The SolHunter Zero dashboard served from the UI module refreshes itself without reloading the page. A lightweight JavaScript loop
-fetches `/status` and `/summary` (plus supporting JSON feeds) every five seconds and patches the existing DOM so counters, charts
-and tables update in place. Because the page no longer uses a `<meta http-equiv="refresh">` tag the header, open `<details>`
+fetches the aggregate `/?format=json` endpoint every five seconds (falling back to the individual JSON feeds when needed) and
+patches the existing DOM so counters, charts and tables update in place. Because the page no longer uses a `<meta http-equiv="refresh">` tag the header, open `<details>`
 sections and scroll positions stay put instead of flickering on each update. The Discovery and Logs panels remember their
 expanded/collapsed state across refreshes using session storage, letting you keep frequently used panels open while watching live
 data.

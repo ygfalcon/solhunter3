@@ -1391,6 +1391,7 @@ def create_app(state: UIState | None = None) -> Flask:
                 { key: 'logs', path: '/logs', label: 'Event log' },
                 { key: 'config', path: '/config', label: 'Configuration' },
             ];
+            const DASHBOARD_AGGREGATE_PATH = '/?format=json';
             const initialState = {
                 status: {{ status | tojson | safe }},
                 summary: {{ summary | tojson | safe }},
@@ -2378,6 +2379,13 @@ def create_app(state: UIState | None = None) -> Flask:
             }
 
             function applyData(partialData, errors = {}) {
+                if (partialData && Array.isArray(partialData.history)) {
+                    historyData = partialData.history
+                        .filter(item => item && typeof item === 'object')
+                        .map(item => JSON.parse(JSON.stringify(item)))
+                        .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
+                        .slice(-200);
+                }
                 currentData = { ...currentData, ...partialData };
                 Object.entries(endpointErrors).forEach(([key]) => {
                     setSectionError(key, errors[key]);
@@ -2442,6 +2450,54 @@ def create_app(state: UIState | None = None) -> Flask:
                 return response.json();
             }
 
+            function normaliseAggregatePayload(payload) {
+                if (!payload || typeof payload !== 'object') {
+                    return null;
+                }
+                if (!payload.status || typeof payload.status !== 'object') {
+                    return null;
+                }
+                if (!payload.summary || typeof payload.summary !== 'object') {
+                    return null;
+                }
+                const activityEntries = Array.isArray(payload.activity)
+                    ? payload.activity
+                    : Array.isArray(payload.activity?.entries)
+                        ? payload.activity.entries
+                        : [];
+                const logsEntries = Array.isArray(payload.logs?.entries)
+                    ? payload.logs.entries
+                    : Array.isArray(payload.logs)
+                        ? payload.logs
+                        : [];
+                const weights = payload.weights && typeof payload.weights === 'object' && !Array.isArray(payload.weights)
+                    ? payload.weights
+                    : {};
+                const config = payload.config_overview && typeof payload.config_overview === 'object'
+                    ? payload.config_overview
+                    : (payload.config && typeof payload.config === 'object'
+                        ? payload.config
+                        : {});
+                const result = {
+                    status: payload.status,
+                    summary: payload.summary,
+                    discovery: payload.discovery && typeof payload.discovery === 'object' ? payload.discovery : {},
+                    actions: Array.isArray(payload.actions) ? payload.actions : [],
+                    activity: activityEntries,
+                    trades: Array.isArray(payload.trades) ? payload.trades : [],
+                    weights,
+                    logs: { entries: logsEntries },
+                    config,
+                };
+                if (payload.metrics && typeof payload.metrics === 'object') {
+                    result.metrics = payload.metrics;
+                }
+                if (Array.isArray(payload.history)) {
+                    result.history = payload.history;
+                }
+                return result;
+            }
+
             async function refresh() {
                 if (paused || inFlight) {
                     return;
@@ -2457,69 +2513,96 @@ def create_app(state: UIState | None = None) -> Flask:
                     timestamp: Date.now(),
                 };
                 try {
-                    const settled = await Promise.allSettled(
-                        ENDPOINTS.map(endpoint => fetchJson(endpoint.path))
-                    );
-                    const partialData = {};
-                    const endpointErrorsMap = {};
-                    settled.forEach((result, index) => {
-                        const endpoint = ENDPOINTS[index];
-                        if (!endpoint) {
-                            return;
+                    let aggregateData = null;
+                    let aggregateError = null;
+                    try {
+                        const aggregatePayload = await fetchJson(DASHBOARD_AGGREGATE_PATH);
+                        aggregateData = normaliseAggregatePayload(aggregatePayload);
+                        if (!aggregateData) {
+                            aggregateError = new Error('Aggregate dashboard payload missing required data');
                         }
-                        if (result.status === 'fulfilled') {
-                            partialData[endpoint.key] = result.value;
-                        } else {
-                            const reason = result.reason;
-                            const message =
-                                reason && typeof reason.message === 'string'
-                                    ? reason.message
-                                    : typeof reason === 'string'
-                                        ? reason
-                                        : `${endpoint.path} request failed`;
-                            endpointErrorsMap[endpoint.key] = formatEndpointError(endpoint.key, message);
-                            console.error(`Failed to refresh ${endpoint.path}`, reason);
-                        }
-                    });
-                    outcome.errorCount = Object.keys(endpointErrorsMap).length;
-                    outcome.successCount = ENDPOINTS.length - outcome.errorCount;
-                    outcome.errors = endpointErrorsMap;
-                    if ('activity' in partialData) {
-                        const activityResp = partialData.activity;
-                        partialData.activity = Array.isArray(activityResp?.entries)
-                            ? activityResp.entries
-                            : (Array.isArray(activityResp) ? activityResp : []);
+                    } catch (error) {
+                        aggregateError = error;
                     }
-                    if ('logs' in partialData && partialData.logs && typeof partialData.logs === 'object') {
-                        partialData.logs = partialData.logs;
-                    }
-                    const statusData = partialData.status && typeof partialData.status === 'object'
-                        ? partialData.status
-                        : (currentData.status && typeof currentData.status === 'object' ? currentData.status : {});
-                    const metrics =
-                        statusData && typeof statusData === 'object'
-                            ? (statusData.dashboard_metrics && typeof statusData.dashboard_metrics === 'object'
-                                ? statusData.dashboard_metrics
-                                : (statusData.metrics && typeof statusData.metrics === 'object'
-                                    ? statusData.metrics
-                                    : null))
-                            : null;
-                    if (metrics !== null) {
-                        partialData.metrics = metrics;
-                    }
-                    if (outcome.successCount > 0) {
-                        applyData(partialData, endpointErrorsMap);
-                        updateRefreshIndicators({ partial: outcome.errorCount > 0 });
-                        setLastUpdated(new Date(), { partial: outcome.errorCount > 0 });
-                        outcome.partial = outcome.errorCount > 0;
+                    if (!aggregateError && aggregateData) {
+                        applyData(aggregateData, {});
+                        updateRefreshIndicators({ partial: false });
+                        setLastUpdated(new Date());
+                        outcome.errorCount = 0;
+                        outcome.successCount = ENDPOINTS.length;
+                        outcome.errors = {};
+                        outcome.partial = false;
                         outcome.success = true;
+                        outcome.failedMessage = '';
                     } else {
-                        applyData({}, endpointErrorsMap);
-                        updateRefreshIndicators({ failed: true });
-                        const firstError = Object.values(endpointErrorsMap)[0] ?? 'All endpoints failed';
-                        outcome.failedMessage = firstError;
-                        if (elements.lastUpdated) {
-                            elements.lastUpdated.textContent = `Last attempt failed: ${firstError}`;
+                        if (aggregateError) {
+                            console.warn('Aggregate dashboard request failed, falling back to individual endpoints', aggregateError);
+                        }
+                        const settled = await Promise.allSettled(
+                            ENDPOINTS.map(endpoint => fetchJson(endpoint.path))
+                        );
+                        const partialData = {};
+                        const endpointErrorsMap = {};
+                        settled.forEach((result, index) => {
+                            const endpoint = ENDPOINTS[index];
+                            if (!endpoint) {
+                                return;
+                            }
+                            if (result.status === 'fulfilled') {
+                                partialData[endpoint.key] = result.value;
+                            } else {
+                                const reason = result.reason;
+                                const message =
+                                    reason && typeof reason.message === 'string'
+                                        ? reason.message
+                                        : typeof reason === 'string'
+                                            ? reason
+                                            : `${endpoint.path} request failed`;
+                                endpointErrorsMap[endpoint.key] = formatEndpointError(endpoint.key, message);
+                                console.error(`Failed to refresh ${endpoint.path}`, reason);
+                            }
+                        });
+                        outcome.errorCount = Object.keys(endpointErrorsMap).length;
+                        outcome.successCount = ENDPOINTS.length - outcome.errorCount;
+                        outcome.errors = endpointErrorsMap;
+                        if ('activity' in partialData) {
+                            const activityResp = partialData.activity;
+                            partialData.activity = Array.isArray(activityResp?.entries)
+                                ? activityResp.entries
+                                : (Array.isArray(activityResp) ? activityResp : []);
+                        }
+                        if ('logs' in partialData && partialData.logs && typeof partialData.logs === 'object') {
+                            partialData.logs = partialData.logs;
+                        }
+                        const statusData = partialData.status && typeof partialData.status === 'object'
+                            ? partialData.status
+                            : (currentData.status && typeof currentData.status === 'object' ? currentData.status : {});
+                        const metrics =
+                            statusData && typeof statusData === 'object'
+                                ? (statusData.dashboard_metrics && typeof statusData.dashboard_metrics === 'object'
+                                    ? statusData.dashboard_metrics
+                                    : (statusData.metrics && typeof statusData.metrics === 'object'
+                                        ? statusData.metrics
+                                        : null))
+                                : null;
+                        if (metrics !== null) {
+                            partialData.metrics = metrics;
+                        }
+                        if (outcome.successCount > 0) {
+                            applyData(partialData, endpointErrorsMap);
+                            updateRefreshIndicators({ partial: outcome.errorCount > 0 });
+                            setLastUpdated(new Date(), { partial: outcome.errorCount > 0 });
+                            outcome.partial = outcome.errorCount > 0;
+                            outcome.success = true;
+                            outcome.failedMessage = '';
+                        } else {
+                            applyData({}, endpointErrorsMap);
+                            updateRefreshIndicators({ failed: true });
+                            const firstError = Object.values(endpointErrorsMap)[0] ?? 'All endpoints failed';
+                            outcome.failedMessage = firstError;
+                            if (elements.lastUpdated) {
+                                elements.lastUpdated.textContent = `Last attempt failed: ${firstError}`;
+                            }
                         }
                     }
                 } catch (error) {

@@ -85,125 +85,102 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
         ],
     }
 
-    scenarios = [
-        {
-            "/status": {
-                "ok": True,
-                "body": {
-                    "trading_loop": True,
-                    "iterations_completed": 10,
-                    "dashboard_metrics": {
-                        "counts": {
-                            "activity": 7,
-                            "trades": 1,
-                            "logs": 1,
-                            "weights": 1,
-                            "actions": 4,
-                        },
-                        "stat_tile_map": {
-                            "heartbeat": {"value": "60", "caption": "loop"},
-                        },
-                    },
-                },
+    status_partial = {
+        "trading_loop": True,
+        "iterations_completed": 10,
+        "dashboard_metrics": {
+            "counts": {
+                "activity": 7,
+                "trades": 1,
+                "logs": 1,
+                "weights": 1,
+                "actions": 4,
             },
-            "/summary": {"ok": False, "status": 500},
-            "/tokens": {"ok": True, "body": {"recent": ["AAA", "BBB"], "latest_iteration_tokens": ["AAA"]}},
-            "/actions": {
-                "ok": True,
-                "body": [
-                    {"agent": "alpha", "token": "AAA", "side": "buy", "amount": "1", "result": "ok"},
-                ],
-            },
-            "/activity": {
-                "ok": True,
-                "body": {"entries": [{"timestamp": "2024-01-01T00:05:00Z", "event": "sample"}]},
-            },
-            "/trades": {
-                "ok": True,
-                "body": [
-                    {"token": "AAA", "side": "buy", "amount": "1"},
-                ],
-            },
-            "/weights": {"ok": True, "body": {"alpha": 0.7, "beta": 0.3}},
-            "/logs": {
-                "ok": True,
-                "body": {
-                    "entries": [
-                        {"timestamp": "2024-01-01T00:05:00Z", "payload": {"stage": "loop", "detail": "step"}},
-                    ]
-                },
-            },
-            "/config": {
-                "ok": True,
-                "body": {
-                    "agents": ["alpha", "beta"],
-                    "loop_delay": 2,
-                    "min_delay": 1,
-                    "max_delay": 5,
-                    "config_path": "/tmp/config.toml",
-                },
+            "stat_tile_map": {
+                "heartbeat": {"value": "60", "caption": "loop"},
             },
         },
+    }
+    status_success = {
+        "trading_loop": True,
+        "iterations_completed": 11,
+        "dashboard_metrics": {
+            "counts": {
+                "activity": 9,
+                "trades": 2,
+                "logs": 2,
+                "weights": 1,
+                "actions": 5,
+            },
+            "stat_tile_map": {
+                "heartbeat": {"value": "61", "caption": "loop"},
+            },
+        },
+    }
+    discovery_partial = {"recent": ["AAA", "BBB"], "latest_iteration_tokens": ["AAA"]}
+    discovery_success = {"recent": ["AAA", "BBB", "CCC"], "latest_iteration_tokens": ["BBB"]}
+    actions_partial = [
+        {"agent": "alpha", "token": "AAA", "side": "buy", "amount": "1", "result": "ok"},
+    ]
+    actions_success = [
+        {"agent": "alpha", "token": "AAA", "side": "buy", "amount": "1", "result": "ok"},
+        {"agent": "beta", "token": "BBB", "side": "sell", "amount": "2", "result": "ok"},
+    ]
+    activity_partial_entries = [{"timestamp": "2024-01-01T00:05:00Z", "event": "sample"}]
+    activity_success_entries = [{"timestamp": "2024-01-01T00:06:00Z", "event": "sample"}]
+    trades_partial = [{"token": "AAA", "side": "buy", "amount": "1"}]
+    trades_success = [
+        {"token": "AAA", "side": "buy", "amount": "1"},
+        {"token": "BBB", "side": "sell", "amount": "2"},
+    ]
+    weights_partial = {"alpha": 0.7, "beta": 0.3}
+    weights_success = {"alpha": 0.6, "beta": 0.4}
+    logs_partial_entries = [
+        {"timestamp": "2024-01-01T00:05:00Z", "payload": {"stage": "loop", "detail": "step"}},
+    ]
+    logs_success_entries = [
+        {"timestamp": "2024-01-01T00:06:00Z", "payload": {"stage": "loop", "detail": "step"}},
+        {"timestamp": "2024-01-01T00:06:30Z", "payload": {"stage": "loop", "detail": "done"}},
+    ]
+    config_partial = {
+        "agents": ["alpha", "beta"],
+        "loop_delay": 2,
+        "min_delay": 1,
+        "max_delay": 5,
+        "config_path": "/tmp/config.toml",
+    }
+    config_success = dict(config_partial)
+
+    aggregate_success = {
+        "message": "SolHunter Zero UI",
+        "status": status_success,
+        "summary": summary_success,
+        "discovery": discovery_success,
+        "actions": actions_success,
+        "activity": activity_success_entries,
+        "trades": trades_success,
+        "weights": weights_success,
+        "logs": logs_success_entries,
+        "config_overview": config_success,
+        "metrics": status_success["dashboard_metrics"],
+        "history": [summary_success],
+    }
+
+    scenarios = [
         {
-            "/status": {
-                "ok": True,
-                "body": {
-                    "trading_loop": True,
-                    "iterations_completed": 11,
-                    "dashboard_metrics": {
-                        "counts": {
-                            "activity": 9,
-                            "trades": 2,
-                            "logs": 2,
-                            "weights": 1,
-                            "actions": 5,
-                        },
-                        "stat_tile_map": {
-                            "heartbeat": {"value": "61", "caption": "loop"},
-                        },
-                    },
-                },
-            },
-            "/summary": {"ok": True, "body": summary_success},
-            "/tokens": {"ok": True, "body": {"recent": ["AAA", "BBB", "CCC"], "latest_iteration_tokens": ["BBB"]}},
-            "/actions": {
-                "ok": True,
-                "body": [
-                    {"agent": "alpha", "token": "AAA", "side": "buy", "amount": "1", "result": "ok"},
-                    {"agent": "beta", "token": "BBB", "side": "sell", "amount": "2", "result": "ok"},
-                ],
-            },
-            "/activity": {
-                "ok": True,
-                "body": {"entries": [{"timestamp": "2024-01-01T00:06:00Z", "event": "sample"}]},
-            },
-            "/trades": {
-                "ok": True,
-                "body": [
-                    {"token": "AAA", "side": "buy", "amount": "1"},
-                    {"token": "BBB", "side": "sell", "amount": "2"},
-                ],
-            },
-            "/weights": {"ok": True, "body": {"alpha": 0.6, "beta": 0.4}},
-            "/logs": {
-                "ok": True,
-                "body": {
-                    "entries": [
-                        {"timestamp": "2024-01-01T00:06:00Z", "payload": {"stage": "loop", "detail": "step"}},
-                        {"timestamp": "2024-01-01T00:06:30Z", "payload": {"stage": "loop", "detail": "done"}},
-                    ]
-                },
-            },
-            "/config": {
-                "ok": True,
-                "body": {
-                    "agents": ["alpha", "beta"],
-                    "loop_delay": 2,
-                    "min_delay": 1,
-                    "max_delay": 5,
-                    "config_path": "/tmp/config.toml",
-                },
-            },
+            "/?format=json": {"ok": False, "status": 502},
+            "/status": {"ok": True, "body": status_partial},
+            "/summary": {"ok": False, "status": 500},
+            "/tokens": {"ok": True, "body": discovery_partial},
+            "/actions": {"ok": True, "body": actions_partial},
+            "/activity": {"ok": True, "body": {"entries": activity_partial_entries}},
+            "/trades": {"ok": True, "body": trades_partial},
+            "/weights": {"ok": True, "body": weights_partial},
+            "/logs": {"ok": True, "body": {"entries": logs_partial_entries}},
+            "/config": {"ok": True, "body": config_partial},
+        },
+        {
+            "/?format=json": {"ok": True, "body": aggregate_success},
         },
     ]
 
