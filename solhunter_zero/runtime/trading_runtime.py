@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import threading
 import time
 import urllib.request
@@ -45,6 +46,8 @@ from ..util import parse_bool_env
 
 
 log = logging.getLogger(__name__)
+
+DEPTH_PROCESS_SHUTDOWN_TIMEOUT = 5.0
 
 _RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
 _RL_HEALTH_INITIAL_INTERVAL = 5.0
@@ -299,10 +302,44 @@ class TradingRuntime:
                 self.rl_task = None
 
         if self.depth_proc is not None:
-            with contextlib.suppress(Exception):
-                if self.depth_proc.poll() is None:
-                    self.depth_proc.terminate()
-            self.depth_proc = None
+            proc = self.depth_proc
+            try:
+                poll = getattr(proc, "poll", None)
+                try:
+                    running = poll() is None if callable(poll) else True
+                except Exception:
+                    running = True
+                if running:
+                    terminate = getattr(proc, "terminate", None)
+                    if callable(terminate):
+                        try:
+                            terminate()
+                        except Exception:
+                            log.exception(
+                                "Failed to terminate depth_service process gracefully"
+                            )
+                        else:
+                            wait_fn = getattr(proc, "wait", None)
+                            if callable(wait_fn):
+                                try:
+                                    wait_fn(timeout=DEPTH_PROCESS_SHUTDOWN_TIMEOUT)
+                                except subprocess.TimeoutExpired:
+                                    message = (
+                                        "depth_service process did not exit within "
+                                        f"{DEPTH_PROCESS_SHUTDOWN_TIMEOUT} seconds"
+                                    )
+                                    log.error(message)
+                                    self.activity.add(
+                                        "depth_service",
+                                        message,
+                                        ok=False,
+                                    )
+                                except Exception:
+                                    log.exception(
+                                        "Error while waiting for depth_service process to exit"
+                                    )
+            finally:
+                self.depth_proc = None
         self.status.depth_service = False
 
         if self.pipeline is not None:
