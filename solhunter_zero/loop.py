@@ -5,8 +5,9 @@ import logging
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
+from . import discovery_state
 from .event_bus import publish
 from .schemas import Heartbeat, RuntimeLog, WeightsUpdated
 from .agents.execution import ExecutionAgent
@@ -373,14 +374,22 @@ async def trading_loop(
     """Run repeated swarm iterations using the new pipeline."""
 
     count = 0
+    base_kwargs = dict(kwargs)
+    explicit_method = base_kwargs.pop("discovery_method", None)
     while iterations is None or count < iterations:
         start = time.perf_counter()
+        iteration_kwargs = dict(base_kwargs)
+        method = discovery_state.current_method(
+            config=cfg if isinstance(cfg, Mapping) else None,
+            explicit=explicit_method,
+        )
+        iteration_kwargs["discovery_method"] = method
         await run_iteration(
             memory,
             portfolio,
             state,
             cfg=runtime_cfg or cfg,
-            **kwargs,
+            **iteration_kwargs,
         )
         count += 1
         if iterations is not None and count >= iterations:
