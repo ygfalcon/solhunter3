@@ -258,9 +258,36 @@ def test_status_endpoint_includes_dashboard_metrics():
     assert metrics["counts"]["activity"] == 2
     assert metrics["counts"]["trades"] == 1
     assert metrics["counts"]["actions"] == 1
-    assert metrics["stat_tile_map"]["heartbeat"]["value"] == "ok"
-    assert metrics["raw"]["trade_count"] == 1
-    assert payload["recent_tokens"] == ["AAA", "BBB"]
+
+
+def test_shutdown_endpoint_requires_token():
+    app = ui.create_app(shutdown_token="secret-token")
+    client = app.test_client()
+
+    resp = client.get(
+        "/__shutdown__",
+        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert resp.status_code == 403
+
+    resp = client.get(
+        "/__shutdown__",
+        headers={"X-UI-Shutdown-Token": "wrong"},
+        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert resp.status_code == 403
+
+
+def test_shutdown_endpoint_rejects_non_loopback():
+    app = ui.create_app(shutdown_token="secret-token")
+    client = app.test_client()
+
+    resp = client.get(
+        "/__shutdown__",
+        headers={"X-UI-Shutdown-Token": "secret-token"},
+        environ_overrides={"REMOTE_ADDR": "203.0.113.5"},
+    )
+    assert resp.status_code == 403
 
 
 

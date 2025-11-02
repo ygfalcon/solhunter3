@@ -25,16 +25,25 @@ front of it if richer dashboards are required.
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import logging
 import os
+import secrets
 import subprocess
 import threading
 from queue import Empty, Queue
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from flask import Flask, jsonify, render_template_string, request, url_for
+from flask import (
+    Flask,
+    abort,
+    jsonify,
+    render_template_string,
+    request,
+    url_for,
+)
 
 from .agents.discovery import (
     DEFAULT_DISCOVERY_METHOD,
@@ -59,6 +68,21 @@ HISTORY_MAX_ENTRIES = 200
 # ---------------------------------------------------------------------------
 # Compatibility helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_trusted_remote(remote: Optional[str]) -> bool:
+    """Return ``True`` if *remote* is a loopback address."""
+
+    if not remote:
+        return False
+    # ``REMOTE_ADDR`` for IPv6 can contain a scope id (``%`` separator).  Strip it
+    # to keep ``ip_address`` happy.
+    host = remote.split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback
 
 start_all_thread: threading.Thread | None = None
 """Handle to the legacy background thread that spawned services."""
@@ -468,7 +492,11 @@ def _build_dashboard_metrics(
         },
     }
 
-def create_app(state: UIState | None = None) -> Flask:
+def create_app(
+    state: UIState | None = None,
+    *,
+    shutdown_token: Optional[str] = None,
+) -> Flask:
     """Return a configured Flask application bound to *state*."""
 
     if state is None:
@@ -2790,11 +2818,19 @@ def create_app(state: UIState | None = None) -> Flask:
         )
 
     @app.get("/__shutdown__")
-    def _shutdown() -> Any:  # pragma: no cover - invoked via HTTP
-        from flask import request
+    def _shutdown() -> Any:
+        if not shutdown_token:
+            abort(404)
+
+        if not _is_trusted_remote(request.remote_addr):
+            return jsonify({"error": "forbidden"}), 403
+
+        provided = request.headers.get("X-UI-Shutdown-Token")
+        if not provided or not hmac.compare_digest(provided, shutdown_token):
+            return jsonify({"error": "forbidden"}), 403
 
         func = request.environ.get("werkzeug.server.shutdown")
-        if func is None:
+        if func is None:  # pragma: no cover - depends on Werkzeug internals
             raise RuntimeError("Not running with the Werkzeug Server")
         func()
         return {"ok": True}
@@ -2815,11 +2851,13 @@ class UIServer:
         *,
         host: str = "127.0.0.1",
         port: int = 5000,
+        shutdown_token: Optional[str] = None,
     ) -> None:
         self.state = state
         self.host = host
         self.port = int(port)
-        self.app = create_app(state)
+        self._shutdown_token = shutdown_token or secrets.token_urlsafe(32)
+        self.app = create_app(state, shutdown_token=self._shutdown_token)
         self._thread: Optional[threading.Thread] = None
         self._server: Optional["BaseWSGIServer"] = None
 
@@ -2905,9 +2943,13 @@ class UIServer:
 
             shutdown_host = self._resolve_shutdown_host()
             formatted_host = self._format_host_for_url(shutdown_host)
-            urllib.request.urlopen(
-                f"http://{formatted_host}:{self.port}/__shutdown__", timeout=1
+            if not self._shutdown_token:
+                raise RuntimeError("missing shutdown token")
+            request_obj = urllib.request.Request(
+                f"http://{formatted_host}:{self.port}/__shutdown__",
+                headers={"X-UI-Shutdown-Token": self._shutdown_token},
             )
+            urllib.request.urlopen(request_obj, timeout=1)
         except Exception:
             self._shutdown_directly()
         if self._thread:
