@@ -204,7 +204,7 @@ async def perform_startup_async(
 
     start = time.perf_counter()
     proc: subprocess.Popen | None = None
-    if parse_bool_env("DEPTH_SERVICE", True):
+    if not dry_run and parse_bool_env("DEPTH_SERVICE", True):
         proc = _start_depth_service(cfg)
     metrics_aggregator.publish(
         "startup_depth_service_start_duration", time.perf_counter() - start
