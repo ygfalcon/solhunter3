@@ -226,3 +226,19 @@ def test_discovery_agent_passes_ws_url(monkeypatch):
 
     assert called["ws"] == "wss://derived.example"
     assert called["limit"] == min(agent.limit, merge_default_limit)
+
+
+def test_normalise_trims_and_deduplicates():
+    agent = DiscoveryAgent()
+    tokens = [
+        " token-a",
+        "token-a  ",
+        "token-b",
+        "token-b",
+        "   token-b   ",
+        "token-c",
+    ]
+
+    result = agent._normalise(tokens)
+
+    assert result == ["token-a", "token-b", "token-c"]
