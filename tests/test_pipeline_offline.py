@@ -127,3 +127,81 @@ async def test_trading_runtime_passes_offline_and_token_file(monkeypatch, tmp_pa
     assert isinstance(runtime.pipeline, CapturingPipeline)
     assert runtime.pipeline.kwargs["offline"] is True
     assert runtime.pipeline.kwargs["token_file"] == str(token_file)
+
+
+@pytest.mark.anyio
+async def test_trading_runtime_dry_run_keeps_live_discovery(monkeypatch, tmp_path):
+    from solhunter_zero.runtime import trading_runtime as runtime_mod
+
+    monkeypatch.setenv("NEW_PIPELINE", "1")
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.delenv("SOLHUNTER_OFFLINE", raising=False)
+    monkeypatch.delenv("LIVE_DISCOVERY", raising=False)
+
+    class DummyMemory:
+        def __init__(self, url: str) -> None:
+            self.url = url
+            self.started = False
+
+        def start_writer(self) -> None:
+            self.started = True
+
+    class DummyPortfolio:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def record_prices(self, prices: dict | None = None) -> None:  # pragma: no cover - not used
+            return None
+
+        def update_risk_metrics(self) -> None:  # pragma: no cover - not used
+            return None
+
+    class DummyExecutor:
+        def __init__(self) -> None:
+            self.dry_run = False
+
+        async def execute(self, action: dict) -> dict:  # pragma: no cover - defensive
+            return {"action": action}
+
+    class DummyAgentManager:
+        def __init__(self) -> None:
+            self.executor = DummyExecutor()
+            self.memory_agent = None
+
+        async def evaluate_with_swarm(self, token: str, portfolio: object) -> SimpleNamespace:
+            return SimpleNamespace(actions=[])
+
+    dummy_manager = DummyAgentManager()
+
+    async def fake_init_rl_training(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    class CapturingPipeline:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        async def start(self) -> None:  # pragma: no cover - not used in test
+            return None
+
+        async def stop(self) -> None:  # pragma: no cover - not used in test
+            return None
+
+    monkeypatch.setattr(runtime_mod, "Memory", DummyMemory)
+    monkeypatch.setattr(runtime_mod, "Portfolio", DummyPortfolio)
+    monkeypatch.setattr(runtime_mod.AgentManager, "from_config", classmethod(lambda cls, cfg: dummy_manager))
+    monkeypatch.setattr(runtime_mod.AgentManager, "from_default", classmethod(lambda cls: dummy_manager))
+    monkeypatch.setattr(runtime_mod, "PipelineCoordinator", CapturingPipeline)
+    monkeypatch.setattr(runtime_mod, "_init_rl_training", fake_init_rl_training)
+
+    runtime = runtime_mod.TradingRuntime()
+    runtime.cfg = {
+        "memory_path": f"sqlite:///{tmp_path/'memory.db'}",
+        "portfolio_path": str(tmp_path / "portfolio.json"),
+        "rl_auto_train": False,
+    }
+
+    await runtime._start_agents()
+
+    assert isinstance(runtime.pipeline, CapturingPipeline)
+    assert runtime.pipeline.kwargs["offline"] is False
+    assert runtime.agent_manager.executor.dry_run is True
