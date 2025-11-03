@@ -44,8 +44,12 @@ def log_startup_info(
 def launch_only(rest: List[str], *, subprocess_module=subprocess) -> int:
     """Launch start_all.py directly."""
     env = os.environ.copy()
-    if "--offline" in rest:
-        env["SOLHUNTER_OFFLINE"] = "1"
+    try:
+        from scripts import start_all as start_all_module
+
+        env.update(start_all_module.runtime_env_from_argv(rest))
+    except SystemExit as exc:  # mirror argparse failure semantics
+        return exc.code if isinstance(exc.code, int) else 1
     proc = subprocess_module.run([sys.executable, "scripts/start_all.py", *rest], env=env)
     return proc.returncode
 
