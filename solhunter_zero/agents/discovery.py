@@ -8,7 +8,7 @@ import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from .. import config
-from ..discovery import _DEFAULT_LIMIT, merge_sources
+from ..discovery import merge_sources
 from ..event_bus import publish
 from ..mempool_scanner import stream_ranked_mempool_tokens_with_depth
 from ..scanner_common import (
@@ -276,10 +276,9 @@ class DiscoveryAgent:
                 return self._fallback_tokens(), {}
 
         if method == "websocket":
-            limit = min(self.limit, _DEFAULT_LIMIT)
             results = await merge_sources(
                 self.rpc_url,
-                limit=limit,
+                limit=self.limit,
                 mempool_threshold=self.mempool_threshold,
                 ws_url=self.ws_url,
             )
