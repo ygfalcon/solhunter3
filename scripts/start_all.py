@@ -22,6 +22,7 @@ import sys
 import time
 from pathlib import Path
 
+from solhunter_zero.main import run_auto
 from solhunter_zero.runtime.trading_runtime import TradingRuntime
 from solhunter_zero.config import (
     apply_env_overrides,
@@ -36,7 +37,14 @@ log = logging.getLogger(__name__)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Start SolHunter runtime")
+    parser = argparse.ArgumentParser(
+        description="Start SolHunter runtime or delegated commands",
+        epilog=(
+            "Commands:\n"
+            "  autopilot  Launch the autopilot entry point"
+            " (solhunter_zero.main.run_auto)."
+        ),
+    )
     parser.add_argument("--config", help="Path to config file", default=None)
     parser.add_argument("--ui-host", default="127.0.0.1", help="UI bind host")
     default_ui_port = os.getenv("UI_PORT", "5001")
@@ -51,6 +59,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-delay", type=float, default=None, help="Minimum inter-iteration delay")
     parser.add_argument("--max-delay", type=float, default=None, help="Maximum inter-iteration delay")
     parser.add_argument("--skip-clean", action="store_true", help="Skip process cleanup")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("autopilot",),
+        help="Optional command to run (e.g. 'autopilot').",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -137,6 +151,17 @@ def launch_foreground(args: argparse.Namespace, cfg_path: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
+    if args.command == "autopilot":
+        if args.config:
+            os.environ["SOLHUNTER_CONFIG"] = args.config
+        run_auto_kwargs = {}
+        for attr in ("loop_delay", "min_delay", "max_delay"):
+            value = getattr(args, attr, None)
+            if value is not None:
+                run_auto_kwargs[attr] = value
+        run_auto(**run_auto_kwargs)
+        return 0
 
     if not args.skip_clean:
         kill_lingering_processes()
