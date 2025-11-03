@@ -74,6 +74,7 @@ class DiscoveryService:
         self.startup_clones = max(1, int(startup_clones))
         self._agent = DiscoveryAgent()
         self._last_tokens: list[str] = []
+        self._last_details: Dict[str, Dict[str, Any]] = {}
         self._last_fetch_ts: float = 0.0
         self._cooldown_until: float = 0.0
         self._consecutive_empty: int = 0
@@ -104,7 +105,8 @@ class DiscoveryService:
     async def _run(self) -> None:
         while not self._stopped.is_set():
             try:
-                tokens = await self._fetch()
+                tokens, details = await self._fetch()
+                self._last_details = details
                 fresh = self._last_fetch_fresh
                 await self._emit_tokens(tokens, fresh=fresh)
             except asyncio.CancelledError:
@@ -113,7 +115,9 @@ class DiscoveryService:
                 log.exception("DiscoveryService failure: %s", exc)
             await asyncio.sleep(self.interval)
 
-    async def _fetch(self, *, agent: DiscoveryAgent | None = None) -> list[str]:
+    async def _fetch(
+        self, *, agent: DiscoveryAgent | None = None
+    ) -> tuple[list[str], Dict[str, Dict[str, Any]]]:
         now = time.time()
         if now < self._cooldown_until:
             remaining = self._cooldown_until - now
@@ -123,7 +127,7 @@ class DiscoveryService:
                 len(self._last_tokens),
             )
             self._last_fetch_fresh = False
-            return list(self._last_tokens)
+            return list(self._last_tokens), dict(self._last_details)
         worker = agent or self._agent
         tokens = await worker.discover_tokens(
             offline=self.offline,
@@ -132,15 +136,33 @@ class DiscoveryService:
         if self.limit:
             tokens = tokens[: self.limit]
         fetch_ts = time.time()
+        details: Dict[str, Dict[str, Any]] = {}
+        raw_details = getattr(worker, "last_details", {})
+        if isinstance(raw_details, dict):
+            for tok in tokens:
+                key = str(tok)
+                payload = raw_details.get(tok)
+                if not isinstance(payload, dict):
+                    payload = raw_details.get(key)
+                if isinstance(payload, dict):
+                    details[key] = dict(payload)
         self._apply_fetch_stats(tokens, fetch_ts)
-        return list(tokens)
+        self._last_details = dict(details)
+        return list(tokens), details
 
-    def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
+    def _build_candidates(
+        self,
+        tokens: Iterable[str],
+        *,
+        details: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> list[TokenCandidate]:
         ts = time.time()
         result: list[TokenCandidate] = []
+        detail_lookup = self._last_details if details is None else details
         for tok in tokens:
             token = str(tok)
-            metadata = self._candidate_metadata(token)
+            token_details = detail_lookup.get(token) if detail_lookup else None
+            metadata = self._candidate_metadata(token, token_details)
             result.append(
                 TokenCandidate(
                     token=token,
@@ -151,13 +173,36 @@ class DiscoveryService:
             )
         return result
 
-    def _candidate_metadata(self, token: str) -> Dict[str, Any]:
+    def _candidate_metadata(
+        self, token: str, details: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         """Return enriched metadata for ``token`` when available."""
 
         raw = TRENDING_METADATA.get(token)
         if not isinstance(raw, dict):
-            return {}
+            metadata: Dict[str, Any] = {}
+        else:
+            metadata = self._trending_metadata(raw)
 
+        if details:
+            detail_metadata = self._detail_metadata(details)
+            sources = metadata.get("sources")
+            detail_sources = detail_metadata.pop("sources", [])
+            if detail_sources:
+                merged_sources: list[str] = []
+                for seq in (sources if isinstance(sources, list) else [], detail_sources):
+                    for src in seq:
+                        if isinstance(src, str) and src and src not in merged_sources:
+                            merged_sources.append(src)
+                if merged_sources:
+                    metadata["sources"] = merged_sources
+            for key, value in detail_metadata.items():
+                if key not in metadata:
+                    metadata[key] = value
+
+        return metadata
+
+    def _trending_metadata(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {}
 
         for key in ("symbol", "name"):
@@ -191,6 +236,56 @@ class DiscoveryService:
                 metadata["trending_rank"] = int(rank_value)
         except (TypeError, ValueError):
             pass
+
+        return metadata
+
+    def _detail_metadata(self, details: Dict[str, Any]) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {}
+
+        for key in ("symbol", "name"):
+            value = details.get(key)
+            if isinstance(value, str) and value:
+                metadata.setdefault(key, value)
+
+        numeric_keys = {
+            "price": "price",
+            "volume": "volume",
+            "liquidity": "liquidity",
+            "market_cap": "market_cap",
+            "price_change": "price_change",
+        }
+        for source_key, dest_key in numeric_keys.items():
+            number = _coerce_float(details.get(source_key))
+            if number is not None:
+                metadata.setdefault(dest_key, number)
+
+        mempool_score = _coerce_float(details.get("mempool_score"))
+        if mempool_score is None:
+            mempool_score = _coerce_float(details.get("combined_score"))
+        if mempool_score is None and str(details.get("source") or "").lower() == "mempool":
+            mempool_score = _coerce_float(details.get("score"))
+        if mempool_score is not None:
+            metadata.setdefault("mempool_score", mempool_score)
+
+        detail_score = _coerce_float(details.get("score"))
+        if detail_score is not None and "mempool_score" not in metadata:
+            metadata.setdefault("detail_score", detail_score)
+
+        sources: list[str] = []
+        raw_sources = details.get("sources")
+        if isinstance(raw_sources, list):
+            sources.extend(str(src) for src in raw_sources if isinstance(src, str))
+        elif isinstance(raw_sources, str) and raw_sources:
+            sources.append(raw_sources)
+        raw_source = details.get("source")
+        if isinstance(raw_source, str) and raw_source:
+            sources.append(raw_source)
+        deduped_sources: list[str] = []
+        for src in sources:
+            if src not in deduped_sources:
+                deduped_sources.append(src)
+        if deduped_sources:
+            metadata["sources"] = deduped_sources
 
         return metadata
 
@@ -268,13 +363,19 @@ class DiscoveryService:
             )
         results = await asyncio.gather(*tasks, return_exceptions=True)
         aggregated: list[str] = []
+        aggregated_details: Dict[str, Dict[str, Any]] = {}
         for idx, result in enumerate(results):
             if isinstance(result, Exception):
                 log.warning(
                     "DiscoveryService startup clone %d failed: %s", idx, result
                 )
                 continue
-            aggregated.extend(result)
+            tokens, details = result
+            aggregated.extend(tokens)
+            if isinstance(details, dict):
+                for token, payload in details.items():
+                    if isinstance(payload, dict):
+                        aggregated_details[token] = dict(payload)
 
         unique: list[str] = []
         seen: set[str] = set()
@@ -292,11 +393,12 @@ class DiscoveryService:
         self._apply_fetch_stats(unique, fetch_ts)
 
         if unique:
+            self._last_details = aggregated_details
             await self._emit_tokens(unique, fresh=True)
         else:
             log.info("DiscoveryService startup clones produced no tokens")
 
-    async def _clone_fetch(self, idx: int) -> list[str]:
+    async def _clone_fetch(self, idx: int) -> tuple[list[str], Dict[str, Dict[str, Any]]]:
         agent = DiscoveryAgent()
         try:
             tokens = await agent.discover_tokens(
@@ -308,9 +410,19 @@ class DiscoveryService:
             log.debug(
                 "DiscoveryService startup clone %d fetched %d tokens", idx, len(tokens)
             )
-            return [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+            seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+            details: Dict[str, Dict[str, Any]] = {}
+            raw_details = getattr(agent, "last_details", {})
+            if isinstance(raw_details, dict):
+                for token in seq:
+                    payload = raw_details.get(token)
+                    if not isinstance(payload, dict):
+                        payload = raw_details.get(str(token))
+                    if isinstance(payload, dict):
+                        details[token] = dict(payload)
+            return seq, details
         except asyncio.CancelledError:
             raise
         except Exception:  # pragma: no cover - defensive logging
             log.exception("DiscoveryService startup clone %d failed", idx)
-            return []
+            return [], {}
