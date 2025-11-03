@@ -23,6 +23,11 @@ from ..token_scanner import enrich_tokens_async, scan_tokens_async
 
 logger = logging.getLogger(__name__)
 
+_MEMPOOL_STREAM_TIMEOUT = float(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT", "2.5") or 2.5)
+_MEMPOOL_STREAM_TIMEOUT_RETRIES = max(
+    1, int(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT_RETRIES", "3") or 3)
+)
+
 _CACHE: dict[str, object] = {
     "tokens": [],
     "ts": 0.0,
@@ -368,8 +373,42 @@ class DiscoveryAgent:
         gen = self.stream_mempool_events(threshold=self.mempool_threshold)
         tokens: List[str] = []
         details: Dict[str, Dict[str, Any]] = {}
+        timeouts = 0
+        timeout = max(_MEMPOOL_STREAM_TIMEOUT, 0.1)
         try:
-            async for item in gen:
+            while len(tokens) < self.limit:
+                try:
+                    item = await asyncio.wait_for(anext(gen), timeout=timeout)
+                except asyncio.TimeoutError:
+                    timeouts += 1
+                    if timeouts >= _MEMPOOL_STREAM_TIMEOUT_RETRIES:
+                        logger.warning(
+                            "Mempool stream timed out after %d attempts", timeouts
+                        )
+                        publish(
+                            "runtime.log",
+                            RuntimeLog(
+                                stage="discovery",
+                                detail=f"mempool-timeout:{timeouts}",
+                                level="WARN",
+                            ),
+                        )
+                        break
+                    logger.debug(
+                        "Mempool stream timeout (attempt %d/%d)",
+                        timeouts,
+                        _MEMPOOL_STREAM_TIMEOUT_RETRIES,
+                    )
+                    await asyncio.sleep(0)
+                    continue
+                except StopAsyncIteration:
+                    break
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Mempool stream failed: %s", exc)
+                    break
+                else:
+                    timeouts = 0
+
                 if not isinstance(item, dict):
                     continue
                 address = item.get("address")
@@ -378,8 +417,6 @@ class DiscoveryAgent:
                 if address not in details:
                     tokens.append(address)
                 details[address] = dict(item)
-                if len(tokens) >= self.limit:
-                    break
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Mempool stream failed: %s", exc)
         finally:

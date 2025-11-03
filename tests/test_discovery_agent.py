@@ -292,3 +292,46 @@ def test_discovery_agent_custom_limit_websocket(monkeypatch):
     assert captured["limit"] == 5
     assert len(tokens) == 5
     assert tokens == [f"mint{i}" for i in range(5)]
+
+
+def test_collect_mempool_times_out(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    async def silent_stream(*_args, **_kwargs):
+        while True:
+            await asyncio.sleep(3600)
+        if False:  # pragma: no cover - satisfy generator typing
+            yield {}
+
+    captured: list[tuple[str, Any]] = []
+    warnings: list[str] = []
+
+    monkeypatch.setattr(
+        discovery_mod,
+        "stream_ranked_mempool_tokens_with_depth",
+        silent_stream,
+    )
+    monkeypatch.setattr(
+        discovery_mod, "publish", lambda topic, payload: captured.append((topic, payload))
+    )
+    monkeypatch.setattr(
+        discovery_mod.logger,
+        "warning",
+        lambda msg, *args, **kwargs: warnings.append(msg % args if args else str(msg)),
+    )
+    monkeypatch.setattr(discovery_mod, "_MEMPOOL_STREAM_TIMEOUT", 0.01)
+    monkeypatch.setattr(discovery_mod, "_MEMPOOL_STREAM_TIMEOUT_RETRIES", 1)
+
+    agent = discovery_mod.DiscoveryAgent()
+
+    async def run():
+        return await agent._collect_mempool()
+
+    tokens, details = asyncio.run(run())
+
+    assert tokens == []
+    assert details == {}
+    assert any("Mempool stream timed out" in entry for entry in warnings)
+
+    runtime_logs = [item for item in captured if item[0] == "runtime.log"]
+    assert runtime_logs, "timeout should publish runtime metrics"
