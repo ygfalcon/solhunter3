@@ -1,5 +1,7 @@
 import asyncio
+import asyncio
 import importlib
+import sys
 import types
 
 import pytest
@@ -236,3 +238,170 @@ async def test_discovery_loop_respects_override(monkeypatch, request):
         runtime_orchestrator.DEFAULT_DISCOVERY_METHOD,
         "mempool",
     ]
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_invokes_stop_all_on_stage_failure(monkeypatch):
+    dummy_ui = types.ModuleType("solhunter_zero.ui")
+    dummy_ui.create_app = lambda *_, **__: types.SimpleNamespace()
+    dummy_ui.start_websockets = lambda: {}
+    monkeypatch.setitem(sys.modules, "solhunter_zero.ui", dummy_ui)
+
+    runtime_orchestrator = importlib.reload(
+        importlib.import_module("solhunter_zero.runtime.orchestrator")
+    )
+
+    class DummyBus:
+        stop_calls = 0
+
+        def subscribe(self, *_args, **_kwargs):
+            return None
+
+        def publish(self, *_args, **_kwargs):
+            return None
+
+        async def stop_ws_server(self):
+            DummyBus.stop_calls += 1
+
+    dummy_bus = DummyBus()
+    monkeypatch.setattr(runtime_orchestrator, "event_bus", dummy_bus)
+
+    async def fake_publish(self, *_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        runtime_orchestrator.RuntimeOrchestrator,
+        "_publish_stage",
+        fake_publish,
+        raising=False,
+    )
+
+    async def fake_start_ui(self):
+        self.handles.ui_app = object()
+
+    monkeypatch.setattr(
+        runtime_orchestrator.RuntimeOrchestrator, "start_ui", fake_start_ui
+    )
+
+    async def fail_bus(self):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        runtime_orchestrator.RuntimeOrchestrator, "start_bus", fail_bus
+    )
+
+    orchestrator = runtime_orchestrator.RuntimeOrchestrator(run_http=False)
+
+    with pytest.raises(RuntimeError):
+        await orchestrator.start()
+
+    assert orchestrator._closed is True
+    assert orchestrator.handles.tasks == []
+
+    # stop_all should remain safe to call again after a partial startup
+    await orchestrator.stop_all()
+    assert orchestrator._closed is True
+
+
+@pytest.mark.anyio("asyncio")
+async def test_stop_all_idempotent_after_partial_start(monkeypatch):
+    dummy_ui = types.ModuleType("solhunter_zero.ui")
+    dummy_ui.create_app = lambda *_, **__: types.SimpleNamespace()
+    dummy_ui.start_websockets = lambda: {}
+    monkeypatch.setitem(sys.modules, "solhunter_zero.ui", dummy_ui)
+
+    runtime_orchestrator = importlib.reload(
+        importlib.import_module("solhunter_zero.runtime.orchestrator")
+    )
+
+    class DummyBus:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        def subscribe(self, *_args, **_kwargs):
+            return None
+
+        def publish(self, *_args, **_kwargs):
+            return None
+
+        async def stop_ws_server(self):
+            self.stop_calls += 1
+
+    dummy_bus = DummyBus()
+    monkeypatch.setattr(runtime_orchestrator, "event_bus", dummy_bus)
+
+    async def fake_publish(self, *_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        runtime_orchestrator.RuntimeOrchestrator,
+        "_publish_stage",
+        fake_publish,
+        raising=False,
+    )
+
+    async def fake_start_ui(self):
+        self.handles.ui_app = object()
+
+    monkeypatch.setattr(
+        runtime_orchestrator.RuntimeOrchestrator, "start_ui", fake_start_ui
+    )
+
+    async def fake_start_bus(self):
+        self.handles.bus_started = True
+
+    monkeypatch.setattr(
+        runtime_orchestrator.RuntimeOrchestrator, "start_bus", fake_start_bus
+    )
+
+    class DummyMetrics:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    class DummyRisk:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "solhunter_zero.metrics.decision_metrics",
+        types.SimpleNamespace(DecisionMetrics=DummyMetrics),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "solhunter_zero.risk_controller",
+        types.SimpleNamespace(RiskController=DummyRisk),
+    )
+
+    async def fail_agents(self):
+        raise RuntimeError("agents failed")
+
+    monkeypatch.setattr(
+        runtime_orchestrator.RuntimeOrchestrator,
+        "start_agents",
+        fail_agents,
+    )
+
+    orchestrator = runtime_orchestrator.RuntimeOrchestrator(run_http=False)
+
+    with pytest.raises(RuntimeError):
+        await orchestrator.start()
+
+    assert dummy_bus.stop_calls == 1
+    assert getattr(orchestrator, "_dec_metrics").stopped is True
+    assert getattr(orchestrator, "_risk_ctl").stopped is True
+
+    await orchestrator.stop_all()
+    assert dummy_bus.stop_calls == 1
