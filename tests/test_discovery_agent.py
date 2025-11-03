@@ -217,3 +217,21 @@ def test_discovery_agent_passes_ws_url(monkeypatch):
     assert tokens == ["tok"]
     assert called["rpc"] == agent.rpc_url
     assert called["ws"] == "wss://derived.example"
+
+
+def test_normalise_strips_and_deduplicates_whitespace_variants():
+    agent = DiscoveryAgent()
+
+    tokens = [
+        "  foo",
+        "foo  ",
+        "\tbar\n",
+        "bar",
+        "",
+        "   ",
+        123,
+    ]
+
+    normalised = agent._normalise(tokens)
+
+    assert normalised == ["foo", "bar"]

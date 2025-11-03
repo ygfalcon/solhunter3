@@ -352,10 +352,10 @@ class DiscoveryAgent:
             candidate = token.strip()
             if not candidate:
                 continue
-            if token in seen:
+            if candidate in seen:
                 continue
-            seen.add(token)
-            filtered.append(token)
+            seen.add(candidate)
+            filtered.append(candidate)
             if len(filtered) >= self.limit:
                 break
         return filtered
