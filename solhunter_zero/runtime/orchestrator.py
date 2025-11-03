@@ -12,6 +12,7 @@ from typing import Any, Optional
 from ..util import install_uvloop, parse_bool_env
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
 from .. import event_bus
+from .. import discovery_state
 from ..config import (
     initialize_event_bus,
     apply_env_overrides,
@@ -291,8 +292,10 @@ class RuntimeOrchestrator:
 
         async def _discovery_loop():
             agent = DiscoveryAgent()
-            method = discovery_method
             while True:
+                method = discovery_state.current_method(
+                    config=cfg, explicit=discovery_method
+                )
                 try:
                     tokens = await agent.discover_tokens(method=method, offline=False)
                     if tokens:
