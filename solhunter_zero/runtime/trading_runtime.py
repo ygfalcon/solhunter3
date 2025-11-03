@@ -37,6 +37,7 @@ from ..agents.discovery import resolve_discovery_method
 from ..loop import FirstTradeTimeoutError, run_iteration, _init_rl_training
 from ..pipeline import PipelineCoordinator
 from ..main import perform_startup_async
+from .. import metrics_aggregator
 from ..main_state import TradingState
 from ..memory import Memory
 from ..portfolio import Portfolio
@@ -217,6 +218,7 @@ class TradingRuntime:
             "detected": False,
             "configured": False,
         }
+        self._metrics_started = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -252,6 +254,7 @@ class TradingRuntime:
         self.activity.add("runtime", "starting")
         self._start_time = time.time()
         await self._prepare_configuration()
+        self._ensure_metrics_aggregator_started()
         await self._start_event_bus()
         await self._start_ui()
         await self._start_agents()
@@ -406,6 +409,11 @@ class TradingRuntime:
                 os.environ[env_name] = str(val)
         if os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is None:
             os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+    def _ensure_metrics_aggregator_started(self) -> None:
+        if not self._metrics_started:
+            metrics_aggregator.start()
+            self._metrics_started = True
 
     async def _start_event_bus(self) -> None:
         broker_urls = get_broker_urls(self.cfg) if self.cfg else []
