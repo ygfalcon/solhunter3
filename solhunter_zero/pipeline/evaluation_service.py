@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 import os
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -32,7 +33,7 @@ class EvaluationService:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
         self.cache_ttl = max(0.0, cache_ttl)
-        self._cache: Dict[str, tuple[float, EvaluationResult]] = {}
+        self._cache: Dict[str, tuple[float, tuple[str, int, str], EvaluationResult]] = {}
         self._stopped = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._worker_tasks: list[asyncio.Task] = []
@@ -120,14 +121,24 @@ class EvaluationService:
 
     async def _evaluate_token(self, scored: ScoredToken) -> Optional[EvaluationResult]:
         now = time.time()
+        candidate_metadata = scored.candidate.metadata or {}
+        price = self._extract_price(candidate_metadata)
+        price_band = self._price_band(price)
+        signature = self._cache_signature(scored.score, scored.rank, price_band)
+
         cached = self._cache.get(scored.token)
-        if cached and (now - cached[0]) < self.cache_ttl:
+        if cached and (now - cached[0]) < self.cache_ttl and cached[1] == signature:
+            cached_result = cached[2]
+            cached_metadata = dict(cached_result.metadata)
+            cached_metadata["score"] = scored.score
+            cached_metadata["rank"] = scored.rank
+            cached_metadata["price_band"] = price_band
             return EvaluationResult(
                 token=scored.token,
-                actions=list(cached[1].actions),
+                actions=list(cached_result.actions),
                 latency=0.0,
                 cached=True,
-                metadata=dict(cached[1].metadata),
+                metadata=cached_metadata,
             )
         start = time.perf_counter()
         errors: list[str] = []
@@ -151,7 +162,7 @@ class EvaluationService:
                     scored.score,
                 )
         latency = time.perf_counter() - start
-        metadata = {"score": scored.score, "rank": scored.rank}
+        metadata = {"score": scored.score, "rank": scored.rank, "price_band": price_band}
         if exploratory_action:
             metadata["exploratory"] = True
         result = EvaluationResult(
@@ -163,7 +174,7 @@ class EvaluationService:
             metadata=metadata,
         )
         if self.cache_ttl and not errors:
-            self._cache[scored.token] = (time.time(), result)
+            self._cache[scored.token] = (time.time(), signature, result)
         return result
 
     @staticmethod
@@ -180,18 +191,39 @@ class EvaluationService:
         except Exception:
             return None
 
+    def _extract_price(self, metadata: Dict[str, Any]) -> float | None:
+        for key in ("price", "usd_price", "price_usd", "last_price"):
+            if key in metadata:
+                price = self._coerce_float(metadata.get(key))
+                if price is not None:
+                    return price
+        return None
+
+    @staticmethod
+    def _price_band(price: float | None) -> str:
+        if price is None or price <= 0:
+            return "unknown"
+        try:
+            order = int(math.floor(math.log10(price)))
+        except (ValueError, OverflowError):
+            return "unknown"
+        return f"1e{order}"
+
+    @staticmethod
+    def _score_band(score: float) -> str:
+        bucket = round(score / 0.05) * 0.05
+        return f"{bucket:.2f}"
+
+    def _cache_signature(self, score: float, rank: int, price_band: str) -> tuple[str, int, str]:
+        return (self._score_band(score), int(rank), price_band)
+
     def _parse_threshold(self, env_key: str) -> float:
         value = self._coerce_float(os.getenv(env_key, "0"))
         return float(value) if value is not None and value > 0 else 0.0
 
     def _maybe_build_exploratory_action(self, scored: ScoredToken) -> Optional[Dict[str, Any]]:
         meta = scored.candidate.metadata or {}
-        price = self._coerce_float(
-            meta.get("price")
-            or meta.get("usd_price")
-            or meta.get("price_usd")
-            or meta.get("last_price")
-        )
+        price = self._extract_price(meta)
         if price is None or price <= 0:
             return None
 
