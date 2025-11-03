@@ -146,9 +146,7 @@ def test_discover_tokens_retries_on_empty_merge(monkeypatch, caplog):
     assert len(calls) == 2
     assert sleep_calls == [0.0]
     assert "No tokens discovered" in caplog.text
-    from solhunter_zero.discovery import _DEFAULT_LIMIT as merge_default_limit
-
-    assert captured["limit"] == min(agent.limit, merge_default_limit)
+    assert captured["limit"] == agent.limit
 
 
 def test_offline_discovery_uses_fallback(monkeypatch):
@@ -222,7 +220,33 @@ def test_discovery_agent_passes_ws_url(monkeypatch):
 
     assert tokens == ["tok"]
     assert called["rpc"] == agent.rpc_url
-    from solhunter_zero.discovery import _DEFAULT_LIMIT as merge_default_limit
-
     assert called["ws"] == "wss://derived.example"
-    assert called["limit"] == min(agent.limit, merge_default_limit)
+    assert called["limit"] == agent.limit
+
+
+def test_discovery_agent_custom_limit_websocket(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_merge(url, *, limit=None, mempool_threshold=0.0, ws_url=None):
+        captured["rpc"] = url
+        captured["limit"] = limit
+        captured["ws"] = ws_url
+        return [{"address": f"mint{i}"} for i in range(10)]
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.merge_sources", fake_merge
+    )
+    monkeypatch.setenv("DISCOVERY_LIMIT", "5")
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0")
+
+    agent = DiscoveryAgent()
+
+    async def run():
+        return await agent.discover_tokens(method="websocket")
+
+    tokens = asyncio.run(run())
+
+    assert agent.limit == 5
+    assert captured["limit"] == 5
+    assert len(tokens) == 5
+    assert tokens == [f"mint{i}" for i in range(5)]
