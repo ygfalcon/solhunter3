@@ -206,7 +206,14 @@ def test_main_invokes_place_order(monkeypatch):
 def test_main_offline(monkeypatch):
     recorded = {}
 
-    async def fake_discover_tokens(self, *, offline=False, token_file=None, method=None):
+    async def fake_discover_tokens(
+        self,
+        *,
+        offline=False,
+        token_file=None,
+        method=None,
+        use_cache=True,
+    ):
         recorded["offline"] = offline
         return ["tok"]
 
@@ -483,7 +490,14 @@ def test_discovery_methods(monkeypatch, method, target):
 
     method_name = method
 
-    async def fake_discover_tokens(self, *, offline=False, token_file=None, method=None):
+    async def fake_discover_tokens(
+        self,
+        *,
+        offline=False,
+        token_file=None,
+        method=None,
+        use_cache=True,
+    ):
         return await async_scanner_mod.scan_tokens_async(
             offline=offline,
             token_file=token_file,

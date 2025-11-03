@@ -177,6 +177,7 @@ class DiscoveryAgent:
         offline: bool = False,
         token_file: Optional[str] = None,
         method: Optional[str] = None,
+        use_cache: bool = True,
     ) -> List[str]:
         now = time.time()
         ttl = self.cache_ttl
@@ -203,59 +204,71 @@ class DiscoveryAgent:
                     OFFLINE_DEFAULT_METHOD,
                 )
             active_method = OFFLINE_DEFAULT_METHOD
-        cached_tokens = (
-            list(_CACHE.get("tokens", []))
-            if isinstance(_CACHE.get("tokens"), list)
-            else []
-        )
-        cache_limit = int(_CACHE.get("limit", 0))
-        cached_method = (_CACHE.get("method") or "").lower()
         normalized_token_path: str | None = None
         token_mtime: float | None = None
-        if token_file:
-            token_path = Path(token_file).expanduser()
-            try:
-                resolved = token_path.resolve(strict=False)
-            except (OSError, RuntimeError):
-                resolved = token_path
-            normalized_token_path = str(resolved)
-            try:
-                token_mtime = resolved.stat().st_mtime
-            except OSError:
+
+        if use_cache:
+            cached_tokens = (
+                list(_CACHE.get("tokens", []))
+                if isinstance(_CACHE.get("tokens"), list)
+                else []
+            )
+            cache_limit = int(_CACHE.get("limit", 0))
+            cached_method = (_CACHE.get("method") or "").lower()
+
+            if token_file:
+                token_path = Path(token_file).expanduser()
                 try:
-                    token_mtime = token_path.stat().st_mtime
+                    resolved = token_path.resolve(strict=False)
+                except (OSError, RuntimeError):
+                    resolved = token_path
+                normalized_token_path = str(resolved)
+                try:
+                    token_mtime = resolved.stat().st_mtime
                 except OSError:
-                    token_mtime = None
+                    try:
+                        token_mtime = token_path.stat().st_mtime
+                    except OSError:
+                        token_mtime = None
 
-        cached_token_file = _CACHE.get("token_file")
-        cached_token_mtime = _CACHE.get("token_file_mtime")
-        cache_matches_token_file = True
-        if normalized_token_path != cached_token_file:
-            if normalized_token_path or cached_token_file:
-                cache_matches_token_file = False
-        if cache_matches_token_file:
+            cached_token_file = _CACHE.get("token_file")
+            cached_token_mtime = _CACHE.get("token_file_mtime")
+            cache_matches_token_file = True
+            if normalized_token_path != cached_token_file:
+                if normalized_token_path or cached_token_file:
+                    cache_matches_token_file = False
+            if cache_matches_token_file:
+                if (
+                    cached_token_mtime is not None
+                    and token_mtime is not None
+                    and token_mtime != cached_token_mtime
+                ):
+                    cache_matches_token_file = False
+                elif (cached_token_mtime is None) != (token_mtime is None):
+                    cache_matches_token_file = False
+
             if (
-                cached_token_mtime is not None
-                and token_mtime is not None
-                and token_mtime != cached_token_mtime
+                ttl > 0
+                and cached_tokens
+                and now - float(_CACHE.get("ts", 0.0)) < ttl
+                and (
+                    not method_override
+                    or cached_method == active_method
+                    or not cached_method
+                )
+                and cache_matches_token_file
             ):
-                cache_matches_token_file = False
-            elif (cached_token_mtime is None) != (token_mtime is None):
-                cache_matches_token_file = False
-
-        if (
-            ttl > 0
-            and cached_tokens
-            and now - float(_CACHE.get("ts", 0.0)) < ttl
-            and (not method_override or cached_method == active_method or not cached_method)
-            and cache_matches_token_file
-        ):
-            if cache_limit and cache_limit >= self.limit:
-                logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
-                return cached_tokens[: self.limit]
-            if len(cached_tokens) >= self.limit:
-                logger.debug("DiscoveryAgent: returning cached tokens (limit=%s)", self.limit)
-                return cached_tokens[: self.limit]
+                if cache_limit and cache_limit >= self.limit:
+                    logger.debug(
+                        "DiscoveryAgent: returning cached tokens (ttl=%s)", ttl
+                    )
+                    return cached_tokens[: self.limit]
+                if len(cached_tokens) >= self.limit:
+                    logger.debug(
+                        "DiscoveryAgent: returning cached tokens (limit=%s)",
+                        self.limit,
+                    )
+                    return cached_tokens[: self.limit]
 
         attempts = self.max_attempts
         details: Dict[str, Dict[str, Any]] = {}
@@ -292,7 +305,7 @@ class DiscoveryAgent:
             "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
         )
 
-        if ttl > 0 and tokens:
+        if use_cache and ttl > 0 and tokens:
             _CACHE["tokens"] = list(tokens)
             _CACHE["ts"] = now
             _CACHE["limit"] = self.limit
