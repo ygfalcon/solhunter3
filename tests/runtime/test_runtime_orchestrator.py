@@ -1,5 +1,6 @@
 import importlib
 import types
+from unittest.mock import Mock
 
 import pytest
 
@@ -71,3 +72,33 @@ async def test_start_agents_aborts_when_no_agents(monkeypatch, request):
     failure_messages = [detail for stage, ok, detail in stages if stage == "agents:loaded" and not ok]
     assert failure_messages, "Expected a failed agents:loaded stage"
     assert "no agents available" in failure_messages[0]
+
+
+@pytest.mark.anyio("asyncio")
+async def test_stop_all_stops_agent_runtime_and_executor(monkeypatch):
+    ui_module = importlib.import_module("solhunter_zero.ui")
+    monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
+    monkeypatch.setattr(ui_module, "start_websockets", lambda: {}, raising=False)
+
+    runtime_orchestrator = importlib.reload(importlib.import_module("solhunter_zero.runtime.orchestrator"))
+
+    orchestrator = runtime_orchestrator.RuntimeOrchestrator(run_http=False)
+    orchestrator.handles.tasks = []
+    orchestrator.handles.bus_started = False
+    orchestrator._agent_runtime = Mock()
+    orchestrator._trade_executor = Mock()
+
+    async def noop_stage(*_: object, **__: object) -> None:
+        return None
+
+    monkeypatch.setattr(orchestrator, "_publish_stage", noop_stage)
+
+    agent_runtime = orchestrator._agent_runtime
+    trade_executor = orchestrator._trade_executor
+
+    await orchestrator.stop_all()
+
+    agent_runtime.stop.assert_called_once_with()
+    trade_executor.stop.assert_called_once_with()
+    assert orchestrator._agent_runtime is None
+    assert orchestrator._trade_executor is None

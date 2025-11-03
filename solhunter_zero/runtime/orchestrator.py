@@ -7,7 +7,7 @@ import os
 import signal
 import sys
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..util import install_uvloop, parse_bool_env
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
@@ -26,6 +26,11 @@ from ..strategy_manager import StrategyManager
 from ..agent_manager import AgentManager
 from ..loop import trading_loop as _trading_loop
 from ..ui import create_app as _create_ui_app, start_websockets as _start_ui_ws
+
+
+if TYPE_CHECKING:
+    from ..agents.runtime import AgentRuntime
+    from ..exec_service import TradeExecutor
 
 
 install_uvloop()
@@ -54,6 +59,8 @@ class RuntimeOrchestrator:
         self.run_http = run_http
         self.handles = RuntimeHandles(tasks=[])
         self._closed = False
+        self._agent_runtime: AgentRuntime | None = None
+        self._trade_executor: TradeExecutor | None = None
 
     async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
         try:
@@ -285,8 +292,10 @@ class RuntimeOrchestrator:
         from ..loop import _init_rl_training as _init_rl_training  # type: ignore
 
         aruntime = AgentRuntime(active_manager, portfolio)
+        self._agent_runtime = aruntime
         await aruntime.start()
         execu = TradeExecutor(memory, portfolio)
+        self._trade_executor = execu
         execu.start()
 
         async def _discovery_loop():
@@ -370,6 +379,22 @@ class RuntimeOrchestrator:
             return
         self._closed = True
         await self._publish_stage("runtime:stopping", True)
+        agent_runtime = getattr(self, "_agent_runtime", None)
+        if agent_runtime is not None:
+            try:
+                agent_runtime.stop()
+            except Exception:
+                log.exception("failed stopping agent runtime")
+            finally:
+                self._agent_runtime = None
+        trade_executor = getattr(self, "_trade_executor", None)
+        if trade_executor is not None:
+            try:
+                trade_executor.stop()
+            except Exception:
+                log.exception("failed stopping trade executor")
+            finally:
+                self._trade_executor = None
         # Cancel tasks
         for t in list(self.handles.tasks or []):
             t.cancel()
