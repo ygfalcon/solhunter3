@@ -1,6 +1,8 @@
 PRIMARY ENTRY POINT — New Runtime Orchestrator
 
 Run:
+  start_live --config path/to/config.toml
+  # fallback:
   python -m solhunter_zero.primary_entry_point --config path/to/config.toml
 
 Notes:
