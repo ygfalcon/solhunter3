@@ -79,6 +79,15 @@ class MemorySyncResponse:
 
 
 @dataclass
+class TokenDiscovered:
+    """Token discovery event payload including metadata refresh signals."""
+
+    tokens: list[str]
+    metadata_refresh: bool = False
+    changed_tokens: Optional[list[str]] = None
+
+
+@dataclass
 class SystemMetrics:
     """Payload with system CPU and memory usage."""
     cpu: float
@@ -120,6 +129,7 @@ _EVENT_SCHEMAS: Dict[str, Type] = {
     "memory_sync_response": MemorySyncResponse,
     "heartbeat": Heartbeat,
     "system_metrics": SystemMetrics,
+    "token_discovered": TokenDiscovered,
     # Add runtime log mapping so validate_message accepts it
     "runtime.log": RuntimeLog,
 }

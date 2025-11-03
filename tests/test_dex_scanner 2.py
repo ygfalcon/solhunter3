@@ -55,7 +55,8 @@ def test_scanner_method_pools(monkeypatch):
     tokens = asyncio.run(scanner.scan_tokens(method="pools"))
     unsub()
     assert tokens == ["tokbonk"]
-    assert events == [tokens]
+    assert [evt.tokens for evt in events] == [tokens]
+    assert all(not evt.metadata_refresh for evt in events)
 
 
 def test_scanner_async_method_pools(monkeypatch):
@@ -79,4 +80,5 @@ def test_scanner_async_method_pools(monkeypatch):
     result = asyncio.run(scanner.scan_tokens_async(method="pools"))
     unsub()
     assert result == ["tokbonk"]
-    assert events == [result]
+    assert [evt.tokens for evt in events] == [result]
+    assert all(not evt.metadata_refresh for evt in events)

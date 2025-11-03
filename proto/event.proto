@@ -135,6 +135,8 @@ message SystemMetricsCombined {
 
 message TokenDiscovered {
   repeated string tokens = 1;
+  bool metadata_refresh = 2;
+  repeated string changed_tokens = 3;
 }
 
 message MemorySyncRequest {

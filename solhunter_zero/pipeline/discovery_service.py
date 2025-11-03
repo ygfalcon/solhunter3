@@ -14,6 +14,23 @@ from ..event_bus import publish
 log = logging.getLogger(__name__)
 
 
+_METADATA_NUMERIC_KEYS = {
+    "discovery_score",
+    "liquidity",
+    "volume",
+    "mempool_score",
+    "detail_score",
+    "price",
+    "price_change",
+    "market_cap",
+    "helius_score",
+}
+_METADATA_INT_KEYS = {"trending_rank"}
+_METADATA_TEXT_KEYS = {"symbol", "name"}
+_METADATA_LIST_KEYS = {"sources"}
+_METADATA_TOLERANCE = 1e-6
+
+
 def _coerce_float(value: Any) -> float | None:
     """Best-effort conversion of ``value`` to ``float``."""
 
@@ -84,6 +101,7 @@ class DiscoveryService:
         self._last_emitted: list[str] = []
         self._last_fetch_fresh: bool = True
         self._primed = False
+        self._last_metadata_snapshot: Dict[str, Dict[str, Any]] = {}
 
     async def start(self) -> None:
         if self._task is None:
@@ -289,22 +307,87 @@ class DiscoveryService:
 
         return metadata
 
+    def _detect_metadata_changes(
+        self, snapshot: Dict[str, Dict[str, Any]]
+    ) -> list[str]:
+        changed: list[str] = []
+        for token, current in snapshot.items():
+            if self._metadata_changed(token, current):
+                changed.append(token)
+        return changed
+
+    def _metadata_changed(self, token: str, current: Dict[str, Any]) -> bool:
+        previous = self._last_metadata_snapshot.get(token)
+        if previous is None:
+            return bool(current)
+        relevant_keys = (
+            _METADATA_NUMERIC_KEYS
+            | _METADATA_INT_KEYS
+            | _METADATA_TEXT_KEYS
+            | _METADATA_LIST_KEYS
+        )
+        keys = relevant_keys & (set(previous.keys()) | set(current.keys()))
+        for key in keys:
+            if key in _METADATA_NUMERIC_KEYS or key in _METADATA_INT_KEYS:
+                new_val = _coerce_float(current.get(key))
+                old_val = _coerce_float(previous.get(key))
+                if new_val is None and old_val is None:
+                    continue
+                if new_val is None or old_val is None:
+                    return True
+                if abs(new_val - old_val) > _METADATA_TOLERANCE:
+                    return True
+            elif key in _METADATA_LIST_KEYS:
+                new_seq = [
+                    str(item)
+                    for item in current.get(key, [])
+                    if isinstance(item, str)
+                ]
+                old_seq = [
+                    str(item)
+                    for item in previous.get(key, [])
+                    if isinstance(item, str)
+                ]
+                if sorted(new_seq) != sorted(old_seq):
+                    return True
+            else:
+                if current.get(key) != previous.get(key):
+                    return True
+        return False
+
     async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
         seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
         if not seq:
             return
-        if not fresh and seq == self._last_emitted:
+        batch = self._build_candidates(seq)
+        metadata_snapshot: Dict[str, Dict[str, Any]] = {}
+        for candidate in batch:
+            meta = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+            metadata_snapshot[candidate.token] = dict(meta)
+        changed_tokens = self._detect_metadata_changes(metadata_snapshot)
+        metadata_refresh = (
+            bool(changed_tokens) and not fresh and seq == self._last_emitted
+        )
+        if not metadata_refresh and not fresh and seq == self._last_emitted:
             log.debug(
                 "DiscoveryService skipping cached emission (%d tokens)", len(seq)
             )
+            self._last_metadata_snapshot = metadata_snapshot
             return
-        batch = self._build_candidates(seq)
+        if not metadata_refresh:
+            changed_tokens = []
         await self.queue.put(batch)
         log.info("DiscoveryService queued %d tokens", len(batch))
         previous = list(self._last_emitted)
-        if seq and seq != previous:
-            publish("token_discovered", list(seq))
+        payload = {
+            "tokens": list(seq),
+            "metadata_refresh": metadata_refresh,
+            "changed_tokens": list(changed_tokens),
+        }
+        if seq and (seq != previous or metadata_refresh):
+            publish("token_discovered", payload)
         self._last_emitted = list(seq)
+        self._last_metadata_snapshot = metadata_snapshot
 
     def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
         payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
