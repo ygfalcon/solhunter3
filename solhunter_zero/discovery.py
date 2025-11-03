@@ -5,7 +5,7 @@ import contextlib
 import logging
 import math
 import os
-from typing import Any, Awaitable, Callable, Dict, List
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from . import onchain_metrics
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
@@ -122,11 +122,73 @@ async def _collect_mempool_candidates(
     return results
 
 
-def _update_entry(entry: Dict[str, Any], payload: Dict[str, Any]) -> None:
-    for key in ("symbol", "name", "market_cap", "price", "price_change"):
+def _extract_detail_source(
+    payload: Dict[str, Any], fallback: Optional[str] = None
+) -> Optional[str]:
+    candidates: List[str] = []
+    if fallback:
+        candidates.append(str(fallback))
+
+    raw_source = payload.get("source")
+    if isinstance(raw_source, str):
+        candidates.append(raw_source)
+
+    raw_sources = payload.get("sources")
+    if isinstance(raw_sources, list):
+        candidates.extend(str(src) for src in raw_sources if isinstance(src, str))
+
+    for candidate in candidates:
+        text = candidate.strip()
+        if text:
+            return text
+    return None
+
+
+def _normalise_detail_history(entry: Dict[str, Any]) -> List[str]:
+    raw = entry.get("detail_sources")
+    if isinstance(raw, list):
+        return [str(src) for src in raw if isinstance(src, str) and src]
+    if isinstance(raw, str) and raw:
+        return [raw]
+    return []
+
+
+def _update_entry(
+    entry: Dict[str, Any], payload: Dict[str, Any], source: Optional[str] = None
+) -> None:
+    if not isinstance(payload, dict):
+        return
+
+    detail_source = _extract_detail_source(payload, source)
+    history = _normalise_detail_history(entry)
+    if detail_source:
+        if detail_source not in history:
+            history.append(detail_source)
+        entry["detail_sources"] = history
+        entry["detail_source"] = detail_source
+    elif history:
+        entry["detail_sources"] = history
+
+    for key in ("symbol", "name"):
         value = payload.get(key)
-        if value and key not in entry:
-            entry[key] = value
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                entry[key] = text
+
+    for key in ("market_cap", "price", "price_change"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)):
+            entry[key] = float(value)
+            continue
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                continue
+            try:
+                entry[key] = float(text)
+            except ValueError:
+                continue
 
 
 def _finalise_sources(entry: Dict[str, Any]) -> None:
@@ -257,7 +319,7 @@ async def merge_sources(
         entry = _entry(address)
         entry["sources"].add("trending")
         meta = TRENDING_METADATA.get(address) or {}
-        _update_entry(entry, meta)
+        _update_entry(entry, meta, source="trending")
         entry.setdefault("rank", meta.get("rank", idx + 1))
         entry["helius_score"] = max(
             _coerce_float(entry.get("helius_score")),
@@ -289,8 +351,9 @@ async def merge_sources(
             _coerce_float(entry.get("liquidity")),
             _coerce_float(payload.get("liquidity")),
         )
-        entry.setdefault("symbol", payload.get("symbol"))
-        entry.setdefault("name", payload.get("name", address))
+        _update_entry(entry, payload, source="onchain")
+        if "name" not in entry:
+            entry["name"] = address
 
     for payload in mempool_candidates:
         address = payload.get("address")
@@ -310,7 +373,7 @@ async def merge_sources(
             _coerce_float(entry.get("liquidity")),
             _coerce_float(payload.get("liquidity")),
         )
-        _update_entry(entry, payload)
+        _update_entry(entry, payload, source="mempool")
 
     final: List[Dict[str, Any]] = []
     for address, entry in combined.items():

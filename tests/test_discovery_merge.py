@@ -1,4 +1,9 @@
 import asyncio
+import math
+
+import pytest
+
+from solhunter_zero import discovery as discovery_mod
 from solhunter_zero.discovery import merge_sources
 
 
@@ -61,6 +66,79 @@ def test_merge_sources(monkeypatch):
     addresses = [e["address"] for e in result]
     assert addresses[0] == "a"
     assert set(addresses) == {"a", "b", "c", "d"}
+
+
+def test_latest_detail_payload_overrides_and_updates_score(monkeypatch):
+    async def fake_trend(limit=None):
+        return ["a"]
+
+    async def fake_onchain(url, return_metrics=False):
+        return []
+
+    async def fake_collect(_rpc_url, *, limit, threshold, ws_url=None):
+        _ = (limit, threshold, ws_url)
+        return [
+            {
+                "address": "a",
+                "liquidity": 100.0,
+                "volume": 200.0,
+                "price": 2.5,
+                "combined_score": 0.4,
+                "sources": ["mempool"],
+                "source": "mempool",
+            }
+        ]
+
+    async def fake_metric_vol(token, url):
+        _ = (token, url)
+        return 50.0
+
+    async def fake_metric_liq(token, url):
+        _ = (token, url)
+        return 10.0
+
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.fetch_trending_tokens_async", fake_trend
+    )
+    monkeypatch.setattr("solhunter_zero.discovery.scan_tokens_onchain", fake_onchain)
+    monkeypatch.setattr(
+        discovery_mod,
+        "_collect_mempool_candidates",
+        fake_collect,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.onchain_metrics.fetch_volume_onchain_async",
+        fake_metric_vol,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.onchain_metrics.fetch_liquidity_onchain_async",
+        fake_metric_liq,
+    )
+
+    monkeypatch.setitem(
+        discovery_mod.TRENDING_METADATA,
+        "a",
+        {
+            "symbol": "AAA",
+            "price": 1.0,
+            "liquidity": 20.0,
+            "volume": 75.0,
+            "score": 0.1,
+        },
+    )
+
+    result = asyncio.run(merge_sources("rpc"))
+    entry = next(item for item in result if item["address"] == "a")
+
+    assert entry["price"] == pytest.approx(2.5)
+    assert entry["liquidity"] == pytest.approx(100.0)
+    assert entry["volume"] == pytest.approx(200.0)
+    assert entry["detail_source"] == "mempool"
+    assert entry["detail_sources"] == ["trending", "mempool"]
+
+    expected_base = math.log1p(100.0) * 0.55 + math.log1p(200.0) * 0.45
+    expected_score = expected_base + 0.4 * 5.0 + 0.1
+    assert entry["score"] == pytest.approx(expected_score)
 
 
 def test_merge_sources_retries_mempool(monkeypatch):
