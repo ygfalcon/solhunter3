@@ -35,8 +35,10 @@ from solhunter_zero.redis_util import ensure_local_redis_if_needed
 log = logging.getLogger(__name__)
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Start SolHunter runtime")
+def _build_parser(*, include_help: bool = True) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Start SolHunter runtime", add_help=include_help
+    )
     parser.add_argument("--config", help="Path to config file", default=None)
     parser.add_argument("--ui-host", default="127.0.0.1", help="UI bind host")
     default_ui_port = os.getenv("UI_PORT", "5001")
@@ -48,9 +50,58 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Compatibility flag; implies detached mode",
     )
     parser.add_argument("--loop-delay", type=float, default=None, help="Override loop delay")
-    parser.add_argument("--min-delay", type=float, default=None, help="Minimum inter-iteration delay")
-    parser.add_argument("--max-delay", type=float, default=None, help="Maximum inter-iteration delay")
+    parser.add_argument(
+        "--min-delay", type=float, default=None, help="Minimum inter-iteration delay"
+    )
+    parser.add_argument(
+        "--max-delay", type=float, default=None, help="Maximum inter-iteration delay"
+    )
     parser.add_argument("--skip-clean", action="store_true", help="Skip process cleanup")
+    parser.add_argument(
+        "--testnet",
+        action="store_true",
+        help="Use configured testnet DEX endpoints when available",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Skip order submission and run the trading loop in simulation mode",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Avoid network access by using cached data and static token lists",
+    )
+    parser.add_argument(
+        "--token-list",
+        dest="token_list",
+        default=None,
+        help="Path to a token list file (one mint address per line)",
+    )
+    parser.add_argument(
+        "--strategy-rotation-interval",
+        type=int,
+        default=None,
+        help="Iterations between strategy weight rotation checks",
+    )
+    parser.add_argument(
+        "--weight-config",
+        dest="weight_configs",
+        action="append",
+        default=None,
+        help="Agent weight preset to include in rotation (repeatable)",
+    )
+    return parser
+
+
+def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    if getattr(args, "weight_configs", None) is None:
+        args.weight_configs = []
+    return args
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     try:
@@ -60,7 +111,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"Invalid value for --ui-port: {args.ui_port!r}. Must be an integer."
         ) from exc
 
-    return args
+    return _normalize_args(args)
+
+
+def runtime_env_from_namespace(args: argparse.Namespace) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if getattr(args, "offline", False):
+        env["SOLHUNTER_OFFLINE"] = "1"
+    if getattr(args, "dry_run", False):
+        env["DRY_RUN"] = "1"
+    if getattr(args, "testnet", False):
+        env["SOLHUNTER_TESTNET"] = "1"
+        env.setdefault("TESTNET", "1")
+    token_list = getattr(args, "token_list", None)
+    if token_list:
+        path = str(Path(token_list).expanduser())
+        env["TOKEN_LIST"] = path
+        env.setdefault("TOKEN_FILE", path)
+    rotation = getattr(args, "strategy_rotation_interval", None)
+    if rotation is not None:
+        env["STRATEGY_ROTATION_INTERVAL"] = str(rotation)
+    weight_configs = getattr(args, "weight_configs", None) or []
+    if weight_configs:
+        normalized = [str(Path(p).expanduser()) for p in weight_configs]
+        joined = os.pathsep.join(normalized)
+        env["WEIGHT_CONFIGS"] = joined
+        env.setdefault("WEIGHT_CONFIG_PATHS", joined)
+    return env
+
+
+def runtime_env_from_argv(argv: list[str]) -> dict[str, str]:
+    parser = _build_parser(include_help=False)
+    args, _ = parser.parse_known_args(argv)
+    return runtime_env_from_namespace(_normalize_args(args))
 
 
 def kill_lingering_processes() -> None:
@@ -136,6 +219,8 @@ def launch_foreground(args: argparse.Namespace, cfg_path: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    for key, value in runtime_env_from_namespace(args).items():
+        os.environ[key] = value
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
     if not args.skip_clean:
