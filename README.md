@@ -50,9 +50,13 @@ still exercising every gate.
 
 This repo now has a single, obvious entry for the new, event‑driven runtime.
 
-- Quick start (preferred):
+- Default command (preferred):
+  - `start_live --config configs/live_recommended.toml`
+  - This CLI wraps `python -m solhunter_zero.primary_entry_point`, sets `NEW_RUNTIME=1`
+    and `EVENT_DRIVEN=1`, and is now the default entry used by our launch scripts.
+- Direct module execution:
   - `python -m solhunter_zero.primary_entry_point --config configs/live_recommended.toml`
-  - This sets `NEW_RUNTIME=1` and `EVENT_DRIVEN=1` and runs the orchestrator.
+  - Useful when the console script is unavailable (for example in editable installs).
 
 - Top‑level marker for discoverability:
   - See `PRIMARY_ENTRYPOINT` (in repo root) for the exact command.
