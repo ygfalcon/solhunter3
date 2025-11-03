@@ -21,11 +21,20 @@ log = logging.getLogger(__name__)
 
 
 class TradeExecutor:
-    def __init__(self, memory: Memory, portfolio: Portfolio) -> None:
+    def __init__(
+        self,
+        memory: Memory,
+        portfolio: Portfolio,
+        *,
+        testnet: bool = False,
+        dry_run: bool = False,
+    ) -> None:
         self.memory = memory
         self.portfolio = portfolio
         self._task: asyncio.Task | None = None
         self._n = 0
+        self.testnet = bool(testnet)
+        self.dry_run = bool(dry_run)
 
     def start(self) -> None:
         event_bus.subscribe("action_decision", self._on_decision)
@@ -88,7 +97,15 @@ class TradeExecutor:
                     except Exception:
                         pass
                 else:
-                    await place_order_async(token, side, adj_size, price, testnet=False, dry_run=False, keypair=None)
+                    await place_order_async(
+                        token,
+                        side,
+                        adj_size,
+                        price,
+                        testnet=self.testnet,
+                        dry_run=self.dry_run,
+                        keypair=None,
+                    )
                     await self.memory.log_trade(token=token, direction=side, amount=adj_size, price=price)
                     await self.portfolio.update_async(token, adj_size if side == "buy" else -adj_size, price)
                     try:

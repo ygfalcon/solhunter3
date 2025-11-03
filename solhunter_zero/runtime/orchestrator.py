@@ -49,11 +49,20 @@ class RuntimeOrchestrator:
     This runs only when NEW_RUNTIME=1 to preserve the current behavior by default.
     """
 
-    def __init__(self, *, config_path: str | None = None, run_http: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        config_path: str | None = None,
+        run_http: bool = True,
+        dry_run: bool | None = None,
+        testnet: bool | None = None,
+    ) -> None:
         self.config_path = config_path
         self.run_http = run_http
         self.handles = RuntimeHandles(tasks=[])
         self._closed = False
+        self._executor_dry_run = dry_run
+        self._executor_testnet = testnet
 
     async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
         try:
@@ -286,7 +295,44 @@ class RuntimeOrchestrator:
 
         aruntime = AgentRuntime(active_manager, portfolio)
         await aruntime.start()
-        execu = TradeExecutor(memory, portfolio)
+        def _maybe_bool(value: Any) -> bool | None:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"1", "true", "yes", "on"}:
+                    return True
+                if lowered in {"0", "false", "no", "off"}:
+                    return False
+            try:
+                return bool(value)
+            except Exception:
+                return None
+
+        def _resolve_flag(override: bool | None, env_name: str, cfg_key: str) -> bool:
+            if override is not None:
+                return bool(override)
+            if os.getenv(env_name) is not None:
+                return parse_bool_env(env_name, False)
+            candidate: Any | None = None
+            if isinstance(cfg, dict):
+                candidate = cfg.get(cfg_key)
+            if candidate is None and isinstance(runtime_cfg, dict):
+                candidate = runtime_cfg.get(cfg_key)
+            maybe_val = _maybe_bool(candidate)
+            return bool(maybe_val) if maybe_val is not None else False
+
+        executor_dry_run = _resolve_flag(self._executor_dry_run, "DRY_RUN", "dry_run")
+        executor_testnet = _resolve_flag(self._executor_testnet, "TESTNET", "testnet")
+
+        execu = TradeExecutor(
+            memory,
+            portfolio,
+            testnet=executor_testnet,
+            dry_run=executor_dry_run,
+        )
         execu.start()
 
         async def _discovery_loop():
