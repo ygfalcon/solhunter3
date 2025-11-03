@@ -14,7 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
 
 from ..agent_manager import AgentManager
 from ..config import (
@@ -367,8 +367,16 @@ class TradingRuntime:
             cfg_path = str(Path(cfg_path).expanduser().resolve())
             self.config_path = cfg_path
 
+        preview_cfg = apply_env_overrides(load_config(self.config_path))
+        offline_mode, dry_run_mode, live_discovery_override = self._derive_offline_modes(
+            preview_cfg
+        )
+        self._apply_mode_environment(
+            offline_mode, dry_run_mode, live_discovery_override
+        )
+
         cfg, runtime_cfg, depth_proc = await perform_startup_async(
-            self.config_path, offline=False, dry_run=False
+            self.config_path, offline=offline_mode, dry_run=dry_run_mode
         )
 
         self.cfg = cfg
@@ -1383,7 +1391,19 @@ class TradingRuntime:
         except Exception:
             return default
 
-    def _derive_offline_modes(self) -> tuple[bool, bool, Optional[bool]]:
+    def _apply_mode_environment(
+        self, offline_mode: bool, dry_run_mode: bool, live_discovery_override: Optional[bool]
+    ) -> None:
+        os.environ["SOLHUNTER_OFFLINE"] = "1" if offline_mode else "0"
+        os.environ["DRY_RUN"] = "1" if dry_run_mode else "0"
+        if live_discovery_override is not None:
+            os.environ["LIVE_DISCOVERY"] = (
+                "1" if live_discovery_override else "0"
+            )
+
+    def _derive_offline_modes(
+        self, cfg: Optional[Mapping[str, Any]] = None
+    ) -> tuple[bool, bool, Optional[bool]]:
         offline_env_raw = os.getenv("SOLHUNTER_OFFLINE")
         dry_run_env_raw = os.getenv("DRY_RUN")
         live_discovery_env_raw = os.getenv("LIVE_DISCOVERY")
@@ -1402,9 +1422,11 @@ class TradingRuntime:
             else None
         )
 
-        offline_cfg = _maybe_bool(self.cfg.get("offline"))
-        dry_run_cfg = _maybe_bool(self.cfg.get("dry_run"))
-        live_discovery_cfg = _maybe_bool(self.cfg.get("live_discovery"))
+        source_cfg = dict(cfg or self.cfg or {})
+
+        offline_cfg = _maybe_bool(source_cfg.get("offline"))
+        dry_run_cfg = _maybe_bool(source_cfg.get("dry_run"))
+        live_discovery_cfg = _maybe_bool(source_cfg.get("live_discovery"))
 
         live_discovery_override = None
         if live_discovery_env is not None:
