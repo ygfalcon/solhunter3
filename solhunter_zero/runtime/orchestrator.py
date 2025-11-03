@@ -62,6 +62,7 @@ class RuntimeOrchestrator:
         self.run_http = run_http
         self.handles = RuntimeHandles(tasks=[])
         self._closed = False
+        self._stopping = False
         self._executor_dry_run = dry_run
         self._executor_testnet = testnet
 
@@ -397,72 +398,83 @@ class RuntimeOrchestrator:
         event_bus.subscribe("control", _ctl)
 
         # 1) UI, 2) Bus, 3) Agents
-        await self.start_ui()
-        await self.start_bus()
-        # Start decision metrics aggregator
         try:
-            from ..metrics.decision_metrics import DecisionMetrics
+            await self.start_ui()
+            await self.start_bus()
+            # Start decision metrics aggregator
+            try:
+                from ..metrics.decision_metrics import DecisionMetrics
 
-            self._dec_metrics = DecisionMetrics()
-            self._dec_metrics.start()
-        except Exception:
-            self._dec_metrics = None
-        # Start adaptive risk controller
-        try:
-            from ..risk_controller import RiskController
+                self._dec_metrics = DecisionMetrics()
+                self._dec_metrics.start()
+            except Exception:
+                self._dec_metrics = None
+            # Start adaptive risk controller
+            try:
+                from ..risk_controller import RiskController
 
-            self._risk_ctl = RiskController()
-            self._risk_ctl.start()
+                self._risk_ctl = RiskController()
+                self._risk_ctl.start()
+            except Exception:
+                self._risk_ctl = None
+            agents_ready = await self.start_agents()
+            if not agents_ready:
+                raise RuntimeError("agent startup aborted")
         except Exception:
-            self._risk_ctl = None
-        agents_ready = await self.start_agents()
-        if not agents_ready:
             await self.stop_all()
-            return
+            raise
         await self._publish_stage("runtime:ready", True)
 
     async def stop_all(self) -> None:
+        if self._stopping:
+            return
         if self._closed:
             return
-        self._closed = True
-        await self._publish_stage("runtime:stopping", True)
-        # Cancel tasks
-        for t in list(self.handles.tasks or []):
-            t.cancel()
-        for t in list(self.handles.tasks or []):
+        self._stopping = True
+        try:
+            self._closed = True
+            await self._publish_stage("runtime:stopping", True)
+            # Cancel tasks
+            for t in list(self.handles.tasks or []):
+                t.cancel()
+            for t in list(self.handles.tasks or []):
+                try:
+                    await t
+                except Exception:
+                    pass
+            self.handles.tasks = []
+            # Stop bus server
+            if self.handles.bus_started:
+                try:
+                    await event_bus.stop_ws_server()
+                except Exception:
+                    pass
+                finally:
+                    self.handles.bus_started = False
+            # Stop metrics
             try:
-                await t
+                m = getattr(self, "_dec_metrics", None)
+                if m is not None:
+                    m.stop()
             except Exception:
                 pass
-        self.handles.tasks = []
-        # Stop bus server
-        if self.handles.bus_started:
+            # Stop risk controller
             try:
-                await event_bus.stop_ws_server()
+                rc = getattr(self, "_risk_ctl", None)
+                if rc is not None:
+                    rc.stop()
             except Exception:
                 pass
-        # Stop metrics
-        try:
-            m = getattr(self, "_dec_metrics", None)
-            if m is not None:
-                m.stop()
-        except Exception:
-            pass
-        # Stop risk controller
-        try:
-            rc = getattr(self, "_risk_ctl", None)
-            if rc is not None:
-                rc.stop()
-        except Exception:
-            pass
-        # Close UI WS threads are daemonic; HTTP server stops with process
-        try:
-            from ..http import close_session
+            # Close UI WS threads are daemonic; HTTP server stops with process
+            try:
+                from ..http import close_session
 
-            await close_session()
-        except Exception:
-            pass
-        await self._publish_stage("runtime:stopped", True)
+                await close_session()
+            except Exception:
+                pass
+            await self._publish_stage("runtime:stopped", True)
+        finally:
+            self._stopping = False
 
 
 def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
