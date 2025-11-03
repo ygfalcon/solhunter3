@@ -74,7 +74,10 @@ async def test_start_event_bus_records_failure_and_raises(monkeypatch):
     runtime = trading_runtime.TradingRuntime()
     runtime.cfg = {}
 
+    start_calls = []
+
     async def failing_start_ws_server(host, port):
+        start_calls.append((host, port))
         raise RuntimeError("port in use")
 
     sleep_calls = []
@@ -99,7 +102,13 @@ async def test_start_event_bus_records_failure_and_raises(monkeypatch):
         await runtime._start_event_bus()
 
     assert "failed to start event bus websocket" in str(exc.value)
-    assert sleep_calls == [0.25, 0.5]
+    assert start_calls == [
+        ("127.0.0.1", 8779),
+        ("127.0.0.1", 8779),
+        ("127.0.0.1", 8779),
+        ("127.0.0.1", 0),
+    ]
+    assert sleep_calls == [0.25, 0.5, 1.0]
     assert runtime.bus_started is False
     assert runtime.status.event_bus is False
 
@@ -107,6 +116,159 @@ async def test_start_event_bus_records_failure_and_raises(monkeypatch):
     assert activity[-1]["stage"] == "event_bus"
     assert activity[-1]["ok"] is False
     assert "failed to start event bus websocket" in activity[-1]["detail"]
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_event_bus_falls_back_to_ephemeral_port(monkeypatch):
+    monkeypatch.delenv("EVENT_BUS_DISABLE_LOCAL", raising=False)
+    monkeypatch.delenv("EVENT_BUS_WS_PORT_RANGE", raising=False)
+
+    runtime = trading_runtime.TradingRuntime()
+    runtime.cfg = {}
+
+    bound_port = 9901
+    start_calls = []
+    sleep_calls = []
+
+    class DummySocket:
+        def __init__(self, port: int) -> None:
+            self._port = port
+
+        def getsockname(self):
+            return ("127.0.0.1", self._port)
+
+    class DummyServer:
+        def __init__(self, port: int) -> None:
+            self.sockets = [DummySocket(port)]
+
+    async def fake_start_ws_server(host, port):
+        start_calls.append((host, port))
+        if len(start_calls) <= 3:
+            raise RuntimeError("busy")
+        return DummyServer(bound_port)
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    async def fake_verify_broker_connection(*, timeout):
+        return True
+
+    monkeypatch.setattr(trading_runtime, "start_ws_server", fake_start_ws_server)
+    monkeypatch.setattr(trading_runtime.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        trading_runtime, "verify_broker_connection", fake_verify_broker_connection
+    )
+    monkeypatch.setattr(
+        trading_runtime, "ensure_local_redis_if_needed", lambda urls: None
+    )
+
+    subscribe_called = False
+
+    def fake_subscribe():
+        nonlocal subscribe_called
+        subscribe_called = True
+
+    monkeypatch.setattr(runtime, "_subscribe_to_events", fake_subscribe)
+
+    await runtime._start_event_bus()
+
+    assert start_calls == [
+        ("127.0.0.1", 8779),
+        ("127.0.0.1", 8779),
+        ("127.0.0.1", 8779),
+        ("127.0.0.1", 0),
+    ]
+    assert sleep_calls == [0.25, 0.5, 1.0]
+    assert os.environ["EVENT_BUS_URL"] == f"ws://127.0.0.1:{bound_port}"
+    assert os.environ["BROKER_WS_URLS"] == f"ws://127.0.0.1:{bound_port}"
+    assert runtime.bus_started is True
+    assert runtime.status.event_bus is True
+    assert subscribe_called is True
+
+    event_entries = [
+        entry for entry in runtime.activity.snapshot() if entry["stage"] == "event_bus"
+    ]
+    assert event_entries
+    assert any(f"ws://127.0.0.1:{bound_port}" in entry["detail"] for entry in event_entries)
+    assert any("(fallback)" in entry["detail"] for entry in event_entries)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_event_bus_uses_configured_port_range(monkeypatch):
+    monkeypatch.delenv("EVENT_BUS_DISABLE_LOCAL", raising=False)
+    monkeypatch.setenv("EVENT_BUS_WS_PORT_RANGE", "8800-8802")
+
+    runtime = trading_runtime.TradingRuntime()
+    runtime.cfg = {}
+
+    start_calls = []
+    sleep_calls = []
+    bound_port = 8801
+
+    class DummySocket:
+        def __init__(self, port: int) -> None:
+            self._port = port
+
+        def getsockname(self):
+            return ("127.0.0.1", self._port)
+
+    class DummyServer:
+        def __init__(self, port: int) -> None:
+            self.sockets = [DummySocket(port)]
+
+    async def fake_start_ws_server(host, port):
+        start_calls.append((host, port))
+        if port in {8779, 8800}:
+            raise RuntimeError("busy")
+        if port == bound_port:
+            return DummyServer(bound_port)
+        raise RuntimeError("unexpected port request")
+
+    async def fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    async def fake_verify_broker_connection(*, timeout):
+        return True
+
+    monkeypatch.setattr(trading_runtime, "start_ws_server", fake_start_ws_server)
+    monkeypatch.setattr(trading_runtime.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        trading_runtime, "verify_broker_connection", fake_verify_broker_connection
+    )
+    monkeypatch.setattr(
+        trading_runtime, "ensure_local_redis_if_needed", lambda urls: None
+    )
+
+    subscribe_called = False
+
+    def fake_subscribe():
+        nonlocal subscribe_called
+        subscribe_called = True
+
+    monkeypatch.setattr(runtime, "_subscribe_to_events", fake_subscribe)
+
+    await runtime._start_event_bus()
+
+    assert start_calls == [
+        ("127.0.0.1", 8779),
+        ("127.0.0.1", 8779),
+        ("127.0.0.1", 8779),
+        ("127.0.0.1", 8800),
+        ("127.0.0.1", bound_port),
+    ]
+    assert sleep_calls == [0.25, 0.5, 1.0, 2.0]
+    assert os.environ["EVENT_BUS_URL"] == f"ws://127.0.0.1:{bound_port}"
+    assert os.environ["BROKER_WS_URLS"] == f"ws://127.0.0.1:{bound_port}"
+    assert runtime.bus_started is True
+    assert runtime.status.event_bus is True
+    assert subscribe_called is True
+
+    event_entries = [
+        entry for entry in runtime.activity.snapshot() if entry["stage"] == "event_bus"
+    ]
+    assert event_entries
+    assert any("(fallback)" in entry["detail"] for entry in event_entries)
+    assert any(f"ws://127.0.0.1:{bound_port}" in entry["detail"] for entry in event_entries)
 
 
 @pytest.mark.anyio("asyncio")
