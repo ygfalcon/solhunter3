@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import types
 
@@ -71,3 +72,167 @@ async def test_start_agents_aborts_when_no_agents(monkeypatch, request):
     failure_messages = [detail for stage, ok, detail in stages if stage == "agents:loaded" and not ok]
     assert failure_messages, "Expected a failed agents:loaded stage"
     assert "no agents available" in failure_messages[0]
+
+
+@pytest.mark.anyio("asyncio")
+async def test_discovery_loop_respects_override(monkeypatch, request):
+    discovery_state = importlib.import_module("solhunter_zero.discovery_state")
+    discovery_state.clear_override()
+    request.addfinalizer(discovery_state.clear_override)
+
+    ui_module = importlib.import_module("solhunter_zero.ui")
+    monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
+    monkeypatch.setattr(ui_module, "start_websockets", lambda: {}, raising=False)
+
+    runtime_orchestrator = importlib.reload(
+        importlib.import_module("solhunter_zero.runtime.orchestrator")
+    )
+    request.addfinalizer(lambda: importlib.reload(runtime_orchestrator))
+
+    async def fake_startup(*_: object, **__: object):
+        return (
+            {
+                "agents": True,
+                "discovery_method": runtime_orchestrator.DEFAULT_DISCOVERY_METHOD,
+                "loop_delay": 10,
+            },
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(runtime_orchestrator, "perform_startup_async", fake_startup)
+
+    class DummyMemory:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def start_writer(self) -> None:
+            pass
+
+    class DummyPortfolio:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    class DummyAgentManager:
+        evolve_interval = 30
+        mutation_threshold = 0.0
+
+        def __init__(self) -> None:
+            self.agents = [types.SimpleNamespace(name="dummy")]
+
+        @classmethod
+        def from_config(cls, *_: object, **__: object) -> "DummyAgentManager":
+            return cls()
+
+        @classmethod
+        def from_default(cls) -> "DummyAgentManager":
+            return cls()
+
+        async def evolve(self, *_: object, **__: object) -> None:
+            pass
+
+        async def update_weights(self) -> None:
+            pass
+
+        def save_weights(self) -> None:
+            pass
+
+    class DummyAgentRuntime:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def start(self) -> None:
+            pass
+
+    class DummyTradeExecutor:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    class DummyDiscoveryAgent:
+        instances: list["DummyDiscoveryAgent"] = []
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            DummyDiscoveryAgent.instances.append(self)
+
+        async def discover_tokens(self, *, method: str, offline: bool) -> list[str]:
+            self.calls.append(method)
+            return []
+
+    async def fake_sleep(_: float) -> None:
+        fake_sleep.calls += 1
+        if fake_sleep.calls == 1:
+            discovery_state.set_override("mempool")
+            return
+        raise asyncio.CancelledError
+
+    fake_sleep.calls = 0  # type: ignore[attr-defined]
+
+    class DummyTask:
+        def __init__(self, coro):
+            self.coro = coro
+
+        def cancel(self) -> None:
+            pass
+
+        def __await__(self):  # pragma: no cover - exercised in test
+            return self.coro.__await__()
+
+    created_tasks: dict[str, DummyTask] = {}
+
+    def fake_create_task(coro, *, name: str | None = None):
+        task = DummyTask(coro)
+        if name:
+            created_tasks[name] = task
+        return task
+
+    monkeypatch.setattr(runtime_orchestrator, "Memory", DummyMemory)
+    monkeypatch.setattr(runtime_orchestrator, "Portfolio", DummyPortfolio)
+    monkeypatch.setattr(runtime_orchestrator, "TradingState", lambda: object())
+    monkeypatch.setattr(runtime_orchestrator, "AgentManager", DummyAgentManager)
+    monkeypatch.setattr(runtime_orchestrator, "StrategyManager", lambda *_: None)
+    runtime_agents_runtime = importlib.import_module("solhunter_zero.agents.runtime")
+    monkeypatch.setattr(runtime_agents_runtime, "AgentRuntime", DummyAgentRuntime, raising=False)
+
+    exec_service_module = importlib.import_module("solhunter_zero.exec_service")
+    monkeypatch.setattr(exec_service_module, "TradeExecutor", DummyTradeExecutor)
+
+    discovery_agent_module = importlib.import_module("solhunter_zero.agents.discovery")
+    monkeypatch.setattr(discovery_agent_module, "DiscoveryAgent", DummyDiscoveryAgent)
+
+    async def fake_init_rl_training(*_: object, **__: object) -> None:
+        return None
+
+    loop_module = importlib.import_module("solhunter_zero.loop")
+    monkeypatch.setattr(loop_module, "_init_rl_training", fake_init_rl_training)
+    monkeypatch.setattr(runtime_orchestrator, "_trading_loop", lambda *_, **__: None)
+    async def publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        return None
+
+    monkeypatch.setattr(
+        runtime_orchestrator.RuntimeOrchestrator,
+        "_publish_stage",
+        publish_stage,
+    )
+    monkeypatch.setattr(runtime_orchestrator.event_bus, "publish", lambda *_, **__: None)
+    monkeypatch.setattr(runtime_orchestrator.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(runtime_orchestrator.asyncio, "create_task", fake_create_task)
+
+    orchestrator = runtime_orchestrator.RuntimeOrchestrator(run_http=False)
+
+    result = await orchestrator.start_agents()
+    assert result is True
+    assert "discovery_loop" in created_tasks
+
+    discovery_task = created_tasks["discovery_loop"]
+    with pytest.raises(asyncio.CancelledError):
+        await discovery_task
+
+    instance = DummyDiscoveryAgent.instances[-1]
+    assert instance.calls[:2] == [
+        runtime_orchestrator.DEFAULT_DISCOVERY_METHOD,
+        "mempool",
+    ]
