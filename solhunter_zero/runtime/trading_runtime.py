@@ -200,6 +200,7 @@ class TradingRuntime:
         self._last_actions: List[Dict[str, Any]] = []
         self._offline_mode: bool = False
         self._dry_run_mode: bool = False
+        self._testnet_mode: bool = False
         history_limit = int(os.getenv("ITERATION_HISTORY_LIMIT", "120") or 120)
         self._iteration_history: Deque[Dict[str, Any]] = deque(maxlen=history_limit)
         self._history_lock = threading.Lock()
@@ -643,6 +644,13 @@ class TradingRuntime:
         self.agent_manager = manager
 
         fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
+        offline_mode, dry_run_mode, live_discovery_override, testnet_mode = (
+            self._derive_offline_modes()
+        )
+        self._offline_mode = bool(offline_mode)
+        self._dry_run_mode = bool(dry_run_mode)
+        self._testnet_mode = bool(testnet_mode)
+
         if self._use_new_pipeline:
             log.info(
                 "TradingRuntime: initialising staged pipeline (fast_mode=%s)",
@@ -675,9 +683,6 @@ class TradingRuntime:
                     )
                     evaluation_cache_ttl = None
 
-            offline_mode, dry_run_mode, live_discovery_override = self._derive_offline_modes()
-            self._offline_mode = bool(offline_mode)
-            self._dry_run_mode = bool(dry_run_mode)
             token_file = self._resolve_token_file()
             use_offline_discovery = bool(self._offline_mode)
             if live_discovery_override is True:
@@ -710,11 +715,13 @@ class TradingRuntime:
             )
 
             executor = getattr(self.agent_manager, "executor", None)
-            if executor is not None and hasattr(executor, "dry_run"):
+            if executor is not None:
                 try:
-                    setattr(executor, "dry_run", bool(self._dry_run_mode))
+                    if hasattr(executor, "dry_run"):
+                        setattr(executor, "dry_run", bool(self._dry_run_mode))
+                    setattr(executor, "testnet", bool(self._testnet_mode))
                 except Exception:  # pragma: no cover - defensive logging
-                    log.exception("Failed to toggle executor dry_run mode")
+                    log.exception("Failed to toggle executor modes")
 
             self.pipeline = PipelineCoordinator(
                 self.agent_manager,
@@ -729,6 +736,7 @@ class TradingRuntime:
                 on_execution=self._pipeline_on_execution,
                 offline=use_offline_discovery,
                 token_file=token_file,
+                testnet=self._testnet_mode,
                 discovery_empty_cache_ttl=discovery_empty_cache,
                 discovery_backoff_factor=discovery_backoff,
                 discovery_max_backoff=discovery_max_backoff,
@@ -906,6 +914,7 @@ class TradingRuntime:
             arbitrage_threshold = _maybe_float(self.cfg.get("arbitrage_threshold"), 0.0)
             arbitrage_amount = _maybe_float(self.cfg.get("arbitrage_amount"), 0.0)
             live_discovery = self.cfg.get("live_discovery")
+            token_file = self._resolve_token_file() if self._offline_mode else None
 
             while not self.stop_event.is_set():
                 start = time.perf_counter()
@@ -916,10 +925,10 @@ class TradingRuntime:
                         self.portfolio,
                         self.state,
                         cfg=self.runtime_cfg,
-                        testnet=False,
-                        dry_run=False,
-                        offline=False,
-                        token_file=None,
+                        testnet=self._testnet_mode,
+                        dry_run=self._dry_run_mode,
+                        offline=self._offline_mode,
+                        token_file=token_file,
                         discovery_method=discovery_method,
                         stop_loss=stop_loss,
                         take_profit=take_profit,
@@ -1435,10 +1444,11 @@ class TradingRuntime:
         except Exception:
             return default
 
-    def _derive_offline_modes(self) -> tuple[bool, bool, Optional[bool]]:
+    def _derive_offline_modes(self) -> tuple[bool, bool, Optional[bool], bool]:
         offline_env_raw = os.getenv("SOLHUNTER_OFFLINE")
         dry_run_env_raw = os.getenv("DRY_RUN")
         live_discovery_env_raw = os.getenv("LIVE_DISCOVERY")
+        testnet_env_raw = os.getenv("TESTNET")
 
         offline_env = (
             parse_bool_env("SOLHUNTER_OFFLINE", False)
@@ -1453,10 +1463,14 @@ class TradingRuntime:
             if live_discovery_env_raw is not None
             else None
         )
+        testnet_env = (
+            parse_bool_env("TESTNET", False) if testnet_env_raw is not None else None
+        )
 
         offline_cfg = _maybe_bool(self.cfg.get("offline"))
         dry_run_cfg = _maybe_bool(self.cfg.get("dry_run"))
         live_discovery_cfg = _maybe_bool(self.cfg.get("live_discovery"))
+        testnet_cfg = _maybe_bool(self.cfg.get("testnet"))
 
         live_discovery_override = None
         if live_discovery_env is not None:
@@ -1482,7 +1496,19 @@ class TradingRuntime:
         else:
             dry_run_mode = False
 
-        return bool(offline_mode), bool(dry_run_mode), live_discovery_override
+        if testnet_env is not None:
+            testnet_mode = testnet_env
+        elif testnet_cfg is not None:
+            testnet_mode = testnet_cfg
+        else:
+            testnet_mode = False
+
+        return (
+            bool(offline_mode),
+            bool(dry_run_mode),
+            live_discovery_override,
+            bool(testnet_mode),
+        )
 
     def _resolve_token_file(self) -> Optional[str]:
         candidate = self.cfg.get("token_file")

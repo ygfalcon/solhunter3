@@ -22,6 +22,7 @@ class ExecutionService:
         agent_manager,
         *,
         lane_workers: int = 2,
+        testnet: bool | None = None,
         on_receipt: Optional[Callable[[ExecutionReceipt], Awaitable[None] | None]] = None,
     ) -> None:
         self.input_queue = input_queue
@@ -35,6 +36,15 @@ class ExecutionService:
         self._task: Optional[asyncio.Task] = None
         self._worker_tasks: list[asyncio.Task] = []
         self._on_receipt = on_receipt
+        self.testnet = bool(testnet) if testnet is not None else None
+
+        if testnet is not None:
+            executor = getattr(self.agent_manager, "executor", None)
+            if executor is not None:
+                try:
+                    setattr(executor, "testnet", bool(testnet))
+                except Exception:  # pragma: no cover - defensive logging
+                    log.exception("Failed to propagate testnet flag to executor")
 
     async def start(self) -> None:
         if self._task is None:
