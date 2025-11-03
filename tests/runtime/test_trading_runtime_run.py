@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import socket
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -77,7 +78,7 @@ async def test_trading_runtime_start_ui_reports_port_in_use(caplog):
         runtime.ui_port = busy_sock.getsockname()[1]
 
         with caplog.at_level(logging.ERROR):
-            with pytest.raises(OSError):
+            with pytest.raises(trading_runtime.UIStartupError):
                 await runtime._start_ui()
 
         entries = runtime.activity.snapshot()
@@ -95,3 +96,33 @@ async def test_trading_runtime_start_ui_reports_port_in_use(caplog):
         )
     finally:
         busy_sock.close()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_prepare_configuration_forwards_offline_modes(monkeypatch, tmp_path):
+    runtime = trading_runtime.TradingRuntime()
+    runtime.config_path = str(tmp_path / "config.toml")
+
+    monkeypatch.setattr(trading_runtime, "apply_env_overrides", lambda cfg: cfg)
+    monkeypatch.setattr(
+        trading_runtime, "load_config", lambda path: {"offline": True, "dry_run": False}
+    )
+    monkeypatch.setattr(trading_runtime, "set_env_from_config", lambda cfg: None)
+
+    recorded = {}
+
+    async def fake_startup(config_path, *, offline, dry_run):
+        recorded["config_path"] = config_path
+        recorded["offline"] = offline
+        recorded["dry_run"] = dry_run
+        return ({"offline": True, "dry_run": False}, SimpleNamespace(), None)
+
+    monkeypatch.setattr(trading_runtime, "perform_startup_async", fake_startup)
+
+    await runtime._prepare_configuration()
+
+    assert recorded["config_path"] == runtime.config_path
+    assert recorded["offline"] is True
+    assert recorded["dry_run"] is False
+    assert runtime._offline_mode is True
+    assert runtime._dry_run_mode is False

@@ -219,6 +219,8 @@ class TradingRuntime:
             "configured": False,
         }
         self._metrics_started = False
+        self._offline_mode: Optional[bool] = None
+        self._dry_run_mode: Optional[bool] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -365,8 +367,19 @@ class TradingRuntime:
             cfg_path = str(Path(cfg_path).expanduser().resolve())
             self.config_path = cfg_path
 
+        # Determine offline/dry-run behaviour before performing startup side-effects.
+        pre_start_cfg = apply_env_overrides(load_config(self.config_path))
+        previous_cfg = self.cfg
+        try:
+            self.cfg = pre_start_cfg
+            self._offline_mode = None
+            self._dry_run_mode = None
+            offline_mode, dry_run_mode = self._resolve_offline_modes()
+        finally:
+            self.cfg = previous_cfg
+
         cfg, runtime_cfg, depth_proc = await perform_startup_async(
-            self.config_path, offline=False, dry_run=False
+            self.config_path, offline=offline_mode, dry_run=dry_run_mode
         )
 
         self.cfg = cfg
@@ -621,7 +634,7 @@ class TradingRuntime:
                     )
                     evaluation_cache_ttl = None
 
-            offline_mode, dry_run_mode = self._derive_offline_modes()
+            offline_mode, dry_run_mode = self._resolve_offline_modes()
             token_file = self._resolve_token_file()
             use_offline_discovery = bool(offline_mode or dry_run_mode)
             discovery_limit_cfg = _maybe_int(
@@ -1353,6 +1366,15 @@ class TradingRuntime:
             return float(val)
         except Exception:
             return default
+
+    def _resolve_offline_modes(self) -> tuple[bool, bool]:
+        if self._offline_mode is not None and self._dry_run_mode is not None:
+            return self._offline_mode, self._dry_run_mode
+
+        offline_mode, dry_run_mode = self._derive_offline_modes()
+        self._offline_mode = offline_mode
+        self._dry_run_mode = dry_run_mode
+        return offline_mode, dry_run_mode
 
     def _derive_offline_modes(self) -> tuple[bool, bool]:
         offline_env_raw = os.getenv("SOLHUNTER_OFFLINE")
