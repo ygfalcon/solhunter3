@@ -109,9 +109,11 @@ def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
 
 def test_discover_tokens_retries_on_empty_merge(monkeypatch, caplog):
     calls = []
+    captured: dict[str, Any] = {}
 
-    async def fake_merge(url, mempool_threshold=0.0, ws_url=None):
+    async def fake_merge(url, *, limit=None, mempool_threshold=0.0, ws_url=None):
         calls.append(None)
+        captured["limit"] = limit
         if len(calls) == 1:
             return []
         return [{"address": "tok"}]
@@ -144,6 +146,9 @@ def test_discover_tokens_retries_on_empty_merge(monkeypatch, caplog):
     assert len(calls) == 2
     assert sleep_calls == [0.0]
     assert "No tokens discovered" in caplog.text
+    from solhunter_zero.discovery import _DEFAULT_LIMIT as merge_default_limit
+
+    assert captured["limit"] == min(agent.limit, merge_default_limit)
 
 
 def test_offline_discovery_uses_fallback(monkeypatch):
@@ -193,8 +198,9 @@ def test_offline_discovery_with_network_override(monkeypatch):
 def test_discovery_agent_passes_ws_url(monkeypatch):
     called: dict[str, Any] = {}
 
-    async def fake_merge(url, mempool_threshold=0.0, ws_url=None):
+    async def fake_merge(url, *, limit=None, mempool_threshold=0.0, ws_url=None):
         called["rpc"] = url
+        called["limit"] = limit
         called["ws"] = ws_url
         return [{"address": "tok"}]
 
@@ -216,4 +222,7 @@ def test_discovery_agent_passes_ws_url(monkeypatch):
 
     assert tokens == ["tok"]
     assert called["rpc"] == agent.rpc_url
+    from solhunter_zero.discovery import _DEFAULT_LIMIT as merge_default_limit
+
     assert called["ws"] == "wss://derived.example"
+    assert called["limit"] == min(agent.limit, merge_default_limit)
