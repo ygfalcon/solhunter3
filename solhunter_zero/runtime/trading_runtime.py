@@ -432,13 +432,51 @@ class TradingRuntime:
         start_delay = 0.25
         start_error: Optional[BaseException] = None
 
-        for attempt in range(1, start_attempts + 1):
+        port_range_env = os.getenv("EVENT_BUS_WS_PORT_RANGE", "").strip()
+        fallback_ports: List[int] = []
+        if port_range_env:
+            range_spec = port_range_env.replace(",", "-")
+            parts = [p.strip() for p in range_spec.split("-") if p.strip()]
             try:
-                server = await start_ws_server("127.0.0.1", ws_port)
+                if len(parts) == 1:
+                    start_port = end_port = int(parts[0])
+                elif len(parts) >= 2:
+                    start_port = int(parts[0])
+                    end_port = int(parts[1])
+                else:
+                    raise ValueError("empty port range")
+                if start_port > end_port:
+                    start_port, end_port = end_port, start_port
+                fallback_ports = [p for p in range(start_port, end_port + 1)]
+            except ValueError:
+                log.warning(
+                    "Invalid EVENT_BUS_WS_PORT_RANGE %r; falling back to port 0",
+                    port_range_env,
+                )
+                fallback_ports = []
+
+        fallback_ports = [p for p in fallback_ports if p != ws_port]
+        if not fallback_ports and ws_port != 0:
+            fallback_ports = [0]
+
+        attempt_sequence: List[tuple[str, int]] = [
+            ("fixed", ws_port) for _ in range(start_attempts)
+        ]
+        attempt_sequence.extend(("fallback", port) for port in fallback_ports)
+
+        total_attempts = len(attempt_sequence)
+        server = None
+        fallback_used = False
+
+        for idx, (stage, port_candidate) in enumerate(attempt_sequence, start=1):
+            try:
+                server = await start_ws_server("127.0.0.1", port_candidate)
             except Exception as exc:
                 start_error = exc
                 log.exception(
-                    "Failed to start event bus websocket on attempt %s", attempt
+                    "Failed to start event bus websocket on attempt %s (port %s)",
+                    idx,
+                    port_candidate,
                 )
             else:
                 if server is None and not local_ws_disabled:
@@ -448,7 +486,7 @@ class TradingRuntime:
                 else:
                     self.bus_started = bool(server)
                     if server is not None and not local_ws_disabled:
-                        bound_port = ws_port
+                        bound_port = port_candidate
                         try:
                             sockets = getattr(server, "sockets", None)
                             if sockets:
@@ -459,27 +497,32 @@ class TradingRuntime:
                                 elif isinstance(sockname, int):
                                     bound_port = sockname
                         except Exception:
-                            bound_port = ws_port
+                            bound_port = port_candidate
                         event_bus_url = f"ws://127.0.0.1:{bound_port}"
                         os.environ["EVENT_BUS_URL"] = event_bus_url
                         os.environ["BROKER_WS_URLS"] = event_bus_url
+                    fallback_used = stage == "fallback"
                     detail = (
                         "local websocket disabled via EVENT_BUS_DISABLE_LOCAL"
                         if local_ws_disabled
-                        else f"listening on {event_bus_url}"
+                        else (
+                            f"listening on {event_bus_url}"
+                            if not fallback_used
+                            else f"listening on {event_bus_url} (fallback)"
+                        )
                     )
                     self.activity.add("event_bus", detail)
                     start_error = None
                     break
 
-            if attempt < start_attempts:
+            if idx < total_attempts:
                 await asyncio.sleep(start_delay)
                 start_delay = min(start_delay * 2, 2.0)
 
         if start_error is not None:
             message = (
                 "failed to start event bus websocket after "
-                f"{start_attempts} attempts: {start_error}"
+                f"{total_attempts} attempts: {start_error}"
             )
             self.activity.add("event_bus", message, ok=False)
             self.status.event_bus = False
