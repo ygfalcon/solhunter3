@@ -193,12 +193,35 @@ class PipelineCoordinator:
         self._no_action_cache: Dict[str, float] = {}
 
     async def start(self) -> None:
-        await self._discovery_service.start()
-        await self._scoring_service.start()
-        await self._evaluation_service.start()
-        await self._execution_service.start()
-        await self._feedback_service.start()
-        await self._portfolio_service.start()
+        services = [
+            ("discovery", self._discovery_service),
+            ("scoring", self._scoring_service),
+            ("evaluation", self._evaluation_service),
+            ("execution", self._execution_service),
+            ("feedback", self._feedback_service),
+            ("portfolio", self._portfolio_service),
+        ]
+        started: list[tuple[str, Any]] = []
+        failed_service = "initial"
+        try:
+            for name, service in services:
+                failed_service = name
+                started.append((name, service))
+                await service.start()
+        except Exception:
+            log.exception(
+                "PipelineCoordinator: failed to start %s service; rolling back",
+                failed_service,
+            )
+            for name, service in reversed(started):
+                try:
+                    await service.stop()
+                except Exception:
+                    log.exception(
+                        "PipelineCoordinator: error stopping %s service during rollback",
+                        name,
+                    )
+            raise
         log.info(
             "PipelineCoordinator: all services started (discovery→scoring→evaluation→execution→portfolio)"
         )

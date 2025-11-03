@@ -255,13 +255,22 @@ class TradingRuntime:
     async def start(self) -> None:
         self.activity.add("runtime", "starting")
         self._start_time = time.time()
-        await self._prepare_configuration()
-        self._ensure_metrics_aggregator_started()
-        await self._start_event_bus()
-        await self._start_ui()
-        await self._start_agents()
-        self._start_rl_status_watcher()
-        await self._start_loop()
+        try:
+            await self._prepare_configuration()
+            self._ensure_metrics_aggregator_started()
+            await self._start_event_bus()
+            await self._start_ui()
+            await self._start_agents()
+            self._start_rl_status_watcher()
+            await self._start_loop()
+        except Exception as exc:
+            self.activity.add("runtime", f"start failed: {exc}", ok=False)
+            log.exception("TradingRuntime: start failed; attempting rollback")
+            try:
+                await self.stop()
+            except Exception:
+                log.exception("TradingRuntime: error during rollback after start failure")
+            raise
         self.activity.add("runtime", "started")
 
     async def stop(self) -> None:
