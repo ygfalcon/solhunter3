@@ -5,9 +5,8 @@ import asyncio
 import logging
 import os
 import signal
-import sys
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from ..util import install_uvloop, parse_bool_env
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
@@ -54,6 +53,15 @@ class RuntimeOrchestrator:
         self.run_http = run_http
         self.handles = RuntimeHandles(tasks=[])
         self._closed = False
+        self._stop_event: asyncio.Event | None = None
+        # Lazily create the stop event to avoid binding to the wrong loop if the
+        # orchestrator is instantiated in a different context.  The event is
+        # created on-demand when first accessed via ``_get_stop_event``.
+
+    def _get_stop_event(self) -> asyncio.Event:
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
+        return self._stop_event
 
     async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
         try:
@@ -369,6 +377,7 @@ class RuntimeOrchestrator:
         if self._closed:
             return
         self._closed = True
+        self._get_stop_event().set()
         await self._publish_stage("runtime:stopping", True)
         # Cancel tasks
         for t in list(self.handles.tasks or []):
@@ -408,6 +417,9 @@ class RuntimeOrchestrator:
             pass
         await self._publish_stage("runtime:stopped", True)
 
+    async def wait_until_closed(self) -> None:
+        await self._get_stop_event().wait()
+
 
 def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="SolHunter Zero Runtime Orchestrator")
@@ -432,10 +444,14 @@ async def _amain(argv: list[str] | None = None) -> int:
         except NotImplementedError:
             pass
 
-    await orch.start()
-    # Keep process alive while trading loop runs
-    while True:
-        await asyncio.sleep(3600)
+    try:
+        await orch.start()
+        await orch.wait_until_closed()
+    except asyncio.CancelledError:
+        await orch.stop_all()
+        raise
+
+    return 0
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -443,6 +459,7 @@ def main(argv: list[str] | None = None) -> None:
         print("NEW_RUNTIME is not enabled; aborting orchestrator.")
         raise SystemExit(2)
     try:
-        asyncio.run(_amain(argv))
+        code = asyncio.run(_amain(argv))
     except KeyboardInterrupt:
-        pass
+        code = 130
+    raise SystemExit(code)

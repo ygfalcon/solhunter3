@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import types
 
@@ -71,3 +72,46 @@ async def test_start_agents_aborts_when_no_agents(monkeypatch, request):
     failure_messages = [detail for stage, ok, detail in stages if stage == "agents:loaded" and not ok]
     assert failure_messages, "Expected a failed agents:loaded stage"
     assert "no agents available" in failure_messages[0]
+
+
+@pytest.mark.anyio("asyncio")
+async def test_amain_stops_when_orchestrator_closed(monkeypatch, request):
+    ui_module = importlib.import_module("solhunter_zero.ui")
+    monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
+    monkeypatch.setattr(ui_module, "start_websockets", lambda: {}, raising=False)
+
+    runtime_orchestrator = importlib.reload(
+        importlib.import_module("solhunter_zero.runtime.orchestrator")
+    )
+    request.addfinalizer(lambda: importlib.reload(runtime_orchestrator))
+
+    created: list[runtime_orchestrator.RuntimeOrchestrator] = []
+    original_init = runtime_orchestrator.RuntimeOrchestrator.__init__
+
+    def capturing_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(runtime_orchestrator.RuntimeOrchestrator, "__init__", capturing_init)
+
+    started = asyncio.Event()
+
+    async def fake_start(self):
+        started.set()
+
+    async def fake_stop_all(self):
+        self._closed = True
+        self._get_stop_event().set()
+
+    monkeypatch.setattr(runtime_orchestrator.RuntimeOrchestrator, "start", fake_start)
+    monkeypatch.setattr(runtime_orchestrator.RuntimeOrchestrator, "stop_all", fake_stop_all)
+
+    task = asyncio.create_task(runtime_orchestrator._amain([]))
+
+    await started.wait()
+    assert created, "RuntimeOrchestrator was not instantiated"
+
+    await created[0].stop_all()
+
+    result = await asyncio.wait_for(task, timeout=1)
+    assert result == 0
