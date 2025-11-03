@@ -22,7 +22,14 @@ from ..token_scanner import enrich_tokens_async, scan_tokens_async
 
 logger = logging.getLogger(__name__)
 
-_CACHE: dict[str, object] = {"tokens": [], "ts": 0.0, "limit": 0, "method": ""}
+_CACHE: dict[str, object] = {
+    "tokens": [],
+    "ts": 0.0,
+    "limit": 0,
+    "method": "",
+    "rpc_url": None,
+    "ws_url": None,
+}
 _STATIC_FALLBACK = [
     "So11111111111111111111111111111111111111112",  # SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
@@ -197,11 +204,17 @@ class DiscoveryAgent:
         )
         cache_limit = int(_CACHE.get("limit", 0))
         cached_method = (_CACHE.get("method") or "").lower()
+        cached_rpc = _CACHE.get("rpc_url")
+        cached_ws = _CACHE.get("ws_url")
+        endpoints_match = (
+            cached_rpc == self.rpc_url and (cached_ws or None) == (self.ws_url or None)
+        )
         if (
             ttl > 0
             and cached_tokens
             and now - float(_CACHE.get("ts", 0.0)) < ttl
             and (not method_override or cached_method == active_method or not cached_method)
+            and endpoints_match
         ):
             if cache_limit and cache_limit >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
@@ -250,6 +263,8 @@ class DiscoveryAgent:
             _CACHE["ts"] = now
             _CACHE["limit"] = self.limit
             _CACHE["method"] = active_method
+            _CACHE["rpc_url"] = self.rpc_url
+            _CACHE["ws_url"] = self.ws_url
 
         return tokens
 

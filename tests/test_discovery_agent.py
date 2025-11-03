@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from typing import Any
 
 from solhunter_zero.agents.discovery import DiscoveryAgent
@@ -226,3 +227,50 @@ def test_discovery_agent_passes_ws_url(monkeypatch):
 
     assert called["ws"] == "wss://derived.example"
     assert called["limit"] == min(agent.limit, merge_default_limit)
+
+
+def test_discovery_cache_skipped_when_rpc_changes(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "60")
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
+    monkeypatch.setenv("SOLANA_RPC_URL", "https://new.rpc")
+    monkeypatch.setenv("SOLANA_WS_URL", "wss://new.rpc")
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.config.get_solana_ws_url", lambda: None
+    )
+
+    monkeypatch.setattr(
+        discovery_mod,
+        "_CACHE",
+        {
+            "tokens": ["cached-token"],
+            "ts": time.time(),
+            "limit": 60,
+            "method": "helius",
+            "rpc_url": "https://old.rpc",
+            "ws_url": "wss://old.rpc",
+        },
+    )
+
+    calls: list[str] = []
+
+    async def fake_scan(*, rpc_url, limit, enrich, api_key):
+        calls.append(rpc_url)
+        return ["fresh-token"]
+
+    async def fake_enrich(tokens, *, rpc_url):
+        return list(tokens)
+
+    monkeypatch.setattr(discovery_mod, "scan_tokens_async", fake_scan)
+    monkeypatch.setattr(discovery_mod, "enrich_tokens_async", fake_enrich)
+
+    agent = DiscoveryAgent()
+
+    async def run() -> list[str]:
+        return await agent.discover_tokens(offline=False)
+
+    tokens = asyncio.run(run())
+
+    assert tokens == ["fresh-token"]
+    assert calls == ["https://new.rpc"]
