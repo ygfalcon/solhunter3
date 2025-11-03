@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from solhunter_zero.pipeline import discovery_service as discovery_mod
+from solhunter_zero.token_scanner import TRENDING_METADATA
 
 
 @pytest.fixture
@@ -128,3 +129,49 @@ async def test_emit_tokens_publishes_event(monkeypatch):
 
     await service._emit_tokens(["TokA", "TokB"], fresh=False)
     assert events == [["TokA", "TokB"]]
+
+
+def test_build_candidates_uses_metadata_sources():
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+    service._agent.last_method = "websocket"
+    service._agent.last_details = {
+        "MintA": {"sources": {"mempool", "helius"}, "symbol": "MNTA"}
+    }
+    TRENDING_METADATA["MintA"] = {"sources": ["birdeye"], "name": "Mint Alpha"}
+    try:
+        batch = service._build_candidates(["MintA"])
+        assert len(batch) == 1
+        candidate = batch[0]
+        assert candidate.source == "mempool"
+        assert candidate.metadata["sources"] == ["mempool", "helius", "birdeye"]
+        assert candidate.metadata["symbol"] == "MNTA"
+        assert candidate.metadata["name"] == "Mint Alpha"
+    finally:
+        TRENDING_METADATA.pop("MintA", None)
+
+
+def test_build_candidates_aggregates_unknown_sources():
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+    service._agent.last_method = "websocket"
+    service._agent.last_details = {"MintB": {"sources": ["Foo", "Bar"]}}
+    try:
+        batch = service._build_candidates(["MintB"])
+        assert len(batch) == 1
+        candidate = batch[0]
+        assert candidate.source == "multi:bar+foo"
+        assert candidate.metadata["sources"] == ["bar", "foo"]
+    finally:
+        TRENDING_METADATA.pop("MintB", None)
+
+
+def test_build_candidates_falls_back_to_last_method():
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+    service._agent.last_method = "file"
+    service._agent.last_details = {}
+    batch = service._build_candidates(["MintC"])
+    assert len(batch) == 1
+    candidate = batch[0]
+    assert candidate.source == "file"

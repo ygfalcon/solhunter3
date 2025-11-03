@@ -141,10 +141,11 @@ class DiscoveryService:
         for tok in tokens:
             token = str(tok)
             metadata = self._candidate_metadata(token)
+            source = self._candidate_source(metadata)
             result.append(
                 TokenCandidate(
                     token=token,
-                    source="discovery",
+                    source=source,
                     discovered_at=ts,
                     metadata=metadata,
                 )
@@ -154,45 +155,122 @@ class DiscoveryService:
     def _candidate_metadata(self, token: str) -> Dict[str, Any]:
         """Return enriched metadata for ``token`` when available."""
 
-        raw = TRENDING_METADATA.get(token)
-        if not isinstance(raw, dict):
-            return {}
-
         metadata: Dict[str, Any] = {}
 
-        for key in ("symbol", "name"):
-            value = raw.get(key)
-            if isinstance(value, str) and value:
+        details = getattr(self._agent, "last_details", {}).get(token)
+        if isinstance(details, dict):
+            for key, value in details.items():
+                if key == "sources":
+                    continue
                 metadata[key] = value
 
-        numeric_keys = {
-            "price": "price",
-            "volume": "volume",
-            "liquidity": "liquidity",
-            "market_cap": "market_cap",
-            "price_change": "price_change",
-        }
-        for source_key, dest_key in numeric_keys.items():
-            number = _coerce_float(raw.get(source_key))
-            if number is not None:
-                metadata[dest_key] = number
+        sources = self._normalise_sources(
+            details.get("sources") if isinstance(details, dict) else None
+        )
 
-        discovery_score = _coerce_float(raw.get("score"))
-        if discovery_score is not None:
-            metadata["discovery_score"] = discovery_score
+        raw = TRENDING_METADATA.get(token)
+        if isinstance(raw, dict):
+            for key in ("symbol", "name"):
+                value = raw.get(key)
+                if isinstance(value, str) and value and key not in metadata:
+                    metadata[key] = value
 
-        sources = raw.get("sources")
-        if isinstance(sources, list):
-            metadata["sources"] = [str(src) for src in sources if isinstance(src, str)]
+            numeric_keys = {
+                "price": "price",
+                "volume": "volume",
+                "liquidity": "liquidity",
+                "market_cap": "market_cap",
+                "price_change": "price_change",
+            }
+            for source_key, dest_key in numeric_keys.items():
+                if dest_key in metadata:
+                    continue
+                number = _coerce_float(raw.get(source_key))
+                if number is not None:
+                    metadata[dest_key] = number
 
-        rank_value = raw.get("rank")
-        try:
-            if rank_value is not None:
-                metadata["trending_rank"] = int(rank_value)
-        except (TypeError, ValueError):
-            pass
+            discovery_score = _coerce_float(raw.get("score"))
+            if discovery_score is not None:
+                metadata.setdefault("discovery_score", discovery_score)
+
+            rank_value = raw.get("rank")
+            try:
+                if rank_value is not None and "trending_rank" not in metadata:
+                    metadata["trending_rank"] = int(rank_value)
+            except (TypeError, ValueError):
+                pass
+
+            sources.extend(self._normalise_sources(raw.get("sources")))
+
+        if sources:
+            # Normalise again in case we extended with additional values.
+            metadata["sources"] = self._normalise_sources(sources)
 
         return metadata
+
+    _SOURCE_PREFERENCE = (
+        "mempool",
+        "onchain",
+        "websocket",
+        "helius",
+        "birdeye",
+        "trending",
+        "file",
+        "static",
+    )
+
+    def _candidate_source(self, metadata: Dict[str, Any]) -> str:
+        sources = self._normalise_sources(metadata.get("sources"))
+        if not sources:
+            single = self._normalise_sources(metadata.get("source"))
+            if single:
+                sources = single
+
+        if sources:
+            for preferred in self._SOURCE_PREFERENCE:
+                if preferred in sources:
+                    return preferred
+            if len(sources) == 1:
+                return sources[0]
+            summary_sources = sources[:3]
+            summary = "+".join(summary_sources)
+            if len(sources) > 3:
+                summary += "+…"
+            return f"multi:{summary}"
+
+        method = getattr(self._agent, "last_method", None)
+        if isinstance(method, str) and method.strip():
+            return method.strip()
+        return "discovery"
+
+    def _normalise_sources(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            iterable = list(value.keys()) + list(value.values())
+        elif isinstance(value, (list, tuple, set)):
+            iterable = list(value)
+        else:
+            iterable = [value]
+
+        normalised: list[str] = []
+        for item in iterable:
+            if not isinstance(item, str):
+                continue
+            text = item.strip().lower()
+            if not text or text in normalised:
+                continue
+            normalised.append(text)
+
+        if len(normalised) <= 1:
+            return normalised
+
+        preference_index = {
+            name: index for index, name in enumerate(self._SOURCE_PREFERENCE)
+        }
+
+        normalised.sort(key=lambda name: (preference_index.get(name, len(preference_index)), name))
+        return normalised
 
     async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
         seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
