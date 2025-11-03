@@ -271,6 +271,21 @@ class DiscoveryService:
         if detail_score is not None and "mempool_score" not in metadata:
             metadata.setdefault("detail_score", detail_score)
 
+        detail_source = details.get("detail_source")
+        if isinstance(detail_source, str) and detail_source:
+            metadata.setdefault("detail_source", detail_source)
+
+        detail_sources = details.get("detail_sources")
+        if isinstance(detail_sources, list):
+            metadata.setdefault(
+                "detail_sources",
+                [
+                    str(src)
+                    for src in detail_sources
+                    if isinstance(src, str) and src
+                ],
+            )
+
         sources: list[str] = []
         raw_sources = details.get("sources")
         if isinstance(raw_sources, list):

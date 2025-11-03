@@ -171,6 +171,8 @@ async def test_metadata_merges_trending_and_details(monkeypatch):
         "volume": 99.0,
         "sources": ["mempool"],
         "source": "mempool",
+        "detail_source": "mempool",
+        "detail_sources": ["trending", "mempool"],
     }
 
     monkeypatch.setitem(discovery_mod.TRENDING_METADATA, token, trending)
@@ -192,5 +194,7 @@ async def test_metadata_merges_trending_and_details(monkeypatch):
     # Detail payload contributes extra metrics when not present.
     assert metadata["volume"] == pytest.approx(99.0)
     assert metadata["mempool_score"] == pytest.approx(3.2)
+    assert metadata["detail_source"] == "mempool"
+    assert metadata["detail_sources"] == ["trending", "mempool"]
 
     monkeypatch.delitem(discovery_mod.TRENDING_METADATA, token, raising=False)
