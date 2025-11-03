@@ -22,7 +22,14 @@ from ..token_scanner import enrich_tokens_async, scan_tokens_async
 
 logger = logging.getLogger(__name__)
 
-_CACHE: dict[str, object] = {"tokens": [], "ts": 0.0, "limit": 0, "method": ""}
+_CACHE: dict[str, object] = {
+    "tokens": [],
+    "ts": 0.0,
+    "limit": 0,
+    "method": "",
+    "offline": False,
+    "token_file": None,
+}
 _STATIC_FALLBACK = [
     "So11111111111111111111111111111111111111112",  # SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
@@ -197,11 +204,52 @@ class DiscoveryAgent:
         )
         cache_limit = int(_CACHE.get("limit", 0))
         cached_method = (_CACHE.get("method") or "").lower()
+        cached_offline = bool(_CACHE.get("offline", False))
+        cached_token_file = _CACHE.get("token_file")
+        requested_token_file: Optional[str]
+        if token_file is None:
+            requested_token_file = None
+        else:
+            try:
+                requested_token_file = os.fspath(token_file)
+            except TypeError:
+                requested_token_file = str(token_file)
+
+        if cached_token_file is not None:
+            try:
+                cached_token_file = os.fspath(cached_token_file)
+            except TypeError:
+                cached_token_file = str(cached_token_file)
+
+        if cached_tokens and cached_method and cached_method != active_method:
+            logger.debug(
+                "DiscoveryAgent cache reset due to method change (cached=%s, requested=%s)",
+                cached_method,
+                active_method,
+            )
+            _CACHE["tokens"] = []
+            _CACHE["ts"] = 0.0
+            _CACHE["limit"] = 0
+            _CACHE["method"] = ""
+            _CACHE.pop("offline", None)
+            _CACHE.pop("token_file", None)
+            cached_tokens = []
+            cache_limit = 0
+            cached_method = ""
+            cached_offline = False
+            cached_token_file = None
+
+        cache_context_matches = (
+            cached_tokens
+            and cached_method == active_method
+            and cached_offline == offline
+            and ((cached_token_file or None) == (requested_token_file or None))
+        )
+
         if (
             ttl > 0
-            and cached_tokens
+            and cache_context_matches
             and now - float(_CACHE.get("ts", 0.0)) < ttl
-            and (not method_override or cached_method == active_method or not cached_method)
         ):
             if cache_limit and cache_limit >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
@@ -250,6 +298,8 @@ class DiscoveryAgent:
             _CACHE["ts"] = now
             _CACHE["limit"] = self.limit
             _CACHE["method"] = active_method
+            _CACHE["offline"] = offline
+            _CACHE["token_file"] = requested_token_file
 
         return tokens
 

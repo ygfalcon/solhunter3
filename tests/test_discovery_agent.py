@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import Any
+from typing import Any, Optional
 
 from solhunter_zero.agents.discovery import DiscoveryAgent
 from solhunter_zero.scanner_common import DEFAULT_SOLANA_RPC, DEFAULT_SOLANA_WS
@@ -226,3 +226,40 @@ def test_discovery_agent_passes_ws_url(monkeypatch):
 
     assert called["ws"] == "wss://derived.example"
     assert called["limit"] == min(agent.limit, merge_default_limit)
+
+
+def test_discovery_cache_invalidation_when_method_changes(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    monkeypatch.setattr(
+        discovery_mod,
+        "_CACHE",
+        {
+            "tokens": [],
+            "ts": 0.0,
+            "limit": 0,
+            "method": "",
+            "offline": False,
+            "token_file": None,
+        },
+    )
+
+    calls: list[tuple[str, bool, Optional[str]]] = []
+
+    async def fake_discover_once(self, *, method, offline, token_file):
+        calls.append((method, offline, token_file))
+        return [f"tok-{len(calls)}"], {}
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+
+    agent = DiscoveryAgent()
+
+    first = asyncio.run(agent.discover_tokens())
+    assert first == ["tok-1"]
+
+    agent.default_method = "websocket"
+
+    second = asyncio.run(agent.discover_tokens())
+
+    assert second == ["tok-2"]
+    assert len(calls) == 2
