@@ -5,6 +5,7 @@ import contextlib
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from .. import config
@@ -22,7 +23,14 @@ from ..token_scanner import enrich_tokens_async, scan_tokens_async
 
 logger = logging.getLogger(__name__)
 
-_CACHE: dict[str, object] = {"tokens": [], "ts": 0.0, "limit": 0, "method": ""}
+_CACHE: dict[str, object] = {
+    "tokens": [],
+    "ts": 0.0,
+    "limit": 0,
+    "method": "",
+    "token_file": None,
+    "token_file_mtime": None,
+}
 _STATIC_FALLBACK = [
     "So11111111111111111111111111111111111111112",  # SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
@@ -197,11 +205,45 @@ class DiscoveryAgent:
         )
         cache_limit = int(_CACHE.get("limit", 0))
         cached_method = (_CACHE.get("method") or "").lower()
+        normalized_token_path: str | None = None
+        token_mtime: float | None = None
+        if token_file:
+            token_path = Path(token_file).expanduser()
+            try:
+                resolved = token_path.resolve(strict=False)
+            except (OSError, RuntimeError):
+                resolved = token_path
+            normalized_token_path = str(resolved)
+            try:
+                token_mtime = resolved.stat().st_mtime
+            except OSError:
+                try:
+                    token_mtime = token_path.stat().st_mtime
+                except OSError:
+                    token_mtime = None
+
+        cached_token_file = _CACHE.get("token_file")
+        cached_token_mtime = _CACHE.get("token_file_mtime")
+        cache_matches_token_file = True
+        if normalized_token_path != cached_token_file:
+            if normalized_token_path or cached_token_file:
+                cache_matches_token_file = False
+        if cache_matches_token_file:
+            if (
+                cached_token_mtime is not None
+                and token_mtime is not None
+                and token_mtime != cached_token_mtime
+            ):
+                cache_matches_token_file = False
+            elif (cached_token_mtime is None) != (token_mtime is None):
+                cache_matches_token_file = False
+
         if (
             ttl > 0
             and cached_tokens
             and now - float(_CACHE.get("ts", 0.0)) < ttl
             and (not method_override or cached_method == active_method or not cached_method)
+            and cache_matches_token_file
         ):
             if cache_limit and cache_limit >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
@@ -250,6 +292,8 @@ class DiscoveryAgent:
             _CACHE["ts"] = now
             _CACHE["limit"] = self.limit
             _CACHE["method"] = active_method
+            _CACHE["token_file"] = normalized_token_path
+            _CACHE["token_file_mtime"] = token_mtime
 
         return tokens
 

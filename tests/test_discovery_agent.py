@@ -195,6 +195,48 @@ def test_offline_discovery_with_network_override(monkeypatch):
     assert agent.last_method == "file"
 
 
+def test_token_file_cache_updates_on_change(tmp_path, monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    path = tmp_path / "tokens.txt"
+    monkeypatch.setattr(
+        discovery_mod,
+        "_CACHE",
+        {
+            "tokens": [],
+            "ts": 0.0,
+            "limit": 0,
+            "method": "",
+            "token_file": None,
+            "token_file_mtime": None,
+        },
+    )
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "120")
+
+    agent = DiscoveryAgent()
+
+    path.write_text(
+        "TokA11111111111111111111111111111111111111\n"
+        "TokB22222222222222222222222222222222222222\n",
+        encoding="utf-8",
+    )
+    first = asyncio.run(agent.discover_tokens(offline=True, token_file=str(path)))
+    assert first == [
+        "TokA11111111111111111111111111111111111111",
+        "TokB22222222222222222222222222222222222222",
+    ]
+
+    original_mtime = path.stat().st_mtime
+    path.write_text(
+        "TokC33333333333333333333333333333333333333\n",
+        encoding="utf-8",
+    )
+    os.utime(path, (original_mtime + 10, original_mtime + 10))
+
+    second = asyncio.run(agent.discover_tokens(offline=True, token_file=str(path)))
+    assert second == ["TokC33333333333333333333333333333333333333"]
+
+
 def test_discovery_agent_passes_ws_url(monkeypatch):
     called: dict[str, Any] = {}
 
