@@ -120,4 +120,5 @@ def test_scan_tokens_async_includes_dex_ws(monkeypatch):
     tokens = asyncio.run(async_scanner.scan_tokens_async())
     unsub()
     assert tokens == ["abcbonk", "dexws"]
-    assert events == [tokens]
+    assert [evt.tokens for evt in events] == [tokens]
+    assert all(not evt.metadata_refresh for evt in events)

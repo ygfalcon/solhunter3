@@ -345,7 +345,14 @@ class RuntimeOrchestrator:
                 try:
                     tokens = await agent.discover_tokens(method=method, offline=False)
                     if tokens:
-                        event_bus.publish("token_discovered", list(tokens))
+                        event_bus.publish(
+                            "token_discovered",
+                            {
+                                "tokens": list(tokens),
+                                "metadata_refresh": False,
+                                "changed_tokens": [],
+                            },
+                        )
                 except Exception:
                     pass
                 await asyncio.sleep(max(5, min(60, loop_delay)))

@@ -690,12 +690,23 @@ def _encode_event(topic: str, payload: Any) -> Any:
             ),
         )
     elif topic == "token_discovered":
-        data = payload
-        if not isinstance(data, (list, tuple)):
-            data = to_dict(data)
+        if isinstance(payload, (list, tuple)):
+            tokens = [str(t) for t in payload]
+            metadata_refresh = False
+            changed_tokens: list[str] = []
+        else:
+            data = to_dict(payload)
+            tokens = [str(t) for t in data.get("tokens", [])]
+            metadata_refresh = bool(data.get("metadata_refresh", False))
+            raw_changed = data.get("changed_tokens") or []
+            changed_tokens = [str(t) for t in raw_changed if isinstance(t, str)]
         event = pb.Event(
             topic=topic,
-            token_discovered=pb.TokenDiscovered(tokens=[str(t) for t in data]),
+            token_discovered=pb.TokenDiscovered(
+                tokens=tokens,
+                metadata_refresh=metadata_refresh,
+                changed_tokens=changed_tokens,
+            ),
         )
     elif topic == "memory_sync_request":
         data = to_dict(payload)
@@ -815,7 +826,11 @@ def _decode_payload(ev: Any) -> Any:
     if field == "system_metrics_combined":
         return {"cpu": msg.cpu, "memory": msg.memory}
     if field == "token_discovered":
-        return list(msg.tokens)
+        return {
+            "tokens": list(msg.tokens),
+            "metadata_refresh": bool(msg.metadata_refresh),
+            "changed_tokens": list(msg.changed_tokens),
+        }
     if field == "memory_sync_request":
         return {"last_id": msg.last_id}
     if field == "memory_sync_response":

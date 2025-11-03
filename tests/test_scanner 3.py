@@ -68,7 +68,8 @@ def test_scan_tokens_websocket(monkeypatch):
     unsub()
     assert tokens == ['abcbonk', 'xyzBONK', 'trend', 'ray', 'orca']
     assert captured['headers'] == scanner.HEADERS
-    assert events == [tokens]
+    assert [evt.tokens for evt in events] == [tokens]
+    assert all(not evt.metadata_refresh for evt in events)
 
 
 
@@ -94,7 +95,8 @@ def test_scan_tokens_offline(monkeypatch):
     unsub()
     assert tokens == scanner.OFFLINE_TOKENS
     assert 'called' not in called
-    assert events == [tokens]
+    assert [evt.tokens for evt in events] == [tokens]
+    assert all(not evt.metadata_refresh for evt in events)
 
 
 def test_scan_tokens_onchain(monkeypatch):
@@ -126,7 +128,8 @@ def test_scan_tokens_onchain(monkeypatch):
     unsub()
     assert tokens == ['tok', 't2']
     assert captured['url'] == 'http://node'
-    assert events == [tokens]
+    assert [evt.tokens for evt in events] == [tokens]
+    assert all(not evt.metadata_refresh for evt in events)
 
 
 from solhunter_zero.token_scanner import scan_tokens_async as async_scan
@@ -175,7 +178,8 @@ def test_scan_tokens_async(monkeypatch):
     tokens = asyncio.run(async_scan())
     unsub()
     assert tokens == ["abcbonk", "otherbonk", "trend", "ray", "orca"]
-    assert events == [tokens]
+    assert [evt.tokens for evt in events] == [tokens]
+    assert all(not evt.metadata_refresh for evt in events)
 
 
 def test_scan_tokens_from_file(monkeypatch, tmp_path):
@@ -200,7 +204,8 @@ def test_scan_tokens_from_file(monkeypatch, tmp_path):
     tokens = asyncio.run(scanner.scan_tokens(token_file=str(path)))
     unsub()
     assert tokens == ["tok1", "tok2"]
-    assert events == [tokens]
+    assert [evt.tokens for evt in events] == [tokens]
+    assert all(not evt.metadata_refresh for evt in events)
 
 
 def test_scan_tokens_async_from_file(monkeypatch, tmp_path):
@@ -223,7 +228,8 @@ def test_scan_tokens_async_from_file(monkeypatch, tmp_path):
     tokens = asyncio.run(async_scan(token_file=str(path)))
     unsub()
     assert tokens == ["a", "b"]
-    assert events == [tokens]
+    assert [evt.tokens for evt in events] == [tokens]
+    assert all(not evt.metadata_refresh for evt in events)
 
 
 def test_scan_tokens_mempool(monkeypatch):
@@ -243,7 +249,8 @@ def test_scan_tokens_mempool(monkeypatch):
     tokens = asyncio.run(scanner.scan_tokens(method="mempool"))
     unsub()
     assert tokens == ["memtok"]
-    assert events == [tokens]
+    assert [evt.tokens for evt in events] == [tokens]
+    assert all(not evt.metadata_refresh for evt in events)
 
 
 def test_scan_tokens_async_mempool(monkeypatch):
@@ -264,7 +271,8 @@ def test_scan_tokens_async_mempool(monkeypatch):
     result = asyncio.run(async_scan(method="mempool"))
     unsub()
     assert result == ["memtok"]
-    assert events == [result]
+    assert [evt.tokens for evt in events] == [result]
+    assert all(not evt.metadata_refresh for evt in events)
 
 
 def test_scan_tokens_async_concurrency(monkeypatch):

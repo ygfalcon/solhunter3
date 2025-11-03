@@ -366,11 +366,11 @@ def test_discovery_refreshes_cache(monkeypatch):
 def test_discovery_emits_token_event(monkeypatch):
     from solhunter_zero.swarm_pipeline import SwarmPipeline
 
-    events: list[list[str]] = []
+    events: list[dict[str, object]] = []
 
     def fake_publish(topic, payload, *args, **kwargs):
         if topic == "token_discovered":
-            events.append(list(payload))
+            events.append(dict(payload))
 
     monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", fake_publish)
     monkeypatch.setattr(
@@ -394,7 +394,13 @@ def test_discovery_emits_token_event(monkeypatch):
     stage = asyncio.run(pipeline._run_discovery())
 
     assert stage.tokens == ["New", "Alt", "Old"]
-    assert events == [stage.tokens]
+    assert events == [
+        {
+            "tokens": list(stage.tokens),
+            "metadata_refresh": False,
+            "changed_tokens": [],
+        }
+    ]
 
 
 def test_execution_skips_missing_price(monkeypatch, caplog):

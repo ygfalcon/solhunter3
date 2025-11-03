@@ -132,11 +132,11 @@ async def test_emit_tokens_publishes_event(monkeypatch):
     queue: asyncio.Queue = asyncio.Queue()
     service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
 
-    events: list[list[str]] = []
+    events: list[dict[str, object]] = []
 
     def fake_publish(topic, payload, *args, **kwargs):
         if topic == "token_discovered":
-            events.append(list(payload))
+            events.append(dict(payload))
 
     monkeypatch.setattr(
         "solhunter_zero.pipeline.discovery_service.publish", fake_publish
@@ -145,10 +145,55 @@ async def test_emit_tokens_publishes_event(monkeypatch):
     await service._emit_tokens(["TokA", "TokB"], fresh=True)
     batch = await queue.get()
     assert [candidate.token for candidate in batch] == ["TokA", "TokB"]
-    assert events == [["TokA", "TokB"]]
+    assert events == [
+        {
+            "tokens": ["TokA", "TokB"],
+            "metadata_refresh": False,
+            "changed_tokens": [],
+        }
+    ]
 
     await service._emit_tokens(["TokA", "TokB"], fresh=False)
-    assert events == [["TokA", "TokB"]]
+    assert len(events) == 1
+
+
+@pytest.mark.anyio
+async def test_metadata_refresh_bypasses_duplicate_guard(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    events: list[dict[str, object]] = []
+
+    def fake_publish(topic, payload, *args, **kwargs):
+        if topic == "token_discovered":
+            events.append(dict(payload))
+
+    monkeypatch.setattr(
+        "solhunter_zero.pipeline.discovery_service.publish", fake_publish
+    )
+
+    token = "MetaTok"
+    initial_meta = {"liquidity": 10.0, "score": 2.0, "rank": 1}
+    updated_meta = {"liquidity": 25.0, "score": 5.0, "rank": 1}
+
+    discovery_mod.TRENDING_METADATA[token] = dict(initial_meta)
+    await service._emit_tokens([token], fresh=True)
+    first_batch = await queue.get()
+    assert first_batch[0].metadata["liquidity"] == pytest.approx(10.0)
+    events.clear()
+
+    discovery_mod.TRENDING_METADATA[token] = dict(updated_meta)
+    await service._emit_tokens([token], fresh=False)
+    second_batch = await queue.get()
+
+    assert second_batch[0].metadata["liquidity"] == pytest.approx(25.0)
+    assert len(events) == 1
+    payload = events[0]
+    assert payload["metadata_refresh"] is True
+    assert payload["changed_tokens"] == [token]
+    assert payload["tokens"] == [token]
+
+    monkeypatch.delitem(discovery_mod.TRENDING_METADATA, token, raising=False)
 
 
 @pytest.mark.anyio

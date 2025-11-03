@@ -1192,7 +1192,14 @@ class SwarmPipeline:
             RuntimeLog(stage="pipeline", detail=f"queue:{len(stage.tokens)}/{len(scores)}"),
         )
         if tokens_changed:
-            publish("token_discovered", list(stage.tokens))
+            publish(
+                "token_discovered",
+                {
+                    "tokens": list(stage.tokens),
+                    "metadata_refresh": False,
+                    "changed_tokens": [],
+                },
+            )
         refresh_ttl = not cache_hit and not cache_refreshed
         ttl_override = None
         if refresh_ttl and not stage.discovered:
