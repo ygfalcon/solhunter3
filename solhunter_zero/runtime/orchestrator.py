@@ -6,7 +6,9 @@ import logging
 import os
 import signal
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from ..util import install_uvloop, parse_bool_env
@@ -31,6 +33,86 @@ from ..ui import create_app as _create_ui_app, start_websockets as _start_ui_ws
 install_uvloop()
 
 log = logging.getLogger(__name__)
+
+
+def _maybe_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if not text:
+            return None
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _derive_offline_modes(cfg: Mapping[str, Any] | None) -> tuple[bool, bool]:
+    cfg_map: Mapping[str, Any] | None = cfg
+
+    offline_env_raw = os.getenv("SOLHUNTER_OFFLINE")
+    dry_run_env_raw = os.getenv("DRY_RUN")
+    live_discovery_env_raw = os.getenv("LIVE_DISCOVERY")
+
+    offline_env = (
+        parse_bool_env("SOLHUNTER_OFFLINE", False)
+        if offline_env_raw is not None
+        else None
+    )
+    dry_run_env = (
+        parse_bool_env("DRY_RUN", False) if dry_run_env_raw is not None else None
+    )
+    live_discovery_env = (
+        parse_bool_env("LIVE_DISCOVERY", False)
+        if live_discovery_env_raw is not None
+        else None
+    )
+
+    offline_cfg = _maybe_bool(cfg_map.get("offline")) if cfg_map is not None else None
+    dry_run_cfg = _maybe_bool(cfg_map.get("dry_run")) if cfg_map is not None else None
+    live_discovery_cfg = (
+        _maybe_bool(cfg_map.get("live_discovery")) if cfg_map is not None else None
+    )
+
+    if offline_env is not None:
+        offline_mode = offline_env
+    elif offline_cfg is not None:
+        offline_mode = offline_cfg
+    else:
+        live_flag = (
+            live_discovery_env if live_discovery_env is not None else live_discovery_cfg
+        )
+        offline_mode = not live_flag if live_flag is not None else False
+
+    if dry_run_env is not None:
+        dry_run_mode = dry_run_env
+    elif dry_run_cfg is not None:
+        dry_run_mode = dry_run_cfg
+    else:
+        dry_run_mode = False
+
+    return bool(offline_mode), bool(dry_run_mode)
+
+
+def _resolve_token_file(cfg: Mapping[str, Any] | None) -> Optional[str]:
+    candidate: Any = None
+    if cfg is not None:
+        candidate = cfg.get("token_file") or cfg.get("token_list")
+    if not candidate:
+        candidate = os.getenv("TOKEN_FILE") or os.getenv("TOKEN_LIST")
+    if not candidate:
+        return None
+    try:
+        path = Path(str(candidate)).expanduser()
+    except Exception:
+        return str(candidate)
+    return str(path)
 
 
 @dataclass
@@ -156,6 +238,10 @@ class RuntimeOrchestrator:
         cfg, runtime_cfg, proc = await perform_startup_async(self.config_path, offline=False, dry_run=False)
         self.handles.depth_proc = proc
 
+        cfg_map = cfg if isinstance(cfg, Mapping) else None
+        offline_mode, dry_run_mode = _derive_offline_modes(cfg_map)
+        token_file_path = _resolve_token_file(cfg_map)
+
         # Build runtime services
         memory_path = os.getenv("MEMORY_PATH", "sqlite:///memory.db")
         portfolio_path = os.getenv("PORTFOLIO_PATH", "portfolio.json")
@@ -249,9 +335,9 @@ class RuntimeOrchestrator:
                 depth_rate_limit=depth_rate_limit,
                 iterations=None,
                 testnet=False,
-                dry_run=False,
-                offline=False,
-                token_file=None,
+                dry_run=dry_run_mode,
+                offline=offline_mode,
+                token_file=token_file_path,
                 discovery_method=discovery_method,
                 keypair=None,
                 stop_loss=cfg.get("stop_loss"),
@@ -294,7 +380,11 @@ class RuntimeOrchestrator:
             method = discovery_method
             while True:
                 try:
-                    tokens = await agent.discover_tokens(method=method, offline=False)
+                    tokens = await agent.discover_tokens(
+                        method=method,
+                        offline=offline_mode,
+                        token_file=token_file_path,
+                    )
                     if tokens:
                         event_bus.publish("token_discovered", list(tokens))
                 except Exception:
