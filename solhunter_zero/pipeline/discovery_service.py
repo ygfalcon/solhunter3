@@ -404,6 +404,7 @@ class DiscoveryService:
             tokens = await agent.discover_tokens(
                 offline=self.offline,
                 token_file=self.token_file,
+                use_cache=False,
             )
             if self.limit:
                 tokens = tokens[: self.limit]

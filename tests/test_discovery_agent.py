@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from typing import Any
 
 from solhunter_zero.agents.discovery import DiscoveryAgent
@@ -233,6 +234,57 @@ def test_token_file_cache_updates_on_change(tmp_path, monkeypatch):
 
     second = asyncio.run(agent.discover_tokens(offline=True, token_file=str(path)))
     assert second == ["TokC33333333333333333333333333333333333333"]
+
+
+def test_clone_fetches_bypass_global_cache(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    call_counter = {"count": 0}
+
+    async def fake_discover_once(self, *, method, offline, token_file):
+        call_counter["count"] += 1
+        token = f"Tok{call_counter['count']}"
+        return [token], {}
+
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "300")
+    monkeypatch.setattr(
+        discovery_mod,
+        "_CACHE",
+        {
+            "tokens": [],
+            "ts": 0.0,
+            "limit": 0,
+            "method": "",
+            "token_file": None,
+            "token_file_mtime": None,
+        },
+    )
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+
+    agent = DiscoveryAgent()
+
+    discovery_mod._CACHE["tokens"] = ["CachedToken"]
+    discovery_mod._CACHE["ts"] = time.time()
+    discovery_mod._CACHE["limit"] = agent.limit
+    discovery_mod._CACHE["method"] = agent.default_method
+
+    first = asyncio.run(agent.discover_tokens(use_cache=False))
+    second = asyncio.run(agent.discover_tokens(use_cache=False))
+
+    assert first == ["Tok1"]
+    assert second == ["Tok2"]
+    assert call_counter["count"] == 2
+    assert discovery_mod._CACHE["tokens"] == ["CachedToken"]
+
+    discovery_mod._CACHE["ts"] = 0.0
+
+    third = asyncio.run(agent.discover_tokens())
+    assert third == ["Tok3"]
+    assert discovery_mod._CACHE["tokens"] == ["Tok3"]
+
+    cached = asyncio.run(agent.discover_tokens())
+    assert cached == ["Tok3"]
+    assert call_counter["count"] == 3
 
 
 def test_discovery_agent_passes_ws_url(monkeypatch):
