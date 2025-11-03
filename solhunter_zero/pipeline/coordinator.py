@@ -40,9 +40,11 @@ class PipelineCoordinator:
         discovery_max_backoff: Optional[float] = None,
         discovery_limit: Optional[int] = None,
         discovery_startup_clones: Optional[int] = None,
+        testnet: Optional[bool] = None,
     ) -> None:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
+        self.testnet = bool(testnet) if testnet is not None else None
 
         interval_override: Optional[float] = None
         raw_interval = os.getenv("DISCOVERY_INTERVAL")
@@ -90,6 +92,14 @@ class PipelineCoordinator:
         self._scoring_queue: asyncio.Queue[ScoredToken] = asyncio.Queue(maxsize=64)
         self._execution_queue: asyncio.Queue[ActionBundle] = asyncio.Queue(maxsize=64)
         self._portfolio_service = PortfolioManagementService(portfolio)
+
+        if testnet is not None:
+            executor = getattr(self.agent_manager, "executor", None)
+            if executor is not None:
+                try:
+                    setattr(executor, "testnet", bool(testnet))
+                except Exception:  # pragma: no cover - defensive logging
+                    log.exception("Failed to propagate testnet flag to executor")
 
         discovery_kwargs: Dict[str, Any] = {}
         if discovery_empty_cache_ttl is not None:
@@ -179,6 +189,7 @@ class PipelineCoordinator:
             self._execution_queue,
             agent_manager,
             lane_workers=self.execution_lanes or int(os.getenv("EXECUTION_LANE_WORKERS", "0") or 0) or 2,
+            testnet=self.testnet,
             on_receipt=self._on_execution_receipt,
         )
         self._feedback_service = FeedbackService(
