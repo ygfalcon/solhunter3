@@ -3,6 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from solhunter_zero.memory import Memory
 from solhunter_zero.runtime import trading_runtime
 
 
@@ -50,3 +51,44 @@ async def test_stop_reports_depth_process_timeout(caplog):
     )
 
     assert any(message in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_stop_drains_memory_writer(monkeypatch):
+    runtime = trading_runtime.TradingRuntime()
+    memory = Memory("sqlite:///:memory:")
+    runtime.memory = memory
+
+    memory.start_writer(batch_size=10, interval=60.0)
+    await memory.wait_ready()
+
+    flush_calls = 0
+    original_flush = memory._flush
+
+    async def tracking_flush(items):
+        nonlocal flush_calls
+        flush_calls += 1
+        await original_flush(items)
+
+    monkeypatch.setattr(memory, "_flush", tracking_flush)
+
+    await memory.log_trade(
+        token="SOL",
+        direction="buy",
+        amount=1.0,
+        price=10.0,
+    )
+
+    # Trade should not be persisted until the writer is stopped.
+    assert await memory.list_trades() == []
+
+    await runtime.stop()
+
+    assert flush_calls >= 1
+    assert memory._writer_task is None
+    assert memory._queue is None
+
+    trades = await memory.list_trades()
+    assert len(trades) == 1
+
+    await memory.close()

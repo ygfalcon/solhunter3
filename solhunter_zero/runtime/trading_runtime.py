@@ -363,6 +363,10 @@ class TradingRuntime:
             self.pipeline = None
         self.status.trading_loop = False
 
+        if self.memory is not None:
+            with contextlib.suppress(Exception):
+                await self.memory.stop_writer()
+
         self.activity.add("runtime", "stopped")
 
     # ------------------------------------------------------------------

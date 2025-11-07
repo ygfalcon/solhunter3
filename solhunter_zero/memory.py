@@ -116,6 +116,43 @@ class Memory(BaseMemory):
         self._writer_started = asyncio.Event()
         self._writer_task = loop.create_task(self._writer())
 
+    async def stop_writer(self) -> None:
+        """Stop the background writer and flush any queued trades."""
+        await self._init_task
+        queue = self._queue
+        task = self._writer_task
+
+        if task is None:
+            if queue is not None and not queue.empty():
+                pending = []
+                while not queue.empty():
+                    pending.append(queue.get_nowait())
+                    queue.task_done()
+                if pending:
+                    await self._flush(pending)
+            self._queue = None
+            self._writer_started = None
+            return
+
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+        self._writer_task = None
+        self._writer_started = None
+
+        # ``queue`` may be drained by ``_writer`` during cancellation, but make
+        # a final pass to ensure nothing remains before dropping the reference.
+        if queue is not None and not queue.empty():
+            pending = []
+            while not queue.empty():
+                pending.append(queue.get_nowait())
+                queue.task_done()
+            if pending:
+                await self._flush(pending)
+
+        self._queue = None
+
     async def _writer(self) -> None:
         assert self._queue is not None
         if self._writer_started and not self._writer_started.is_set():
@@ -241,14 +278,6 @@ class Memory(BaseMemory):
 
     async def close(self) -> None:
         """Flush pending trades and dispose of the engine."""
-        await self._init_task
-        if self._writer_task:
-            self._writer_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._writer_task
-            self._writer_task = None
-            self._writer_started = None
-        if self._queue and not self._queue.empty():
-            await self._flush([self._queue.get_nowait() for _ in range(self._queue.qsize())])
+        await self.stop_writer()
         await self.engine.dispose()
 
