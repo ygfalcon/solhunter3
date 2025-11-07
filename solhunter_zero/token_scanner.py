@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
+from .scanner_common import STATIC_FALLBACK_TOKENS
+
 # Hard-coded Helius defaults (per your request)
 DEFAULT_SOLANA_RPC = "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
 
@@ -637,12 +639,7 @@ async def scan_tokens_async(
 
     def _apply_static() -> List[str]:
         TRENDING_METADATA.clear()
-        fallback = [
-            "So11111111111111111111111111111111111111112",  # SOL
-            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
-            "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",  # JUP
-        ]
+        fallback = list(STATIC_FALLBACK_TOKENS)
         for mint in fallback:
             TRENDING_METADATA.setdefault(
                 mint,
