@@ -33,7 +33,12 @@ async def test_start_agents_aborts_when_no_agents(monkeypatch, request):
     monkeypatch.setattr(orchestrator, "_publish_stage", capture_stage)
 
     async def fake_startup(
-        config_path: str | None, offline: bool, dry_run: bool, testnet: bool = False
+        config_path: str | None,
+        *,
+        offline: bool,
+        dry_run: bool,
+        testnet: bool = False,
+        preloaded_config: dict | None = None,
     ):
         return {}, {}, None
 

@@ -58,7 +58,14 @@ async def test_orchestrator_stop_clears_token_discovery_handlers(monkeypatch, re
     monkeypatch.setattr(runtime_orchestrator.RuntimeOrchestrator, "start_ui", fake_start_ui, raising=False)
     monkeypatch.setattr(runtime_orchestrator.RuntimeOrchestrator, "start_bus", fake_start_bus, raising=False)
 
-    async def fake_startup(config_path: str | None, offline: bool, dry_run: bool):
+    async def fake_startup(
+        config_path: str | None,
+        *,
+        offline: bool,
+        dry_run: bool,
+        testnet: bool = False,
+        preloaded_config: dict | None = None,
+    ):
         cfg = {"agents": ["dummy"], "loop_delay": 1}
         return cfg, cfg, None
 

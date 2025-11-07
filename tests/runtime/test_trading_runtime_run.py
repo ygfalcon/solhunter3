@@ -111,16 +111,28 @@ async def test_prepare_configuration_uses_offline_flags(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
     async def fake_startup(
-        config_path: str | None, *, offline: bool, dry_run: bool, testnet: bool
+        config_path: str | None,
+        *,
+        offline: bool,
+        dry_run: bool,
+        testnet: bool,
+        preloaded_config: dict | None = None,
     ) -> tuple[dict, object, None]:
         captured["config_path"] = config_path
         captured["offline"] = offline
         captured["dry_run"] = dry_run
         captured["testnet"] = testnet
+        captured["preloaded_config"] = preloaded_config
         return {}, object(), None
 
     monkeypatch.setattr(trading_runtime, "perform_startup_async", fake_startup)
-    monkeypatch.setattr(trading_runtime, "load_config", lambda path=None: {})
+    load_calls = {"count": 0}
+
+    def fake_load_config(path=None):
+        load_calls["count"] += 1
+        return {}
+
+    monkeypatch.setattr(trading_runtime, "load_config", fake_load_config)
     monkeypatch.setattr(trading_runtime, "apply_env_overrides", lambda cfg: cfg)
     monkeypatch.setattr(trading_runtime, "set_env_from_config", lambda cfg: None)
 
@@ -130,6 +142,8 @@ async def test_prepare_configuration_uses_offline_flags(monkeypatch, tmp_path):
     assert captured["offline"] is True
     assert captured["dry_run"] is True
     assert captured["testnet"] is True
+    assert captured["preloaded_config"] == {}
+    assert load_calls["count"] == 1
 
     modes = runtime._derive_offline_modes()
     assert modes == (True, True, False, True)

@@ -12,7 +12,7 @@ import sys
 import time
 from argparse import ArgumentParser
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 import cProfile
 
 from .util import install_uvloop, parse_bool_env
@@ -186,10 +186,14 @@ async def perform_startup_async(
     offline: bool = False,
     dry_run: bool = False,
     testnet: bool = False,
+    preloaded_config: Mapping[str, Any] | None = None,
 ) -> tuple[dict, Config, subprocess.Popen | None]:
     """Load configuration, verify connectivity and start services."""
     start = time.perf_counter()
-    cfg = apply_env_overrides(load_config(config_path))
+    if preloaded_config is None:
+        cfg = apply_env_overrides(load_config(config_path))
+    else:
+        cfg = dict(preloaded_config)
     set_env_from_config(cfg)
     initialize_event_bus()
     runtime_cfg = Config.from_env(cfg)
