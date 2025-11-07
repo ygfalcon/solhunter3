@@ -949,8 +949,8 @@ class SwarmPipeline:
                 publish("runtime.log", RuntimeLog(stage="loop", detail=f"end:{elapsed:.3f}s"))
                 return {
                     "elapsed_s": float(elapsed),
-                    "discovered_count": len(discovery.discovered),
-                    "tokens_discovered": discovery.discovered,
+                    "discovered_count": len(discovery.tokens),
+                    "tokens_discovered": list(discovery.tokens),
                     "tokens_used": [],
                     "picked_tokens": [],
                     "fallback_used": discovery.fallback_used,
@@ -962,7 +962,7 @@ class SwarmPipeline:
                     "token_results": [],
                     "telemetry": {
                         "discovery": {
-                            "discovered": len(discovery.discovered),
+                            "discovered": len(discovery.tokens),
                             "scored": 0,
                             "limit": discovery.limit,
                         }
@@ -995,7 +995,7 @@ class SwarmPipeline:
 
             telemetry = {
                 "discovery": {
-                    "discovered": len(discovery.discovered),
+                    "discovered": len(discovery.tokens),
                     "scored": len(discovery.tokens),
                     "limit": discovery.limit,
                 },
@@ -1018,7 +1018,7 @@ class SwarmPipeline:
                 },
                 "pipeline": {
                     "queued": len(discovery.tokens),
-                    "discovered": len(discovery.discovered),
+                    "discovered": len(discovery.tokens),
                     "limit": discovery.limit,
                     "processed": len(simulation.records),
                     "budget": self.time_budget or None,
@@ -1032,8 +1032,8 @@ class SwarmPipeline:
                         summary_errors.append(err)
             summary = {
                 "elapsed_s": float(elapsed),
-                "discovered_count": len(discovery.discovered),
-                "tokens_discovered": discovery.discovered,
+                "discovered_count": len(discovery.tokens),
+                "tokens_discovered": list(discovery.tokens),
                 "tokens_used": list(discovery.tokens),
                 "picked_tokens": [rec.token for rec in simulation.records],
                 "fallback_used": discovery.fallback_used,
