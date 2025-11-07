@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -14,6 +15,7 @@ from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_metho
 from .. import event_bus
 from .. import metrics_aggregator
 from .. import discovery_state
+from .. import ui as _ui_module
 from ..config import (
     initialize_event_bus,
     apply_env_overrides,
@@ -29,7 +31,16 @@ from ..portfolio import Portfolio
 from ..strategy_manager import StrategyManager
 from ..agent_manager import AgentManager
 from ..loop import trading_loop as _trading_loop
-from ..ui import create_app as _create_ui_app, start_websockets as _start_ui_ws
+from .trading_runtime import DEPTH_PROCESS_SHUTDOWN_TIMEOUT
+_create_ui_app = _ui_module.create_app
+
+if hasattr(_ui_module, "start_websockets"):
+    _start_ui_ws = _ui_module.start_websockets  # type: ignore[attr-defined]
+else:
+    def _start_ui_ws() -> dict[str, Any]:
+        """Fallback stub when UI websockets are unavailable."""
+
+        return {}
 
 
 install_uvloop()
@@ -479,6 +490,61 @@ class RuntimeOrchestrator:
                 except Exception:
                     pass
             self.handles.tasks = []
+            # Stop depth service process
+            proc = self.handles.depth_proc
+            self.handles.depth_proc = None
+            if proc is not None:
+                try:
+                    poll = getattr(proc, "poll", None)
+                    try:
+                        running = poll() is None if callable(poll) else True
+                    except Exception:
+                        running = True
+                    if running:
+                        terminate = getattr(proc, "terminate", None)
+                        if callable(terminate):
+                            try:
+                                terminate()
+                            except Exception:
+                                log.exception(
+                                    "Failed to terminate depth_service process gracefully"
+                                )
+                            else:
+                                wait_fn = getattr(proc, "wait", None)
+                                if callable(wait_fn):
+                                    try:
+                                        wait_fn(timeout=DEPTH_PROCESS_SHUTDOWN_TIMEOUT)
+                                    except subprocess.TimeoutExpired:
+                                        message = (
+                                            "depth_service process did not exit within "
+                                            f"{DEPTH_PROCESS_SHUTDOWN_TIMEOUT} seconds"
+                                        )
+                                        log.error(message)
+                                        kill_fn = getattr(proc, "kill", None)
+                                        if callable(kill_fn):
+                                            try:
+                                                kill_fn()
+                                            except Exception:
+                                                log.exception(
+                                                    "Failed to kill depth_service process"
+                                                )
+                                        if callable(wait_fn):
+                                            try:
+                                                wait_fn(timeout=DEPTH_PROCESS_SHUTDOWN_TIMEOUT)
+                                            except subprocess.TimeoutExpired:
+                                                log.error(
+                                                    "depth_service process did not exit after kill"
+                                                )
+                                            except Exception:
+                                                log.exception(
+                                                    "Error while waiting for depth_service process to exit after kill"
+                                                )
+                                    except Exception:
+                                        log.exception(
+                                            "Error while waiting for depth_service process to exit"
+                                        )
+                finally:
+                    self.handles.depth_proc = None
             # Stop bus server
             if self.handles.bus_started:
                 try:
