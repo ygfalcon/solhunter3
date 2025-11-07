@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import solhunter_zero.pipeline.evaluation_service as evaluation_module
+
 from solhunter_zero.pipeline.evaluation_service import EvaluationService
 from solhunter_zero.pipeline.types import ScoredToken, TokenCandidate
 from solhunter_zero.portfolio import Portfolio
@@ -76,3 +78,30 @@ async def test_evaluation_cache_busts_when_score_band_changes():
     assert not refreshed.cached
     assert refreshed.metadata["score"] == pytest.approx(0.96)
     assert refreshed.metadata["price_band"] == "1e-1"
+
+
+@pytest.mark.anyio
+async def test_evaluation_cache_prunes_expired_entries(monkeypatch):
+    fake_time_value = {"value": 0.0}
+
+    def fake_time() -> float:
+        return fake_time_value["value"]
+
+    monkeypatch.setattr(evaluation_module.time, "time", fake_time)
+
+    agent = _CountingAgent()
+    service = EvaluationService(
+        asyncio.Queue(),
+        asyncio.Queue(),
+        agent,
+        Portfolio(path=None),
+        cache_ttl=5.0,
+    )
+
+    tokens = [f"Token{i}" for i in range(25)]
+    for idx, token in enumerate(tokens):
+        fake_time_value["value"] = float(idx * 10)
+        await service._evaluate_token(_scored(token, 0.5 + (idx * 0.01), idx, 1.0))
+
+    assert agent.calls == len(tokens)
+    assert len(service._cache) == 1
