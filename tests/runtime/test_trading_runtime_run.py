@@ -77,7 +77,7 @@ async def test_trading_runtime_start_ui_reports_port_in_use(caplog):
         runtime.ui_port = busy_sock.getsockname()[1]
 
         with caplog.at_level(logging.ERROR):
-            with pytest.raises(OSError):
+            with pytest.raises(trading_runtime.UIStartupError):
                 await runtime._start_ui()
 
         entries = runtime.activity.snapshot()
@@ -95,3 +95,41 @@ async def test_trading_runtime_start_ui_reports_port_in_use(caplog):
         )
     finally:
         busy_sock.close()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_prepare_configuration_uses_offline_flags(monkeypatch, tmp_path):
+    runtime = trading_runtime.TradingRuntime(
+        config_path=str(tmp_path / "config.toml")
+    )
+
+    monkeypatch.setenv("SOLHUNTER_OFFLINE", "1")
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.setenv("TESTNET", "1")
+    monkeypatch.setenv("LIVE_DISCOVERY", "0")
+
+    captured: dict[str, object] = {}
+
+    async def fake_startup(
+        config_path: str | None, *, offline: bool, dry_run: bool, testnet: bool
+    ) -> tuple[dict, object, None]:
+        captured["config_path"] = config_path
+        captured["offline"] = offline
+        captured["dry_run"] = dry_run
+        captured["testnet"] = testnet
+        return {}, object(), None
+
+    monkeypatch.setattr(trading_runtime, "perform_startup_async", fake_startup)
+    monkeypatch.setattr(trading_runtime, "load_config", lambda path=None: {})
+    monkeypatch.setattr(trading_runtime, "apply_env_overrides", lambda cfg: cfg)
+    monkeypatch.setattr(trading_runtime, "set_env_from_config", lambda cfg: None)
+
+    await runtime._prepare_configuration()
+
+    assert captured["config_path"] == runtime.config_path
+    assert captured["offline"] is True
+    assert captured["dry_run"] is True
+    assert captured["testnet"] is True
+
+    modes = runtime._derive_offline_modes()
+    assert modes == (True, True, False, True)

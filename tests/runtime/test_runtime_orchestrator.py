@@ -32,7 +32,9 @@ async def test_start_agents_aborts_when_no_agents(monkeypatch, request):
 
     monkeypatch.setattr(orchestrator, "_publish_stage", capture_stage)
 
-    async def fake_startup(config_path: str | None, offline: bool, dry_run: bool):
+    async def fake_startup(
+        config_path: str | None, offline: bool, dry_run: bool, testnet: bool = False
+    ):
         return {}, {}, None
 
     monkeypatch.setattr(runtime_orchestrator, "perform_startup_async", fake_startup)
@@ -469,6 +471,7 @@ async def test_start_invokes_stop_all_on_stage_failure(monkeypatch):
 
     dummy_trading_runtime = types.ModuleType("solhunter_zero.runtime.trading_runtime")
     dummy_trading_runtime.TradingRuntime = type("TradingRuntime", (), {})
+    dummy_trading_runtime.DEPTH_PROCESS_SHUTDOWN_TIMEOUT = 5.0
     monkeypatch.setitem(
         sys.modules, "solhunter_zero.runtime.trading_runtime", dummy_trading_runtime
     )
@@ -545,6 +548,7 @@ async def test_start_invokes_metrics_aggregator(monkeypatch):
 
     dummy_trading_runtime = types.ModuleType("solhunter_zero.runtime.trading_runtime")
     dummy_trading_runtime.TradingRuntime = type("TradingRuntime", (), {})
+    dummy_trading_runtime.DEPTH_PROCESS_SHUTDOWN_TIMEOUT = 5.0
     monkeypatch.setitem(
         sys.modules, "solhunter_zero.runtime.trading_runtime", dummy_trading_runtime
     )

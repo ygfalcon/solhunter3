@@ -185,6 +185,7 @@ async def perform_startup_async(
     *,
     offline: bool = False,
     dry_run: bool = False,
+    testnet: bool = False,
 ) -> tuple[dict, Config, subprocess.Popen | None]:
     """Load configuration, verify connectivity and start services."""
     start = time.perf_counter()
@@ -210,6 +211,10 @@ async def perform_startup_async(
         "startup_depth_service_start_duration", time.perf_counter() - start
     )
 
+    if testnet:
+        os.environ.setdefault("TESTNET", "1")
+        os.environ.setdefault("SOLHUNTER_TESTNET", "1")
+
     return cfg, runtime_cfg, proc
 
 
@@ -218,10 +223,13 @@ def perform_startup(
     *,
     offline: bool = False,
     dry_run: bool = False,
+    testnet: bool = False,
 ) -> tuple[dict, Config, subprocess.Popen | None]:
     """Synchronous wrapper for :func:`perform_startup_async`."""
     return asyncio.run(
-        perform_startup_async(config_path, offline=offline, dry_run=dry_run)
+        perform_startup_async(
+            config_path, offline=offline, dry_run=dry_run, testnet=testnet
+        )
     )
 
 
@@ -274,7 +282,7 @@ def main(
     prev_weights = os.environ.get("AGENT_WEIGHTS")
     try:
         cfg, runtime_cfg, proc = perform_startup(
-            config_path, offline=offline, dry_run=dry_run
+            config_path, offline=offline, dry_run=dry_run, testnet=testnet
         )
     except DepthServiceStartupError as exc:
         logging.error("Failed to start depth_service: %s", exc)
