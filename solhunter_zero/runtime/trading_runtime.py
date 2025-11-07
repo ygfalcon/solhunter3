@@ -45,6 +45,8 @@ from ..paths import ROOT
 from ..redis_util import ensure_local_redis_if_needed
 from ..ui import UIState, UIServer, UIStartupError
 from ..util import parse_bool_env
+from ..config_runtime import Config
+from ..services import DepthServiceStartupError
 
 
 log = logging.getLogger(__name__)
@@ -383,12 +385,19 @@ class TradingRuntime:
             bool(testnet_mode),
         )
 
-        cfg, runtime_cfg, depth_proc = await perform_startup_async(
-            self.config_path,
-            offline=self._startup_modes[0],
-            dry_run=self._startup_modes[1],
-            testnet=self._startup_modes[3],
-        )
+        try:
+            cfg, runtime_cfg, depth_proc = await perform_startup_async(
+                self.config_path,
+                offline=self._startup_modes[0],
+                dry_run=self._startup_modes[1],
+                testnet=self._startup_modes[3],
+            )
+        except DepthServiceStartupError as exc:
+            log.error("Failed to start depth_service: %s", exc)
+            cfg = {"depth_service": False}
+            runtime_cfg = Config.from_env(cfg)
+            depth_proc = None
+            os.environ["DEPTH_SERVICE"] = "false"
 
         self.cfg = cfg
         self.runtime_cfg = runtime_cfg

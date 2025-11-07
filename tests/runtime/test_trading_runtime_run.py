@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from solhunter_zero.config_runtime import Config
 from solhunter_zero.runtime import trading_runtime
+from solhunter_zero.services import DepthServiceStartupError
 
 
 @pytest.fixture
@@ -133,3 +135,26 @@ async def test_prepare_configuration_uses_offline_flags(monkeypatch, tmp_path):
 
     modes = runtime._derive_offline_modes()
     assert modes == (True, True, False, True)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_prepare_configuration_disables_depth_on_start_failure(monkeypatch):
+    runtime = trading_runtime.TradingRuntime()
+
+    monkeypatch.setattr(trading_runtime, "load_config", lambda path=None: {})
+    monkeypatch.setattr(trading_runtime, "apply_env_overrides", lambda cfg: cfg)
+    monkeypatch.setattr(trading_runtime, "set_env_from_config", lambda cfg: None)
+    monkeypatch.delenv("DEPTH_SERVICE", raising=False)
+
+    async def failing_startup(*_args, **_kwargs):
+        raise DepthServiceStartupError("boom")
+
+    monkeypatch.setattr(trading_runtime, "perform_startup_async", failing_startup)
+
+    await runtime._prepare_configuration()
+
+    assert runtime.cfg == {"depth_service": False}
+    assert isinstance(runtime.runtime_cfg, Config)
+    assert runtime.depth_proc is None
+    assert runtime.status.depth_service is False
+    assert trading_runtime.os.environ["DEPTH_SERVICE"] == "false"
