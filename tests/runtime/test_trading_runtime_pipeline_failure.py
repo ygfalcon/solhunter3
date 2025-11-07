@@ -68,3 +68,68 @@ async def test_runtime_rollback_on_pipeline_failure(monkeypatch: pytest.MonkeyPa
     assert runtime.pipeline is None
     assert runtime.status.trading_loop is False
     assert runtime.stop_event.is_set()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_runtime_does_not_retain_empty_pipeline_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = trading_runtime.TradingRuntime()
+
+    monkeypatch.setattr(trading_runtime, "publish", lambda *_, **__: None)
+
+    for idx in range(50):
+        result = SimpleNamespace(
+            token=f"token-{idx}",
+            actions=[],
+            latency=0.01,
+            errors=[],
+            metadata={},
+            cached=False,
+        )
+        await runtime._pipeline_on_evaluation(result)
+
+    assert runtime._pending_tokens == {}
+
+
+@pytest.mark.anyio("asyncio")
+async def test_runtime_drops_existing_entry_when_actions_disappear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = trading_runtime.TradingRuntime()
+
+    monkeypatch.setattr(trading_runtime, "publish", lambda *_, **__: None)
+
+    token = "token-42"
+    with_actions = SimpleNamespace(
+        token=token,
+        actions=[
+            {
+                "token": token,
+                "side": "buy",
+                "amount": 1,
+                "price": 1.0,
+                "agent": "demo-agent",
+            }
+        ],
+        latency=0.01,
+        errors=[],
+        metadata={"score": 1.0},
+        cached=False,
+    )
+
+    await runtime._pipeline_on_evaluation(with_actions)
+    assert token in runtime._pending_tokens
+
+    without_actions = SimpleNamespace(
+        token=token,
+        actions=[],
+        latency=0.02,
+        errors=["no actions"],
+        metadata={},
+        cached=False,
+    )
+
+    await runtime._pipeline_on_evaluation(without_actions)
+
+    assert token not in runtime._pending_tokens
