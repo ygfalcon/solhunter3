@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import socket
+from typing import Mapping
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -133,3 +135,47 @@ async def test_prepare_configuration_uses_offline_flags(monkeypatch, tmp_path):
 
     modes = runtime._derive_offline_modes()
     assert modes == (True, True, False, True)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_prepare_configuration_sets_environment(monkeypatch, tmp_path):
+    runtime = trading_runtime.TradingRuntime(
+        config_path=str(tmp_path / "config.toml")
+    )
+
+    config = {
+        "birdeye_api_key": "test-key",
+        "jupiter_ws_url": "wss://jupiter.example/ws",
+    }
+
+    monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
+    monkeypatch.delenv("JUPITER_WS_URL", raising=False)
+    monkeypatch.delenv("PYTORCH_ENABLE_MPS_FALLBACK", raising=False)
+
+    captured: dict[str, Mapping[str, object]] = {}
+
+    async def fake_startup(
+        config_path: str | None, *, offline: bool, dry_run: bool, testnet: bool
+    ) -> tuple[dict, object, None]:
+        return config, object(), None
+
+    def fake_load_config(path=None):
+        return config
+
+    def fake_apply_overrides(data):
+        return data
+
+    def fake_set_env(cfg):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(trading_runtime, "perform_startup_async", fake_startup)
+    monkeypatch.setattr(trading_runtime, "load_config", fake_load_config)
+    monkeypatch.setattr(trading_runtime, "apply_env_overrides", fake_apply_overrides)
+    monkeypatch.setattr(trading_runtime, "set_env_from_config", fake_set_env)
+
+    await runtime._prepare_configuration()
+
+    assert captured["cfg"] == config
+    assert os.environ["BIRDEYE_API_KEY"] == "test-key"
+    assert os.environ["JUPITER_WS_URL"] == "wss://jupiter.example/ws"
+    assert os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] == "1"
