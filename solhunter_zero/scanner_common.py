@@ -81,10 +81,14 @@ refresh_runtime_values()
 TOKEN_SUFFIX = os.getenv("TOKEN_SUFFIX", "token")
 TOKEN_KEYWORDS = [k.strip() for k in os.getenv("TOKEN_KEYWORDS", "token,coin").split(",") if k.strip()]
 
-OFFLINE_TOKENS: List[str] = [
+STATIC_FALLBACK_TOKENS: tuple[str, ...] = (
     "So11111111111111111111111111111111111111112",  # Wrapped SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-]
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
+    "JUP4Fb2cqiRUcaTHdrPC8h7gTZMAbxq12n6u43iCz46",  # JUP (mint verified on explorer)
+)
+
+OFFLINE_TOKENS: List[str] = list(STATIC_FALLBACK_TOKENS[:2])
 
 def token_matches(token_info: Dict[str, Any] | str, patterns: Iterable[str] | None = None) -> bool:
     if patterns is None:

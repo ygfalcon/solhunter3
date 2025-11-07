@@ -15,6 +15,7 @@ from ..mempool_scanner import stream_ranked_mempool_tokens_with_depth
 from ..scanner_common import (
     DEFAULT_SOLANA_RPC,
     DEFAULT_SOLANA_WS,
+    STATIC_FALLBACK_TOKENS,
     scan_tokens_from_file,
 )
 from ..scanner_onchain import scan_tokens_onchain
@@ -36,12 +37,7 @@ _CACHE: dict[str, object] = {
     "token_file": None,
     "token_file_mtime": None,
 }
-_STATIC_FALLBACK = [
-    "So11111111111111111111111111111111111111112",  # SOL
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
-    "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",  # JUP
-]
+_STATIC_FALLBACK = list(STATIC_FALLBACK_TOKENS)
 
 DEFAULT_DISCOVERY_METHOD = "helius"
 OFFLINE_DEFAULT_METHOD = "file"

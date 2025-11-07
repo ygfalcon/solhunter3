@@ -27,6 +27,7 @@ from .lru import TTLCache
 from .execution import EventExecutor
 from .agents.price_utils import resolve_price
 from .prices import update_price_cache
+from .scanner_common import STATIC_FALLBACK_TOKENS
 
 log = logging.getLogger(__name__)
 
@@ -1129,12 +1130,7 @@ class SwarmPipeline:
                 ]
 
         if not stage.discovered:
-            stage.tokens = [
-                "So11111111111111111111111111111111111111112",
-                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-                "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-                "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",
-            ]
+            stage.tokens = list(STATIC_FALLBACK_TOKENS)
             stage.fallback_used = True
             publish("runtime.log", RuntimeLog(stage="discovery", detail="fallback"))
         else:
