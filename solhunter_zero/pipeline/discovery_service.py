@@ -380,16 +380,17 @@ class DiscoveryService:
             meta = candidate.metadata if isinstance(candidate.metadata, dict) else {}
             metadata_snapshot[candidate.token] = dict(meta)
         changed_tokens = self._detect_metadata_changes(metadata_snapshot)
+        metadata_changed = bool(changed_tokens)
         metadata_refresh = (
-            bool(changed_tokens) and not fresh and seq == self._last_emitted
+            metadata_changed and not fresh and seq == self._last_emitted
         )
-        if not metadata_refresh and not fresh and seq == self._last_emitted:
+        if (not metadata_changed) and not fresh and seq == self._last_emitted:
             log.debug(
                 "DiscoveryService skipping cached emission (%d tokens)", len(seq)
             )
             self._last_metadata_snapshot = metadata_snapshot
             return
-        if not metadata_refresh:
+        if not metadata_changed:
             changed_tokens = []
         await self.queue.put(batch)
         log.info("DiscoveryService queued %d tokens", len(batch))
@@ -399,7 +400,10 @@ class DiscoveryService:
             "metadata_refresh": metadata_refresh,
             "changed_tokens": list(changed_tokens),
         }
-        if seq and (seq != previous or metadata_refresh):
+        should_publish = bool(seq) and (
+            seq != previous or metadata_refresh or metadata_changed
+        )
+        if should_publish:
             publish("token_discovered", payload)
         self._last_emitted = list(seq)
         self._last_metadata_snapshot = metadata_snapshot
