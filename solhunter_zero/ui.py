@@ -2928,6 +2928,10 @@ def create_app(
 class UIStartupError(RuntimeError):
     """Raised when the UI server fails to start."""
 
+    def __init__(self, message: str, *, errno: int | None = None) -> None:
+        super().__init__(message)
+        self.errno = errno
+
 
 class UIServer:
     """Utility wrapper that runs the Flask app in a background thread."""
@@ -2962,8 +2966,18 @@ class UIServer:
                 threaded=True,
             )
         except SystemExit as exc:
+            errno_value: int | None = None
+            context = exc.__context__
+            if isinstance(context, OSError):
+                errno_value = getattr(context, "errno", None)
             raise UIStartupError(
-                f"failed to bind UI server on {self.host}:{self.port}: {exc}"
+                f"failed to bind UI server on {self.host}:{self.port}: {exc}",
+                errno=errno_value,
+            ) from exc
+        except OSError as exc:
+            raise UIStartupError(
+                f"failed to bind UI server on {self.host}:{self.port}: {exc}",
+                errno=getattr(exc, "errno", None),
             ) from exc
         except Exception as exc:
             raise UIStartupError(

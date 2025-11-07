@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import contextlib
 import json
 import logging
@@ -719,18 +720,99 @@ class TradingRuntime:
         self.ui_state.actions_provider = self._collect_actions
         self.ui_state.history_provider = self._collect_history
 
-        self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
-        try:
-            self.ui_server.start()
-        except UIStartupError as exc:
-            self.activity.add("ui", f"failed to start: {exc}", ok=False)
-            log.exception(
-                "TradingRuntime: failed to start UI server on %s:%s",
-                self.ui_host,
-                self.ui_port,
+        port_candidates: list[int] = []
+        primary_port = int(self.ui_port)
+        port_candidates.append(primary_port)
+
+        range_spec: Optional[str] = None
+        if self.cfg:
+            cfg_range = self.cfg.get("ui_port_range")
+            if cfg_range:
+                range_spec = str(cfg_range)
+        env_range = os.getenv("UI_PORT_RANGE", "").strip()
+        if env_range:
+            range_spec = env_range
+
+        fallback_ports: list[int] = []
+        if range_spec:
+            range_expr = range_spec.replace(",", "-")
+            parts = [p.strip() for p in range_expr.split("-") if p.strip()]
+            try:
+                if len(parts) == 1:
+                    start_port = end_port = int(parts[0])
+                elif len(parts) >= 2:
+                    start_port = int(parts[0])
+                    end_port = int(parts[1])
+                else:
+                    raise ValueError("empty port range")
+                if start_port > end_port:
+                    start_port, end_port = end_port, start_port
+                fallback_ports = list(range(start_port, end_port + 1))
+            except ValueError:
+                log.warning(
+                    "Invalid UI port range %r; falling back to port 0",
+                    range_spec,
+                )
+                fallback_ports = []
+
+        fallback_ports = [p for p in fallback_ports if p not in {primary_port, 0}]
+        if primary_port != 0:
+            fallback_ports.append(0)
+
+        port_candidates.extend(p for p in fallback_ports if p not in port_candidates)
+
+        last_error: Optional[UIStartupError] = None
+
+        def _is_addr_in_use(error: UIStartupError) -> bool:
+            errnos = {errno.EADDRINUSE}
+            if hasattr(errno, "WSAEADDRINUSE"):
+                errnos.add(errno.WSAEADDRINUSE)  # type: ignore[attr-defined]
+            if error.errno in errnos:
+                return True
+            cause = error.__cause__
+            if isinstance(cause, OSError) and getattr(cause, "errno", None) in errnos:
+                return True
+            return False
+
+        for attempt, port_candidate in enumerate(port_candidates, start=1):
+            self.ui_server = UIServer(
+                self.ui_state,
+                host=self.ui_host,
+                port=port_candidate,
             )
+            try:
+                self.ui_server.start()
+            except UIStartupError as exc:
+                last_error = exc
+                should_retry = _is_addr_in_use(exc) and attempt < len(port_candidates)
+                if should_retry:
+                    detail = (
+                        f"failed to bind on {self.ui_host}:{port_candidate}; retrying"
+                    )
+                    self.activity.add("ui", detail, ok=False)
+                    log.warning(
+                        "TradingRuntime: UI port %s unavailable; retrying (attempt %s/%s)",
+                        port_candidate,
+                        attempt,
+                        len(port_candidates),
+                    )
+                    self.ui_server = None
+                    continue
+                self.activity.add("ui", f"failed to start: {exc}", ok=False)
+                log.exception(
+                    "TradingRuntime: failed to start UI server on %s:%s",
+                    self.ui_host,
+                    port_candidate,
+                )
+                self.ui_server = None
+                raise
+            else:
+                break
+        else:
             self.ui_server = None
-            raise
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("UI server failed without an explicit error")
 
         self.ui_port = self.ui_server.port
         self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
