@@ -40,6 +40,7 @@ class RuntimeHandles:
     ui_threads: dict[str, Any] | None = None
     ui_server: Any | None = None
     bus_started: bool = False
+    local_ws_bound: bool = False
     tasks: list[asyncio.Task] | None = None
     depth_proc: Any | None = None
 
@@ -129,6 +130,8 @@ class RuntimeOrchestrator:
                 os.environ.pop("EVENT_BUS_URL", None)
             else:
                 os.environ["EVENT_BUS_URL"] = original_event_bus_url
+        self.handles.local_ws_bound = local_ws_bound
+        initialize_event_bus()
         ok = await event_bus.verify_broker_connection(timeout=1.0)
         if not ok:
             await self._publish_stage("bus:verify", False, "broker roundtrip failed")
