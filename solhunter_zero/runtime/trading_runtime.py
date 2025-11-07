@@ -394,9 +394,18 @@ class TradingRuntime:
         self.cfg = cfg
         self.runtime_cfg = runtime_cfg
         self.depth_proc = depth_proc
-        self.status.depth_service = bool(
-            depth_proc is not None and getattr(depth_proc, "poll", lambda: 1)() is None
-        )
+        depth_running = False
+        if depth_proc is not None:
+            poll = getattr(depth_proc, "poll", lambda: None)
+            try:
+                if callable(poll):
+                    depth_running = poll() is None
+                else:
+                    depth_running = True
+            except Exception:
+                depth_running = True
+
+        self.status.depth_service = depth_running
 
         if self.cfg.get("birdeye_api_key"):
             os.environ.setdefault("BIRDEYE_API_KEY", str(self.cfg["birdeye_api_key"]))
@@ -1089,7 +1098,16 @@ class TradingRuntime:
     # ------------------------------------------------------------------
 
     def _collect_status(self) -> Dict[str, Any]:
-        depth_ok = bool(self.depth_proc and self.depth_proc.poll() is None)
+        depth_ok = False
+        if self.depth_proc is not None:
+            poll = getattr(self.depth_proc, "poll", lambda: None)
+            try:
+                if callable(poll):
+                    depth_ok = poll() is None
+                else:
+                    depth_ok = True
+            except Exception:
+                depth_ok = True
         rl_snapshot = self._collect_rl_status()
         rl_running = bool(rl_snapshot.get("running")) if rl_snapshot else False
         self.status.rl_daemon = rl_running
