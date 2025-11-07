@@ -2757,10 +2757,14 @@ def create_app(
                 return False
             return bool(value)
 
+        trading_loop_ok = _flag_ok(status_snapshot.get("trading_loop"))
+        heartbeat_value = status_snapshot.get("heartbeat")
+        heartbeat_ok = _flag_ok(heartbeat_value) or trading_loop_ok
+
         critical_components = {
             "event_bus": _flag_ok(status_snapshot.get("event_bus")),
-            "trading_loop": _flag_ok(status_snapshot.get("trading_loop")),
-            "heartbeat": _flag_ok(status_snapshot.get("heartbeat")),
+            "trading_loop": trading_loop_ok,
+            "heartbeat": heartbeat_ok,
         }
         failing = sorted(name for name, ok in critical_components.items() if not ok)
         payload: Dict[str, Any] = {

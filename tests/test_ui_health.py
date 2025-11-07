@@ -38,6 +38,22 @@ def test_health_endpoint_reports_healthy(client):
     }
 
 
+def test_health_endpoint_healthy_before_first_heartbeat(client):
+    snapshot = {"event_bus": True, "trading_loop": True, "heartbeat": None}
+    response = client(snapshot).get("/health")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload == {
+        "ok": True,
+        "components": {
+            "event_bus": True,
+            "trading_loop": True,
+            "heartbeat": True,
+        },
+        "status": snapshot,
+    }
+
+
 def test_health_endpoint_reports_failures(client):
     snapshot = {"event_bus": False, "trading_loop": None, "heartbeat": "offline"}
     response = client(snapshot).get("/health")
