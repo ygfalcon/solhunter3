@@ -3000,7 +3000,39 @@ def create_app(
         os.environ["DISCOVERY_METHOD"] = method
         handled = state.notify_discovery_update(method)
         if not handled:
-            discovery_state.set_override(method)
+            previous, current = discovery_state.set_override(method)
+            if current is None:
+                log.error(
+                    "Discovery update failed: canonical method resolution returned None for %s",
+                    method,
+                )
+                return (
+                    jsonify(
+                        {
+                            "error": "Discovery update failed",
+                            "detail": "Unable to resolve discovery method",
+                            "method": method,
+                            "allowed_methods": sorted(DISCOVERY_METHODS),
+                        }
+                    ),
+                    500,
+                )
+            if previous == current:
+                log.error(
+                    "Discovery update failed: runtime rejected method %s and override unchanged",
+                    method,
+                )
+                return (
+                    jsonify(
+                        {
+                            "error": "Discovery update not applied",
+                            "detail": "Runtime rejected method and override already set",
+                            "method": method,
+                            "allowed_methods": sorted(DISCOVERY_METHODS),
+                        }
+                    ),
+                    409,
+                )
         return jsonify(
             {
                 "status": "ok",

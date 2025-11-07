@@ -310,6 +310,52 @@ def test_discovery_update_requires_loopback_remote():
     assert resp.status_code == 200
 
 
+def test_discovery_update_notifies_runtime(monkeypatch):
+    state = ui.UIState()
+    recorded: list[str] = []
+    state.discovery_update_callback = recorded.append
+    app = ui.create_app(state)
+    client = app.test_client()
+
+    monkeypatch.delenv("DISCOVERY_METHOD", raising=False)
+
+    resp = client.post(
+        "/discovery",
+        json={"method": "mempool"},
+        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert resp.status_code == 200
+    assert recorded == ["mempool"]
+    payload = resp.get_json()
+    assert payload["status"] == "ok"
+
+
+def test_discovery_update_conflict_when_override_unchanged(monkeypatch, caplog):
+    state = ui.UIState()
+    app = ui.create_app(state)
+    client = app.test_client()
+
+    monkeypatch.delenv("DISCOVERY_METHOD", raising=False)
+
+    def _fake_set_override(method: str) -> tuple[str, str]:
+        return (method, method)
+
+    monkeypatch.setattr(ui.discovery_state, "set_override", _fake_set_override)
+    caplog.set_level(logging.ERROR, logger="solhunter_zero.ui")
+
+    resp = client.post(
+        "/discovery",
+        json={"method": "mempool"},
+        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert resp.status_code == 409
+    payload = resp.get_json()
+    assert payload["error"] == "Discovery update not applied"
+    assert "detail" in payload
+    assert any("override unchanged" in record.getMessage() for record in caplog.records)
+
 
 def test_ensure_active_keypair_selects_single(monkeypatch):
     monkeypatch.setattr(ui.wallet, "get_active_keypair_name", lambda: None)
