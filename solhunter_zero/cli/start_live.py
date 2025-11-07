@@ -20,10 +20,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Launch the trading runtime using the modern event-driven pipeline."""
 
     _prepare_environment()
-    parser = primary_entry_point.build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
-    primary_entry_point.run_from_args(args)
-    return 0
+    return primary_entry_point.main(list(argv) if argv is not None else None)
 
 
 if __name__ == "__main__":
