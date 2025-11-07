@@ -1,10 +1,13 @@
 import asyncio
-import asyncio
 import importlib
+import os
 import sys
 import types
+import warnings
 
 import pytest
+
+from solhunter_zero.services import DepthServiceStartupError
 
 
 @pytest.fixture
@@ -238,6 +241,137 @@ async def test_discovery_loop_respects_override(monkeypatch, request):
         runtime_orchestrator.DEFAULT_DISCOVERY_METHOD,
         "mempool",
     ]
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_reaches_ready_when_depth_service_fails(monkeypatch, request):
+    ui_module = importlib.import_module("solhunter_zero.ui")
+    monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
+    monkeypatch.setattr(ui_module, "start_websockets", lambda: {}, raising=False)
+
+    runtime_orchestrator = importlib.reload(
+        importlib.import_module("solhunter_zero.runtime.orchestrator")
+    )
+    request.addfinalizer(lambda: importlib.reload(runtime_orchestrator))
+
+    monkeypatch.setenv("EVENT_DRIVEN", "0")
+    warnings.filterwarnings(
+        "ignore",
+        message="coroutine 'measure_dex_latency_async",
+        category=RuntimeWarning,
+    )
+
+    async def failing_startup(*_: object, **__: object) -> None:
+        raise DepthServiceStartupError("boom")
+
+    monkeypatch.setattr(runtime_orchestrator, "perform_startup_async", failing_startup)
+
+    class DummyMemory:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def start_writer(self) -> None:
+            pass
+
+    class DummyPortfolio:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    class DummyAgentManager:
+        def __init__(self) -> None:
+            self.agents = [types.SimpleNamespace(name="dummy")]
+
+        @classmethod
+        def from_config(cls, *_: object, **__: object):
+            return cls()
+
+        @classmethod
+        def from_default(cls):
+            return cls()
+
+    class DummyStrategyManager:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+    async def fake_trading_loop(*_: object, **__: object) -> None:
+        return None
+
+    class DummyDecisionMetrics:
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    class DummyRiskController:
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    decision_metrics_module = types.ModuleType("solhunter_zero.metrics.decision_metrics")
+    decision_metrics_module.DecisionMetrics = DummyDecisionMetrics
+    monkeypatch.setitem(sys.modules, "solhunter_zero.metrics.decision_metrics", decision_metrics_module)
+
+    risk_module = types.ModuleType("solhunter_zero.risk_controller")
+    risk_module.RiskController = DummyRiskController
+    monkeypatch.setitem(sys.modules, "solhunter_zero.risk_controller", risk_module)
+
+    monkeypatch.setattr(runtime_orchestrator, "Memory", DummyMemory)
+    monkeypatch.setattr(runtime_orchestrator, "Portfolio", DummyPortfolio)
+    monkeypatch.setattr(runtime_orchestrator, "TradingState", lambda: object())
+    monkeypatch.setattr(runtime_orchestrator, "AgentManager", DummyAgentManager)
+    monkeypatch.setattr(runtime_orchestrator, "StrategyManager", DummyStrategyManager)
+    monkeypatch.setattr(runtime_orchestrator, "_trading_loop", fake_trading_loop)
+
+    class DummyTask:
+        def __init__(self, coro):
+            self.coro = coro
+
+        def cancel(self) -> None:
+            pass
+
+        def __await__(self):
+            return self.coro.__await__()
+
+    def fake_create_task(coro, *, name: str | None = None):
+        return DummyTask(coro)
+
+    monkeypatch.setattr(runtime_orchestrator.asyncio, "create_task", fake_create_task)
+
+    async def fake_start_ui() -> None:
+        return None
+
+    async def fake_start_bus() -> None:
+        return None
+
+    async def fake_stop_ws_server() -> None:
+        return None
+
+    monkeypatch.setattr(runtime_orchestrator.event_bus, "publish", lambda *_, **__: None)
+    monkeypatch.setattr(runtime_orchestrator.event_bus, "subscribe", lambda *_, **__: None)
+    monkeypatch.setattr(runtime_orchestrator.event_bus, "stop_ws_server", fake_stop_ws_server)
+
+    orchestrator = runtime_orchestrator.RuntimeOrchestrator(run_http=False)
+    monkeypatch.setattr(orchestrator, "start_ui", fake_start_ui)
+    monkeypatch.setattr(orchestrator, "start_bus", fake_start_bus)
+
+    stages: list[tuple[str, bool, str]] = []
+
+    async def capture_stage(stage: str, ok: bool, detail: str = "") -> None:
+        stages.append((stage, ok, detail))
+
+    monkeypatch.setattr(orchestrator, "_publish_stage", capture_stage)
+
+    await orchestrator.start()
+    await orchestrator.stop_all()
+
+    ready_stages = [stage for stage in stages if stage[0] == "runtime:ready" and stage[1]]
+    assert ready_stages, "Runtime should reach ready stage despite depth service failure"
+    assert orchestrator.handles.depth_proc is None
+    assert os.getenv("DEPTH_SERVICE") == "false"
+    os.environ.pop("DEPTH_SERVICE", None)
 
 
 @pytest.mark.anyio("asyncio")

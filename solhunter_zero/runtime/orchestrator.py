@@ -20,6 +20,8 @@ from ..config import (
     load_selected_config,
 )
 from ..main import perform_startup_async
+from ..config_runtime import Config
+from ..services import DepthServiceStartupError
 from ..main_state import TradingState
 from ..memory import Memory
 from ..portfolio import Portfolio
@@ -164,7 +166,19 @@ class RuntimeOrchestrator:
     async def start_agents(self) -> bool:
         # Use existing startup path to ensure consistent connectivity + depth_service
         await self._publish_stage("agents:startup", True)
-        cfg, runtime_cfg, proc = await perform_startup_async(self.config_path, offline=False, dry_run=False)
+        try:
+            cfg, runtime_cfg, proc = await perform_startup_async(
+                self.config_path, offline=False, dry_run=False
+            )
+        except DepthServiceStartupError as exc:
+            log.error("Failed to start depth_service: %s", exc)
+            cfg = {"depth_service": False}
+            runtime_cfg = Config.from_env(cfg)
+            proc = None
+            os.environ["DEPTH_SERVICE"] = "false"
+        except Exception:
+            log.exception("Startup aborted during perform_startup_async; aborting")
+            raise
         self.handles.depth_proc = proc
 
         # Build runtime services
