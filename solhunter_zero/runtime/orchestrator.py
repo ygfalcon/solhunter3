@@ -8,7 +8,7 @@ import signal
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from ..util import install_uvloop, parse_bool_env
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
@@ -57,6 +57,11 @@ class RuntimeHandles:
     local_ws_bound: bool = False
     tasks: list[asyncio.Task] | None = None
     depth_proc: Any | None = None
+    agent_runtime: "AgentRuntime | None" = None
+
+
+if TYPE_CHECKING:
+    from ..agents.runtime import AgentRuntime
 
 
 class RuntimeOrchestrator:
@@ -326,6 +331,7 @@ class RuntimeOrchestrator:
         from ..loop import _init_rl_training as _init_rl_training  # type: ignore
 
         aruntime = AgentRuntime(active_manager, portfolio)
+        self.handles.agent_runtime = aruntime
         await aruntime.start()
         def _maybe_bool(value: Any) -> bool | None:
             if value is None:
@@ -486,12 +492,23 @@ class RuntimeOrchestrator:
         try:
             self._closed = True
             await self._publish_stage("runtime:stopping", True)
+            # Stop agent runtime before tearing down background tasks
+            aruntime = getattr(self.handles, "agent_runtime", None)
+            if aruntime is not None:
+                try:
+                    aruntime.stop()
+                except Exception:
+                    log.exception("Failed to stop agent runtime cleanly")
+                finally:
+                    self.handles.agent_runtime = None
             # Cancel tasks
             for t in list(self.handles.tasks or []):
                 t.cancel()
             for t in list(self.handles.tasks or []):
                 try:
                     await t
+                except asyncio.CancelledError:
+                    pass
                 except Exception:
                     pass
             self.handles.tasks = []
