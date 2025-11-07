@@ -3147,7 +3147,7 @@ class UIServer:
         try:
             import urllib.request
 
-            shutdown_host = self._resolve_shutdown_host()
+            shutdown_host = self.resolved_host
             formatted_host = self._format_host_for_url(shutdown_host)
             if not self._shutdown_token:
                 raise RuntimeError("missing shutdown token")
@@ -3173,6 +3173,12 @@ class UIServer:
         if ip.is_unspecified:
             return "::1" if ip.version == 6 else "127.0.0.1"
         return raw_host
+
+    @property
+    def resolved_host(self) -> str:
+        """Return a loopback host suitable for local access/activity messages."""
+
+        return self._resolve_shutdown_host()
 
     @staticmethod
     def _format_host_for_url(host: str) -> str:

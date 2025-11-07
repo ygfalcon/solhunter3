@@ -92,7 +92,12 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
             assert any(
                 entry["stage"] == "ui"
                 and entry["ok"] is True
-                and f"http://{runtime.ui_host}:{runtime.ui_port}" == entry["detail"]
+                and entry["detail"]
+                == (
+                    "http://"
+                    f"{runtime.ui_server._format_host_for_url(runtime.ui_server.resolved_host)}"
+                    f":{runtime.ui_port}"
+                )
                 for entry in entries
             )
         finally:
@@ -136,13 +141,36 @@ async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
                 entry["stage"] == "ui"
                 and entry["ok"] is True
                 and entry["detail"]
-                == f"http://{runtime.ui_host}:{fallback_hint_port}"
+                == (
+                    "http://"
+                    f"{runtime.ui_server._format_host_for_url(runtime.ui_server.resolved_host)}"
+                    f":{fallback_hint_port}"
+                )
                 for entry in entries
             )
         finally:
             runtime.ui_server.stop()
     finally:
         busy_sock.close()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_trading_runtime_start_ui_formats_unspecified_host():
+    runtime = trading_runtime.TradingRuntime(ui_host="0.0.0.0")
+
+    await runtime._start_ui()
+    try:
+        assert runtime.ui_server is not None
+        entries = runtime.activity.snapshot()
+        expected_detail = f"http://127.0.0.1:{runtime.ui_port}"
+        assert any(
+            entry["stage"] == "ui"
+            and entry["ok"] is True
+            and entry["detail"] == expected_detail
+            for entry in entries
+        )
+    finally:
+        runtime.ui_server.stop()
 
 
 @pytest.mark.anyio("asyncio")
@@ -212,12 +240,18 @@ async def test_prepare_configuration_uses_saved_config_selection(monkeypatch, tm
     captured: dict[str, object] = {}
 
     async def fake_startup(
-        config_path: str | None, *, offline: bool, dry_run: bool, testnet: bool
+        config_path: str | None,
+        *,
+        offline: bool,
+        dry_run: bool,
+        testnet: bool,
+        preloaded_config: dict | None = None,
     ) -> tuple[dict, object, None]:
         captured["config_path"] = config_path
         captured["offline"] = offline
         captured["dry_run"] = dry_run
         captured["testnet"] = testnet
+        captured["preloaded_config"] = preloaded_config
         return {}, object(), None
 
     def fake_load_config(path=None):
@@ -238,3 +272,4 @@ async def test_prepare_configuration_uses_saved_config_selection(monkeypatch, tm
     assert captured["offline"] is False
     assert captured["dry_run"] is False
     assert captured["testnet"] is False
+    assert captured["preloaded_config"] == {}

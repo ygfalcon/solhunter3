@@ -837,7 +837,9 @@ class TradingRuntime:
             raise RuntimeError("UI server failed without an explicit error")
 
         self.ui_port = self.ui_server.port
-        self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
+        activity_host = self.ui_server.resolved_host
+        formatted_host = self.ui_server._format_host_for_url(activity_host)
+        self.activity.add("ui", f"http://{formatted_host}:{self.ui_port}")
 
     async def _start_agents(self) -> None:
         memory_path = self.cfg.get("memory_path", "sqlite:///memory.db")
