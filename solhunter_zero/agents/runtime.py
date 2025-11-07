@@ -44,6 +44,22 @@ class AgentRuntime:
         # Subscribe to token discovery and price updates for decision generation
         event_bus.subscribe("token_discovered", self._on_tokens)
         event_bus.subscribe("price_update", self._on_price)
+        # Immediately evaluate existing positions or recently priced tokens so
+        # strategies can react without waiting for an external discovery event.
+        tokens_to_prime: set[str] = set()
+        try:
+            tokens_to_prime.update(str(token) for token in self.portfolio.balances.keys())
+        except Exception:
+            pass
+        try:
+            tokens_to_prime.update(str(token) for token in self.portfolio.price_history.keys())
+        except Exception:
+            pass
+        for token in tokens_to_prime:
+            if not token:
+                continue
+            self._tokens.add(token)
+            asyncio.create_task(self._evaluate_and_publish(token))
         # Start price backfill loop (optional)
         if os.getenv("PRICE_BACKFILL", "1").lower() in {"1", "true", "yes"}:
             self._tasks.append(asyncio.create_task(self._price_backfill_loop()))
