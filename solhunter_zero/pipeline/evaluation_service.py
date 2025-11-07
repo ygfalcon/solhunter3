@@ -34,6 +34,7 @@ class EvaluationService:
         self.portfolio = portfolio
         self.cache_ttl = max(0.0, cache_ttl)
         self._cache: Dict[str, tuple[float, tuple[str, int, str], EvaluationResult]] = {}
+        self._last_prune = time.time()
         self._stopped = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._worker_tasks: list[asyncio.Task] = []
@@ -121,6 +122,7 @@ class EvaluationService:
 
     async def _evaluate_token(self, scored: ScoredToken) -> Optional[EvaluationResult]:
         now = time.time()
+        self._prune_cache(now)
         candidate_metadata = scored.candidate.metadata or {}
         price = self._extract_price(candidate_metadata)
         price_band = self._price_band(price)
@@ -176,6 +178,20 @@ class EvaluationService:
         if self.cache_ttl and not errors:
             self._cache[scored.token] = (time.time(), signature, result)
         return result
+
+    def _prune_cache(self, now: float) -> None:
+        if not self.cache_ttl:
+            if self._cache:
+                self._cache.clear()
+            self._last_prune = now
+            return
+        if (now - self._last_prune) < self.cache_ttl:
+            return
+        expiry = now - self.cache_ttl
+        stale_tokens = [token for token, (timestamp, _, _) in self._cache.items() if timestamp < expiry]
+        for token in stale_tokens:
+            self._cache.pop(token, None)
+        self._last_prune = now
 
     @staticmethod
     def _coerce_float(value: Any) -> float | None:
