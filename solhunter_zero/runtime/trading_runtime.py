@@ -1486,7 +1486,14 @@ class TradingRuntime:
             "committed": False,
         }
         summary["dry_run"] = bool(self._dry_run_mode)
-        self._pending_tokens[result.token] = summary
+        if result.actions:
+            self._pending_tokens[result.token] = summary
+        else:
+            # Avoid retaining tokens that produced no actions. Otherwise a
+            # flood of "empty" evaluations would cause ``_pending_tokens`` to
+            # grow without bound when there are no corresponding executions to
+            # clear them.
+            self._pending_tokens.pop(result.token, None)
         await self._apply_iteration_summary(summary, stage="pipeline")
 
     async def _pipeline_on_execution(self, receipt) -> None:
