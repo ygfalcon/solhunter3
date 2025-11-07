@@ -158,6 +158,33 @@ async def test_emit_tokens_publishes_event(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_emit_tokens_includes_metadata_map(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    events: list[dict[str, object]] = []
+
+    def fake_publish(topic, payload, *args, **kwargs):
+        if topic == "token_discovered":
+            events.append(dict(payload))
+
+    monkeypatch.setattr(
+        "solhunter_zero.pipeline.discovery_service.publish", fake_publish
+    )
+
+    token = "TokMeta"
+    service._last_details = {token: {"score": 3.14, "sources": ["mempool"]}}
+
+    await service._emit_tokens([token], fresh=True)
+    batch = await queue.get()
+
+    assert [candidate.token for candidate in batch] == [token]
+    assert len(events) == 1
+    payload = events[0]
+    assert payload["metadata"] == {token: {"score": 3.14, "sources": ["mempool"]}}
+
+
+@pytest.mark.anyio
 async def test_metadata_refresh_bypasses_duplicate_guard(monkeypatch):
     queue: asyncio.Queue = asyncio.Queue()
     service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)

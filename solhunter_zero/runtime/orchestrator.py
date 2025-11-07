@@ -346,12 +346,21 @@ class RuntimeOrchestrator:
                 try:
                     tokens = await agent.discover_tokens(method=method, offline=False)
                     if tokens:
+                        metadata: dict[str, dict[str, Any]] = {}
+                        details = getattr(agent, "last_details", {})
+                        if isinstance(details, dict):
+                            for token in tokens:
+                                key = str(token)
+                                payload = details.get(token) or details.get(key)
+                                if isinstance(payload, dict):
+                                    metadata[key] = dict(payload)
                         event_bus.publish(
                             "token_discovered",
                             {
                                 "tokens": list(tokens),
                                 "metadata_refresh": False,
                                 "changed_tokens": [],
+                                **({"metadata": metadata} if metadata else {}),
                             },
                         )
                 except Exception:

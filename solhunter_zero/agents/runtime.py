@@ -11,12 +11,13 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, List, Dict
+from typing import Any, Callable, Dict, Iterable, List, Mapping
 
 from .. import event_bus
 from ..agent_manager import AgentManager
 from ..portfolio import Portfolio
 from ..prices import fetch_token_prices_async
+from ..schemas import TokenDiscovered
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class AgentRuntime:
         self._running = False
         self._tokens: set[str] = set()
         self._ewma: dict[str, float] = {}
+        self._token_metadata: dict[str, dict[str, Any]] = {}
 
     async def start(self) -> None:
         self._running = True
@@ -61,13 +63,35 @@ class AgentRuntime:
     def _on_tokens(self, payload: Any) -> None:
         if not self._running:
             return
-        tokens = payload if isinstance(payload, (list, tuple)) else []
-        for token in tokens:
+        sequence: Iterable[Any] = ()
+        metadata_map: Mapping[str, Any] | None = None
+        if isinstance(payload, TokenDiscovered):
+            sequence = payload.tokens
+            metadata_map = payload.metadata
+        elif isinstance(payload, dict):
+            sequence = payload.get("tokens", [])
+            meta = payload.get("metadata")
+            metadata_map = meta if isinstance(meta, Mapping) else None
+        elif isinstance(payload, (list, tuple, set)):
+            sequence = payload
+        for token in sequence:
             try:
-                self._tokens.add(str(token))
+                key = str(token)
+                if not key:
+                    continue
+                self._tokens.add(key)
+                if metadata_map:
+                    raw_meta = metadata_map.get(key)
+                    if raw_meta is None and token != key:
+                        try:
+                            raw_meta = metadata_map.get(token)  # type: ignore[arg-type]
+                        except Exception:
+                            raw_meta = None
+                    if isinstance(raw_meta, Mapping):
+                        self._token_metadata[key] = dict(raw_meta)
             except Exception:
                 pass
-            asyncio.create_task(self._evaluate_and_publish(str(token)))
+            asyncio.create_task(self._evaluate_and_publish(key))
 
     def _on_price(self, payload: Any) -> None:
         # Update portfolio price history so agents can use volatility/correlation

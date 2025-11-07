@@ -85,6 +85,7 @@ class TokenDiscovered:
     tokens: list[str]
     metadata_refresh: bool = False
     changed_tokens: Optional[list[str]] = None
+    metadata: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 @dataclass

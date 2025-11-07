@@ -41,7 +41,7 @@ except Exception:  # pragma: no cover - optional dependency
     _ZSTD_DECOMPRESSOR = None
 from contextlib import contextmanager
 from collections import defaultdict
-from typing import Any, Awaitable, Callable, Dict, Generator, Iterable, List, Set, Sequence, cast
+from typing import Any, Awaitable, Callable, Dict, Generator, Iterable, List, Mapping, Set, Sequence, cast
 
 try:
     import msgpack
@@ -100,6 +100,8 @@ _broker_preflight()
 from asyncio import Queue
 
 
+from google.protobuf import struct_pb2
+
 from .schemas import validate_message, to_dict
 from . import event_pb2 as _pb
 
@@ -129,6 +131,93 @@ _PB_MAP = {
     "memory_sync_request": getattr(pb, "MemorySyncRequest", None),
     "memory_sync_response": getattr(pb, "MemorySyncResponse", None),
 }
+
+
+def _normalize_metadata_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.hex()
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_metadata_value(val)
+            for key, val in value.items()
+            if key is not None and str(key)
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_metadata_value(item) for item in value]
+    try:
+        return float(value)
+    except Exception:
+        try:
+            return str(value)
+        except Exception:
+            return None
+
+
+def _normalize_metadata_dict(data: Mapping[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key, value in data.items():
+        key_str = str(key)
+        if not key_str:
+            continue
+        normalized[key_str] = _normalize_metadata_value(value)
+    return normalized
+
+
+def _encode_metadata_map(metadata: Any) -> Dict[str, struct_pb2.Struct]:
+    if not isinstance(metadata, Mapping):
+        return {}
+    encoded: Dict[str, struct_pb2.Struct] = {}
+    for token, raw in metadata.items():
+        token_key = str(token)
+        if not token_key:
+            continue
+        if not isinstance(raw, Mapping):
+            continue
+        normalized = _normalize_metadata_dict(raw)
+        struct_obj = struct_pb2.Struct()
+        struct_obj.update(normalized)
+        encoded[token_key] = struct_obj
+    return encoded
+
+
+def _decode_struct_value(value: struct_pb2.Value) -> Any:
+    kind = value.WhichOneof("kind")
+    if kind == "number_value":
+        return value.number_value
+    if kind == "string_value":
+        return value.string_value
+    if kind == "bool_value":
+        return value.bool_value
+    if kind == "struct_value":
+        return _decode_struct(value.struct_value)
+    if kind == "list_value":
+        return [_decode_struct_value(item) for item in value.list_value.values]
+    if kind == "null_value":
+        return None
+    return None
+
+
+def _decode_struct(struct: struct_pb2.Struct) -> Dict[str, Any]:
+    decoded: Dict[str, Any] = {}
+    for key, value in struct.items():
+        decoded[str(key)] = _decode_struct_value(value)
+    return decoded
+
+
+def _decode_metadata_map(metadata_field: Mapping[str, struct_pb2.Struct]) -> Dict[str, Dict[str, Any]]:
+    decoded: Dict[str, Dict[str, Any]] = {}
+    for token, struct_val in metadata_field.items():
+        decoded[str(token)] = _decode_struct(struct_val)
+    return decoded
 
 # compress protobuf messages when broadcasting if enabled
 _COMPRESS_EVENTS = os.getenv("COMPRESS_EVENTS")
@@ -694,18 +783,21 @@ def _encode_event(topic: str, payload: Any) -> Any:
             tokens = [str(t) for t in payload]
             metadata_refresh = False
             changed_tokens: list[str] = []
+            metadata_map: Dict[str, struct_pb2.Struct] = {}
         else:
             data = to_dict(payload)
             tokens = [str(t) for t in data.get("tokens", [])]
             metadata_refresh = bool(data.get("metadata_refresh", False))
             raw_changed = data.get("changed_tokens") or []
             changed_tokens = [str(t) for t in raw_changed if isinstance(t, str)]
+            metadata_map = _encode_metadata_map(data.get("metadata"))
         event = pb.Event(
             topic=topic,
             token_discovered=pb.TokenDiscovered(
                 tokens=tokens,
                 metadata_refresh=metadata_refresh,
                 changed_tokens=changed_tokens,
+                metadata=metadata_map,
             ),
         )
     elif topic == "memory_sync_request":
@@ -826,11 +918,15 @@ def _decode_payload(ev: Any) -> Any:
     if field == "system_metrics_combined":
         return {"cpu": msg.cpu, "memory": msg.memory}
     if field == "token_discovered":
-        return {
+        metadata_map = _decode_metadata_map(msg.metadata)
+        result = {
             "tokens": list(msg.tokens),
             "metadata_refresh": bool(msg.metadata_refresh),
             "changed_tokens": list(msg.changed_tokens),
         }
+        if metadata_map:
+            result["metadata"] = metadata_map
+        return result
     if field == "memory_sync_request":
         return {"last_id": msg.last_id}
     if field == "memory_sync_response":

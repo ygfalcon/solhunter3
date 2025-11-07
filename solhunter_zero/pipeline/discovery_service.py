@@ -379,6 +379,12 @@ class DiscoveryService:
         for candidate in batch:
             meta = candidate.metadata if isinstance(candidate.metadata, dict) else {}
             metadata_snapshot[candidate.token] = dict(meta)
+        metadata_payload: Dict[str, Dict[str, Any]] = {}
+        if self._last_details:
+            for token in seq:
+                payload = self._last_details.get(token)
+                if isinstance(payload, dict):
+                    metadata_payload[str(token)] = dict(payload)
         changed_tokens = self._detect_metadata_changes(metadata_snapshot)
         metadata_refresh = (
             bool(changed_tokens) and not fresh and seq == self._last_emitted
@@ -399,6 +405,8 @@ class DiscoveryService:
             "metadata_refresh": metadata_refresh,
             "changed_tokens": list(changed_tokens),
         }
+        if metadata_payload:
+            payload["metadata"] = metadata_payload
         if seq and (seq != previous or metadata_refresh):
             publish("token_discovered", payload)
         self._last_emitted = list(seq)
