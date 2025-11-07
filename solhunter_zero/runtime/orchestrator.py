@@ -12,6 +12,7 @@ from typing import Any, Optional
 from ..util import install_uvloop, parse_bool_env
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
 from .. import event_bus
+from .. import metrics_aggregator
 from .. import discovery_state
 from ..config import (
     initialize_event_bus,
@@ -423,6 +424,12 @@ class RuntimeOrchestrator:
         except Exception:
             await self.stop_all()
             raise
+
+        try:
+            metrics_aggregator.start()
+        except Exception:
+            log.exception("Failed to start metrics aggregator")
+
         await self._publish_stage("runtime:ready", True)
 
     async def stop_all(self) -> None:
