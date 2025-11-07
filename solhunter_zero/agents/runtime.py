@@ -11,12 +11,13 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, List, Dict
+from typing import Any, Callable, List, Dict, Iterable
 
 from .. import event_bus
 from ..agent_manager import AgentManager
 from ..portfolio import Portfolio
 from ..prices import fetch_token_prices_async
+from ..schemas import TokenDiscovered
 
 log = logging.getLogger(__name__)
 
@@ -61,13 +62,35 @@ class AgentRuntime:
     def _on_tokens(self, payload: Any) -> None:
         if not self._running:
             return
-        tokens = payload if isinstance(payload, (list, tuple)) else []
-        for token in tokens:
-            try:
-                self._tokens.add(str(token))
-            except Exception:
-                pass
-            asyncio.create_task(self._evaluate_and_publish(str(token)))
+
+        iterables: list[Iterable[Any]] = []
+
+        if isinstance(payload, TokenDiscovered):
+            iterables.append(payload.tokens or [])
+            if payload.changed_tokens:
+                iterables.append(payload.changed_tokens)
+        elif isinstance(payload, dict):
+            iterables.append(payload.get("tokens") or [])
+            changed = payload.get("changed_tokens") or []
+            if changed:
+                iterables.append(changed)
+        elif isinstance(payload, (list, tuple, set)):
+            iterables.append(payload)
+
+        seen: set[str] = set()
+        for iterable in iterables:
+            for tok in iterable or []:
+                if tok is None:
+                    continue
+                token = str(tok)
+                if token in seen:
+                    continue
+                seen.add(token)
+                try:
+                    self._tokens.add(token)
+                except Exception:
+                    pass
+                asyncio.create_task(self._evaluate_and_publish(token))
 
     def _on_price(self, payload: Any) -> None:
         # Update portfolio price history so agents can use volatility/correlation
