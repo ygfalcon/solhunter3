@@ -1286,10 +1286,25 @@ class TradingRuntime:
             recent = list(self._recent_tokens)
         with self._iteration_lock:
             latest = list(self._last_iteration.get("tokens_used", []) or [])
+        observability: Dict[str, Any] = {}
+        pipeline = self.pipeline if getattr(self, "_use_new_pipeline", False) else None
+        if pipeline is not None:
+            service = getattr(pipeline, "_discovery_service", None)
+            snapshot = getattr(service, "status_snapshot", None) if service else None
+            if callable(snapshot):
+                try:
+                    observability = dict(snapshot())
+                except Exception:  # pragma: no cover - defensive guard
+                    observability = {}
         return {
             "recent": recent[:50],
             "recent_count": len(recent),
             "latest_iteration_tokens": latest,
+            "last_fetch_ts": observability.get("last_fetch_ts"),
+            "cooldown_until": observability.get("cooldown_until"),
+            "consecutive_empty": observability.get("consecutive_empty"),
+            "current_backoff": observability.get("current_backoff"),
+            "next_fetch_ts": observability.get("next_fetch_ts"),
         }
 
     def _collect_config(self) -> Dict[str, Any]:

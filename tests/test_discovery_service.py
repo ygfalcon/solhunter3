@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -128,6 +129,43 @@ async def test_empty_backoff_grows_and_resets(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_status_snapshot_reports_next_fetch(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(
+        queue,
+        interval=0.5,
+        cache_ttl=3.0,
+        empty_cache_ttl=1.0,
+        backoff_factor=2.0,
+    )
+
+    now = {"value": 100.0}
+
+    def fake_time() -> float:
+        return now["value"]
+
+    monkeypatch.setattr(discovery_mod.time, "time", fake_time)
+
+    async def fake_discover(self, **_: object) -> list[str]:
+        self.last_details = {}
+        return []
+
+    monkeypatch.setattr(discovery_mod.DiscoveryAgent, "discover_tokens", fake_discover)
+
+    tokens, details = await service._fetch()
+    assert tokens == []
+    assert details == {}
+
+    snapshot = service.status_snapshot()
+    assert snapshot["last_fetch_ts"] == pytest.approx(now["value"])
+    expected_cooldown = now["value"] + service.empty_cache_ttl
+    assert snapshot["cooldown_until"] == pytest.approx(expected_cooldown)
+    assert snapshot["next_fetch_ts"] == pytest.approx(expected_cooldown)
+    assert snapshot["current_backoff"] == pytest.approx(service.empty_cache_ttl)
+    assert snapshot["consecutive_empty"] == 1
+
+
+@pytest.mark.anyio
 async def test_emit_tokens_publishes_event(monkeypatch):
     queue: asyncio.Queue = asyncio.Queue()
     service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
@@ -234,6 +272,47 @@ async def test_metadata_changes_emit_when_fresh(monkeypatch):
     ]
 
     monkeypatch.delitem(discovery_mod.TRENDING_METADATA, token, raising=False)
+
+
+@pytest.mark.anyio
+async def test_run_loop_respects_backoff(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(
+        queue,
+        interval=0.1,
+        cache_ttl=0.0,
+        empty_cache_ttl=0.2,
+        backoff_factor=2.0,
+    )
+
+    async def fake_prime(self) -> None:
+        return None
+
+    monkeypatch.setattr(discovery_mod.DiscoveryService, "_prime_startup_clones", fake_prime)
+
+    async def fake_discover(self, **_: object) -> list[str]:
+        self.last_details = {}
+        return []
+
+    monkeypatch.setattr(discovery_mod.DiscoveryAgent, "discover_tokens", fake_discover)
+
+    original_fetch = discovery_mod.DiscoveryService._fetch
+    call_times: list[float] = []
+
+    async def counting_fetch(self, *args, **kwargs):
+        call_times.append(time.monotonic())
+        return await original_fetch(self, *args, **kwargs)
+
+    monkeypatch.setattr(discovery_mod.DiscoveryService, "_fetch", counting_fetch)
+
+    await service.start()
+    await asyncio.sleep(0.9)
+    await service.stop()
+
+    assert len(call_times) >= 3
+    intervals = [b - a for a, b in zip(call_times, call_times[1:])]
+    assert intervals, "expected multiple fetch iterations"
+    assert min(intervals) >= 0.15
 
 
 @pytest.mark.anyio

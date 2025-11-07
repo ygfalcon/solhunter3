@@ -98,6 +98,7 @@ class DiscoveryService:
         self._cooldown_until: float = 0.0
         self._consecutive_empty: int = 0
         self._current_backoff: float = 0.0
+        self._next_fetch_ts: float = 0.0
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
         self._last_emitted: list[str] = []
@@ -128,6 +129,9 @@ class DiscoveryService:
 
     async def _run(self) -> None:
         while not self._stopped.is_set():
+            await self._sleep_until_next_fetch()
+            if self._stopped.is_set():
+                break
             try:
                 tokens, details = await self._fetch()
                 self._last_details = details
@@ -137,7 +141,7 @@ class DiscoveryService:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 log.exception("DiscoveryService failure: %s", exc)
-            await asyncio.sleep(self.interval)
+                self._schedule_retry_on_error()
 
     async def _fetch(
         self, *, agent: DiscoveryAgent | None = None
@@ -197,6 +201,7 @@ class DiscoveryService:
                 refresher()
             self._settings_snapshot = self._capture_agent_settings()
             self._cooldown_until = 0.0
+            self._next_fetch_ts = 0.0
 
     def _build_candidates(
         self,
@@ -480,6 +485,46 @@ class DiscoveryService:
             self._cooldown_until = fetch_ts
 
         self._last_fetch_fresh = True
+        interval_target = fetch_ts + self.interval
+        self._next_fetch_ts = max(interval_target, self._cooldown_until)
+
+    @property
+    def next_fetch_ts(self) -> float:
+        return self._next_fetch_ts
+
+    def status_snapshot(self) -> Dict[str, Any]:
+        last_fetch = self._last_fetch_ts if self._last_fetch_ts > 0 else None
+        cooldown_until = self._cooldown_until if self._cooldown_until > 0 else None
+        next_fetch = self._next_fetch_ts if self._next_fetch_ts > 0 else None
+        return {
+            "last_fetch_ts": last_fetch,
+            "cooldown_until": cooldown_until,
+            "consecutive_empty": self._consecutive_empty,
+            "current_backoff": self._current_backoff,
+            "next_fetch_ts": next_fetch,
+        }
+
+    async def _sleep_until_next_fetch(self) -> None:
+        target = self._next_fetch_ts
+        if target <= 0:
+            return
+        delay = target - time.time()
+        if delay <= 0:
+            return
+        try:
+            await asyncio.wait_for(self._stopped.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
+
+    def _schedule_retry_on_error(self) -> None:
+        now = time.time()
+        fallback = now + self.interval
+        if self._cooldown_until > now:
+            fallback = max(fallback, self._cooldown_until)
+        if self._next_fetch_ts <= now:
+            self._next_fetch_ts = fallback
+        else:
+            self._next_fetch_ts = max(self._next_fetch_ts, fallback)
 
     async def _prime_startup_clones(self) -> None:
         clones = max(1, int(self.startup_clones))
