@@ -9,6 +9,7 @@ def test_scan_tokens_async_reuses_cache_during_cooldown(monkeypatch):
     monkeypatch.setattr(token_scanner, "_LAST_TRENDING_RESULT", {"mints": [], "metadata": {}, "timestamp": 0.0})
     monkeypatch.setattr(token_scanner, "_FAILURE_COUNT", 0)
     monkeypatch.setattr(token_scanner, "_COOLDOWN_UNTIL", 0.0)
+    monkeypatch.setattr(token_scanner, "_MIN_SCAN_INTERVAL", 0.0)
     token_scanner.TRENDING_METADATA.clear()
 
     # Trigger cooldown quickly for the test scenario
@@ -22,7 +23,7 @@ def test_scan_tokens_async_reuses_cache_during_cooldown(monkeypatch):
         return [
             {
                 "address": "mint-success",
-                "rank": 0,
+                "rank": 1,
                 "source": "helius",
                 "sources": ["helius"],
             }
@@ -72,5 +73,34 @@ def test_scan_tokens_async_reuses_cache_during_cooldown(monkeypatch):
     third = asyncio.run(token_scanner.scan_tokens_async(limit=1))
     assert third == ["mint-success"]
     assert token_scanner.TRENDING_METADATA["mint-success"]["sources"] == ["helius"]
+    assert token_scanner.TRENDING_METADATA["mint-success"]["rank"] == 1
     # Timestamp should refresh when cached values are reused
     assert token_scanner._LAST_TRENDING_RESULT["timestamp"] >= token_scanner._COOLDOWN_UNTIL - token_scanner._FAILURE_COOLDOWN
+
+
+def test_scan_tokens_async_static_fallback_ranks_are_one_based(monkeypatch):
+    monkeypatch.setattr(token_scanner, "_LAST_TRENDING_RESULT", {"mints": [], "metadata": {}, "timestamp": 0.0})
+    monkeypatch.setattr(token_scanner, "_FAILURE_COUNT", 0)
+    monkeypatch.setattr(token_scanner, "_COOLDOWN_UNTIL", 0.0)
+    monkeypatch.setattr(token_scanner, "_MIN_SCAN_INTERVAL", 0.0)
+    token_scanner.TRENDING_METADATA.clear()
+
+    async def helius_failure(session, *, limit):
+        return []
+
+    async def birdeye_failure(session, api_key, *, limit, offset):
+        return []
+
+    monkeypatch.setattr(token_scanner, "_helius_trending", helius_failure)
+    monkeypatch.setattr(token_scanner, "_birdeye_trending", birdeye_failure)
+
+    fallback = asyncio.run(token_scanner.scan_tokens_async(limit=4))
+    assert fallback == [
+        "So11111111111111111111111111111111111111112",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",
+    ]
+
+    ranks = [token_scanner.TRENDING_METADATA[mint]["rank"] for mint in fallback]
+    assert ranks == [1, 2, 3, 4]
