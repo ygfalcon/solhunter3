@@ -293,7 +293,7 @@ class DiscoveryAgent:
                 await asyncio.sleep(self.backoff)
 
         if not tokens:
-            tokens = self._fallback_tokens()
+            tokens = self._normalise(self._fallback_tokens())
             details = {}
 
         self.last_tokens = tokens
@@ -447,10 +447,10 @@ class DiscoveryAgent:
             candidate = token.strip()
             if not candidate:
                 continue
-            if token in seen:
+            if candidate in seen:
                 continue
-            seen.add(token)
-            filtered.append(token)
+            seen.add(candidate)
+            filtered.append(candidate)
             if len(filtered) >= self.limit:
                 break
         return filtered
