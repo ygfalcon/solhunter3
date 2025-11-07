@@ -52,6 +52,7 @@ from .agents.discovery import (
 )
 from . import discovery_state, wallet
 from . import config as config_module
+from .util import parse_bool_env
 
 
 log = logging.getLogger(__name__)
@@ -3048,6 +3049,7 @@ class UIServer:
         host: str = "127.0.0.1",
         port: int = 5000,
         shutdown_token: Optional[str] = None,
+        startup_probe: Optional[bool] = None,
     ) -> None:
         self.state = state
         self.host = host
@@ -3056,6 +3058,11 @@ class UIServer:
         self.app = create_app(state, shutdown_token=self._shutdown_token)
         self._thread: Optional[threading.Thread] = None
         self._server: Optional["BaseWSGIServer"] = None
+        if startup_probe is None:
+            self._startup_probe_enabled = parse_bool_env("UI_STARTUP_PROBE", True)
+        else:
+            self._startup_probe_enabled = bool(startup_probe)
+        self._startup_probe_timeout = 0.5
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -3125,21 +3132,38 @@ class UIServer:
                 f"UI server failed to start on {self.host}:{self.port}"
             )
 
+        def _teardown_startup_failure(*, shutdown: bool) -> None:
+            if shutdown:
+                try:
+                    server.shutdown()
+                except Exception:  # pragma: no cover - best effort cleanup
+                    pass
+            if self._thread:
+                self._thread.join(timeout=1)
+            self._thread = None
+            try:
+                server.server_close()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
+            self._server = None
+
         try:
             exc = exception_queue.get_nowait()
         except Empty:
-            return
-
-        self._thread.join(timeout=1)
-        self._thread = None
-        try:
-            server.server_close()
-        except Exception:  # pragma: no cover - best effort cleanup
             pass
-        self._server = None
-        raise UIStartupError(
-            f"UI server failed to start on {self.host}:{self.port}"
-        ) from exc
+        else:
+            _teardown_startup_failure(shutdown=False)
+            raise UIStartupError(
+                f"UI server failed to start on {self.host}:{self.port}"
+            ) from exc
+
+        try:
+            self._run_startup_probe()
+        except Exception as exc:
+            _teardown_startup_failure(shutdown=True)
+            raise UIStartupError(
+                f"UI startup probe failed on {self.host}:{self.port}: {exc}"
+            ) from exc
 
     def stop(self) -> None:
         if not self._thread:
@@ -3188,3 +3212,28 @@ class UIServer:
             server.shutdown()
         except Exception:  # pragma: no cover - best effort fallback
             pass
+
+    def _run_startup_probe(self) -> None:
+        if not self._startup_probe_enabled:
+            return
+
+        import urllib.error
+        import urllib.request
+
+        probe_host = self._resolve_shutdown_host()
+        formatted_host = self._format_host_for_url(probe_host)
+        url = f"http://{formatted_host}:{self.port}/health"
+
+        log.debug(
+            "UIServer: running startup probe against %s", url.replace(self._shutdown_token or "", "***")
+        )
+
+        try:
+            with urllib.request.urlopen(url, timeout=self._startup_probe_timeout) as response:
+                status = getattr(response, "status", getattr(response, "code", 200))
+                if int(status) >= 400:
+                    raise RuntimeError(f"unexpected HTTP status {status}")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"connection error: {exc.reason}") from exc

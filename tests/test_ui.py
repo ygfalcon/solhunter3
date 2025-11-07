@@ -479,3 +479,47 @@ def test_uiserver_start_raises_when_background_thread_fails(monkeypatch):
     assert "simulated bind failure" in str(excinfo.value.__cause__)
     assert created_servers and created_servers[0].closed is True
     assert server._thread is None
+
+
+def _healthy_status_snapshot() -> dict[str, object]:
+    return {"event_bus": True, "trading_loop": True, "heartbeat": 123}
+
+
+def _failing_status_snapshot() -> dict[str, object]:
+    return {"event_bus": False, "trading_loop": False, "heartbeat": None}
+
+
+def test_uiserver_start_runs_health_probe_success(monkeypatch):
+    monkeypatch.setenv("UI_STARTUP_PROBE", "1")
+    state = ui.UIState(status_provider=_healthy_status_snapshot)
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+    try:
+        server.start()
+        assert server.port != 0
+    finally:
+        server.stop()
+
+
+def test_uiserver_start_fails_when_health_probe_fails(monkeypatch):
+    monkeypatch.setenv("UI_STARTUP_PROBE", "1")
+    state = ui.UIState(status_provider=_failing_status_snapshot)
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+
+    with pytest.raises(ui.UIStartupError) as excinfo:
+        server.start()
+
+    message = str(excinfo.value).lower()
+    assert "probe" in message
+    assert server._thread is None
+    assert server._server is None
+
+
+def test_uiserver_start_probe_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+    state = ui.UIState(status_provider=_failing_status_snapshot)
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+    try:
+        server.start()
+        assert server.port != 0
+    finally:
+        server.stop()
