@@ -165,6 +165,7 @@ sys.modules.setdefault("pydantic", dummy_pydantic)
 import solhunter_zero.config as config
 config.initialize_event_bus = lambda: None
 import solhunter_zero.ui as ui
+from solhunter_zero import discovery_state
 from collections import deque
 from solhunter_zero.portfolio import Position
 
@@ -309,6 +310,39 @@ def test_discovery_update_requires_loopback_remote():
     )
     assert resp.status_code == 200
 
+
+def test_discovery_endpoint_reports_override(monkeypatch):
+    monkeypatch.setenv("DISCOVERY_METHOD", "helius")
+    state = ui.UIState(
+        config_provider=lambda: {
+            "sanitized_config": {"discovery_method": "mempool"}
+        }
+    )
+    app = ui.create_app(state)
+    client = app.test_client()
+
+    discovery_state.clear_override()
+    try:
+        resp = client.get("/discovery")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["method"] == "mempool"
+        assert data["override"] is None
+
+        resp = client.post(
+            "/discovery",
+            json={"method": "onchain"},
+            environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+        )
+        assert resp.status_code == 200
+
+        resp = client.get("/discovery")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["method"] == "onchain"
+        assert data["override"] == "onchain"
+    finally:
+        discovery_state.clear_override()
 
 
 def test_ensure_active_keypair_selects_single(monkeypatch):
