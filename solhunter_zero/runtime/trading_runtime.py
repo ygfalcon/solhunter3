@@ -393,6 +393,7 @@ class TradingRuntime:
         self.cfg = cfg
         self.runtime_cfg = runtime_cfg
         self.depth_proc = depth_proc
+        self._sync_environment_from_config()
         self.status.depth_service = bool(
             depth_proc is not None and getattr(depth_proc, "poll", lambda: 1)() is None
         )
@@ -406,6 +407,33 @@ class TradingRuntime:
                 scanner_common.HEADERS["X-API-KEY"] = scanner_common.BIRDEYE_API_KEY
             except Exception:
                 pass
+
+    def _sync_environment_from_config(self) -> None:
+        cfg = self.cfg
+        if isinstance(cfg, Mapping):
+            set_env_from_config(dict(cfg))
+            for key in (
+                "birdeye_api_key",
+                "jupiter_ws_url",
+                "orca_dex_url",
+                "raydium_dex_url",
+                "phoenix_dex_url",
+                "meteora_dex_url",
+            ):
+                val = cfg.get(key)
+                env_name = {
+                    "birdeye_api_key": "BIRDEYE_API_KEY",
+                    "jupiter_ws_url": "JUPITER_WS_URL",
+                    "orca_dex_url": "ORCA_DEX_URL",
+                    "raydium_dex_url": "RAYDIUM_DEX_URL",
+                    "phoenix_dex_url": "PHOENIX_DEX_URL",
+                    "meteora_dex_url": "METEORA_DEX_URL",
+                }.get(key)
+                if val and env_name and not os.getenv(env_name):
+                    os.environ[env_name] = str(val)
+
+        if os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is None:
+            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
     def _resolve_config_path(self) -> Optional[str]:
         cfg_path = self.config_path
@@ -504,30 +532,6 @@ class TradingRuntime:
             live_discovery_override,
             bool(testnet_mode),
         )
-
-        # Ensure environment reflects configuration for downstream modules
-        set_env_from_config(cfg)
-        for key in (
-            "birdeye_api_key",
-            "jupiter_ws_url",
-            "orca_dex_url",
-            "raydium_dex_url",
-            "phoenix_dex_url",
-            "meteora_dex_url",
-        ):
-            val = cfg.get(key)
-            env_name = {
-                "birdeye_api_key": "BIRDEYE_API_KEY",
-                "jupiter_ws_url": "JUPITER_WS_URL",
-                "orca_dex_url": "ORCA_DEX_URL",
-                "raydium_dex_url": "RAYDIUM_DEX_URL",
-                "phoenix_dex_url": "PHOENIX_DEX_URL",
-                "meteora_dex_url": "METEORA_DEX_URL",
-            }.get(key)
-            if val and env_name and not os.getenv(env_name):
-                os.environ[env_name] = str(val)
-        if os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") is None:
-            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
     def _ensure_metrics_aggregator_started(self) -> None:
         if not self._metrics_started:

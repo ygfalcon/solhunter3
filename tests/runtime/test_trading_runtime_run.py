@@ -1,4 +1,5 @@
 import asyncio
+import os
 import logging
 import socket
 from unittest.mock import AsyncMock, Mock
@@ -133,3 +134,32 @@ async def test_prepare_configuration_uses_offline_flags(monkeypatch, tmp_path):
 
     modes = runtime._derive_offline_modes()
     assert modes == (True, True, False, True)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_prepare_configuration_syncs_environment(monkeypatch, tmp_path):
+    runtime = trading_runtime.TradingRuntime(
+        config_path=str(tmp_path / "config.toml")
+    )
+
+    cfg = {
+        "birdeye_api_key": "key-123",
+        "jupiter_ws_url": "wss://example.invalid/ws",
+    }
+
+    async def fake_startup(config_path, *, offline, dry_run, testnet):
+        return cfg, object(), None
+
+    monkeypatch.setattr(trading_runtime, "perform_startup_async", fake_startup)
+    monkeypatch.setattr(trading_runtime, "load_config", lambda path=None: {})
+    monkeypatch.setattr(trading_runtime, "apply_env_overrides", lambda data: data)
+
+    monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
+    monkeypatch.delenv("JUPITER_WS_URL", raising=False)
+    monkeypatch.delenv("PYTORCH_ENABLE_MPS_FALLBACK", raising=False)
+
+    await runtime._prepare_configuration()
+
+    assert os.environ["BIRDEYE_API_KEY"] == "key-123"
+    assert os.environ["JUPITER_WS_URL"] == "wss://example.invalid/ws"
+    assert os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] == "1"
