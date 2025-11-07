@@ -67,32 +67,80 @@ async def test_trading_runtime_run_cleans_up_on_start_failure(monkeypatch, caplo
 
 
 @pytest.mark.anyio("asyncio")
-async def test_trading_runtime_start_ui_reports_port_in_use(caplog):
+async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch):
     runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
 
     busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         busy_sock.bind(("127.0.0.1", 0))
         busy_sock.listen(1)
-        runtime.ui_port = busy_sock.getsockname()[1]
+        busy_port = busy_sock.getsockname()[1]
+        runtime.ui_port = busy_port
 
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(trading_runtime.UIStartupError):
-                await runtime._start_ui()
+        await runtime._start_ui()
 
-        entries = runtime.activity.snapshot()
-        assert any(
-            entry["stage"] == "ui"
-            and entry["ok"] is False
-            and "failed to start" in entry["detail"]
-            for entry in entries
-        )
+        try:
+            assert runtime.ui_server is not None
+            assert runtime.ui_port != busy_port
+            entries = runtime.activity.snapshot()
+            assert any(
+                entry["stage"] == "ui"
+                and entry["ok"] is False
+                and "failed to bind" in entry["detail"]
+                for entry in entries
+            )
+            assert any(
+                entry["stage"] == "ui"
+                and entry["ok"] is True
+                and f"http://{runtime.ui_host}:{runtime.ui_port}" == entry["detail"]
+                for entry in entries
+            )
+        finally:
+            runtime.ui_server.stop()
+    finally:
+        busy_sock.close()
 
-        assert runtime.ui_server is None
-        assert any(
-            "failed to start UI server" in record.getMessage()
-            for record in caplog.records
-        )
+
+@pytest.mark.anyio("asyncio")
+async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
+    runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
+
+    busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    fallback_hint = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        busy_sock.bind(("127.0.0.1", 0))
+        busy_sock.listen(1)
+        primary_port = busy_sock.getsockname()[1]
+        runtime.ui_port = primary_port
+
+        fallback_hint.bind(("127.0.0.1", 0))
+        fallback_hint_port = fallback_hint.getsockname()[1]
+    finally:
+        fallback_hint.close()
+
+    monkeypatch.setenv("UI_PORT_RANGE", str(fallback_hint_port))
+
+    try:
+        await runtime._start_ui()
+        try:
+            assert runtime.ui_server is not None
+            assert runtime.ui_port == fallback_hint_port
+            entries = runtime.activity.snapshot()
+            assert any(
+                entry["stage"] == "ui"
+                and entry["ok"] is False
+                and "failed to bind" in entry["detail"]
+                for entry in entries
+            )
+            assert any(
+                entry["stage"] == "ui"
+                and entry["ok"] is True
+                and entry["detail"]
+                == f"http://{runtime.ui_host}:{fallback_hint_port}"
+                for entry in entries
+            )
+        finally:
+            runtime.ui_server.stop()
     finally:
         busy_sock.close()
 
