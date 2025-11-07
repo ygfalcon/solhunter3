@@ -18,10 +18,11 @@ from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
 
 from ..agent_manager import AgentManager
 from ..config import (
+    CONFIG_DIR,
     apply_env_overrides,
+    get_active_config_name,
     get_broker_urls,
     load_config,
-    load_selected_config,
     set_env_from_config,
 )
 from ..event_bus import (
@@ -410,13 +411,13 @@ class TradingRuntime:
     def _resolve_config_path(self) -> Optional[str]:
         cfg_path = self.config_path
         if cfg_path is None:
-            selected = load_selected_config()
-            if selected:
-                candidate = selected.get("__path__")
-                if candidate:
+            name = get_active_config_name()
+            if name:
+                candidate = Path(CONFIG_DIR) / name
+                if candidate.exists():
                     cfg_path = str(candidate)
-                else:
-                    cfg_path = "config.toml"
+            if cfg_path is None:
+                cfg_path = "config.toml"
         if cfg_path is not None:
             cfg_path = str(Path(cfg_path).expanduser().resolve())
         return cfg_path

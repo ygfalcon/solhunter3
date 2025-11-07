@@ -133,3 +133,46 @@ async def test_prepare_configuration_uses_offline_flags(monkeypatch, tmp_path):
 
     modes = runtime._derive_offline_modes()
     assert modes == (True, True, False, True)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_prepare_configuration_uses_saved_config_selection(monkeypatch, tmp_path):
+    runtime = trading_runtime.TradingRuntime()
+
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    config_file = config_dir / "saved.toml"
+    config_file.write_text("[solana]\ncluster = \"mainnet\"\n", encoding="utf-8")
+
+    monkeypatch.setattr(trading_runtime, "CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(trading_runtime, "get_active_config_name", lambda: "saved.toml")
+
+    captured: dict[str, object] = {}
+
+    async def fake_startup(
+        config_path: str | None, *, offline: bool, dry_run: bool, testnet: bool
+    ) -> tuple[dict, object, None]:
+        captured["config_path"] = config_path
+        captured["offline"] = offline
+        captured["dry_run"] = dry_run
+        captured["testnet"] = testnet
+        return {}, object(), None
+
+    def fake_load_config(path=None):
+        captured.setdefault("loaded_configs", []).append(path)
+        return {}
+
+    monkeypatch.setattr(trading_runtime, "perform_startup_async", fake_startup)
+    monkeypatch.setattr(trading_runtime, "load_config", fake_load_config)
+    monkeypatch.setattr(trading_runtime, "apply_env_overrides", lambda cfg: cfg)
+    monkeypatch.setattr(trading_runtime, "set_env_from_config", lambda cfg: None)
+
+    await runtime._prepare_configuration()
+
+    expected_path = str(config_file.resolve())
+    assert runtime.config_path == expected_path
+    assert captured["config_path"] == expected_path
+    assert captured.get("loaded_configs") == [expected_path]
+    assert captured["offline"] is False
+    assert captured["dry_run"] is False
+    assert captured["testnet"] is False
