@@ -133,3 +133,28 @@ async def test_prepare_configuration_uses_offline_flags(monkeypatch, tmp_path):
 
     modes = runtime._derive_offline_modes()
     assert modes == (True, True, False, True)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_ui_logs_ipv6_address(monkeypatch, caplog):
+    runtime = trading_runtime.TradingRuntime(ui_host="::1", ui_port=0)
+
+    def fake_start(self):
+        self.port = 4321
+
+    monkeypatch.setattr(trading_runtime.UIServer, "start", fake_start)
+
+    logger_name = trading_runtime.__name__
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        await runtime._start_ui()
+
+    try:
+        entries = runtime.activity.snapshot()
+        assert any(
+            entry["stage"] == "ui" and entry["detail"] == "http://[::1]:4321"
+            for entry in entries
+        )
+        assert any("http://[::1]:4321" in record.getMessage() for record in caplog.records)
+    finally:
+        if runtime.ui_server is not None:
+            runtime.ui_server.stop()

@@ -733,7 +733,10 @@ class TradingRuntime:
             raise
 
         self.ui_port = self.ui_server.port
-        self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
+        formatted_host = self.ui_server._format_host_for_url(self.ui_server.host)
+        ui_url = f"http://{formatted_host}:{self.ui_port}"
+        log.info("TradingRuntime: UI server running at %s", ui_url)
+        self.activity.add("ui", ui_url)
 
     async def _start_agents(self) -> None:
         memory_path = self.cfg.get("memory_path", "sqlite:///memory.db")
