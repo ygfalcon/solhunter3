@@ -7,6 +7,7 @@ import argparse
 import logging
 import sys
 
+from .config import ConfigFileNotFound
 from .runtime.trading_runtime import TradingRuntime
 
 
@@ -40,10 +41,15 @@ def run_from_args(args: argparse.Namespace) -> None:
     runtime.run_forever()
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    run_from_args(args)
+    try:
+        run_from_args(args)
+    except (ConfigFileNotFound, ValueError) as exc:
+        log.error("Unable to start trading runtime: %s", exc)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    raise SystemExit(main(sys.argv[1:]))
