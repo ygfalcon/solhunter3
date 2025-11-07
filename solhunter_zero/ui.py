@@ -32,9 +32,11 @@ import os
 import secrets
 import subprocess
 import threading
+import math
+from datetime import datetime, timezone
 from queue import Empty, Queue
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from flask import (
     Flask,
@@ -92,6 +94,70 @@ start_all_proc: subprocess.Popen | None = None
 
 start_all_ready = threading.Event()
 """Event toggled once the background start helper signals readiness."""
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
+def _format_duration(value: Any) -> str:
+    seconds = _coerce_float(value)
+    if seconds is None:
+        return "—"
+    seconds = max(0.0, seconds)
+    if seconds < 1.0:
+        return "<1s"
+    if seconds < 60.0:
+        return f"{seconds:.1f}s"
+    minutes = seconds / 60.0
+    if minutes < 60.0:
+        return f"{minutes:.1f}m"
+    hours = minutes / 60.0
+    if hours < 24.0:
+        return f"{hours:.1f}h"
+    days = hours / 24.0
+    return f"{days:.1f}d"
+
+
+def _format_epoch_relative(epoch: Any) -> str:
+    ts = _coerce_float(epoch)
+    if ts is None or ts <= 0:
+        return "—"
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    now = datetime.now(timezone.utc)
+    delta = max(0.0, (now - dt).total_seconds())
+    duration = _format_duration(delta)
+    timestamp = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    if duration == "—":
+        return timestamp
+    return f"{timestamp} ({duration} ago)"
+
+
+def _build_discovery_meta(snapshot: Mapping[str, Any] | None) -> Dict[str, str]:
+    data = dict(snapshot or {})
+    method_raw = data.get("last_method")
+    method = str(method_raw).strip() if method_raw else "—"
+    last_fetch = _format_epoch_relative(data.get("last_fetch_ts"))
+    cooldown_value = _coerce_float(data.get("cooldown_seconds"))
+    if cooldown_value is None:
+        cooldown = "—"
+    elif cooldown_value <= 0:
+        cooldown = "ready"
+    else:
+        cooldown = _format_duration(cooldown_value)
+    return {
+        "method": method,
+        "last_fetch": last_fetch,
+        "cooldown": cooldown,
+    }
 
 
 def list_keypairs() -> List[str]:
@@ -579,6 +645,7 @@ def create_app(
         status = state.snapshot_status()
         summary = state.snapshot_summary()
         discovery = state.snapshot_discovery()
+        discovery_meta = _build_discovery_meta(discovery)
         activity = list(state.snapshot_activity())
         trades = list(state.snapshot_trades())
         logs = list(state.snapshot_logs())
@@ -991,6 +1058,14 @@ def create_app(
                     font-size: 0.85rem;
                     color: rgba(230, 237, 243, 0.8);
                 }
+                .summary-meta {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 2px;
+                    font-size: 0.75rem;
+                    color: var(--muted);
+                    margin-top: 6px;
+                }
                 .peek-chip {
                     padding: 4px 8px;
                     border-radius: 999px;
@@ -1230,6 +1305,11 @@ def create_app(
                                         <span class="muted">Waiting for discovery results…</span>
                                     {% endif %}
                                 </div>
+                            </div>
+                            <div class="summary-meta">
+                                <div data-role="discovery-method">Method: {{ discovery_meta.method }}</div>
+                                <div data-role="discovery-last-fetch">Last fetch: {{ discovery_meta.last_fetch }}</div>
+                                <div data-role="discovery-cooldown">Cooldown: {{ discovery_meta.cooldown }}</div>
                             </div>
                             <span class="caret" aria-hidden="true"></span>
                         </summary>
@@ -1556,6 +1636,9 @@ def create_app(
                 summaryJsonError: document.querySelector('[data-role="summary-json-error"]'),
                 discoverySummary: document.querySelector('[data-role="discovery-summary"]'),
                 discoveryBody: document.querySelector('[data-role="discovery-body"]'),
+                discoveryMethod: document.querySelector('[data-role="discovery-method"]'),
+                discoveryLastFetch: document.querySelector('[data-role="discovery-last-fetch"]'),
+                discoveryCooldown: document.querySelector('[data-role="discovery-cooldown"]'),
                 countsTable: document.querySelector('[data-role="counts-table"]'),
                 historyCharts: document.querySelector('[data-role="history-charts"]'),
                 historyEmpty: document.querySelector('[data-role="history-empty"]'),
@@ -1704,6 +1787,45 @@ def create_app(
             function asNumber(value) {
                 const num = Number(value);
                 return Number.isFinite(num) ? num : null;
+            }
+
+            function formatDuration(seconds) {
+                const value = asNumber(seconds);
+                if (value === null) {
+                    return null;
+                }
+                const abs = Math.max(0, value);
+                if (abs < 1) {
+                    return '<1s';
+                }
+                if (abs < 60) {
+                    return `${formatFloat(abs, abs < 10 ? 1 : 0)}s`;
+                }
+                const minutes = abs / 60;
+                if (minutes < 60) {
+                    return `${formatFloat(minutes, minutes < 10 ? 1 : 0)}m`;
+                }
+                const hours = minutes / 60;
+                if (hours < 24) {
+                    return `${formatFloat(hours, hours < 10 ? 1 : 0)}h`;
+                }
+                const days = hours / 24;
+                return `${formatFloat(days, days < 10 ? 1 : 0)}d`;
+            }
+
+            function formatRelativeTimestamp(epochSeconds) {
+                const value = asNumber(epochSeconds);
+                if (value === null || value <= 0) {
+                    return null;
+                }
+                const date = new Date(value * 1000);
+                const diffSeconds = Math.max(0, (Date.now() - date.getTime()) / 1000);
+                const duration = formatDuration(diffSeconds);
+                const formattedDate = date.toLocaleString();
+                if (!duration) {
+                    return formattedDate;
+                }
+                return `${formattedDate} (${duration} ago)`;
             }
 
             function setStat(key, value, caption) {
@@ -1987,6 +2109,29 @@ def create_app(
                 const summaryTokens = recent.slice(-3).reverse();
                 const displayTokens = recent.slice(-120).reverse();
                 const latestTokens = Array.isArray(data.latest_iteration_tokens) ? data.latest_iteration_tokens : [];
+                if (elements.discoveryMethod) {
+                    const method = typeof data.last_method === 'string' && data.last_method.trim()
+                        ? data.last_method.trim()
+                        : null;
+                    elements.discoveryMethod.textContent = `Method: ${method ?? '—'}`;
+                }
+                if (elements.discoveryLastFetch) {
+                    const formatted = formatRelativeTimestamp(data.last_fetch_ts);
+                    elements.discoveryLastFetch.textContent = `Last fetch: ${formatted ?? '—'}`;
+                }
+                if (elements.discoveryCooldown) {
+                    const cooldownValue = asNumber(data.cooldown_seconds);
+                    let cooldownText = 'Cooldown: —';
+                    if (cooldownValue !== null) {
+                        if (cooldownValue <= 0) {
+                            cooldownText = 'Cooldown: ready';
+                        } else {
+                            const formattedCooldown = formatDuration(cooldownValue);
+                            cooldownText = `Cooldown: ${formattedCooldown ?? '—'}`;
+                        }
+                    }
+                    elements.discoveryCooldown.textContent = cooldownText;
+                }
                 if (elements.discoverySummary) {
                     const peek = summaryTokens.length
                         ? summaryTokens.map(token => `<span class="peek-chip">${escapeHtml(token)}</span>`).join('')
@@ -2810,6 +2955,7 @@ def create_app(
             status=status,
             summary=summary,
             discovery=discovery,
+            discovery_meta=discovery_meta,
             discovery_recent_display=discovery_recent_display,
             discovery_recent_summary=discovery_recent_summary,
             discovery_recent_total=discovery_recent_total,

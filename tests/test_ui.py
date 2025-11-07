@@ -260,6 +260,41 @@ def test_status_endpoint_includes_dashboard_metrics():
     assert metrics["counts"]["actions"] == 1
 
 
+def test_tokens_endpoint_exposes_discovery_telemetry():
+    state = ui.UIState(
+        discovery_provider=lambda: {
+            "recent": ["AAA"],
+            "last_fetch_ts": 123.0,
+            "cooldown_seconds": 45.0,
+            "last_method": "helius",
+        }
+    )
+    app = ui.create_app(state)
+    client = app.test_client()
+    resp = client.get("/tokens")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["last_fetch_ts"] == 123.0
+    assert payload["cooldown_seconds"] == 45.0
+    assert payload["last_method"] == "helius"
+
+
+def test_index_html_renders_discovery_meta():
+    state = ui.UIState(
+        discovery_provider=lambda: {
+            "recent": [],
+            "last_method": "helius",
+            "cooldown_seconds": 0.0,
+            "last_fetch_ts": None,
+        }
+    )
+    app = ui.create_app(state)
+    html = app.test_client().get("/").get_data(as_text=True)
+    assert "Method: helius" in html
+    assert "Cooldown: ready" in html
+    assert "Last fetch:" in html
+
+
 def test_shutdown_endpoint_requires_token():
     app = ui.create_app(shutdown_token="secret-token")
     client = app.test_client()

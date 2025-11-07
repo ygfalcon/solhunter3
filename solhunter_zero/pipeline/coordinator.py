@@ -302,6 +302,20 @@ class PipelineCoordinator:
         async with self._telemetry_lock:
             return list(self._telemetry)
 
+    def discovery_snapshot(self) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {}
+        try:
+            service_snapshot = self._discovery_service.snapshot_state()
+        except Exception:  # pragma: no cover - defensive snapshotting
+            log.debug("Failed to snapshot discovery service state", exc_info=True)
+        else:
+            if isinstance(service_snapshot, dict):
+                snapshot.update(service_snapshot)
+        snapshot.setdefault("interval", self.discovery_interval)
+        snapshot.setdefault("cache_ttl", self.discovery_cache_ttl)
+        snapshot.setdefault("offline", self.offline)
+        return snapshot
+
     def _register_no_action(self, result: EvaluationResult) -> None:
         ttl = float(os.getenv("NO_ACTION_CACHE_TTL", "10") or 10.0)
         if ttl <= 0:

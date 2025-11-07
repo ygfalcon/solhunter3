@@ -57,6 +57,8 @@ _RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
 _RL_HEALTH_INITIAL_INTERVAL = 5.0
 _RL_HEALTH_MAX_INTERVAL = 60.0
 
+_MISSING = object()
+
 
 def _probe_rl_daemon_health(timeout: float = 0.5) -> Dict[str, Any]:
     """Return information about an externally managed RL daemon.
@@ -196,6 +198,9 @@ class TradingRuntime:
         self._discovery_seen: set[str] = set()
         self._discovery_lock = threading.Lock()
         self._recent_tokens_limit = int(os.getenv("UI_DISCOVERY_LIMIT", "200") or 200)
+        self._discovery_last_fetch_ts: Optional[float] = None
+        self._discovery_cooldown_seconds: Optional[float] = None
+        self._discovery_last_method: Optional[str] = None
         self._start_time: Optional[float] = None
         self._last_iteration_elapsed: Optional[float] = None
         self._last_iteration_errors: List[str] = []
@@ -1130,6 +1135,7 @@ class TradingRuntime:
             while not self.stop_event.is_set():
                 start = time.perf_counter()
                 discovery_method = self._current_discovery_method()
+                self._update_discovery_state(last_method=discovery_method)
                 try:
                     summary = await run_iteration(
                         self.memory,
@@ -1281,15 +1287,79 @@ class TradingRuntime:
             data.setdefault("elapsed_s", elapsed)
         return data
 
+    def _update_discovery_state(
+        self,
+        *,
+        last_fetch_ts: Any = _MISSING,
+        cooldown_seconds: Any = _MISSING,
+        last_method: Any = _MISSING,
+    ) -> None:
+        with self._discovery_lock:
+            if last_fetch_ts is not _MISSING:
+                value = _maybe_float(last_fetch_ts)
+                if value is not None and value <= 0:
+                    value = None
+                self._discovery_last_fetch_ts = value
+            if cooldown_seconds is not _MISSING:
+                value = _maybe_float(cooldown_seconds)
+                if value is not None:
+                    value = max(0.0, value)
+                self._discovery_cooldown_seconds = value
+            if last_method is not _MISSING:
+                if last_method is None:
+                    self._discovery_last_method = None
+                else:
+                    text = str(last_method).strip()
+                    self._discovery_last_method = text or None
+
     def _collect_discovery(self) -> Dict[str, Any]:
+        pipeline_snapshot: Dict[str, Any] = {}
+        pipeline = self.pipeline if self._use_new_pipeline else None
+        if pipeline is not None:
+            try:
+                snapshot = pipeline.discovery_snapshot()
+            except Exception:  # pragma: no cover - defensive telemetry fetch
+                log.debug("Failed to snapshot pipeline discovery state", exc_info=True)
+            else:
+                if isinstance(snapshot, dict):
+                    pipeline_snapshot = dict(snapshot)
         with self._discovery_lock:
             recent = list(self._recent_tokens)
+            last_fetch_ts = self._discovery_last_fetch_ts
+            cooldown_seconds = self._discovery_cooldown_seconds
+            last_method = self._discovery_last_method
+        updates: Dict[str, Any] = {}
+        if pipeline_snapshot:
+            if "last_fetch_ts" in pipeline_snapshot:
+                last_fetch_ts = _maybe_float(pipeline_snapshot.get("last_fetch_ts"))
+                updates["last_fetch_ts"] = last_fetch_ts
+            if "cooldown_seconds" in pipeline_snapshot:
+                cooldown_seconds = _maybe_float(pipeline_snapshot.get("cooldown_seconds"))
+                if cooldown_seconds is not None:
+                    cooldown_seconds = max(0.0, cooldown_seconds)
+                updates["cooldown_seconds"] = cooldown_seconds
+            method_candidate = pipeline_snapshot.get("last_method")
+            if method_candidate is not None:
+                text = str(method_candidate).strip()
+                if text:
+                    last_method = text
+                    updates["last_method"] = text
+            if updates:
+                self._update_discovery_state(**updates)
         with self._iteration_lock:
             latest = list(self._last_iteration.get("tokens_used", []) or [])
+        if last_method is None:
+            try:
+                last_method = self._current_discovery_method()
+            except Exception:
+                last_method = None
         return {
             "recent": recent[:50],
             "recent_count": len(recent),
             "latest_iteration_tokens": latest,
+            "last_fetch_ts": last_fetch_ts,
+            "cooldown_seconds": cooldown_seconds,
+            "last_method": last_method,
         }
 
     def _collect_config(self) -> Dict[str, Any]:
@@ -1341,6 +1411,7 @@ class TradingRuntime:
         discovery_state.set_override(canonical)
         if previous == canonical:
             return
+        self._update_discovery_state(last_method=canonical)
         detail = f"method updated to {canonical}"
         self.activity.add("discovery", detail)
         try:
@@ -1364,6 +1435,11 @@ class TradingRuntime:
             while len(self._recent_tokens) > self._recent_tokens_limit:
                 removed = self._recent_tokens.pop()
                 self._discovery_seen.discard(removed)
+        if not self._use_new_pipeline:
+            self._update_discovery_state(
+                last_fetch_ts=time.time(),
+                cooldown_seconds=0.0,
+            )
 
     def _collect_actions(self) -> List[Dict[str, Any]]:
         with self._iteration_lock:

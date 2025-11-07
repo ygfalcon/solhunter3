@@ -105,6 +105,19 @@ class DiscoveryService:
         self._primed = False
         self._last_metadata_snapshot: Dict[str, Dict[str, Any]] = {}
 
+    def snapshot_state(self) -> Dict[str, Any]:
+        last_method = getattr(self._agent, "last_method", None)
+        if not last_method:
+            last_method = getattr(self._agent, "default_method", None)
+        last_fetch = self._last_fetch_ts if self._last_fetch_ts > 0 else None
+        cooldown_remaining = max(0.0, self._cooldown_until - time.time())
+        return {
+            "last_fetch_ts": last_fetch,
+            "cooldown_seconds": cooldown_remaining,
+            "last_method": last_method,
+            "last_fetch_fresh": bool(self._last_fetch_fresh),
+        }
+
     async def start(self) -> None:
         if self._task is not None and self._task.done():
             self._task = None
