@@ -189,6 +189,26 @@ def test_index_html_uses_recent_count_over_length():
     assert "Newest 120 tokens shown below." in html
 
 
+def test_index_html_shows_discovery_backoff():
+    state = ui.UIState(
+        discovery_provider=lambda: {
+            "recent": [],
+            "recent_count": 0,
+            "cooldown_remaining": 12.5,
+            "cooldown_expires_at": "2024-01-01T00:00:30Z",
+            "consecutive_empty_fetches": 3,
+            "cooldown_active": True,
+            "backoff_seconds": 12.5,
+        }
+    )
+    app = ui.create_app(state)
+    client = app.test_client()
+    html = client.get("/").get_data(as_text=True)
+    assert "Empty discovery fetch backoff active" in html
+    assert "12.5s remaining" in html
+    assert "3 empty fetches" in html
+
+
 def test_build_dashboard_metrics_returns_expected_values():
     state = ui.UIState(
         status_provider=lambda: {

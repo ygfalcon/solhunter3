@@ -647,6 +647,35 @@ def create_app(
         discovery_recent_display = list(
             reversed(discovery_recent_all[-120:])
         )
+        raw_backoff_remaining = discovery.get("cooldown_remaining")
+        discovery_backoff_remaining: Optional[float] = None
+        try:
+            if raw_backoff_remaining is not None:
+                discovery_backoff_remaining = float(raw_backoff_remaining)
+        except (TypeError, ValueError):
+            discovery_backoff_remaining = None
+        if discovery_backoff_remaining is not None and discovery_backoff_remaining <= 0:
+            discovery_backoff_remaining = None
+        discovery_backoff_remaining_text: Optional[str] = None
+        if discovery_backoff_remaining is not None:
+            rounded = round(discovery_backoff_remaining)
+            if abs(discovery_backoff_remaining - rounded) < 0.05:
+                discovery_backoff_remaining_text = f"{int(rounded)}"
+            else:
+                discovery_backoff_remaining_text = f"{discovery_backoff_remaining:.1f}"
+        discovery_backoff_expires = discovery.get("cooldown_expires_at")
+        if discovery_backoff_expires:
+            discovery_backoff_expires = str(discovery_backoff_expires)
+        raw_consecutive_empty = (
+            discovery.get("consecutive_empty_fetches")
+            if discovery.get("consecutive_empty_fetches") is not None
+            else discovery.get("consecutive_empty")
+        )
+        try:
+            discovery_consecutive_empty = max(0, int(raw_consecutive_empty))
+        except (TypeError, ValueError):
+            discovery_consecutive_empty = 0
+        discovery_backoff_active = bool(discovery_backoff_remaining)
         endpoint_names = [
             "health",
             "status",
@@ -1234,6 +1263,17 @@ def create_app(
                             <span class="caret" aria-hidden="true"></span>
                         </summary>
                         <div class="collapsible-body" data-role="discovery-body">
+                            {% if discovery_backoff_active %}
+                                <div class="muted discovery-backoff">
+                                    Empty discovery fetch backoff active: {{ discovery_backoff_remaining_text }}s remaining
+                                    {% if discovery_backoff_expires %}(until {{ discovery_backoff_expires }}){% endif %}
+                                    {% if discovery_consecutive_empty %} · {{ discovery_consecutive_empty }} empty fetch{% if discovery_consecutive_empty != 1 %}es{% endif %}{% endif %}
+                                </div>
+                            {% elif discovery_consecutive_empty %}
+                                <div class="muted discovery-backoff">
+                                    Discovery waiting after {{ discovery_consecutive_empty }} empty fetch{% if discovery_consecutive_empty != 1 %}es{% endif %}.
+                                </div>
+                            {% endif %}
                             {% if discovery_recent_display %}
                                 <div class="muted">Newest {{ discovery_recent_display|length }} tokens shown below.</div>
                                 <div class="collapsible-scroll">
@@ -2000,7 +2040,55 @@ def create_app(
                     `;
                 }
                 if (elements.discoveryBody) {
+                    const parseSeconds = value => {
+                        const num = Number(value);
+                        if (!Number.isFinite(num) || num <= 0) {
+                            return 0;
+                        }
+                        return Math.max(0, num);
+                    };
+                    const formatSeconds = value => {
+                        if (!Number.isFinite(value) || value <= 0) {
+                            return null;
+                        }
+                        const rounded = Math.round(value);
+                        if (Math.abs(value - rounded) < 0.05) {
+                            return String(rounded);
+                        }
+                        return value.toFixed(1);
+                    };
+                    const rawRemaining = data.cooldown_remaining ?? data.backoff_seconds;
+                    const remaining = parseSeconds(rawRemaining);
+                    const expiryRaw = typeof data.cooldown_expires_at === 'string'
+                        ? data.cooldown_expires_at
+                        : '';
+                    const rawConsecutive = data.consecutive_empty_fetches ?? data.consecutive_empty;
+                    const consecutive = Number.isFinite(Number(rawConsecutive))
+                        ? Math.max(0, Math.trunc(Number(rawConsecutive)))
+                        : 0;
+                    const backoffActive = remaining > 0;
                     let bodyHtml = '';
+                    if (backoffActive) {
+                        const secondsText = formatSeconds(remaining) ?? '—';
+                        const expiryText = expiryRaw ? ` (until ${escapeHtml(expiryRaw)})` : '';
+                        let emptiesText = '';
+                        if (consecutive > 0) {
+                            const plural = consecutive === 1 ? '' : 'es';
+                            emptiesText = ` · ${formatNumber(consecutive)} empty fetch${plural}`;
+                        }
+                        bodyHtml += `
+                            <div class="muted discovery-backoff" data-role="discovery-backoff">
+                                Empty discovery fetch backoff active: ${secondsText}s remaining${expiryText}${emptiesText}
+                            </div>
+                        `;
+                    } else if (consecutive > 0) {
+                        const plural = consecutive === 1 ? '' : 'es';
+                        bodyHtml += `
+                            <div class="muted discovery-backoff" data-role="discovery-backoff">
+                                Discovery waiting after ${formatNumber(consecutive)} empty fetch${plural}.
+                            </div>
+                        `;
+                    }
                     if (displayTokens.length) {
                         const list = displayTokens.map(token => `<li>${escapeHtml(token)}</li>`).join('');
                         bodyHtml += `
@@ -2813,6 +2901,10 @@ def create_app(
             discovery_recent_display=discovery_recent_display,
             discovery_recent_summary=discovery_recent_summary,
             discovery_recent_total=discovery_recent_total,
+            discovery_backoff_active=discovery_backoff_active,
+            discovery_backoff_remaining_text=discovery_backoff_remaining_text,
+            discovery_backoff_expires=discovery_backoff_expires,
+            discovery_consecutive_empty=discovery_consecutive_empty,
             counts=counts,
             metrics=metrics,
             samples=samples,

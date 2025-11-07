@@ -13,7 +13,7 @@ import time
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
 
@@ -1286,11 +1286,79 @@ class TradingRuntime:
             recent = list(self._recent_tokens)
         with self._iteration_lock:
             latest = list(self._last_iteration.get("tokens_used", []) or [])
-        return {
+        snapshot: Dict[str, Any] = {
             "recent": recent[:50],
             "recent_count": len(recent),
             "latest_iteration_tokens": latest,
         }
+
+        pipeline_snapshot: Dict[str, Any] = {}
+        pipeline = self.pipeline if self._use_new_pipeline else None
+        if pipeline is not None and hasattr(pipeline, "discovery_snapshot"):
+            try:
+                pipeline_snapshot = pipeline.discovery_snapshot()
+            except Exception:
+                log.debug("TradingRuntime: failed to snapshot discovery state", exc_info=True)
+                pipeline_snapshot = {}
+
+        if isinstance(pipeline_snapshot, dict) and pipeline_snapshot:
+            backoff = _maybe_float(pipeline_snapshot.get("current_backoff")) or 0.0
+            cooldown_until = _maybe_float(pipeline_snapshot.get("cooldown_until"))
+            cooldown_remaining = _maybe_float(pipeline_snapshot.get("cooldown_remaining"))
+            if cooldown_remaining is None and cooldown_until is not None:
+                cooldown_remaining = max(0.0, cooldown_until - time.time())
+            consecutive_empty = pipeline_snapshot.get("consecutive_empty")
+            try:
+                consecutive_empty_int = int(consecutive_empty)
+            except (TypeError, ValueError):
+                consecutive_empty_int = 0
+            cooldown_active = bool(pipeline_snapshot.get("cooldown_active"))
+            if cooldown_remaining is not None and cooldown_remaining <= 0:
+                cooldown_remaining = 0.0
+                if not cooldown_active:
+                    cooldown_until = None
+            expiry_iso: Optional[str] = None
+            if cooldown_until:
+                try:
+                    expiry_iso = (
+                        datetime.fromtimestamp(cooldown_until, timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                except Exception:
+                    expiry_iso = None
+            last_fetch_ts = _maybe_float(pipeline_snapshot.get("last_fetch_ts"))
+            last_fetch_iso: Optional[str] = None
+            if last_fetch_ts:
+                try:
+                    last_fetch_iso = (
+                        datetime.fromtimestamp(last_fetch_ts, timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                except Exception:
+                    last_fetch_iso = None
+            last_fetch_count = pipeline_snapshot.get("last_fetch_count")
+            try:
+                last_fetch_count_int = int(last_fetch_count)
+            except (TypeError, ValueError):
+                last_fetch_count_int = None
+            snapshot.update(
+                {
+                    "backoff_seconds": backoff,
+                    "cooldown_until": cooldown_until,
+                    "cooldown_remaining": cooldown_remaining,
+                    "cooldown_expires_at": expiry_iso,
+                    "cooldown_active": bool(cooldown_active and cooldown_remaining),
+                    "consecutive_empty_fetches": consecutive_empty_int,
+                    "last_fetch_ts": last_fetch_ts,
+                    "last_fetch_at": last_fetch_iso,
+                    "last_fetch_count": last_fetch_count_int,
+                    "last_fetch_empty": bool(pipeline_snapshot.get("last_fetch_empty")),
+                }
+            )
+
+        return snapshot
 
     def _collect_config(self) -> Dict[str, Any]:
         cfg = self.cfg or {}
