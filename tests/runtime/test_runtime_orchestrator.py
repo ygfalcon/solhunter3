@@ -1,6 +1,7 @@
 import asyncio
 import asyncio
 import importlib
+import os
 import sys
 import types
 
@@ -74,6 +75,65 @@ async def test_start_agents_aborts_when_no_agents(monkeypatch, request):
     failure_messages = [detail for stage, ok, detail in stages if stage == "agents:loaded" and not ok]
     assert failure_messages, "Expected a failed agents:loaded stage"
     assert "no agents available" in failure_messages[0]
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_bus_reinitializes_after_local_bind(monkeypatch, request):
+    ui_module = importlib.import_module("solhunter_zero.ui")
+    monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
+    monkeypatch.setattr(ui_module, "start_websockets", lambda: {}, raising=False)
+
+    runtime_orchestrator = importlib.reload(
+        importlib.import_module("solhunter_zero.runtime.orchestrator")
+    )
+    request.addfinalizer(lambda: importlib.reload(runtime_orchestrator))
+
+    event_bus_module = importlib.import_module("solhunter_zero.event_bus")
+    config_module = importlib.import_module("solhunter_zero.config")
+    redis_util = importlib.import_module("solhunter_zero.redis_util")
+
+    monkeypatch.setenv("BROKER_WS_URLS", "ws://remote:9999")
+    monkeypatch.setenv("EVENT_BUS_URL", "ws://remote:9999")
+    monkeypatch.setenv("EVENT_BUS_WS_PORT", "9101")
+
+    event_bus_module.BUS.reset()
+    event_bus_module.configure(broker_urls=["ws://remote:9999"])
+
+    init_calls = {"count": 0}
+
+    def fake_initialize_event_bus() -> None:
+        init_calls["count"] += 1
+        urls_env = os.getenv("BROKER_WS_URLS", "")
+        urls = [u for u in urls_env.split(",") if u]
+        event_bus_module.configure(broker_urls=urls)
+
+    monkeypatch.setattr(runtime_orchestrator, "initialize_event_bus", fake_initialize_event_bus)
+    monkeypatch.setattr(runtime_orchestrator, "apply_env_overrides", lambda cfg: cfg)
+    monkeypatch.setattr(runtime_orchestrator, "load_selected_config", lambda: {})
+    monkeypatch.setattr(runtime_orchestrator, "load_config", lambda path=None: {})
+    monkeypatch.setattr(config_module, "set_env_from_config", lambda cfg: None)
+    monkeypatch.setattr(config_module, "get_broker_urls", lambda cfg: [])
+    monkeypatch.setattr(redis_util, "ensure_local_redis_if_needed", lambda urls: None)
+
+    async def fake_start_ws_server(host, port):
+        fake_start_ws_server.calls.append((host, port))
+
+    fake_start_ws_server.calls = []  # type: ignore[attr-defined]
+    monkeypatch.setattr(event_bus_module, "start_ws_server", fake_start_ws_server)
+
+    async def fake_verify_broker_connection(*_: object, **__: object) -> bool:
+        return True
+
+    monkeypatch.setattr(event_bus_module, "verify_broker_connection", fake_verify_broker_connection)
+
+    orchestrator = runtime_orchestrator.RuntimeOrchestrator(run_http=False)
+
+    await orchestrator.start_bus()
+
+    assert init_calls["count"] == 2
+    assert fake_start_ws_server.calls == [("localhost", 9101)]
+    assert orchestrator.handles.local_ws_bound is True
+    assert event_bus_module.BUS.broker_urls == ["ws://127.0.0.1:9101"]
 
 
 @pytest.mark.anyio("asyncio")
