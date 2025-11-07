@@ -14,7 +14,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
 
 from ..agent_manager import AgentManager
 from ..config import (
@@ -201,6 +201,7 @@ class TradingRuntime:
         self._offline_mode: bool = False
         self._dry_run_mode: bool = False
         self._testnet_mode: bool = False
+        self._startup_modes: Optional[tuple[bool, bool, Optional[bool], bool]] = None
         history_limit = int(os.getenv("ITERATION_HISTORY_LIMIT", "120") or 120)
         self._iteration_history: Deque[Dict[str, Any]] = deque(maxlen=history_limit)
         self._history_lock = threading.Lock()
@@ -368,17 +369,25 @@ class TradingRuntime:
     # ------------------------------------------------------------------
 
     async def _prepare_configuration(self) -> None:
-        cfg_path = self.config_path
-        if cfg_path is None:
-            selected = load_selected_config()
-            if selected:
-                cfg_path = str(selected.get("__path__", "config.toml"))
+        cfg_path = self._resolve_config_path()
         if cfg_path is not None:
-            cfg_path = str(Path(cfg_path).expanduser().resolve())
             self.config_path = cfg_path
 
+        offline_mode, dry_run_mode, live_discovery_override, testnet_mode = (
+            self._determine_startup_modes(self.config_path)
+        )
+        self._startup_modes = (
+            bool(offline_mode),
+            bool(dry_run_mode),
+            live_discovery_override,
+            bool(testnet_mode),
+        )
+
         cfg, runtime_cfg, depth_proc = await perform_startup_async(
-            self.config_path, offline=False, dry_run=False
+            self.config_path,
+            offline=self._startup_modes[0],
+            dry_run=self._startup_modes[1],
+            testnet=self._startup_modes[3],
         )
 
         self.cfg = cfg
@@ -397,6 +406,104 @@ class TradingRuntime:
                 scanner_common.HEADERS["X-API-KEY"] = scanner_common.BIRDEYE_API_KEY
             except Exception:
                 pass
+
+    def _resolve_config_path(self) -> Optional[str]:
+        cfg_path = self.config_path
+        if cfg_path is None:
+            selected = load_selected_config()
+            if selected:
+                candidate = selected.get("__path__")
+                if candidate:
+                    cfg_path = str(candidate)
+                else:
+                    cfg_path = "config.toml"
+        if cfg_path is not None:
+            cfg_path = str(Path(cfg_path).expanduser().resolve())
+        return cfg_path
+
+    def _determine_startup_modes(
+        self, cfg_path: Optional[str]
+    ) -> tuple[bool, bool, Optional[bool], bool]:
+        config_data: Mapping[str, Any]
+        if cfg_path is not None:
+            config_data = apply_env_overrides(load_config(cfg_path))
+        else:
+            try:
+                config_data = apply_env_overrides(load_config(None))
+            except FileNotFoundError:
+                config_data = {}
+        return self._evaluate_mode_choices(config_data)
+
+    def _evaluate_mode_choices(
+        self, config: Mapping[str, Any]
+    ) -> tuple[bool, bool, Optional[bool], bool]:
+        offline_env_raw = os.getenv("SOLHUNTER_OFFLINE")
+        dry_run_env_raw = os.getenv("DRY_RUN")
+        live_discovery_env_raw = os.getenv("LIVE_DISCOVERY")
+
+        offline_env = (
+            parse_bool_env("SOLHUNTER_OFFLINE", False)
+            if offline_env_raw is not None
+            else None
+        )
+        dry_run_env = (
+            parse_bool_env("DRY_RUN", False) if dry_run_env_raw is not None else None
+        )
+        live_discovery_env = (
+            parse_bool_env("LIVE_DISCOVERY", False)
+            if live_discovery_env_raw is not None
+            else None
+        )
+
+        testnet_env: Optional[bool] = None
+        if os.getenv("TESTNET") is not None:
+            testnet_env = parse_bool_env("TESTNET", False)
+        elif os.getenv("SOLHUNTER_TESTNET") is not None:
+            testnet_env = parse_bool_env("SOLHUNTER_TESTNET", False)
+
+        offline_cfg = _maybe_bool(config.get("offline"))
+        dry_run_cfg = _maybe_bool(config.get("dry_run"))
+        live_discovery_cfg = _maybe_bool(config.get("live_discovery"))
+        testnet_cfg = _maybe_bool(config.get("testnet"))
+
+        live_discovery_override: Optional[bool] = None
+        if live_discovery_env is not None:
+            live_discovery_override = bool(live_discovery_env)
+        elif live_discovery_cfg is not None:
+            live_discovery_override = bool(live_discovery_cfg)
+
+        if offline_env is not None:
+            offline_mode = bool(offline_env)
+        elif offline_cfg is not None:
+            offline_mode = bool(offline_cfg)
+        elif live_discovery_override is not None:
+            offline_mode = not live_discovery_override
+        else:
+            offline_mode = False
+
+        if dry_run_env is not None:
+            dry_run_mode = bool(dry_run_env)
+        elif dry_run_cfg is not None:
+            dry_run_mode = bool(dry_run_cfg)
+        else:
+            dry_run_mode = False
+
+        if testnet_env is not None:
+            testnet_mode = bool(testnet_env)
+        elif testnet_cfg is not None:
+            testnet_mode = bool(testnet_cfg)
+        else:
+            testnet_mode = False
+
+        if live_discovery_override is not None:
+            live_discovery_override = bool(live_discovery_override)
+
+        return (
+            bool(offline_mode),
+            bool(dry_run_mode),
+            live_discovery_override,
+            bool(testnet_mode),
+        )
 
         # Ensure environment reflects configuration for downstream modules
         set_env_from_config(cfg)
@@ -1445,70 +1552,20 @@ class TradingRuntime:
             return default
 
     def _derive_offline_modes(self) -> tuple[bool, bool, Optional[bool], bool]:
-        offline_env_raw = os.getenv("SOLHUNTER_OFFLINE")
-        dry_run_env_raw = os.getenv("DRY_RUN")
-        live_discovery_env_raw = os.getenv("LIVE_DISCOVERY")
-        testnet_env_raw = os.getenv("TESTNET")
-
-        offline_env = (
-            parse_bool_env("SOLHUNTER_OFFLINE", False)
-            if offline_env_raw is not None
-            else None
-        )
-        dry_run_env = (
-            parse_bool_env("DRY_RUN", False) if dry_run_env_raw is not None else None
-        )
-        live_discovery_env = (
-            parse_bool_env("LIVE_DISCOVERY", False)
-            if live_discovery_env_raw is not None
-            else None
-        )
-        testnet_env = (
-            parse_bool_env("TESTNET", False) if testnet_env_raw is not None else None
-        )
-
-        offline_cfg = _maybe_bool(self.cfg.get("offline"))
-        dry_run_cfg = _maybe_bool(self.cfg.get("dry_run"))
-        live_discovery_cfg = _maybe_bool(self.cfg.get("live_discovery"))
-        testnet_cfg = _maybe_bool(self.cfg.get("testnet"))
-
-        live_discovery_override = None
-        if live_discovery_env is not None:
-            live_discovery_override = live_discovery_env
-        elif live_discovery_cfg is not None:
-            live_discovery_override = live_discovery_cfg
-
-        if offline_env is not None:
-            offline_mode = offline_env
-        elif offline_cfg is not None:
-            offline_mode = offline_cfg
-        else:
-            offline_mode = (
-                not live_discovery_override
-                if live_discovery_override is not None
-                else False
+        if self._startup_modes is not None:
+            offline_mode, dry_run_mode, live_discovery_override, testnet_mode = (
+                self._startup_modes
+            )
+            return (
+                bool(offline_mode),
+                bool(dry_run_mode),
+                live_discovery_override
+                if live_discovery_override is None
+                else bool(live_discovery_override),
+                bool(testnet_mode),
             )
 
-        if dry_run_env is not None:
-            dry_run_mode = dry_run_env
-        elif dry_run_cfg is not None:
-            dry_run_mode = dry_run_cfg
-        else:
-            dry_run_mode = False
-
-        if testnet_env is not None:
-            testnet_mode = testnet_env
-        elif testnet_cfg is not None:
-            testnet_mode = testnet_cfg
-        else:
-            testnet_mode = False
-
-        return (
-            bool(offline_mode),
-            bool(dry_run_mode),
-            live_discovery_override,
-            bool(testnet_mode),
-        )
+        return self._evaluate_mode_choices(self.cfg)
 
     def _resolve_token_file(self) -> Optional[str]:
         candidate = self.cfg.get("token_file")
