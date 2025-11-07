@@ -403,6 +403,53 @@ def test_discovery_emits_token_event(monkeypatch):
     ]
 
 
+def test_pipeline_fallback_summary_lists_tokens(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
+
+    fallback_tokens = [
+        "So11111111111111111111111111111111111111112",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v",
+    ]
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline._score_token", lambda token, pf: 1.0)
+
+    class _StubAgentManager:
+        skip_simulation = True
+        depth_service = False
+
+        def __init__(self) -> None:
+            async def _execute(action):
+                return {}
+
+            self.executor = types.SimpleNamespace(execute=_execute)
+
+        async def evaluate_with_swarm(self, token, portfolio):
+            return _DummyContext(actions=[])
+
+        def consume_swarm(self, token, swarm):  # pragma: no cover - interface stub
+            return None
+
+    class _EmptyDiscoveryAgent:
+        async def discover_tokens(self, **kwargs):
+            return []
+
+    pipeline = SwarmPipeline(_StubAgentManager(), Portfolio(path=None), dry_run=True)
+    pipeline._discovery_agent = _EmptyDiscoveryAgent()
+
+    summary = asyncio.run(pipeline.run())
+
+    assert summary["fallback_used"] is True
+    assert summary["tokens_discovered"] == fallback_tokens
+    assert summary["tokens_used"] == fallback_tokens
+    assert summary["discovered_count"] == len(fallback_tokens)
+    discovery_stats = summary["telemetry"]["discovery"]
+    assert discovery_stats["discovered"] == len(fallback_tokens)
+    assert discovery_stats["scored"] == len(fallback_tokens)
+
+
 def test_execution_skips_missing_price(monkeypatch, caplog):
     _install_torch_stub(monkeypatch)
     from solhunter_zero.swarm_pipeline import (
