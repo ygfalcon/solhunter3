@@ -47,8 +47,12 @@ class ExecutionService:
                     log.exception("Failed to propagate testnet flag to executor")
 
     async def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._run(), name="execution_service")
+        if self._task is not None and self._task.done():
+            self._task = None
+        if self._task is not None and not self._task.done():
+            return
+        self._stopped.clear()
+        self._task = asyncio.create_task(self._run(), name="execution_service")
 
     async def stop(self) -> None:
         self._stopped.set()

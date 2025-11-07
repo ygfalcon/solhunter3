@@ -104,11 +104,15 @@ class DiscoveryService:
         self._last_metadata_snapshot: Dict[str, Dict[str, Any]] = {}
 
     async def start(self) -> None:
-        if self._task is None:
-            if not self._primed:
-                await self._prime_startup_clones()
-                self._primed = True
-            self._task = asyncio.create_task(self._run(), name="discovery_service")
+        if self._task is not None and self._task.done():
+            self._task = None
+        if self._task is not None and not self._task.done():
+            return
+        self._stopped.clear()
+        if not self._primed:
+            await self._prime_startup_clones()
+            self._primed = True
+        self._task = asyncio.create_task(self._run(), name="discovery_service")
 
     async def stop(self) -> None:
         self._stopped.set()
