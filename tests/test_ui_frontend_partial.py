@@ -166,21 +166,22 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
         "history": [summary_success],
     }
 
+    dashboard_base = "/dashboard"
     scenarios = [
         {
-            "/?format=json": {"ok": False, "status": 502},
-            "/status": {"ok": True, "body": status_partial},
-            "/summary": {"ok": False, "status": 500},
-            "/tokens": {"ok": True, "body": discovery_partial},
-            "/actions": {"ok": True, "body": actions_partial},
-            "/activity": {"ok": True, "body": {"entries": activity_partial_entries}},
-            "/trades": {"ok": True, "body": trades_partial},
-            "/weights": {"ok": True, "body": weights_partial},
-            "/logs": {"ok": True, "body": {"entries": logs_partial_entries}},
-            "/config": {"ok": True, "body": config_partial},
+            f"{dashboard_base}/?format=json": {"ok": False, "status": 502},
+            f"{dashboard_base}/status": {"ok": True, "body": status_partial},
+            f"{dashboard_base}/summary": {"ok": False, "status": 500},
+            f"{dashboard_base}/tokens": {"ok": True, "body": discovery_partial},
+            f"{dashboard_base}/actions": {"ok": True, "body": actions_partial},
+            f"{dashboard_base}/activity": {"ok": True, "body": {"entries": activity_partial_entries}},
+            f"{dashboard_base}/trades": {"ok": True, "body": trades_partial},
+            f"{dashboard_base}/weights": {"ok": True, "body": weights_partial},
+            f"{dashboard_base}/logs": {"ok": True, "body": {"entries": logs_partial_entries}},
+            f"{dashboard_base}/config": {"ok": True, "body": config_partial},
         },
         {
-            "/?format=json": {"ok": True, "body": aggregate_success},
+            f"{dashboard_base}/?format=json": {"ok": True, "body": aggregate_success},
         },
     ]
 
@@ -189,6 +190,7 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
         const vm = require('vm');
 
         const scenarios = {json.dumps(scenarios)};
+        const dashboardBase = {json.dumps(dashboard_base)};
         let scenarioIndex = 0;
 
         const elementStore = new Map();
@@ -257,6 +259,7 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
                 setItem(key, value) {{ this._store.set(key, String(value)); }},
                 removeItem(key) {{ this._store.delete(key); }},
             }},
+            location: {{ pathname: `${{dashboardBase}}/` }},
             __solhunterAutoRefresh: false,
         }};
 
@@ -314,7 +317,7 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
                 errors: hooks.getEndpointErrors(),
                 outcome: hooks.getLastRefreshOutcome(),
             }};
-            process.stdout.write(JSON.stringify({{ first, second }}));
+            process.stdout.write(JSON.stringify({{ first, second, basePath: window.__solhunterResolvedBasePath }}));
         }})().catch(err => {{
             console.error(err);
             process.exit(1);
@@ -336,7 +339,7 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
 
     assert first["data"]["status"]["iterations_completed"] == 10
     assert first["data"]["summary"]["timestamp"] == initial_summary["timestamp"]
-    assert first["errors"]["summary"] == "Summary update failed: /summary responded with 500"
+    assert first["errors"]["summary"] == "Summary update failed: /dashboard/summary responded with 500"
     assert first["outcome"]["partial"] is True
     assert first["outcome"]["successCount"] == 8
     assert first["outcome"]["errorCount"] == 1
@@ -346,3 +349,4 @@ def test_dashboard_refresh_recovers_from_partial_failures() -> None:
     assert second["outcome"]["partial"] is False
     assert second["outcome"]["successCount"] == 9
     assert second["outcome"]["errorCount"] == 0
+    assert payload["basePath"] == "/dashboard"

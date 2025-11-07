@@ -508,6 +508,14 @@ def create_app(
 
     @app.get("/")
     def index() -> Any:
+        script_root = (request.script_root or "").rstrip("/")
+
+        def _join_base(path: str) -> str:
+            if not path:
+                return f"{script_root}/" if script_root else "/"
+            normalized = path if path.startswith("/") else f"/{path}"
+            return f"{script_root}{normalized}" if script_root else normalized
+
         if request.args.get("format", "").lower() == "json":
             status = state.snapshot_status()
             summary = state.snapshot_summary()
@@ -539,6 +547,7 @@ def create_app(
             return jsonify(
                 {
                     "message": "SolHunter Zero UI",
+                    "base_path": script_root,
                     "status": status,
                     "summary": summary,
                     "discovery": discovery,
@@ -550,18 +559,18 @@ def create_app(
                     "config_overview": config_summary,
                     "metrics": metrics,
                     "endpoints": [
-                        "/health",
-                        "/status",
-                        "/summary",
-                        "/tokens",
-                        "/actions",
-                        "/activity",
-                        "/trades",
-                        "/weights",
-                        "/rl/status",
-                        "/config",
-                        "/logs",
-                        "/history",
+                        _join_base("health"),
+                        _join_base("status"),
+                        _join_base("summary"),
+                        _join_base("tokens"),
+                        _join_base("actions"),
+                        _join_base("activity"),
+                        _join_base("trades"),
+                        _join_base("weights"),
+                        _join_base("rl/status"),
+                        _join_base("config"),
+                        _join_base("logs"),
+                        _join_base("history"),
                     ],
                     "history": history[-HISTORY_MAX_ENTRIES:],
                 }
@@ -638,6 +647,22 @@ def create_app(
         discovery_recent_display = list(
             reversed(discovery_recent_all[-120:])
         )
+        endpoint_names = [
+            "health",
+            "status",
+            "summary",
+            "tokens",
+            "actions",
+            "activity",
+            "trades",
+            "weights",
+            "rl/status",
+            "config",
+            "logs",
+            "history",
+        ]
+        endpoint_links = {name: _join_base(name) for name in endpoint_names}
+        json_view_link = f"{_join_base('')}?format=json"
         logs_all = list(logs)
         logs_total = len(logs_all)
         logs_summary = list(reversed(logs_all[-3:]))
@@ -1059,7 +1084,7 @@ def create_app(
                         <button type="button" id="toggleRefresh" aria-pressed="false">Pause</button>
                         <span class="muted" data-role="last-updated"></span>
                     </div>
-                    <div>JSON view: <a href="/?format=json">/?format=json</a></div>
+                    <div>JSON view: <a href="{{ json_view_link }}">{{ json_view_link }}</a></div>
                 </div>
             </header>
 
@@ -1245,7 +1270,7 @@ def create_app(
                     <div style="margin-top: 14px;" class="muted">Endpoints</div>
                     <div class="endpoint-list">
                         {% for link in ['health','status','summary','tokens','actions','activity','trades','weights','rl/status','config','logs','history'] %}
-                            <a href="/{{ link }}">/{{ link }}</a>
+                            <a href="{{ endpoint_links[link] }}">{{ endpoint_links[link] }}</a>
                         {% endfor %}
                     </div>
                 </div>
@@ -1410,7 +1435,73 @@ def create_app(
             const REFRESH_INTERVAL_MS = 5000;
             const COUNT_ORDER = ['activity', 'trades', 'logs', 'weights', 'actions'];
             const PALETTE = ['#7afcff', '#f6a6ff', '#9effa9', '#ffe29a', '#b5b0ff', '#ffb8a5', '#aff8db', '#f3c4fb'];
-            const ENDPOINTS = [
+
+            function stripTrailingSlashes(value) {
+                let result = value;
+                while (typeof result === 'string' && result.endsWith('/') && result.length > 1) {
+                    result = result.slice(0, -1);
+                }
+                return result === '/' ? '' : result;
+            }
+
+            function normaliseBasePath(path) {
+                if (typeof path !== 'string') {
+                    return '';
+                }
+                const trimmed = path.trim();
+                if (!trimmed) {
+                    return '';
+                }
+                return stripTrailingSlashes(trimmed);
+            }
+
+            function deriveBasePathFromWindow() {
+                if (typeof window === 'undefined') {
+                    return null;
+                }
+                if (typeof window.__solhunterBasePath === 'string') {
+                    return normaliseBasePath(window.__solhunterBasePath);
+                }
+                const location = window.location;
+                if (!location || typeof location.pathname !== 'string') {
+                    return null;
+                }
+                const pathname = location.pathname;
+                if (!pathname) {
+                    return '';
+                }
+                return stripTrailingSlashes(pathname);
+            }
+
+            const SERVER_BASE_PATH = normaliseBasePath({{ base_path | tojson }});
+            const BASE_PATH = (() => {
+                const derived = deriveBasePathFromWindow();
+                return derived ?? SERVER_BASE_PATH;
+            })();
+
+            function withBase(path) {
+                if (typeof path !== 'string' || path.length === 0) {
+                    return BASE_PATH ? `${BASE_PATH}/` : '/';
+                }
+                const lower = path.toLowerCase();
+                if (lower.startsWith('http://') || lower.startsWith('https://')) {
+                    return path;
+                }
+                const normalized = path.startsWith('/') ? path : `/${path}`;
+                if (!BASE_PATH) {
+                    return normalized;
+                }
+                if (normalized === '/') {
+                    return `${BASE_PATH}/`;
+                }
+                return `${BASE_PATH}${normalized}`;
+            }
+
+            if (typeof window !== 'undefined') {
+                window.__solhunterResolvedBasePath = BASE_PATH;
+            }
+
+            const RAW_ENDPOINTS = [
                 { key: 'status', path: '/status', label: 'Status' },
                 { key: 'summary', path: '/summary', label: 'Summary' },
                 { key: 'tokens', path: '/tokens', label: 'Discovery' },
@@ -1421,7 +1512,11 @@ def create_app(
                 { key: 'logs', path: '/logs', label: 'Event log' },
                 { key: 'config', path: '/config', label: 'Configuration' },
             ];
-            const DASHBOARD_AGGREGATE_PATH = '/?format=json';
+            const ENDPOINTS = RAW_ENDPOINTS.map(endpoint => ({
+                ...endpoint,
+                path: withBase(endpoint.path),
+            }));
+            const DASHBOARD_AGGREGATE_PATH = withBase('/?format=json');
             const initialState = {
                 status: {{ status | tojson | safe }},
                 summary: {{ summary | tojson | safe }},
@@ -2737,6 +2832,9 @@ def create_app(
             weights_aria_label=weights_aria_label,
             stat_tiles=stat_tiles,
             chart_js_local=chart_js_local,
+            base_path=script_root,
+            json_view_link=json_view_link,
+            endpoint_links=endpoint_links,
         )
 
     @app.get("/health")
