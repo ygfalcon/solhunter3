@@ -121,8 +121,13 @@ class RuntimeOrchestrator:
                 except Exception:
                     urls = []
             ensure_local_redis_if_needed(urls)
-        except Exception:
-            pass
+        except Exception as exc:
+            detail = f"redis bootstrap failed: {exc}"
+            await self._publish_stage("bus:bootstrap", False, detail)
+            log.exception("Failed to ensure Redis broker")
+            raise
+        else:
+            await self._publish_stage("bus:bootstrap", True)
         initialize_event_bus()
         # Prefer a dedicated local WS port to avoid conflicts
         local_ws_bound = False

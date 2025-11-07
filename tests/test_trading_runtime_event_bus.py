@@ -119,6 +119,36 @@ async def test_start_event_bus_records_failure_and_raises(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_start_event_bus_fails_when_redis_bootstrap_fails(monkeypatch):
+    monkeypatch.delenv("EVENT_BUS_DISABLE_LOCAL", raising=False)
+
+    runtime = trading_runtime.TradingRuntime()
+    runtime.cfg = {}
+
+    def failing_ensure(urls):
+        raise RuntimeError("redis-server missing")
+
+    async def should_not_start_ws(*args, **kwargs):  # pragma: no cover - ensured by assertion
+        pytest.fail("start_ws_server should not be called when redis bootstrap fails")
+
+    monkeypatch.setattr(
+        trading_runtime, "ensure_local_redis_if_needed", failing_ensure
+    )
+    monkeypatch.setattr(trading_runtime, "start_ws_server", should_not_start_ws)
+
+    with pytest.raises(RuntimeError) as exc:
+        await runtime._start_event_bus()
+
+    assert "redis-server missing" in str(exc.value)
+    assert runtime.status.event_bus is False
+
+    activity = runtime.activity.snapshot()
+    assert activity[-1]["stage"] == "broker"
+    assert activity[-1]["ok"] is False
+    assert "redis" in activity[-1]["detail"]
+
+
+@pytest.mark.anyio("asyncio")
 async def test_start_event_bus_falls_back_to_ephemeral_port(monkeypatch):
     monkeypatch.delenv("EVENT_BUS_DISABLE_LOCAL", raising=False)
     monkeypatch.delenv("EVENT_BUS_WS_PORT_RANGE", raising=False)
