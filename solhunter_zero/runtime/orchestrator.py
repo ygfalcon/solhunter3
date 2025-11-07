@@ -65,6 +65,8 @@ class RuntimeOrchestrator:
         self._stopping = False
         self._executor_dry_run = dry_run
         self._executor_testnet = testnet
+        self._trade_executor: Any | None = None
+        self._agent_runtime: Any | None = None
 
     async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
         try:
@@ -166,6 +168,8 @@ class RuntimeOrchestrator:
         await self._publish_stage("agents:startup", True)
         cfg, runtime_cfg, proc = await perform_startup_async(self.config_path, offline=False, dry_run=False)
         self.handles.depth_proc = proc
+        self._trade_executor = None
+        self._agent_runtime = None
 
         # Build runtime services
         memory_path = os.getenv("MEMORY_PATH", "sqlite:///memory.db")
@@ -297,6 +301,7 @@ class RuntimeOrchestrator:
 
         aruntime = AgentRuntime(active_manager, portfolio)
         await aruntime.start()
+        self._agent_runtime = aruntime
         def _maybe_bool(value: Any) -> bool | None:
             if value is None:
                 return None
@@ -336,6 +341,7 @@ class RuntimeOrchestrator:
             dry_run=executor_dry_run,
         )
         execu.start()
+        self._trade_executor = execu
 
         async def _discovery_loop():
             agent = DiscoveryAgent()
@@ -434,6 +440,22 @@ class RuntimeOrchestrator:
         try:
             self._closed = True
             await self._publish_stage("runtime:stopping", True)
+            try:
+                execu = self._trade_executor
+                if execu is not None:
+                    execu.stop()
+            except Exception:
+                pass
+            finally:
+                self._trade_executor = None
+            try:
+                aruntime = self._agent_runtime
+                if aruntime is not None:
+                    aruntime.stop()
+            except Exception:
+                pass
+            finally:
+                self._agent_runtime = None
             # Cancel tasks
             for t in list(self.handles.tasks or []):
                 t.cancel()

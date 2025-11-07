@@ -10,7 +10,7 @@ Enabled when EVENT_DRIVEN=1.
 import asyncio
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from .. import event_bus
 from ..loop import place_order_async
@@ -35,12 +35,20 @@ class TradeExecutor:
         self._n = 0
         self.testnet = bool(testnet)
         self.dry_run = bool(dry_run)
+        self._unsubscribe: Callable[[], None] | None = None
 
     def start(self) -> None:
-        event_bus.subscribe("action_decision", self._on_decision)
+        if self._unsubscribe is not None:
+            return
+        self._unsubscribe = event_bus.subscribe("action_decision", self._on_decision)
 
     def stop(self) -> None:
-        pass
+        if self._unsubscribe is None:
+            return
+        try:
+            self._unsubscribe()
+        finally:
+            self._unsubscribe = None
 
     def _on_decision(self, payload: Dict[str, Any]) -> None:
         side = str(payload.get("side", "hold"))

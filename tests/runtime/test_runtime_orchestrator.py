@@ -86,9 +86,7 @@ async def test_discovery_loop_respects_override(monkeypatch, request):
     monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
     monkeypatch.setattr(ui_module, "start_websockets", lambda: {}, raising=False)
 
-    runtime_orchestrator = importlib.reload(
-        importlib.import_module("solhunter_zero.runtime.orchestrator")
-    )
+    runtime_orchestrator = importlib.import_module("solhunter_zero.runtime.orchestrator")
     request.addfinalizer(lambda: importlib.reload(runtime_orchestrator))
 
     async def fake_startup(*_: object, **__: object):
@@ -245,11 +243,15 @@ async def test_start_invokes_stop_all_on_stage_failure(monkeypatch):
     dummy_ui = types.ModuleType("solhunter_zero.ui")
     dummy_ui.create_app = lambda *_, **__: types.SimpleNamespace()
     dummy_ui.start_websockets = lambda: {}
+    dummy_ui.UIState = type("UIState", (), {})
+    dummy_ui.UIServer = type("UIServer", (), {})
+    dummy_ui.UIStartupError = type("UIStartupError", (Exception,), {})
     monkeypatch.setitem(sys.modules, "solhunter_zero.ui", dummy_ui)
+    monkeypatch.setattr(importlib.import_module("solhunter_zero"), "ui", dummy_ui, raising=False)
 
-    runtime_orchestrator = importlib.reload(
-        importlib.import_module("solhunter_zero.runtime.orchestrator")
-    )
+    sys.modules.pop("solhunter_zero.runtime.orchestrator", None)
+    sys.modules.pop("solhunter_zero.runtime", None)
+    runtime_orchestrator = importlib.import_module("solhunter_zero.runtime.orchestrator")
 
     class DummyBus:
         stop_calls = 0
@@ -308,11 +310,15 @@ async def test_stop_all_idempotent_after_partial_start(monkeypatch):
     dummy_ui = types.ModuleType("solhunter_zero.ui")
     dummy_ui.create_app = lambda *_, **__: types.SimpleNamespace()
     dummy_ui.start_websockets = lambda: {}
+    dummy_ui.UIState = type("UIState", (), {})
+    dummy_ui.UIServer = type("UIServer", (), {})
+    dummy_ui.UIStartupError = type("UIStartupError", (Exception,), {})
     monkeypatch.setitem(sys.modules, "solhunter_zero.ui", dummy_ui)
+    monkeypatch.setattr(importlib.import_module("solhunter_zero"), "ui", dummy_ui, raising=False)
 
-    runtime_orchestrator = importlib.reload(
-        importlib.import_module("solhunter_zero.runtime.orchestrator")
-    )
+    sys.modules.pop("solhunter_zero.runtime.orchestrator", None)
+    sys.modules.pop("solhunter_zero.runtime", None)
+    runtime_orchestrator = importlib.import_module("solhunter_zero.runtime.orchestrator")
 
     class DummyBus:
         def __init__(self) -> None:
@@ -405,3 +411,93 @@ async def test_stop_all_idempotent_after_partial_start(monkeypatch):
 
     await orchestrator.stop_all()
     assert dummy_bus.stop_calls == 1
+
+
+@pytest.mark.anyio("asyncio")
+async def test_stop_all_clears_event_runtime_subscriptions(monkeypatch):
+    event_bus_module = importlib.import_module("solhunter_zero.event_bus")
+    event_bus_module.reset()
+
+    dummy_ui = types.ModuleType("solhunter_zero.ui")
+    dummy_ui.create_app = lambda *_, **__: types.SimpleNamespace()
+    dummy_ui.start_websockets = lambda: {}
+    dummy_ui.UIState = type("UIState", (), {})
+    dummy_ui.UIServer = type("UIServer", (), {})
+    dummy_ui.UIStartupError = type("UIStartupError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "solhunter_zero.ui", dummy_ui)
+    monkeypatch.setattr(importlib.import_module("solhunter_zero"), "ui", dummy_ui, raising=False)
+
+    runtime_orchestrator = importlib.import_module("solhunter_zero.runtime.orchestrator")
+
+    async def noop_publish(*_args, **_kwargs):
+        return None
+
+    orchestrator = runtime_orchestrator.RuntimeOrchestrator(run_http=False)
+    monkeypatch.setattr(orchestrator, "_publish_stage", noop_publish)
+
+    async def fake_close_session() -> None:
+        return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "solhunter_zero.http",
+        types.SimpleNamespace(close_session=fake_close_session),
+    )
+
+    service = importlib.import_module("solhunter_zero.exec_service.service")
+    agents_pkg = importlib.import_module("solhunter_zero.agents")
+    from importlib import util as importlib_util
+    from pathlib import Path
+
+    runtime_spec = importlib_util.spec_from_file_location(
+        "solhunter_zero.agents.runtime_actual",
+        Path(agents_pkg.__file__).with_name("runtime.py"),
+    )
+    assert runtime_spec and runtime_spec.loader
+    runtime_module = importlib_util.module_from_spec(runtime_spec)
+    sys.modules[runtime_spec.name] = runtime_module
+    runtime_spec.loader.exec_module(runtime_module)
+
+    class DummyMemory:
+        def start_writer(self) -> None:
+            pass
+
+        async def log_trade(self, **_kwargs):
+            return None
+
+    class DummyPortfolio:
+        def __init__(self) -> None:
+            self.price_history: dict[str, list[float]] = {}
+            self.balances: dict[str, object] = {}
+
+        async def update_async(self, *_args, **_kwargs):
+            return None
+
+        def total_value(self, _prices):
+            return 0.0
+
+        def record_prices(self, *_args, **_kwargs):
+            return None
+
+    class DummyManager:
+        def __init__(self) -> None:
+            self.agents = [types.SimpleNamespace(name="dummy")]
+
+        async def evaluate(self, *_args, **_kwargs):
+            return []
+
+    portfolio = DummyPortfolio()
+    runtime = runtime_module.AgentRuntime(DummyManager(), portfolio)
+    await runtime.start()
+
+    executor = service.TradeExecutor(DummyMemory(), portfolio)
+    executor.start()
+
+    orchestrator._agent_runtime = runtime
+    orchestrator._trade_executor = executor
+
+    await orchestrator.stop_all()
+
+    assert event_bus_module._subscribers.get("action_decision") is None
+    assert event_bus_module._subscribers.get("token_discovered") is None
+    assert event_bus_module._subscribers.get("price_update") is None

@@ -75,3 +75,38 @@ async def test_trade_executor_forwards_flags(monkeypatch):
     assert call["side"] == "buy"
     assert call["amount"] == pytest.approx(1.0)
     assert call["price"] == pytest.approx(2.5)
+
+
+@pytest.mark.anyio
+async def test_trade_executor_unsubscribes_on_stop(monkeypatch):
+    service = importlib.import_module("solhunter_zero.exec_service.service")
+    event_bus_module = importlib.import_module("solhunter_zero.event_bus")
+
+    event_bus_module.reset()
+
+    class DummyMemory:
+        def start_writer(self) -> None:
+            pass
+
+        async def log_trade(self, **_kwargs):
+            return None
+
+    class DummyPortfolio:
+        def __init__(self) -> None:
+            self.price_history: dict[str, list[float]] = {}
+            self.balances: dict[str, object] = {}
+
+        async def update_async(self, *_args, **_kwargs):
+            return None
+
+        def total_value(self, _prices):
+            return 0.0
+
+    executor = service.TradeExecutor(DummyMemory(), DummyPortfolio())
+
+    executor.start()
+    assert "action_decision" in event_bus_module._subscribers
+
+    executor.stop()
+
+    assert event_bus_module._subscribers.get("action_decision") is None
