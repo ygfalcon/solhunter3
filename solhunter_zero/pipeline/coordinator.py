@@ -203,6 +203,15 @@ class PipelineCoordinator:
         self._tasks: List[asyncio.Task] = []
         self._no_action_cache: Dict[str, float] = {}
 
+    def discovery_snapshot(self) -> Dict[str, Any]:
+        """Expose the discovery service fetch/backoff state."""
+
+        try:
+            return self._discovery_service.snapshot()
+        except Exception:
+            log.exception("Failed to snapshot discovery service state")
+            return {}
+
     async def start(self) -> None:
         services = [
             ("discovery", self._discovery_service),

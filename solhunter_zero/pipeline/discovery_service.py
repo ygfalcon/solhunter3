@@ -446,9 +446,9 @@ class DiscoveryService:
         cooldown = 0.0
         if payload:
             self._consecutive_empty = 0
-            self._current_backoff = 0.0
             if self.cache_ttl:
                 cooldown = self.cache_ttl
+            self._current_backoff = 0.0
         else:
             self._consecutive_empty += 1
             base_ttl = self.empty_cache_ttl
@@ -457,9 +457,11 @@ class DiscoveryService:
                     cooldown = base_ttl * (self.backoff_factor ** (self._consecutive_empty - 1))
                 else:
                     cooldown = base_ttl
+            if self.max_backoff is not None and cooldown:
+                cooldown = min(cooldown, self.max_backoff)
             self._current_backoff = cooldown
 
-        if self.max_backoff is not None and cooldown:
+        if self.max_backoff is not None and payload and cooldown:
             cooldown = min(cooldown, self.max_backoff)
 
         if cooldown:
@@ -480,6 +482,38 @@ class DiscoveryService:
             self._cooldown_until = fetch_ts
 
         self._last_fetch_fresh = True
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Return a thread-safe snapshot of the most recent fetch state."""
+
+        cooldown_until = float(self._cooldown_until)
+        last_fetch_ts = float(self._last_fetch_ts)
+        backoff = float(self._current_backoff)
+        consecutive_empty = int(self._consecutive_empty)
+        last_count = len(self._last_tokens)
+        now = time.time()
+        remaining = 0.0
+        if cooldown_until > now:
+            remaining = cooldown_until - now
+        cooldown_active = remaining > 0.0 and backoff > 0.0
+        cooldown_until_value = cooldown_until if cooldown_active else None
+        if not cooldown_active:
+            remaining = 0.0
+        last_fetch_age = 0.0
+        if last_fetch_ts:
+            last_fetch_age = max(0.0, now - last_fetch_ts)
+
+        return {
+            "last_fetch_ts": last_fetch_ts or None,
+            "last_fetch_count": last_count,
+            "last_fetch_age": last_fetch_age if last_fetch_ts else None,
+            "current_backoff": backoff,
+            "cooldown_until": cooldown_until_value,
+            "cooldown_remaining": remaining,
+            "cooldown_active": cooldown_active,
+            "consecutive_empty": consecutive_empty,
+            "last_fetch_empty": last_count == 0,
+        }
 
     async def _prime_startup_clones(self) -> None:
         clones = max(1, int(self.startup_clones))

@@ -128,6 +128,60 @@ async def test_empty_backoff_grows_and_resets(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_snapshot_reports_backoff_state(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(
+        queue,
+        interval=0.1,
+        cache_ttl=3.0,
+        empty_cache_ttl=2.0,
+        backoff_factor=2.0,
+    )
+
+    now = {"value": 50.0}
+
+    def fake_time() -> float:
+        return now["value"]
+
+    monkeypatch.setattr(discovery_mod.time, "time", fake_time)
+
+    responses = [([], {}), (["tok"], {"tok": {"liquidity": 1.0}})]
+
+    async def fake_discover(self, **_: object) -> list[str]:
+        tokens, details = responses.pop(0)
+        self.last_details = details
+        return list(tokens)
+
+    monkeypatch.setattr(discovery_mod.DiscoveryAgent, "discover_tokens", fake_discover)
+
+    tokens, details = await service._fetch()
+    assert tokens == []
+    assert details == {}
+
+    snap = service.snapshot()
+    assert snap["current_backoff"] == pytest.approx(service.empty_cache_ttl)
+    assert snap["cooldown_until"] == pytest.approx(now["value"] + service.empty_cache_ttl)
+    assert snap["cooldown_active"] is True
+    assert snap["consecutive_empty"] == 1
+    assert snap["cooldown_remaining"] == pytest.approx(service.empty_cache_ttl)
+
+    now["value"] += 1.0
+    snap = service.snapshot()
+    assert snap["cooldown_remaining"] == pytest.approx(service.empty_cache_ttl - 1.0)
+
+    now["value"] = service._cooldown_until
+    tokens, details = await service._fetch()
+    assert tokens == ["tok"]
+    assert details == {"tok": {"liquidity": 1.0}}
+
+    snap = service.snapshot()
+    assert snap["current_backoff"] == 0.0
+    assert snap["cooldown_active"] is False
+    assert snap["cooldown_until"] is None
+    assert snap["last_fetch_empty"] is False
+
+
+@pytest.mark.anyio
 async def test_emit_tokens_publishes_event(monkeypatch):
     queue: asyncio.Queue = asyncio.Queue()
     service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
