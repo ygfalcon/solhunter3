@@ -154,9 +154,11 @@ class DiscoveryService:
             self._last_fetch_fresh = False
             return list(self._last_tokens), dict(self._last_details)
         worker = agent or self._agent
+        method = discovery_state.current_method()
         tokens = await worker.discover_tokens(
             offline=self.offline,
             token_file=self.token_file,
+            method=method,
         )
         if self.limit:
             tokens = tokens[: self.limit]
@@ -174,6 +176,23 @@ class DiscoveryService:
         self._apply_fetch_stats(tokens, fetch_ts)
         self._last_details = dict(details)
         return list(tokens), details
+
+    def refresh(self) -> None:
+        """Reset cached discovery state to pick up configuration changes."""
+
+        refresher = getattr(self._agent, "refresh_settings", None)
+        if callable(refresher):
+            refresher()
+        self._settings_snapshot = self._capture_agent_settings()
+        self._cooldown_until = 0.0
+        self._consecutive_empty = 0
+        self._current_backoff = 0.0
+        self._last_fetch_ts = 0.0
+        self._last_tokens = []
+        self._last_details = {}
+        self._last_emitted = []
+        self._last_metadata_snapshot = {}
+        self._last_fetch_fresh = True
 
     def _capture_agent_settings(self) -> Dict[str, Optional[str]]:
         keys = (

@@ -53,3 +53,23 @@ async def test_discovery_post_updates_method_without_restart(monkeypatch):
     await runtime._trading_loop()
 
     assert captured_methods[:2] == ["helius", "websocket"]
+
+
+def test_discovery_update_refreshes_pipeline(monkeypatch):
+    monkeypatch.delenv("DISCOVERY_METHOD", raising=False)
+    discovery_state.clear_override()
+
+    runtime = trading_runtime.TradingRuntime()
+    refreshed: list[bool] = []
+
+    class _Pipeline:
+        def refresh_discovery(self) -> None:
+            refreshed.append(True)
+
+    runtime.pipeline = _Pipeline()
+
+    runtime._on_discovery_method_update("mempool")
+    assert refreshed == [True]
+
+    runtime._on_discovery_method_update("mempool")
+    assert refreshed == [True]

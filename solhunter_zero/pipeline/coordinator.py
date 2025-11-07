@@ -253,6 +253,14 @@ class PipelineCoordinator:
                 pass
         self._tasks.clear()
 
+    def refresh_discovery(self) -> None:
+        """Clear cached discovery state so new settings take effect promptly."""
+
+        try:
+            self._discovery_service.refresh()
+        except Exception:
+            log.exception("PipelineCoordinator: failed to refresh discovery service")
+
     async def _on_evaluation_result(self, result: EvaluationResult) -> None:
         payload = {
             "token": result.token,
