@@ -3108,7 +3108,10 @@ class UIServer:
                 log.exception("UI server crashed")
             finally:
                 startup_event.set()
-                self._server = None
+                try:
+                    self._finalize_server(server)
+                finally:
+                    self._server = None
 
         self._thread = threading.Thread(target=_serve, daemon=True)
         self._thread.start()
@@ -3158,6 +3161,8 @@ class UIServer:
             urllib.request.urlopen(request_obj, timeout=1)
         except Exception:
             self._shutdown_directly()
+        else:
+            self._consume_server()
         if self._thread:
             self._thread.join(timeout=2)
         self._thread = None
@@ -3180,11 +3185,32 @@ class UIServer:
             return f"[{host}]"
         return host
 
-    def _shutdown_directly(self) -> None:
+    def _consume_server(self) -> Optional["BaseWSGIServer"]:
         server = self._server
+        if server is None:
+            return None
+        self._server = None
+        return server
+
+    @staticmethod
+    def _finalize_server(server: Optional["BaseWSGIServer"]) -> None:
+        if server is None:
+            return
+        if getattr(server, "_solhunter_closed", False):
+            return
+        setattr(server, "_solhunter_closed", True)
+        try:
+            server.server_close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+
+    def _shutdown_directly(self) -> None:
+        server = self._consume_server()
         if server is None:
             return
         try:
             server.shutdown()
         except Exception:  # pragma: no cover - best effort fallback
             pass
+        finally:
+            self._finalize_server(server)

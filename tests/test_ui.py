@@ -479,3 +479,26 @@ def test_uiserver_start_raises_when_background_thread_fails(monkeypatch):
     assert "simulated bind failure" in str(excinfo.value.__cause__)
     assert created_servers and created_servers[0].closed is True
     assert server._thread is None
+
+
+def test_uiserver_direct_shutdown_releases_port(monkeypatch):
+    state = ui.UIState()
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+
+    def _raise_urlerror(*args, **kwargs):
+        raise urllib.error.URLError("forced failure")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _raise_urlerror)
+
+    server.start()
+    port = server.port
+
+    try:
+        server.stop()
+        assert server._thread is None
+        assert server._server is None
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", port))
+    finally:
+        server.stop()
