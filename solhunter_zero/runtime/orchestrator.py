@@ -343,6 +343,7 @@ class RuntimeOrchestrator:
 
         async def _discovery_loop():
             agent = DiscoveryAgent()
+            previous_tokens: list[str] | None = None
             while True:
                 method = discovery_state.current_method(
                     config=cfg, explicit=discovery_method
@@ -350,14 +351,25 @@ class RuntimeOrchestrator:
                 try:
                     tokens = await agent.discover_tokens(method=method, offline=False)
                     if tokens:
-                        event_bus.publish(
-                            "token_discovered",
-                            {
-                                "tokens": list(tokens),
-                                "metadata_refresh": False,
-                                "changed_tokens": [],
-                            },
-                        )
+                        seq = [str(token) for token in tokens if isinstance(token, str) and token]
+                        if seq:
+                            metadata_refresh = False
+                            changed_tokens: list[str] = []
+                            if previous_tokens is not None:
+                                prev_set = {str(token) for token in previous_tokens if token}
+                                curr_set = set(seq)
+                                if curr_set == prev_set:
+                                    metadata_refresh = True
+                                    changed_tokens = list(seq)
+                            event_bus.publish(
+                                "token_discovered",
+                                {
+                                    "tokens": list(seq),
+                                    "metadata_refresh": metadata_refresh,
+                                    "changed_tokens": list(changed_tokens),
+                                },
+                            )
+                            previous_tokens = list(seq)
                 except Exception:
                     pass
                 await asyncio.sleep(max(5, min(60, loop_delay)))

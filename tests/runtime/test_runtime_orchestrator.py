@@ -215,6 +215,7 @@ async def test_discovery_loop_respects_override(monkeypatch, request):
 
     class DummyDiscoveryAgent:
         instances: list["DummyDiscoveryAgent"] = []
+        token = "TEST_TOKEN"
 
         def __init__(self) -> None:
             self.calls: list[str] = []
@@ -222,7 +223,7 @@ async def test_discovery_loop_respects_override(monkeypatch, request):
 
         async def discover_tokens(self, *, method: str, offline: bool) -> list[str]:
             self.calls.append(method)
-            return []
+            return [self.token]
 
     async def fake_sleep(_: float) -> None:
         fake_sleep.calls += 1
@@ -279,7 +280,12 @@ async def test_discovery_loop_respects_override(monkeypatch, request):
         "_publish_stage",
         publish_stage,
     )
-    monkeypatch.setattr(runtime_orchestrator.event_bus, "publish", lambda *_, **__: None)
+    published_events: list[tuple[str, object]] = []
+
+    def capture_publish(topic: str, payload: object, *_, **__) -> None:
+        published_events.append((topic, payload))
+
+    monkeypatch.setattr(runtime_orchestrator.event_bus, "publish", capture_publish)
     monkeypatch.setattr(runtime_orchestrator.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(runtime_orchestrator.asyncio, "create_task", fake_create_task)
 
@@ -298,6 +304,20 @@ async def test_discovery_loop_respects_override(monkeypatch, request):
         runtime_orchestrator.DEFAULT_DISCOVERY_METHOD,
         "mempool",
     ]
+
+    token_events = [payload for topic, payload in published_events if topic == "token_discovered"]
+    assert len(token_events) >= 2
+    first_event, second_event = token_events[:2]
+    assert first_event == {
+        "tokens": [DummyDiscoveryAgent.token],
+        "metadata_refresh": False,
+        "changed_tokens": [],
+    }
+    assert second_event == {
+        "tokens": [DummyDiscoveryAgent.token],
+        "metadata_refresh": True,
+        "changed_tokens": [DummyDiscoveryAgent.token],
+    }
 
 
 @pytest.mark.anyio("asyncio")
