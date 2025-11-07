@@ -11,6 +11,33 @@ async def fake_stream(url, **_):
     yield {"address": "tok", "score": 12.0}
 
 
+def test_discover_tokens_trims_and_deduplicates(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    async def fake_discover_once(self, *, method, offline, token_file):
+        return [
+            "  MintA11111111111111111111111111111111111111  ",
+            "\nMintA11111111111111111111111111111111111111\n",
+            "MintB22222222222222222222222222222222222222 ",
+            "   ",
+        ], {}
+
+    monkeypatch.setattr(discovery_mod, "_CACHE", {})
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "120")
+
+    agent = DiscoveryAgent()
+
+    tokens = asyncio.run(agent.discover_tokens())
+
+    assert tokens == [
+        "MintA11111111111111111111111111111111111111",
+        "MintB22222222222222222222222222222222222222",
+    ]
+    assert agent.last_tokens == tokens
+    assert discovery_mod._CACHE["tokens"] == tokens
+
+
 def test_stream_mempool_events(monkeypatch):
     monkeypatch.setattr(
         "solhunter_zero.agents.discovery.stream_ranked_mempool_tokens_with_depth",
