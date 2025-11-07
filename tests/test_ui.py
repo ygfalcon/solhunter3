@@ -290,6 +290,26 @@ def test_shutdown_endpoint_rejects_non_loopback():
     assert resp.status_code == 403
 
 
+def test_discovery_update_requires_loopback_remote():
+    state = ui.UIState()
+    app = ui.create_app(state)
+    client = app.test_client()
+
+    resp = client.post(
+        "/discovery",
+        json={"method": "mempool"},
+        environ_overrides={"REMOTE_ADDR": "203.0.113.5"},
+    )
+    assert resp.status_code == 403
+
+    resp = client.post(
+        "/discovery",
+        json={"method": "mempool"},
+        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert resp.status_code == 200
+
+
 
 def test_ensure_active_keypair_selects_single(monkeypatch):
     monkeypatch.setattr(ui.wallet, "get_active_keypair_name", lambda: None)
