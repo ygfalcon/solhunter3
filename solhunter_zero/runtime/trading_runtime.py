@@ -379,9 +379,12 @@ class TradingRuntime:
         if cfg_path is not None:
             self.config_path = cfg_path
 
-        offline_mode, dry_run_mode, live_discovery_override, testnet_mode = (
-            self._determine_startup_modes(self.config_path)
-        )
+        config_data, (
+            offline_mode,
+            dry_run_mode,
+            live_discovery_override,
+            testnet_mode,
+        ) = self._determine_startup_modes(self.config_path)
         self._startup_modes = (
             bool(offline_mode),
             bool(dry_run_mode),
@@ -394,6 +397,7 @@ class TradingRuntime:
             offline=self._startup_modes[0],
             dry_run=self._startup_modes[1],
             testnet=self._startup_modes[3],
+            preloaded_config=config_data,
         )
 
         self.cfg = cfg
@@ -438,7 +442,7 @@ class TradingRuntime:
 
     def _determine_startup_modes(
         self, cfg_path: Optional[str]
-    ) -> tuple[bool, bool, Optional[bool], bool]:
+    ) -> tuple[Mapping[str, Any], tuple[bool, bool, Optional[bool], bool]]:
         config_data: Mapping[str, Any]
         if cfg_path is not None:
             config_data = apply_env_overrides(load_config(cfg_path))
@@ -447,7 +451,7 @@ class TradingRuntime:
                 config_data = apply_env_overrides(load_config(None))
             except FileNotFoundError:
                 config_data = {}
-        return self._evaluate_mode_choices(config_data)
+        return config_data, self._evaluate_mode_choices(config_data)
 
     def _evaluate_mode_choices(
         self, config: Mapping[str, Any]
