@@ -717,3 +717,34 @@ async def test_stop_all_idempotent_after_partial_start(monkeypatch):
 
     await orchestrator.stop_all()
     assert dummy_bus.stop_calls == 1
+
+
+def test_main_returns_after_stop(monkeypatch):
+    monkeypatch.setenv("NEW_RUNTIME", "1")
+    runtime_orchestrator = importlib.reload(
+        importlib.import_module("solhunter_zero.runtime.orchestrator")
+    )
+
+    started = False
+    stopped = False
+
+    original_stop_all = runtime_orchestrator.RuntimeOrchestrator.stop_all
+
+    async def fake_start(self):
+        nonlocal started
+        started = True
+        asyncio.create_task(self.stop_all())
+        await asyncio.sleep(0)
+
+    async def fake_stop_all(self):
+        nonlocal stopped
+        await original_stop_all(self)
+        stopped = True
+
+    monkeypatch.setattr(runtime_orchestrator.RuntimeOrchestrator, "start", fake_start)
+    monkeypatch.setattr(runtime_orchestrator.RuntimeOrchestrator, "stop_all", fake_stop_all)
+
+    runtime_orchestrator.main([])
+
+    assert started is True
+    assert stopped is True
