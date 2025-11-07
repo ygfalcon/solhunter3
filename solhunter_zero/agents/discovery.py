@@ -81,32 +81,73 @@ class DiscoveryAgent:
     """Token discovery orchestrator supporting multiple discovery methods."""
 
     def __init__(self) -> None:
-        rpc_env = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
-        os.environ.setdefault("SOLANA_RPC_URL", rpc_env)
-        self.rpc_url = rpc_env
-
-        ws_env = self._resolve_ws_url()
-        ws_resolved = self._as_websocket_url(ws_env) or DEFAULT_SOLANA_WS
-        os.environ.setdefault("SOLANA_WS_URL", ws_resolved)
-        self.ws_url = ws_resolved
-        self.birdeye_api_key = os.getenv(
-            "BIRDEYE_API_KEY",
-            "b1e60d72780940d1bd929b9b2e9225e6",
-        )
-        if not self.birdeye_api_key:
-            logger.warning(
-                "BIRDEYE_API_KEY missing; discovery will fall back to static tokens"
-            )
+        self.rpc_url = DEFAULT_SOLANA_RPC
+        self.ws_url = DEFAULT_SOLANA_WS
+        self.birdeye_api_key = ""
         self.limit = int(os.getenv("DISCOVERY_LIMIT", "60") or 60)
         self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
         self.max_attempts = max(1, int(os.getenv("TOKEN_DISCOVERY_RETRIES", "2") or 2))
         self.mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
-        env_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
-        self.default_method = env_method or DEFAULT_DISCOVERY_METHOD
+        self.default_method = DEFAULT_DISCOVERY_METHOD
+        self._warned_missing_birdeye = False
         self.last_details: Dict[str, Dict[str, Any]] = {}
         self.last_tokens: List[str] = []
         self.last_method: str | None = None
+
+        self.refresh_settings()
+
+    def refresh_settings(self) -> None:
+        """Refresh environment-derived settings like RPC, WS, and API keys."""
+
+        previous_rpc = getattr(self, "rpc_url", None)
+        previous_ws = getattr(self, "ws_url", None)
+        previous_api_key = getattr(self, "birdeye_api_key", None)
+        previous_method = getattr(self, "default_method", None)
+
+        rpc_env = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
+        os.environ.setdefault("SOLANA_RPC_URL", rpc_env)
+        self.rpc_url = rpc_env
+
+        ws_resolved = self._resolve_ws_url() or DEFAULT_SOLANA_WS
+        if ws_resolved:
+            os.environ.setdefault("SOLANA_WS_URL", ws_resolved)
+        self.ws_url = ws_resolved
+
+        api_key = os.getenv(
+            "BIRDEYE_API_KEY",
+            "b1e60d72780940d1bd929b9b2e9225e6",
+        )
+        if not api_key:
+            if not self._warned_missing_birdeye:
+                logger.warning(
+                    "BIRDEYE_API_KEY missing; discovery will fall back to static tokens"
+                )
+            self._warned_missing_birdeye = True
+        else:
+            self._warned_missing_birdeye = False
+        self.birdeye_api_key = api_key
+
+        env_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
+        self.default_method = env_method or DEFAULT_DISCOVERY_METHOD
+
+        if (
+            self.rpc_url != previous_rpc
+            or self.ws_url != previous_ws
+            or self.birdeye_api_key != previous_api_key
+            or self.default_method != previous_method
+        ):
+            _CACHE.clear()
+            _CACHE.update(
+                {
+                    "tokens": [],
+                    "ts": 0.0,
+                    "limit": 0,
+                    "method": "",
+                    "token_file": None,
+                    "token_file_mtime": None,
+                }
+            )
 
     # ------------------------------------------------------------------
     # Public helpers

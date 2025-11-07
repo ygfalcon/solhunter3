@@ -283,3 +283,61 @@ async def test_metadata_merges_trending_and_details(monkeypatch):
     assert metadata["detail_sources"] == ["trending", "mempool"]
 
     monkeypatch.delitem(discovery_mod.TRENDING_METADATA, token, raising=False)
+
+
+@pytest.mark.anyio
+async def test_fetch_refreshes_agent_when_rpc_env_changes(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    monkeypatch.setenv("SOLANA_RPC_URL", "https://rpc.initial")
+
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    seen_urls: list[str] = []
+
+    async def fake_discover(self, **_: object) -> list[str]:
+        seen_urls.append(self.rpc_url)
+        self.last_details = {}
+        return ["tok"]
+
+    monkeypatch.setattr(discovery_mod.DiscoveryAgent, "discover_tokens", fake_discover)
+
+    tokens, details = await service._fetch()
+    assert tokens == ["tok"]
+    assert details == {}
+    assert seen_urls[-1] == "https://rpc.initial"
+
+    monkeypatch.setenv("SOLANA_RPC_URL", "https://rpc.updated")
+
+    tokens, details = await service._fetch()
+    assert tokens == ["tok"]
+    assert details == {}
+    assert seen_urls[-1] == "https://rpc.updated"
+
+
+@pytest.mark.anyio
+async def test_fetch_refreshes_agent_when_method_env_changes(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    monkeypatch.setenv("DISCOVERY_METHOD", "helius")
+
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    seen_methods: list[str] = []
+
+    async def fake_discover(self, **_: object) -> list[str]:
+        seen_methods.append(self.default_method)
+        self.last_details = {}
+        return ["tok"]
+
+    monkeypatch.setattr(discovery_mod.DiscoveryAgent, "discover_tokens", fake_discover)
+
+    tokens, details = await service._fetch()
+    assert tokens == ["tok"]
+    assert details == {}
+    assert seen_methods[-1] == "helius"
+
+    monkeypatch.setenv("DISCOVERY_METHOD", "mempool")
+
+    tokens, details = await service._fetch()
+    assert tokens == ["tok"]
+    assert details == {}
+    assert seen_methods[-1] == "mempool"
