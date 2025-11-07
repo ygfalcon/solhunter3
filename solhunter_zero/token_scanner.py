@@ -647,7 +647,7 @@ async def scan_tokens_async(
                     "address": mint,
                     "source": "static",
                     "sources": ["static"],
-                    "rank": len(TRENDING_METADATA),
+                    "rank": len(TRENDING_METADATA) + 1,
                 },
             )
         return fallback[:requested]
@@ -762,7 +762,7 @@ async def scan_tokens_async(
                     "address": mint,
                     "source": "birdeye",
                     "sources": ["birdeye"],
-                    "rank": len(TRENDING_METADATA),
+                    "rank": len(TRENDING_METADATA) + 1,
                 }
                 success = True
             offset += len(batch)
