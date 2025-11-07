@@ -58,6 +58,11 @@ This repo now has a single, obvious entry for the new, event‑driven runtime.
   - `python -m solhunter_zero.primary_entry_point --config configs/live_recommended.toml`
   - Useful when the console script is unavailable (for example in editable installs).
 
+- Programmatic launches now respect the configuration picked in the UI. If
+  `solhunter_zero.config.select_config` (or the UI) has already marked an active
+  file before you start the runtime, the event-driven entry point automatically
+  reuses that selection instead of falling back to `config.toml`.
+
 - Top‑level marker for discoverability:
   - See `PRIMARY_ENTRYPOINT` (in repo root) for the exact command.
 

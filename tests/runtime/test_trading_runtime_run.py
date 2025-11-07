@@ -5,7 +5,37 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from solhunter_zero import config as config_module
 from solhunter_zero.runtime import trading_runtime
+
+
+def test_resolve_config_path_uses_selected_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(config_module, "CONFIG_DIR", str(tmp_path))
+    active_file = tmp_path / "active"
+    monkeypatch.setattr(config_module, "ACTIVE_CONFIG_FILE", str(active_file))
+    monkeypatch.setattr(config_module, "_publish", lambda *_, **__: None)
+    monkeypatch.setattr(config_module, "_ACTIVE_CONFIG", {})
+
+    cfg_file = tmp_path / "demo.toml"
+    cfg_file.write_text(
+        "\n".join(
+            [
+                'solana_rpc_url = "https://example.com"',
+                'dex_base_url = "https://example.com"',
+                'agents = ["sim"]',
+                "[agent_weights]",
+                "sim = 1.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config_module.select_config("demo.toml")
+
+    runtime = trading_runtime.TradingRuntime()
+    resolved = runtime._resolve_config_path()
+
+    assert resolved == str(cfg_file.resolve())
 
 
 @pytest.fixture
