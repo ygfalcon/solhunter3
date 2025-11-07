@@ -6,6 +6,7 @@ import os
 import time
 from typing import Any, Dict, Iterable, Optional
 
+from .. import discovery_state
 from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
 from .types import TokenCandidate
@@ -90,6 +91,7 @@ class DiscoveryService:
             startup_clones = 5
         self.startup_clones = max(1, int(startup_clones))
         self._agent = DiscoveryAgent()
+        self._settings_snapshot = self._capture_agent_settings()
         self._last_tokens: list[str] = []
         self._last_details: Dict[str, Dict[str, Any]] = {}
         self._last_fetch_ts: float = 0.0
@@ -136,6 +138,7 @@ class DiscoveryService:
     async def _fetch(
         self, *, agent: DiscoveryAgent | None = None
     ) -> tuple[list[str], Dict[str, Dict[str, Any]]]:
+        self._sync_agent_settings()
         now = time.time()
         if now < self._cooldown_until:
             remaining = self._cooldown_until - now
@@ -167,6 +170,29 @@ class DiscoveryService:
         self._apply_fetch_stats(tokens, fetch_ts)
         self._last_details = dict(details)
         return list(tokens), details
+
+    def _capture_agent_settings(self) -> Dict[str, Optional[str]]:
+        keys = (
+            "SOLANA_RPC_URL",
+            "SOLANA_WS_URL",
+            "BIRDEYE_API_KEY",
+            "DISCOVERY_METHOD",
+        )
+        snapshot: Dict[str, Optional[str]] = {key: os.getenv(key) for key in keys}
+        try:
+            snapshot["override"] = discovery_state.get_override()
+        except Exception:  # pragma: no cover - defensive guard
+            snapshot["override"] = None
+        return snapshot
+
+    def _sync_agent_settings(self) -> None:
+        current = self._capture_agent_settings()
+        if current != getattr(self, "_settings_snapshot", {}):
+            refresher = getattr(self._agent, "refresh_settings", None)
+            if callable(refresher):
+                refresher()
+            self._settings_snapshot = self._capture_agent_settings()
+            self._cooldown_until = 0.0
 
     def _build_candidates(
         self,
