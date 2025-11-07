@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
 import math
 import os
@@ -33,7 +35,7 @@ class EvaluationService:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
         self.cache_ttl = max(0.0, cache_ttl)
-        self._cache: Dict[str, tuple[float, tuple[str, int, str], EvaluationResult]] = {}
+        self._cache: Dict[str, tuple[float, tuple[str, int, str, str, str], EvaluationResult]] = {}
         self._stopped = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._worker_tasks: list[asyncio.Task] = []
@@ -124,7 +126,13 @@ class EvaluationService:
         candidate_metadata = scored.candidate.metadata or {}
         price = self._extract_price(candidate_metadata)
         price_band = self._price_band(price)
-        signature = self._cache_signature(scored.score, scored.rank, price_band)
+        signature = self._cache_signature(
+            scored.score,
+            scored.rank,
+            price_band,
+            scored.candidate.discovered_at,
+            candidate_metadata,
+        )
 
         cached = self._cache.get(scored.token)
         if cached and (now - cached[0]) < self.cache_ttl and cached[1] == signature:
@@ -214,8 +222,51 @@ class EvaluationService:
         bucket = round(score / 0.05) * 0.05
         return f"{bucket:.2f}"
 
-    def _cache_signature(self, score: float, rank: int, price_band: str) -> tuple[str, int, str]:
-        return (self._score_band(score), int(rank), price_band)
+    def _cache_signature(
+        self,
+        score: float,
+        rank: int,
+        price_band: str,
+        discovered_at: float | None,
+        metadata: Dict[str, Any],
+    ) -> tuple[str, int, str, str, str]:
+        return (
+            self._score_band(score),
+            int(rank),
+            price_band,
+            self._discovered_signature(discovered_at),
+            self._metadata_signature(metadata),
+        )
+
+    @staticmethod
+    def _discovered_signature(value: float | None) -> str:
+        try:
+            if value is None:
+                return "none"
+            return f"{float(value):.3f}"
+        except (TypeError, ValueError):
+            return "none"
+
+    def _metadata_signature(self, metadata: Dict[str, Any]) -> str:
+        if not metadata:
+            return "empty"
+        normalised = self._normalise_metadata(metadata)
+        payload = json.dumps(normalised, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+    def _normalise_metadata(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): self._normalise_metadata(val)
+                for key, val in sorted(value.items(), key=lambda item: str(item[0]))
+            }
+        if isinstance(value, (list, tuple)):
+            return [self._normalise_metadata(item) for item in value]
+        if isinstance(value, set):
+            return sorted(self._normalise_metadata(item) for item in value)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
 
     def _parse_threshold(self, env_key: str) -> float:
         value = self._coerce_float(os.getenv(env_key, "0"))

@@ -26,12 +26,23 @@ def anyio_backend():
     return "asyncio"
 
 
-def _scored(token: str, score: float, rank: int, price: float) -> ScoredToken:
+def _scored(
+    token: str,
+    score: float,
+    rank: int,
+    price: float,
+    *,
+    discovered_at: float = 0.0,
+    metadata: dict | None = None,
+) -> ScoredToken:
+    payload = {"price": price}
+    if metadata:
+        payload.update(metadata)
     candidate = TokenCandidate(
         token=token,
         source="discovery",
-        discovered_at=0.0,
-        metadata={"price": price},
+        discovered_at=discovered_at,
+        metadata=payload,
     )
     return ScoredToken(token=token, score=score, rank=rank, candidate=candidate)
 
@@ -76,3 +87,25 @@ async def test_evaluation_cache_busts_when_score_band_changes():
     assert not refreshed.cached
     assert refreshed.metadata["score"] == pytest.approx(0.96)
     assert refreshed.metadata["price_band"] == "1e-1"
+
+
+@pytest.mark.anyio
+async def test_evaluation_cache_busts_when_metadata_changes():
+    agent = _CountingAgent()
+    service = EvaluationService(
+        asyncio.Queue(),
+        asyncio.Queue(),
+        agent,
+        Portfolio(path=None),
+        cache_ttl=30.0,
+    )
+
+    await service._evaluate_token(
+        _scored("TokenZ", 0.82, 9, 2.5, metadata={"volume": 123, "sources": ["a"]})
+    )
+    refreshed = await service._evaluate_token(
+        _scored("TokenZ", 0.82, 9, 2.5, metadata={"volume": 456, "sources": ["a"]})
+    )
+
+    assert agent.calls == 2
+    assert not refreshed.cached
