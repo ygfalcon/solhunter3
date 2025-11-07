@@ -66,6 +66,7 @@ zstandard = ["zstandard"]
 ray = ["ray[rllib]"]
 
 [project.scripts]
+start_live = "solhunter_zero.cli.start_live:main"
 solhunter-wallet = "solhunter_zero.wallet_cli:main"
 solhunter-backtest = "solhunter_zero.backtest_cli:main"
 solhunter-train = "solhunter_zero.train_cli:main"
