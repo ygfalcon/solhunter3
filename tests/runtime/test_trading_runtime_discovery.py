@@ -34,7 +34,11 @@ async def test_discovery_post_updates_method_without_restart(monkeypatch):
         method = kwargs.get("discovery_method")
         captured_methods.append(method)
         if len(captured_methods) == 1:
-            response = client.post("/discovery", json={"method": "websocket"})
+            response = client.post(
+                "/discovery",
+                json={"method": "websocket"},
+                environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+            )
             assert response.status_code == 200
         else:
             runtime.stop_event.set()

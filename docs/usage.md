@@ -19,6 +19,10 @@ sections and scroll positions stay put instead of flickering on each update. The
 expanded/collapsed state across refreshes using session storage, letting you keep frequently used panels open while watching live
 data.
 
+Administrative POST actions, such as updating the discovery method via `/discovery`, must originate from a loopback address. If a
+reverse proxy or remote automation needs to reach these endpoints it should relay requests locally or add its own authentication
+layer before forwarding them to the UI server.
+
 ## Investor Demo
 
 Run a small rolling backtest and generate lightweight reports:

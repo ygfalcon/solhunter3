@@ -2869,6 +2869,9 @@ def create_app(
 
     @app.post("/discovery")
     def update_discovery() -> Any:
+        if not _is_trusted_remote(request.remote_addr):
+            return jsonify({"error": "forbidden"}), 403
+
         payload = request.get_json(silent=True) or {}
         raw_method = payload.get("method")
         if not isinstance(raw_method, str) or not raw_method.strip():
