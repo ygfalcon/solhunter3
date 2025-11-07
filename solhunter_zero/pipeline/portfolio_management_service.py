@@ -44,8 +44,18 @@ class PortfolioManagementService:
         self._worker_limit = max(5, int(chosen))
 
     async def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._run(), name="portfolio_management_service")
+        if self._task is not None and self._task.done():
+            self._task = None
+        if self._ticker_task is not None and self._ticker_task.done():
+            self._ticker_task = None
+        if self._task is not None and not self._task.done():
+            if self._ticker_task is None:
+                self._ticker_task = asyncio.create_task(
+                    self._ticker_loop(), name="portfolio_ticker"
+                )
+            return
+        self._stopped.clear()
+        self._task = asyncio.create_task(self._run(), name="portfolio_management_service")
         if self._ticker_task is None:
             self._ticker_task = asyncio.create_task(self._ticker_loop(), name="portfolio_ticker")
 
