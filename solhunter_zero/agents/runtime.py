@@ -39,12 +39,16 @@ class AgentRuntime:
         self._running = False
         self._tokens: set[str] = set()
         self._ewma: dict[str, float] = {}
+        self._token_handler: Callable[[Any], None] | None = None
+        self._price_handler: Callable[[Any], None] | None = None
 
     async def start(self) -> None:
         self._running = True
         # Subscribe to token discovery and price updates for decision generation
-        event_bus.subscribe("token_discovered", self._on_tokens)
-        event_bus.subscribe("price_update", self._on_price)
+        self._token_handler = self._on_tokens
+        self._price_handler = self._on_price
+        event_bus.subscribe("token_discovered", self._token_handler)
+        event_bus.subscribe("price_update", self._price_handler)
         # Immediately evaluate existing positions or recently priced tokens so
         # strategies can react without waiting for an external discovery event.
         tokens_to_prime: set[str] = set()
@@ -67,6 +71,23 @@ class AgentRuntime:
 
     def stop(self) -> None:
         self._running = False
+        if self._token_handler is not None:
+            try:
+                event_bus.unsubscribe("token_discovered", self._token_handler)
+            except Exception:
+                pass
+            finally:
+                self._token_handler = None
+        if self._price_handler is not None:
+            try:
+                event_bus.unsubscribe("price_update", self._price_handler)
+            except Exception:
+                pass
+            finally:
+                self._price_handler = None
+        for task in list(self._tasks):
+            task.cancel()
+        self._tasks.clear()
 
     def _emit(self, p: Proposal) -> None:
         try:
