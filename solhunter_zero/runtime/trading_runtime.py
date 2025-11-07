@@ -1513,19 +1513,30 @@ class TradingRuntime:
 
     async def _pipeline_telemetry_poller(self) -> None:
         index = 0
+        pipeline_identity: Optional[int] = None
         while not self.stop_event.is_set():
-            if not self.pipeline:
+            pipeline = self.pipeline
+            if not pipeline:
                 break
+            current_identity = id(pipeline)
+            if pipeline_identity != current_identity:
+                pipeline_identity = current_identity
+                index = 0
             try:
-                samples = await self.pipeline.snapshot_telemetry()
+                samples = await pipeline.snapshot_telemetry()
             except Exception:
                 samples = []
+            if len(samples) < index:
+                index = 0
             if samples and index < len(samples):
                 for sample in samples[index:]:
                     entry = {
                         "topic": "pipeline",
                         "payload": sample,
-                        "timestamp": datetime.utcfromtimestamp(sample.get("timestamp", time.time())).isoformat() + "Z",
+                        "timestamp": datetime.utcfromtimestamp(
+                            sample.get("timestamp", time.time())
+                        ).isoformat()
+                        + "Z",
                     }
                     self._append_ui_log(entry)
                 index = len(samples)
