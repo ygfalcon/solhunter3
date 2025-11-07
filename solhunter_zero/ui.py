@@ -34,7 +34,7 @@ import subprocess
 import threading
 from queue import Empty, Queue
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from flask import (
     Flask,
@@ -3051,13 +3051,21 @@ def create_app(
 
     @app.get("/discovery")
     def discovery_settings() -> Any:
-        method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
-        if method is None:
-            method = DEFAULT_DISCOVERY_METHOD
+        config_snapshot = state.snapshot_config()
+        config_mapping: Mapping[str, Any] | None = None
+        if isinstance(config_snapshot, Mapping):
+            sanitized = config_snapshot.get("sanitized_config")
+            if isinstance(sanitized, Mapping):
+                config_mapping = sanitized
+            else:
+                config_mapping = config_snapshot
+        method = discovery_state.current_method(config=config_mapping)
+        override = discovery_state.get_override()
         return jsonify(
             {
                 "method": method,
                 "allowed_methods": sorted(DISCOVERY_METHODS),
+                "override": override,
             }
         )
 
