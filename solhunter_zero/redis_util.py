@@ -22,7 +22,9 @@ def _can_connect(host: str, port: int, timeout: float = 0.2) -> bool:
 def ensure_local_redis_if_needed(urls: Iterable[str] | None) -> None:
     """Start a local redis-server if any URL targets localhost and isn't reachable.
 
-    Best-effort; returns quickly when redis-server is missing or not needed.
+    Raises ``RuntimeError`` when redis-server cannot be launched or refuses to
+    accept connections after a short grace period. Callers should treat such
+    failures as fatal because they imply the broker cannot be reached.
     """
     if not urls:
         return
@@ -47,12 +49,31 @@ def ensure_local_redis_if_needed(urls: Iterable[str] | None) -> None:
         return
     try:
         # Silence output; rely on later ping attempts to confirm readiness
-        subprocess.Popen(["redis-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Wait briefly for startup
-        for _ in range(10):
-            if _can_connect(host, port):
-                return
-            time.sleep(0.3)
-    except Exception:
-        return
+        proc = subprocess.Popen(
+            ["redis-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError("redis-server executable not found on PATH") from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise RuntimeError(f"failed to launch redis-server: {exc}") from exc
+
+    # Wait briefly for startup
+    for _ in range(10):
+        if _can_connect(host, port):
+            return
+        time.sleep(0.3)
+
+    exit_code = None
+    try:
+        exit_code = proc.poll()
+    except Exception:  # pragma: no cover - defensive
+        exit_code = None
+    if exit_code is not None:
+        raise RuntimeError(
+            f"redis-server exited with code {exit_code} before accepting connections on {host}:{port}"
+        )
+
+    raise RuntimeError(
+        f"timed out waiting for redis-server to accept connections on {host}:{port}"
+    )
 

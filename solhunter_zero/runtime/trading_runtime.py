@@ -538,8 +538,12 @@ class TradingRuntime:
         broker_urls = get_broker_urls(self.cfg) if self.cfg else []
         try:
             ensure_local_redis_if_needed(broker_urls)
-        except Exception:
+        except Exception as exc:
+            message = f"failed to ensure local Redis broker: {exc}"
+            self.activity.add("broker", message, ok=False)
+            self.status.event_bus = False
             log.exception("Failed to ensure Redis broker")
+            raise
 
         ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
         event_bus_url = f"ws://127.0.0.1:{ws_port}"
