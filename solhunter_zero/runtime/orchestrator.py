@@ -80,6 +80,7 @@ class RuntimeOrchestrator:
         self._stopping = False
         self._executor_dry_run = dry_run
         self._executor_testnet = testnet
+        self._stopped_event = asyncio.Event()
 
     async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
         try:
@@ -439,6 +440,7 @@ class RuntimeOrchestrator:
         event_bus.subscribe("control", _ctl)
 
         # 1) UI, 2) Bus, 3) Agents
+        self._stopped_event.clear()
         try:
             await self.start_ui()
             await self.start_bus()
@@ -474,10 +476,13 @@ class RuntimeOrchestrator:
 
     async def stop_all(self) -> None:
         if self._stopping:
+            await self.wait_stopped()
             return
         if self._closed:
+            self._stopped_event.set()
             return
         self._stopping = True
+        self._stopped_event.clear()
         try:
             self._closed = True
             await self._publish_stage("runtime:stopping", True)
@@ -577,6 +582,10 @@ class RuntimeOrchestrator:
             await self._publish_stage("runtime:stopped", True)
         finally:
             self._stopping = False
+            self._stopped_event.set()
+
+    async def wait_stopped(self) -> None:
+        await self._stopped_event.wait()
 
 
 def _parse_cli(argv: list[str] | None = None) -> argparse.Namespace:
@@ -603,9 +612,11 @@ async def _amain(argv: list[str] | None = None) -> int:
             pass
 
     await orch.start()
-    # Keep process alive while trading loop runs
-    while True:
-        await asyncio.sleep(3600)
+    try:
+        await orch.wait_stopped()
+    except asyncio.CancelledError:
+        await orch.stop_all()
+        raise
 
 
 def main(argv: list[str] | None = None) -> None:
