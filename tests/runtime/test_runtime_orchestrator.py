@@ -80,6 +80,93 @@ async def test_start_agents_aborts_when_no_agents(monkeypatch, request):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_start_agents_classic_propagates_runtime_flags(monkeypatch, request):
+    monkeypatch.setenv("EVENT_DRIVEN", "0")
+    monkeypatch.setenv("SOLHUNTER_OFFLINE", "1")
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.setenv("TESTNET", "1")
+
+    ui_module = importlib.import_module("solhunter_zero.ui")
+    monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
+    monkeypatch.setattr(ui_module, "start_websockets", lambda: {}, raising=False)
+
+    runtime_orchestrator = importlib.reload(
+        importlib.import_module("solhunter_zero.runtime.orchestrator")
+    )
+    request.addfinalizer(lambda: importlib.reload(runtime_orchestrator))
+
+    async def fake_startup(*_: object, **__: object):
+        return (
+            {
+                "agents": True,
+                "loop_delay": 1,
+            },
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(runtime_orchestrator, "perform_startup_async", fake_startup)
+
+    class DummyMemory:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def start_writer(self) -> None:
+            pass
+
+    class DummyPortfolio:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.balances = {}
+            self.price_history = {}
+
+    class DummyAgentManager:
+        evolve_interval = 30
+        mutation_threshold = 0.0
+
+        def __init__(self) -> None:
+            self.agents = [types.SimpleNamespace(name="dummy")]
+
+        @classmethod
+        def from_config(cls, *_: object, **__: object) -> "DummyAgentManager":
+            return cls()
+
+        @classmethod
+        def from_default(cls) -> "DummyAgentManager":
+            return cls()
+
+        async def evolve(self, *_: object, **__: object) -> None:
+            pass
+
+        async def update_weights(self) -> None:
+            pass
+
+        def save_weights(self) -> None:
+            pass
+
+    monkeypatch.setattr(runtime_orchestrator, "Memory", DummyMemory)
+    monkeypatch.setattr(runtime_orchestrator, "Portfolio", DummyPortfolio)
+    monkeypatch.setattr(runtime_orchestrator, "TradingState", lambda: object())
+    monkeypatch.setattr(runtime_orchestrator, "AgentManager", DummyAgentManager)
+
+    captured: dict[str, object] = {}
+    loop_called = asyncio.Event()
+
+    async def fake_trading_loop(*_: object, **kwargs: object) -> None:
+        captured.update({k: kwargs.get(k) for k in ("testnet", "dry_run", "offline")})
+        loop_called.set()
+
+    monkeypatch.setattr(runtime_orchestrator, "_trading_loop", fake_trading_loop)
+
+    orchestrator = runtime_orchestrator.RuntimeOrchestrator(run_http=False)
+    assert await orchestrator.start_agents() is True
+
+    await asyncio.wait_for(loop_called.wait(), timeout=1.0)
+    assert captured == {"testnet": True, "dry_run": True, "offline": True}
+
+    await orchestrator.stop_all()
+
+
+@pytest.mark.anyio("asyncio")
 async def test_start_bus_reinitializes_after_local_bind(monkeypatch, request):
     ui_module = importlib.import_module("solhunter_zero.ui")
     monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
@@ -323,6 +410,139 @@ async def test_discovery_loop_respects_override(monkeypatch, request):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_start_agents_event_runtime_propagates_flags(monkeypatch, request):
+    monkeypatch.setenv("EVENT_DRIVEN", "1")
+    monkeypatch.setenv("SOLHUNTER_OFFLINE", "1")
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.setenv("TESTNET", "1")
+
+    ui_module = importlib.import_module("solhunter_zero.ui")
+    monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
+    monkeypatch.setattr(ui_module, "start_websockets", lambda: {}, raising=False)
+
+    runtime_orchestrator = importlib.reload(
+        importlib.import_module("solhunter_zero.runtime.orchestrator")
+    )
+    request.addfinalizer(lambda: importlib.reload(runtime_orchestrator))
+
+    async def fake_startup(*_: object, **__: object):
+        return (
+            {
+                "agents": True,
+                "loop_delay": 1,
+            },
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(runtime_orchestrator, "perform_startup_async", fake_startup)
+
+    class DummyMemory:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def start_writer(self) -> None:
+            pass
+
+    class DummyPortfolio:
+        def __init__(self, *_: object, **__: object) -> None:
+            self.balances = {}
+            self.price_history = {}
+
+        def record_prices(self, *_: object, **__: object) -> None:
+            pass
+
+    class DummyAgentManager:
+        evolve_interval = 30
+        mutation_threshold = 0.0
+
+        def __init__(self) -> None:
+            self.agents = [types.SimpleNamespace(name="dummy")]
+
+        @classmethod
+        def from_config(cls, *_: object, **__: object) -> "DummyAgentManager":
+            return cls()
+
+        @classmethod
+        def from_default(cls) -> "DummyAgentManager":
+            return cls()
+
+        async def evolve(self, *_: object, **__: object) -> None:
+            pass
+
+        async def update_weights(self) -> None:
+            pass
+
+        def save_weights(self) -> None:
+            pass
+
+    runtime_agents_runtime = importlib.import_module("solhunter_zero.agents.runtime")
+
+    class DummyAgentRuntime:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(runtime_agents_runtime, "AgentRuntime", DummyAgentRuntime, raising=False)
+
+    executor_flags: dict[str, object] = {}
+
+    class DummyTradeExecutor:
+        def __init__(self, *_: object, testnet: bool, dry_run: bool) -> None:
+            executor_flags["testnet"] = testnet
+            executor_flags["dry_run"] = dry_run
+
+        def start(self) -> None:
+            executor_flags["started"] = True
+
+    exec_service_module = importlib.import_module("solhunter_zero.exec_service")
+    monkeypatch.setattr(exec_service_module, "TradeExecutor", DummyTradeExecutor)
+
+    discovery_called = asyncio.Event()
+    discovery_offline_flags: list[bool] = []
+
+    class DummyDiscoveryAgent:
+        async def discover_tokens(
+            self,
+            *,
+            offline: bool = False,
+            token_file: str | None = None,
+            method: str | None = None,
+            use_cache: bool = True,
+        ) -> list[str]:
+            discovery_offline_flags.append(offline)
+            discovery_called.set()
+            return []
+
+    discovery_agent_module = importlib.import_module("solhunter_zero.agents.discovery")
+    monkeypatch.setattr(discovery_agent_module, "DiscoveryAgent", DummyDiscoveryAgent)
+
+    async def fake_init_rl_training(*_: object, **__: object) -> None:
+        return None
+
+    loop_module = importlib.import_module("solhunter_zero.loop")
+    monkeypatch.setattr(loop_module, "_init_rl_training", fake_init_rl_training)
+    monkeypatch.setattr(runtime_orchestrator, "Memory", DummyMemory)
+    monkeypatch.setattr(runtime_orchestrator, "Portfolio", DummyPortfolio)
+    monkeypatch.setattr(runtime_orchestrator, "TradingState", lambda: object())
+    monkeypatch.setattr(runtime_orchestrator, "AgentManager", DummyAgentManager)
+    monkeypatch.setattr(runtime_orchestrator.event_bus, "publish", lambda *_, **__: None)
+    monkeypatch.setattr(runtime_orchestrator.event_bus, "subscribe", lambda *_, **__: None)
+
+    orchestrator = runtime_orchestrator.RuntimeOrchestrator(run_http=False)
+    assert await orchestrator.start_agents() is True
+
+    await asyncio.wait_for(discovery_called.wait(), timeout=1.0)
+    assert discovery_offline_flags and discovery_offline_flags[0] is True
+    assert executor_flags == {"testnet": True, "dry_run": True, "started": True}
+
+    for task in list(orchestrator.handles.tasks or []):
+        task.cancel()
+
+
+@pytest.mark.anyio("asyncio")
 async def test_start_reaches_ready_when_depth_service_fails(monkeypatch, request):
     ui_module = importlib.import_module("solhunter_zero.ui")
     monkeypatch.setattr(ui_module, "create_app", lambda *_, **__: types.SimpleNamespace(), raising=False)
@@ -469,6 +689,7 @@ async def test_start_invokes_stop_all_on_stage_failure(monkeypatch):
 
     dummy_trading_runtime = types.ModuleType("solhunter_zero.runtime.trading_runtime")
     dummy_trading_runtime.TradingRuntime = type("TradingRuntime", (), {})
+    dummy_trading_runtime.DEPTH_PROCESS_SHUTDOWN_TIMEOUT = 0
     monkeypatch.setitem(
         sys.modules, "solhunter_zero.runtime.trading_runtime", dummy_trading_runtime
     )
@@ -545,6 +766,7 @@ async def test_start_invokes_metrics_aggregator(monkeypatch):
 
     dummy_trading_runtime = types.ModuleType("solhunter_zero.runtime.trading_runtime")
     dummy_trading_runtime.TradingRuntime = type("TradingRuntime", (), {})
+    dummy_trading_runtime.DEPTH_PROCESS_SHUTDOWN_TIMEOUT = 0
     monkeypatch.setitem(
         sys.modules, "solhunter_zero.runtime.trading_runtime", dummy_trading_runtime
     )

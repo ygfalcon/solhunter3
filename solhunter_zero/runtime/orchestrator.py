@@ -272,6 +272,39 @@ class RuntimeOrchestrator:
         elif tokens_cfg:
             arbitrage_tokens = list(tokens_cfg)
 
+        def _maybe_bool(value: Any) -> bool | None:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"1", "true", "yes", "on"}:
+                    return True
+                if lowered in {"0", "false", "no", "off"}:
+                    return False
+            try:
+                return bool(value)
+            except Exception:
+                return None
+
+        def _resolve_flag(override: bool | None, env_name: str, cfg_key: str) -> bool:
+            if override is not None:
+                return bool(override)
+            if os.getenv(env_name) is not None:
+                return parse_bool_env(env_name, False)
+            candidate: Any | None = None
+            if isinstance(cfg, dict):
+                candidate = cfg.get(cfg_key)
+            if candidate is None and isinstance(runtime_cfg, dict):
+                candidate = runtime_cfg.get(cfg_key)
+            maybe_val = _maybe_bool(candidate)
+            return bool(maybe_val) if maybe_val is not None else False
+
+        offline_mode = _resolve_flag(None, "SOLHUNTER_OFFLINE", "offline")
+        dry_run_mode = _resolve_flag(self._executor_dry_run, "DRY_RUN", "dry_run")
+        testnet_mode = _resolve_flag(self._executor_testnet, "TESTNET", "testnet")
+
         async def _run_classic():
             await _trading_loop(
                 cfg,
@@ -288,9 +321,9 @@ class RuntimeOrchestrator:
                 depth_freq_high=depth_freq_high,
                 depth_rate_limit=depth_rate_limit,
                 iterations=None,
-                testnet=False,
-                dry_run=False,
-                offline=False,
+                testnet=testnet_mode,
+                dry_run=dry_run_mode,
+                offline=offline_mode,
                 token_file=None,
                 discovery_method=discovery_method,
                 keypair=None,
@@ -326,43 +359,12 @@ class RuntimeOrchestrator:
 
         aruntime = AgentRuntime(active_manager, portfolio)
         await aruntime.start()
-        def _maybe_bool(value: Any) -> bool | None:
-            if value is None:
-                return None
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                lowered = value.strip().lower()
-                if lowered in {"1", "true", "yes", "on"}:
-                    return True
-                if lowered in {"0", "false", "no", "off"}:
-                    return False
-            try:
-                return bool(value)
-            except Exception:
-                return None
-
-        def _resolve_flag(override: bool | None, env_name: str, cfg_key: str) -> bool:
-            if override is not None:
-                return bool(override)
-            if os.getenv(env_name) is not None:
-                return parse_bool_env(env_name, False)
-            candidate: Any | None = None
-            if isinstance(cfg, dict):
-                candidate = cfg.get(cfg_key)
-            if candidate is None and isinstance(runtime_cfg, dict):
-                candidate = runtime_cfg.get(cfg_key)
-            maybe_val = _maybe_bool(candidate)
-            return bool(maybe_val) if maybe_val is not None else False
-
-        executor_dry_run = _resolve_flag(self._executor_dry_run, "DRY_RUN", "dry_run")
-        executor_testnet = _resolve_flag(self._executor_testnet, "TESTNET", "testnet")
 
         execu = TradeExecutor(
             memory,
             portfolio,
-            testnet=executor_testnet,
-            dry_run=executor_dry_run,
+            testnet=testnet_mode,
+            dry_run=dry_run_mode,
         )
         execu.start()
 
@@ -374,7 +376,7 @@ class RuntimeOrchestrator:
                     config=cfg, explicit=discovery_method
                 )
                 try:
-                    tokens = await agent.discover_tokens(method=method, offline=False)
+                    tokens = await agent.discover_tokens(method=method, offline=offline_mode)
                     if tokens:
                         seq = [str(token) for token in tokens if isinstance(token, str) and token]
                         if seq:
