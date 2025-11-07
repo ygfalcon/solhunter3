@@ -237,6 +237,43 @@ async def test_metadata_changes_emit_when_fresh(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_fetch_switches_method_when_override_changes(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(
+        queue,
+        interval=0.1,
+        cache_ttl=0.0,
+        empty_cache_ttl=0.0,
+        backoff_factor=1.0,
+    )
+
+    captured_methods: list[str | None] = []
+
+    async def fake_discover(self, **kwargs):
+        captured_methods.append(kwargs.get("method"))
+        self.last_details = {}
+        return []
+
+    monkeypatch.setattr(discovery_mod.DiscoveryAgent, "discover_tokens", fake_discover)
+
+    monkeypatch.setattr(
+        discovery_mod.discovery_state,
+        "current_method",
+        lambda **_: "helius",
+    )
+    await service._fetch()
+
+    monkeypatch.setattr(
+        discovery_mod.discovery_state,
+        "current_method",
+        lambda **_: "mempool",
+    )
+    await service._fetch()
+
+    assert captured_methods == ["helius", "mempool"]
+
+
+@pytest.mark.anyio
 async def test_metadata_merges_trending_and_details(monkeypatch):
     queue: asyncio.Queue = asyncio.Queue()
     service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)

@@ -1341,6 +1341,14 @@ class TradingRuntime:
         discovery_state.set_override(canonical)
         if previous == canonical:
             return
+        pipeline = self.pipeline
+        if pipeline is not None:
+            refresher = getattr(pipeline, "refresh_discovery", None)
+            if callable(refresher):
+                try:
+                    refresher()
+                except Exception:  # pragma: no cover - defensive logging
+                    log.exception("Failed to refresh discovery service after method update")
         detail = f"method updated to {canonical}"
         self.activity.add("discovery", detail)
         try:
