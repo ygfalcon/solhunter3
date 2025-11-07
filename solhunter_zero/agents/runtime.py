@@ -38,18 +38,26 @@ class AgentRuntime:
         self._running = False
         self._tokens: set[str] = set()
         self._ewma: dict[str, float] = {}
+        self._subscriptions: list[Callable[[], None]] = []
 
     async def start(self) -> None:
         self._running = True
         # Subscribe to token discovery and price updates for decision generation
-        event_bus.subscribe("token_discovered", self._on_tokens)
-        event_bus.subscribe("price_update", self._on_price)
+        self._subscriptions.clear()
+        self._subscriptions.append(event_bus.subscribe("token_discovered", self._on_tokens))
+        self._subscriptions.append(event_bus.subscribe("price_update", self._on_price))
         # Start price backfill loop (optional)
         if os.getenv("PRICE_BACKFILL", "1").lower() in {"1", "true", "yes"}:
             self._tasks.append(asyncio.create_task(self._price_backfill_loop()))
 
     def stop(self) -> None:
         self._running = False
+        while self._subscriptions:
+            unsub = self._subscriptions.pop()
+            try:
+                unsub()
+            except Exception:
+                log.exception("failed to unsubscribe handler")
 
     def _emit(self, p: Proposal) -> None:
         try:
