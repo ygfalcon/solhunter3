@@ -3201,6 +3201,7 @@ class UIServer:
         self.app = create_app(state, shutdown_token=self._shutdown_token)
         self._thread: Optional[threading.Thread] = None
         self._server: Optional["BaseWSGIServer"] = None
+        self._user_visible_host: Optional[str] = None
         if startup_probe is None:
             self._startup_probe_enabled = parse_bool_env("UI_STARTUP_PROBE", True)
         else:
@@ -3310,11 +3311,15 @@ class UIServer:
         self.port = int(server.server_port)
 
         resolved_host = self.resolved_host
-        requested_host = (self.host or "").strip()
+        configured_host = self.configured_host
+        user_host = self._determine_user_visible_host(
+            configured_host=configured_host, resolved_host=resolved_host
+        )
 
         os.environ["UI_PORT"] = str(self.port)
         os.environ["PORT"] = str(self.port)
-        os.environ["UI_HOST"] = requested_host or resolved_host
+        os.environ["UI_HOST"] = user_host
+        self._user_visible_host = user_host
 
         startup_event = threading.Event()
         exception_queue: Queue[BaseException] = Queue(maxsize=1)
@@ -3427,6 +3432,37 @@ class UIServer:
         """Return a loopback host suitable for local access/activity messages."""
 
         return self._resolve_shutdown_host()
+
+    @property
+    def configured_host(self) -> Optional[str]:
+        host = (self.host or "").strip()
+        return host or None
+
+    @property
+    def user_visible_host(self) -> str:
+        configured_host = self.configured_host
+        resolved_host = self.resolved_host
+        if self._user_visible_host:
+            return self._user_visible_host
+        return self._determine_user_visible_host(
+            configured_host=configured_host, resolved_host=resolved_host
+        )
+
+    @staticmethod
+    def _determine_user_visible_host(
+        *, configured_host: Optional[str], resolved_host: str
+    ) -> str:
+        if configured_host and not UIServer._is_loopback_host(configured_host):
+            return configured_host
+        return resolved_host
+
+    @staticmethod
+    def _is_loopback_host(host: str) -> bool:
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return host.lower() == "localhost"
+        return ip.is_loopback
 
     @staticmethod
     def _format_host_for_url(host: str) -> str:

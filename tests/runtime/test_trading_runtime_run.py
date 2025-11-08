@@ -174,7 +174,7 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
                 and entry["detail"]
                 == (
                     "http://"
-                    f"{runtime.ui_server._format_host_for_url(runtime.ui_server.resolved_host)}"
+                    f"{runtime.ui_server._format_host_for_url(runtime.ui_server.user_visible_host)}"
                     f":{runtime.ui_port}"
                 )
                 for entry in entries
@@ -211,11 +211,13 @@ async def test_trading_runtime_config_reports_live_port_after_fallback(monkeypat
             config_snapshot = runtime.ui_state.snapshot_config()
 
             assert config_snapshot["ui_port"] == runtime.ui_port
-            assert config_snapshot["ui_host"] == runtime.ui_server.resolved_host
+            assert config_snapshot["ui_host"] == runtime.ui_host
+            assert config_snapshot["resolved_ui_host"] == runtime.ui_server.resolved_host
 
             sanitized = config_snapshot["sanitized_config"]
             assert sanitized["ui_port"] == runtime.ui_port
-            assert sanitized["ui_host"] == runtime.ui_server.resolved_host
+            assert sanitized["ui_host"] == runtime.ui_host
+            assert sanitized["resolved_ui_host"] == runtime.ui_server.resolved_host
         finally:
             runtime.ui_server.stop()
     finally:
@@ -266,7 +268,7 @@ async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
                 and entry["detail"]
                 == (
                     "http://"
-                    f"{runtime.ui_server._format_host_for_url(runtime.ui_server.resolved_host)}"
+                    f"{runtime.ui_server._format_host_for_url(runtime.ui_server.user_visible_host)}"
                     f":{fallback_hint_port}"
                 )
                 for entry in entries
@@ -290,7 +292,7 @@ async def test_trading_runtime_start_ui_formats_unspecified_host(monkeypatch):
     try:
         assert runtime.ui_server is not None
         entries = runtime.activity.snapshot()
-        expected_detail = f"http://127.0.0.1:{runtime.ui_port}"
+        expected_detail = f"http://{runtime.ui_host}:{runtime.ui_port}"
         assert any(
             entry["stage"] == "ui"
             and entry["ok"] is True
@@ -322,10 +324,12 @@ async def test_trading_runtime_config_preserves_requested_bind_host(monkeypatch)
         assert config_snapshot["ui_host"] == "0.0.0.0"
         assert config_snapshot["bind_host"] == "0.0.0.0"
         assert config_snapshot["local_access_host"] == resolved_host
+        assert config_snapshot["resolved_ui_host"] == resolved_host
 
         sanitized = config_snapshot["sanitized_config"]
         assert sanitized["ui_host"] == "0.0.0.0"
         assert sanitized["local_access_host"] == resolved_host
+        assert sanitized["resolved_ui_host"] == resolved_host
     finally:
         runtime.ui_server.stop()
 

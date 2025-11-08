@@ -882,7 +882,7 @@ class TradingRuntime:
             raise RuntimeError("UI server failed without an explicit error")
 
         self.ui_port = self.ui_server.port
-        activity_host = self.ui_server.resolved_host
+        activity_host = self.ui_server.user_visible_host
         formatted_host = self.ui_server._format_host_for_url(activity_host)
         if isinstance(self.cfg, dict):
             try:
@@ -1428,16 +1428,24 @@ class TradingRuntime:
                 continue
             sanitized[str(key)] = _serialize(value)
         resolved_host = None
+        configured_host = (self.ui_host or "").strip() or None
+        user_visible_host: Optional[str] = None
         if self.ui_server is not None:
             resolved_host = getattr(self.ui_server, "resolved_host", None)
-        bind_host = self.ui_host
+            configured_host = (
+                getattr(self.ui_server, "configured_host", None) or configured_host
+            )
+            user_visible_host = getattr(self.ui_server, "user_visible_host", None)
+        bind_host = configured_host or resolved_host
         local_access_host = None
         if resolved_host and resolved_host != bind_host:
             local_access_host = resolved_host
-        live_host = resolved_host or bind_host
+        live_host = user_visible_host or bind_host
         sanitized["ui_host"] = _serialize(bind_host)
         if local_access_host is not None:
             sanitized["local_access_host"] = _serialize(local_access_host)
+        if resolved_host is not None:
+            sanitized["resolved_ui_host"] = _serialize(resolved_host)
         sanitized["ui_port"] = _serialize(self.ui_port)
         env_summary: Dict[str, Optional[str]] = {}
         for env_key in (
@@ -1460,7 +1468,7 @@ class TradingRuntime:
         ui_port = self.ui_port
         formatted_host: Optional[str] = None
         if self.ui_server is not None:
-            host_for_url = resolved_host or live_host
+            host_for_url = user_visible_host or live_host
             if host_for_url is not None:
                 formatted_host = self.ui_server._format_host_for_url(host_for_url)
         return {
@@ -1479,6 +1487,7 @@ class TradingRuntime:
             "ui_port": ui_port,
             "bind_host": bind_host,
             "local_access_host": local_access_host,
+            "resolved_ui_host": resolved_host,
             "ui_url": f"http://{formatted_host}:{ui_port}" if formatted_host is not None and ui_port is not None else None,
             "sanitized_config": sanitized,
         }
