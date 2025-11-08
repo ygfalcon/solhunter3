@@ -77,3 +77,18 @@ def test_collect_discovery_includes_backoff(monkeypatch):
     )
     assert discovery["cooldown_expires_at"] == expected_expiry
     assert discovery["last_fetch_at"] == expected_last_fetch
+
+
+def test_collect_discovery_respects_recent_limit():
+    runtime = trading_runtime.TradingRuntime()
+    runtime._recent_tokens_limit = 5
+
+    with runtime._discovery_lock:
+        runtime._recent_tokens.clear()
+        for idx in range(10):
+            runtime._recent_tokens.appendleft(f"Token{idx}")
+
+    discovery = runtime._collect_discovery()
+
+    assert discovery["recent_count"] == 10
+    assert discovery["recent"] == [f"Token{idx}" for idx in range(9, 4, -1)]

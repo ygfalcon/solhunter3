@@ -190,6 +190,41 @@ def test_index_html_uses_recent_count_over_length():
     assert "Newest 120 tokens shown below." in html
 
 
+def test_dashboard_json_caps_discovery_recent_to_display_limit():
+    recent_tokens = [f"Token {i}" for i in range(200)]
+    state = ui.UIState(
+        discovery_provider=lambda: {
+            "recent": recent_tokens,
+            "recent_count": len(recent_tokens),
+        }
+    )
+    app = ui.create_app(state)
+    client = app.test_client()
+    payload = client.get("/?format=json").get_json()
+
+    assert payload["discovery"]["recent_count"] == len(recent_tokens)
+    assert len(payload["discovery"]["recent"]) == 120
+    assert payload["discovery"]["recent"][:5] == recent_tokens[:5]
+
+
+def test_dashboard_json_respects_configured_discovery_limit():
+    limit = 75
+    recent_tokens = [f"Token {i}" for i in range(limit)]
+    state = ui.UIState(
+        discovery_provider=lambda: {
+            "recent": recent_tokens,
+            "recent_count": len(recent_tokens),
+        }
+    )
+    app = ui.create_app(state)
+    client = app.test_client()
+    payload = client.get("/?format=json").get_json()
+
+    assert payload["discovery"]["recent_count"] == len(recent_tokens)
+    assert len(payload["discovery"]["recent"]) == limit
+    assert payload["discovery"]["recent"] == recent_tokens
+
+
 def test_index_html_shows_discovery_backoff():
     state = ui.UIState(
         discovery_provider=lambda: {
