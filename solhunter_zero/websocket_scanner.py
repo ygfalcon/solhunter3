@@ -42,6 +42,7 @@ from .scanner_common import (
     JUPITER_WS_URL,
     token_matches,
 )
+from .url_helpers import as_websocket_url
 
 
 
@@ -231,19 +232,10 @@ def _tokens_from_logs(
 
 
 def _to_ws_url(url: str) -> str:
-    if not url:
-        return url
-    trimmed = url.strip()
-    lowered = trimmed.lower()
-    if lowered.startswith("ws://") or lowered.startswith("wss://"):
-        return trimmed
-    if lowered.startswith("http://"):
-        return "ws://" + trimmed[7:]
-    if lowered.startswith("https://"):
-        return "wss://" + trimmed[8:]
-    if "://" not in trimmed:
-        return "wss://" + trimmed.lstrip("/")
-    return trimmed
+    resolved = as_websocket_url(url)
+    if resolved:
+        return resolved
+    return url
 
 
 class _WebsocketContext:

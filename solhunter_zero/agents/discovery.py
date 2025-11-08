@@ -25,6 +25,7 @@ from ..scanner_common import (
 from ..scanner_onchain import scan_tokens_onchain
 from ..schemas import RuntimeLog
 from ..news import fetch_token_mentions_async
+from ..url_helpers import as_websocket_url
 
 logger = logging.getLogger(__name__)
 
@@ -244,18 +245,7 @@ class DiscoveryAgent:
 
     @staticmethod
     def _as_websocket_url(url: Optional[str]) -> Optional[str]:
-        if not url:
-            return None
-        text = url.strip()
-        if not text:
-            return None
-        if text.startswith("wss://") or text.startswith("ws://"):
-            return text
-        if text.startswith("https://"):
-            return "wss://" + text[len("https://") :]
-        if text.startswith("http://"):
-            return "ws://" + text[len("http://") :]
-        return text
+        return as_websocket_url(url)
 
     # ------------------------------------------------------------------
     # Core discovery API
