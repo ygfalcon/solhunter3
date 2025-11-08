@@ -545,6 +545,7 @@ def _failing_status_snapshot() -> dict[str, object]:
 
 def test_uiserver_start_runs_health_probe_success(monkeypatch):
     monkeypatch.setenv("UI_STARTUP_PROBE", "1")
+    monkeypatch.delenv("UI_STARTUP_PROBE_RETRIES", raising=False)
     state = ui.UIState(status_provider=_healthy_status_snapshot)
     server = ui.UIServer(state, host="127.0.0.1", port=0)
     try:
@@ -556,6 +557,7 @@ def test_uiserver_start_runs_health_probe_success(monkeypatch):
 
 def test_uiserver_start_fails_when_health_probe_fails(monkeypatch):
     monkeypatch.setenv("UI_STARTUP_PROBE", "1")
+    monkeypatch.setenv("UI_STARTUP_PROBE_RETRIES", "0")
     state = ui.UIState(status_provider=_failing_status_snapshot)
     server = ui.UIServer(state, host="127.0.0.1", port=0)
 
@@ -577,3 +579,67 @@ def test_uiserver_start_probe_can_be_disabled(monkeypatch):
         assert server.port != 0
     finally:
         server.stop()
+
+
+def test_uiserver_start_probe_retries_transient_failure(monkeypatch):
+    monkeypatch.setenv("UI_STARTUP_PROBE", "1")
+    monkeypatch.setenv("UI_STARTUP_PROBE_RETRIES", "2")
+    state = ui.UIState(status_provider=_healthy_status_snapshot)
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+
+    original_urlopen = urllib.request.urlopen
+    attempts = {"count": 0}
+
+    def _flaky_urlopen(url, *args, **kwargs):
+        attempts["count"] += 1
+        actual_url = getattr(url, "full_url", url)
+        if (
+            attempts["count"] < 3
+            and isinstance(actual_url, str)
+            and actual_url.endswith("/health")
+        ):
+            raise urllib.error.URLError("not ready")
+        return original_urlopen(url, *args, **kwargs)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _flaky_urlopen)
+
+    try:
+        server.start()
+        assert attempts["count"] >= 3
+    finally:
+        server.stop()
+
+
+def test_uiserver_start_probe_respects_config_and_env(monkeypatch):
+    monkeypatch.setenv("UI_STARTUP_PROBE", "1")
+    monkeypatch.setenv("UI_STARTUP_PROBE_TIMEOUT", "3.5")
+    monkeypatch.setenv("UI_STARTUP_PROBE_RETRIES", "4")
+    monkeypatch.setenv("UI_STARTUP_PROBE_INITIAL_DELAY", "0.1")
+    monkeypatch.setenv("UI_STARTUP_PROBE_BACKOFF", "1.5")
+    monkeypatch.setenv("UI_STARTUP_PROBE_MAX_DELAY", "0.5")
+
+    def _config_provider():
+        return {
+            "ui": {
+                "startup_probe": {
+                    "timeout": 6.0,
+                    "retries": 6,
+                    "initial_delay": 0.3,
+                    "backoff": 3.0,
+                    "max_delay": 1.2,
+                }
+            }
+        }
+
+    state = ui.UIState(
+        status_provider=_healthy_status_snapshot,
+        config_provider=_config_provider,
+    )
+
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+
+    assert server._startup_probe_timeout == pytest.approx(3.5)
+    assert server._startup_probe_retries == 4
+    assert server._startup_probe_initial_delay == pytest.approx(0.1)
+    assert server._startup_probe_backoff == pytest.approx(1.5)
+    assert server._startup_probe_max_delay == pytest.approx(0.5)
