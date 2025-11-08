@@ -34,8 +34,9 @@ class FeedbackService:
                 log.warning("Invalid FEEDBACK_WORKERS=%r; ignoring", raw_env)
         chosen = workers if workers is not None else env_workers
         if chosen is None or chosen <= 0:
-            chosen = 5
-        self._worker_limit = max(5, int(chosen))
+            self._worker_limit = 5
+        else:
+            self._worker_limit = int(chosen)
         self._worker_tasks: list[asyncio.Task] = []
 
     async def put(self, item) -> None:
