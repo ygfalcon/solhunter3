@@ -377,6 +377,73 @@ async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_runtime_websockets_use_public_host(monkeypatch):
+    for key in (
+        "UI_HOST",
+        "UI_WS_HOST",
+        "UI_WS_URL",
+        "UI_EVENTS_WS",
+        "UI_EVENTS_WS_URL",
+        "UI_RL_WS",
+        "UI_RL_WS_URL",
+        "UI_LOGS_WS",
+        "UI_LOG_WS_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("UI_PUBLIC_HOST", "public.runtime.test")
+
+    captured: Dict[str, str | None] = {}
+
+    def _fake_start_websockets() -> dict[str, threading.Thread]:
+        captured["ui_host_env"] = os.getenv("UI_HOST")
+        captured["ui_ws_host_env"] = os.getenv("UI_WS_HOST")
+        base_host = captured["ui_host_env"] or "127.0.0.1"
+        os.environ["UI_EVENTS_WS_URL"] = f"ws://{base_host}:9100{ui_module._channel_path('events')}"
+        os.environ["UI_RL_WS_URL"] = f"ws://{base_host}:9101{ui_module._channel_path('rl')}"
+        os.environ["UI_LOG_WS_URL"] = f"ws://{base_host}:9102{ui_module._channel_path('logs')}"
+        return {}
+
+    monkeypatch.setattr(ui_module, "start_websockets", _fake_start_websockets)
+
+    class _DummyUIServer:
+        def __init__(self, _state, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.started = False
+
+    monkeypatch.setattr(runtime_module, "UIServer", _DummyUIServer)
+
+    runtime = TradingRuntime(ui_host="0.0.0.0", ui_port=6200)
+    assert os.getenv("UI_HOST") == "0.0.0.0"
+    assert os.getenv("UI_WS_HOST") == "0.0.0.0"
+
+    await runtime._start_ui()
+
+    ui_module.start_websockets()
+
+    assert captured["ui_host_env"] == "0.0.0.0"
+    assert captured["ui_ws_host_env"] == "0.0.0.0"
+
+    manifest = ui_module.build_ui_manifest(None)
+    assert manifest["events_ws"] == "ws://public.runtime.test:9100/ws/events"
+    assert manifest["rl_ws"] == "ws://public.runtime.test:9101/ws/rl"
+    assert manifest["logs_ws"] == "ws://public.runtime.test:9102/ws/logs"
+
+    for key in ("UI_WS_URL", "UI_EVENTS_WS_URL", "UI_RL_WS_URL", "UI_LOG_WS_URL"):
+        monkeypatch.delenv(key, raising=False)
+
+    if runtime.ui_server is not None:
+        runtime.ui_server.stop()
+
+
+@pytest.mark.anyio("asyncio")
 async def test_trading_runtime_starts_golden_pipeline_by_default(monkeypatch):
     runtime = TradingRuntime()
     runtime.config_path = "dummy-config.toml"
