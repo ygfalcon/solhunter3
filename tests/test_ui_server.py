@@ -32,3 +32,18 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         assert server._thread.is_alive()
     finally:
         server.stop()
+
+
+def test_ui_server_updates_port_after_bind() -> None:
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    server.start()
+    try:
+        assert server._server is not None
+        assert server.port != 0
+        bound_port = getattr(server._server, "server_port", None)
+        if isinstance(bound_port, int):
+            assert server.port == bound_port
+    finally:
+        server.stop()

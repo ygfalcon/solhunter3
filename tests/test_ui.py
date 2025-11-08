@@ -214,6 +214,19 @@ def test_manifest_ui_port_defaults(monkeypatch):
     assert manifest["ui_port"] == DEFAULT_UI_PORT
 
 
+def test_manifest_uses_active_ui_port(monkeypatch):
+    monkeypatch.delenv("UI_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+
+    server = ui.UIServer(ui.UIState(), host="127.0.0.1", port=0)
+    server.start()
+    try:
+        manifest = ui.build_ui_manifest()
+        assert manifest["ui_port"] == server.port
+    finally:
+        server.stop()
+
+
 def test_agent_events_without_mint(client):
     resp = client.get("/api/agents/events")
     assert resp.status_code == 200

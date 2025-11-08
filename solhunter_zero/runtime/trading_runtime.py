@@ -886,10 +886,14 @@ class TradingRuntime:
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
+        actual_port = self.ui_server.port
+        if actual_port is not None:
+            self.ui_port = actual_port
         threads = start_websockets()
         self._ui_ws_threads = threads
         self._ui_ws_started_here = bool(threads)
-        self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
+        ui_port = actual_port if actual_port is not None else self.ui_port
+        self.activity.add("ui", f"http://{self.ui_host}:{ui_port}")
 
     async def _start_agents(self) -> None:
         memory_path = self.cfg.get("memory_path", "sqlite:///memory.db")

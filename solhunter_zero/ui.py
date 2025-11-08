@@ -41,6 +41,8 @@ _UI_META_CACHE_TTL = 1.0
 _ui_meta_cache: tuple[float, Dict[str, Any]] | None = None
 _active_ui_state: "UIState" | None = None
 _ENV_BOOTSTRAPPED = False
+_ACTIVE_UI_SERVER_ID: int | None = None
+_ACTIVE_UI_PORT: int | None = None
 
 
 def _bootstrap_ui_environment() -> None:
@@ -64,6 +66,50 @@ def _set_active_ui_state(state: "UIState" | None) -> None:
 
 def _get_active_ui_state() -> "UIState" | None:
     return _active_ui_state
+
+
+def _register_active_ui_server(server: "UIServer", port: int | None) -> None:
+    global _ACTIVE_UI_SERVER_ID, _ACTIVE_UI_PORT
+    if port is None:
+        return
+    _ACTIVE_UI_SERVER_ID = id(server)
+    _ACTIVE_UI_PORT = int(port)
+
+
+def _clear_active_ui_server(server: "UIServer") -> None:
+    global _ACTIVE_UI_SERVER_ID, _ACTIVE_UI_PORT
+    if _ACTIVE_UI_SERVER_ID == id(server):
+        _ACTIVE_UI_SERVER_ID = None
+        _ACTIVE_UI_PORT = None
+
+
+def _get_active_ui_port() -> int | None:
+    return _ACTIVE_UI_PORT
+
+
+def _resolve_server_port(server: BaseWSGIServer) -> int | None:
+    port = getattr(server, "server_port", None)
+    if isinstance(port, int) and port > 0:
+        return port
+
+    sock = getattr(server, "socket", None)
+    if sock is None:
+        return None
+
+    try:
+        sockname = sock.getsockname()
+    except OSError:
+        return None
+
+    if isinstance(sockname, tuple) and len(sockname) >= 2:
+        candidate = sockname[1]
+        if isinstance(candidate, int) and candidate > 0:
+            return candidate
+
+    if isinstance(sockname, int) and sockname > 0:
+        return sockname
+
+    return None
 
 
 def _select_first_url(*candidates: Any) -> str | None:
@@ -1914,8 +1960,12 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
             manifest[f"{channel}_ws"] = None
             manifest[f"{channel}_ws_available"] = False
 
-    ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
-    manifest["ui_port"] = _parse_port(ui_port_value, DEFAULT_UI_PORT)
+    active_port = _get_active_ui_port()
+    if active_port is not None:
+        manifest["ui_port"] = int(active_port)
+    else:
+        ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
+        manifest["ui_port"] = _parse_port(ui_port_value, DEFAULT_UI_PORT)
     return manifest
 def _shutdown_state(state: _WebsocketState) -> None:
     loop = state.loop
@@ -3303,6 +3353,10 @@ class UIServer:
             raise
 
         server.daemon_threads = True
+        bound_port = _resolve_server_port(server)
+        if bound_port is not None:
+            self.port = int(bound_port)
+        _register_active_ui_server(self, bound_port)
         self._server = server
 
         def _serve() -> None:
@@ -3311,6 +3365,7 @@ class UIServer:
             except Exception:  # pragma: no cover - best effort logging
                 log.exception("UI server crashed")
             finally:
+                _clear_active_ui_server(self)
                 self._server = None
 
         self._thread = threading.Thread(target=_serve, daemon=True)
@@ -3327,6 +3382,7 @@ class UIServer:
             self._thread.join(timeout=2)
         self._thread = None
         self._server = None
+        _clear_active_ui_server(self)
         stop_websockets()
 
 
