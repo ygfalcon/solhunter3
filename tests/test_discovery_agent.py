@@ -136,7 +136,7 @@ def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
 
     async def run():
         with caplog.at_level("WARNING"):
-            return await agent.discover_tokens(offline=True)
+            return await agent.discover_tokens(offline=True, method="helius")
 
     tokens = asyncio.run(run())
     assert tokens == [VALID_MINT]
@@ -209,6 +209,38 @@ def test_discover_tokens_recovers_from_merge_exception(monkeypatch, caplog):
     assert tokens == [VALID_MINT]
     assert "Websocket merge failed" in caplog.text
     assert "Websocket merge yielded no tokens" in caplog.text
+
+
+def test_discover_tokens_offline_short_circuits(monkeypatch):
+    _reset_cache()
+
+    async def _should_not_run(*_a, **_k):  # pragma: no cover - defensive guard
+        raise AssertionError("network discovery should not be invoked when offline")
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.scan_tokens_async",
+        _should_not_run,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.merge_sources",
+        _should_not_run,
+    )
+
+    discovery_mod._CACHE.update(
+        {
+            "tokens": [VALID_MINT],
+            "ts": time.time(),
+            "limit": 10,
+            "method": "helius",
+        }
+    )
+
+    agent = DiscoveryAgent()
+
+    tokens = asyncio.run(agent.discover_tokens(offline=True))
+
+    assert tokens == [VALID_MINT]
+    assert agent.last_method == "offline"
 
 
 def test_collect_social_mentions(monkeypatch):

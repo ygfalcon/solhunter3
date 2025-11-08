@@ -228,8 +228,41 @@ class DiscoveryAgent:
         ttl = self.cache_ttl
         method_override = method is not None
         requested_method = resolve_discovery_method(method)
-        if requested_method is None and offline and not method_override:
-            requested_method = "helius"
+
+        def _finalise(
+            result_tokens: List[str],
+            result_details: Dict[str, Dict[str, Any]],
+            result_method: str,
+        ) -> List[str]:
+            self.last_tokens = result_tokens
+            self.last_details = result_details
+            self.last_method = result_method
+
+            detail = f"yield={len(result_tokens)}"
+            if self.limit:
+                detail = f"{detail}/{self.limit}"
+            detail = f"{detail} method={result_method}"
+            if self.limit and len(result_tokens) < self.limit:
+                detail = f"{detail} partial"
+            publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
+            logger.info(
+                "DiscoveryAgent yielded %d tokens via %s",
+                len(result_tokens),
+                result_method,
+            )
+
+            if ttl > 0 and result_tokens:
+                _CACHE["tokens"] = list(result_tokens)
+                _CACHE["ts"] = now
+                _CACHE["limit"] = self.limit
+                _CACHE["method"] = result_method
+
+            return result_tokens
+
+        if offline and not method_override and requested_method is None:
+            tokens = self._fallback_tokens()
+            return _finalise(tokens, {}, "offline")
+
         if requested_method is None:
             active_method = self.default_method or DEFAULT_DISCOVERY_METHOD
             if method_override and isinstance(method, str) and method.strip():
@@ -287,28 +320,7 @@ class DiscoveryAgent:
             tokens = self._fallback_tokens()
             details = {}
 
-        self.last_tokens = tokens
-        self.last_details = details
-        self.last_method = active_method
-
-        detail = f"yield={len(tokens)}"
-        if self.limit:
-            detail = f"{detail}/{self.limit}"
-        detail = f"{detail} method={active_method}"
-        if self.limit and len(tokens) < self.limit:
-            detail = f"{detail} partial"
-        publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
-        logger.info(
-            "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
-        )
-
-        if ttl > 0 and tokens:
-            _CACHE["tokens"] = list(tokens)
-            _CACHE["ts"] = now
-            _CACHE["limit"] = self.limit
-            _CACHE["method"] = active_method
-
-        return tokens
+        return _finalise(tokens, details, active_method)
 
     # ------------------------------------------------------------------
     # Internal helpers
