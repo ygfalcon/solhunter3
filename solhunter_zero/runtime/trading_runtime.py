@@ -1667,6 +1667,8 @@ class TradingRuntime:
             else:
                 detail = f"{stage} actions={count or 0}"
         self.activity.add(stage, detail)
+        if summary.get("fallback_used"):
+            self.activity.add("discovery", "fallback tokens used", ok=False)
         publish(
             "runtime.log",
             {

@@ -390,7 +390,15 @@ class DiscoveryAgent:
         self.last_details = details
         self.last_method = active_method
 
-        publish("runtime.log", RuntimeLog(stage="discovery", detail=f"yield={len(tokens)}"))
+        try:
+            publish(
+                "runtime.log",
+                RuntimeLog(stage="discovery", detail=f"yield={len(tokens)}"),
+            )
+        except Exception:  # pragma: no cover - logging only
+            logger.debug(
+                "Failed to publish discovery yield runtime log", exc_info=True
+            )
         logger.info(
             "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
         )
