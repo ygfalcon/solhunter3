@@ -24,6 +24,24 @@ def test_collect_status_handles_depth_proc_without_poll():
     status = runtime._collect_status()
 
     assert status["depth_service"] is True
+    assert status["ui_failed"] is False
+
+
+def test_collect_status_reports_ui_failure():
+    runtime = trading_runtime.TradingRuntime()
+    runtime._collect_rl_status = lambda: {}
+    runtime._collect_iteration = lambda: {}
+    runtime.activity.snapshot = lambda: []
+    runtime.ui_server = types.SimpleNamespace(
+        failed=True,
+        failure_exception=RuntimeError("bad times"),
+    )
+
+    status = runtime._collect_status()
+
+    assert status["ui_failed"] is True
+    assert "ui_failure" in status
+    assert "bad times" in status["ui_failure"]
 
 
 def test_collect_discovery_includes_backoff(monkeypatch):

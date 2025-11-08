@@ -3192,6 +3192,7 @@ class UIServer:
         port: int = 5000,
         shutdown_token: Optional[str] = None,
         startup_probe: Optional[bool] = None,
+        on_failure: Optional[Callable[[BaseException], None]] = None,
     ) -> None:
         self.state = state
         self.host = host
@@ -3200,6 +3201,9 @@ class UIServer:
         self.app = create_app(state, shutdown_token=self._shutdown_token)
         self._thread: Optional[threading.Thread] = None
         self._server: Optional["BaseWSGIServer"] = None
+        self._on_failure = on_failure
+        self._failure_event = threading.Event()
+        self._failure_exc: Optional[BaseException] = None
         if startup_probe is None:
             self._startup_probe_enabled = parse_bool_env("UI_STARTUP_PROBE", True)
         else:
@@ -3250,6 +3254,8 @@ class UIServer:
 
         from werkzeug.serving import BaseWSGIServer, make_server
 
+        self._failure_event.clear()
+        self._failure_exc = None
         try:
             server: BaseWSGIServer = make_server(
                 self.host,
@@ -3297,6 +3303,7 @@ class UIServer:
                     exception_queue.put_nowait(exc)
                 except Exception:  # pragma: no cover - queue errors should not surface
                     pass
+                self._handle_failure(exc)
                 log.exception("UI server crashed")
             finally:
                 startup_event.set()
@@ -3371,6 +3378,14 @@ class UIServer:
             self._thread.join(timeout=2)
         self._thread = None
 
+    @property
+    def failed(self) -> bool:
+        return self._failure_event.is_set()
+
+    @property
+    def failure_exception(self) -> Optional[BaseException]:
+        return self._failure_exc
+
     def _resolve_shutdown_host(self) -> str:
         raw_host = (self.host or "").strip()
         if not raw_host:
@@ -3405,6 +3420,17 @@ class UIServer:
             server.shutdown()
         except Exception:  # pragma: no cover - best effort fallback
             pass
+
+    def _handle_failure(self, exc: BaseException) -> None:
+        self._failure_exc = exc
+        self._failure_event.set()
+        callback = self._on_failure
+        if callback is None:
+            return
+        try:
+            callback(exc)
+        except Exception:  # pragma: no cover - callback errors should not escape
+            log.exception("UIServer: failure callback raised")
 
     def _resolve_startup_probe_config(self) -> Mapping[str, Any]:
         try:

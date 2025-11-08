@@ -570,6 +570,54 @@ def test_uiserver_start_raises_when_background_thread_fails(monkeypatch):
     assert server._thread is None
 
 
+def test_uiserver_records_failure_and_invokes_callback(monkeypatch):
+    state = ui.UIState()
+    crash_event = threading.Event()
+
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+
+    class _Crasher:
+        def __init__(self) -> None:
+            self.server_port = 9999
+            self.shutdown_called = False
+
+        def serve_forever(self) -> None:
+            crash_event.wait(timeout=1)
+            raise RuntimeError("boom")
+
+        def server_close(self) -> None:
+            pass
+
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+
+    def _make_server(host, port, app, threaded):
+        return _Crasher()
+
+    monkeypatch.setattr("werkzeug.serving.make_server", _make_server)
+
+    captured: dict[str, BaseException] = {}
+
+    def _on_failure(exc: BaseException) -> None:
+        captured["exc"] = exc
+
+    server = ui.UIServer(state, host="127.0.0.1", port=0, on_failure=_on_failure)
+    server.start()
+
+    crash_event.set()
+
+    for _ in range(20):
+        if server.failed:
+            break
+        time.sleep(0.05)
+
+    assert server.failed is True
+    assert isinstance(server.failure_exception, RuntimeError)
+    assert captured["exc"] is server.failure_exception
+
+    server.stop()
+
+
 def _healthy_status_snapshot() -> dict[str, object]:
     return {"event_bus": True, "trading_loop": True, "heartbeat": 123}
 
