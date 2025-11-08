@@ -436,6 +436,29 @@ async def test_fetch_refreshes_agent_when_method_env_changes(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_stop_returns_when_queue_full(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    await queue.put(["pre-filled"])
+
+    service = discovery_mod.DiscoveryService(queue, interval=0.01, cache_ttl=0.0)
+    service._primed = True
+
+    fetch_called = asyncio.Event()
+
+    async def fake_fetch() -> tuple[list[str], dict[str, dict[str, object]]]:
+        fetch_called.set()
+        service._last_fetch_fresh = True
+        return ["tok"], {}
+
+    monkeypatch.setattr(service, "_fetch", fake_fetch)
+
+    await service.start()
+    await asyncio.wait_for(fetch_called.wait(), timeout=1.0)
+
+    await asyncio.wait_for(service.stop(), timeout=1.0)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("env_key", "initial", "updated"),
     [
