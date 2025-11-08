@@ -470,15 +470,31 @@ class DiscoveryAgent:
             api_key=self.birdeye_api_key,
         )
         tokens: List[str]
+        details: Dict[str, Dict[str, Any]] = {}
+        unverified: List[str] = []
+
         try:
             tokens = await enrich_tokens_async(raw_tokens, rpc_url=self.rpc_url)
         except Exception as exc:  # pragma: no cover - enrichment best effort
             logger.warning("enrich_tokens_async failed: %s", exc)
             tokens = [tok for tok in raw_tokens if isinstance(tok, str)]
+            unverified = list(tokens)
         else:
             if not tokens and raw_tokens:
                 tokens = [tok for tok in raw_tokens if isinstance(tok, str)]
-        return tokens, {}
+                unverified = list(tokens)
+
+        if unverified:
+            details = {
+                token: {
+                    "verified": False,
+                    "detail_source": "rpc-enrichment",
+                }
+                for token in unverified
+                if isinstance(token, str) and token
+            }
+
+        return tokens, details
 
     async def _collect_mempool(self) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
         gen = self.stream_mempool_events(threshold=self.mempool_threshold)
