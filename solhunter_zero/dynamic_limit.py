@@ -1,5 +1,6 @@
 import os
 import logging
+import math
 
 try:  # pragma: no cover - optional dependency
     import psutil
@@ -105,7 +106,12 @@ def _step_limit(
     _ERR_INT += ki * err
     _ERR_INT = max(-max_val, min(max_val, _ERR_INT))
     new_val = current + smoothing * err + _ERR_INT
-    new_val = int(round(new_val))
+    if new_val > current:
+        new_val = math.ceil(new_val)
+    elif new_val < current:
+        new_val = math.floor(new_val)
+    else:
+        new_val = int(new_val)
     if new_val > max_val:
         return max_val
     if new_val < 1:

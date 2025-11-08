@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from pathlib import Path
@@ -236,3 +237,53 @@ def scan_tokens_from_directory(directory: str | os.PathLike, *, limit: int | Non
     if limit_value is None:
         return tokens
     return tokens[:limit_value]
+
+
+async def offline_or_onchain_async(
+    use_offline: bool,
+    *,
+    method: str = "websocket",
+    limit: int | None = None,
+    **kwargs: Any,
+) -> List[str]:
+    """Return tokens from the requested discovery ``method``."""
+
+    limit_value = _coerce_limit(limit)
+    if limit_value == 0:
+        return []
+
+    method_key = (method or "").strip().lower()
+    rpc_url = SOLANA_RPC_URL
+
+    if method_key == "mempool":
+        from . import mempool_scanner as _scanner
+
+        gen = _scanner.stream_mempool_tokens(rpc_url, **kwargs)
+    elif method_key == "websocket":
+        from . import websocket_scanner as _scanner
+
+        gen = _scanner.stream_new_tokens(rpc_url, **kwargs)
+    else:
+        return []
+
+    tokens: List[str] = []
+    try:
+        async for item in gen:
+            if isinstance(item, str):
+                token = item
+            elif isinstance(item, dict):
+                token = str(item.get("address", ""))
+            else:
+                continue
+            if not token:
+                continue
+            tokens.append(token)
+            if limit_value is not None and len(tokens) >= limit_value:
+                break
+    finally:
+        with contextlib.suppress(Exception):
+            await gen.aclose()
+
+    if limit_value is not None and len(tokens) > limit_value:
+        return tokens[:limit_value]
+    return tokens
