@@ -21,6 +21,7 @@ from .config import (
     load_config,
     apply_env_overrides,
     initialize_event_bus,
+    get_remote_event_bus_urls,
 )
 from .service_launcher import (
     start_depth_service,
@@ -161,6 +162,13 @@ def _start_event_bus(url: str) -> None:
 def _maybe_start_event_bus(cfg: dict) -> None:
     """Start a local event bus if ``EVENT_BUS_URL`` points to localhost."""
     if os.getenv("EVENT_BUS_DISABLE_LOCAL", "").strip().lower() in {"1", "true", "yes"}:
+        remote_urls = get_remote_event_bus_urls(cfg)
+        if remote_urls:
+            os.environ["EVENT_BUS_URL"] = remote_urls[0]
+            os.environ["BROKER_WS_URLS"] = ",".join(remote_urls)
+        else:
+            os.environ.pop("EVENT_BUS_URL", None)
+            os.environ.pop("BROKER_WS_URLS", None)
         return
     url = os.getenv("EVENT_BUS_URL") or cfg.get("event_bus_url")
     if not url:

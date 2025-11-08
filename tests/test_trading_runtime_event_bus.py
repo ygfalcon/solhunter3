@@ -405,3 +405,48 @@ async def test_start_event_bus_updates_env_for_dynamic_port(monkeypatch):
     assert os.environ["BROKER_WS_URLS"] == f"ws://127.0.0.1:{bound_port}"
     assert runtime.bus_started is True
     assert subscribe_called is True
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_event_bus_uses_remote_when_local_disabled(monkeypatch):
+    monkeypatch.setenv("EVENT_BUS_DISABLE_LOCAL", "1")
+    monkeypatch.setenv("EVENT_BUS_URL", "ws://127.0.0.1:8779")
+    monkeypatch.setenv("BROKER_WS_URLS", "ws://127.0.0.1:8779")
+
+    runtime = trading_runtime.TradingRuntime()
+    runtime.cfg = {
+        "event_bus_url": "wss://primary.example/ws",
+        "event_bus_peers": ["wss://backup.example/ws"],
+    }
+
+    monkeypatch.setattr(
+        trading_runtime, "ensure_local_redis_if_needed", lambda urls: None
+    )
+
+    async def should_not_start_ws(*args, **kwargs):  # pragma: no cover - ensured by assertion
+        pytest.fail("start_ws_server should not be called when local bus disabled")
+
+    async def fake_verify_broker_connection(*, timeout):
+        return True
+
+    monkeypatch.setattr(trading_runtime, "start_ws_server", should_not_start_ws)
+    monkeypatch.setattr(
+        trading_runtime, "verify_broker_connection", fake_verify_broker_connection
+    )
+
+    await runtime._start_event_bus()
+
+    assert runtime.bus_started is False
+    assert runtime.status.event_bus is True
+    assert os.environ["EVENT_BUS_URL"] == "wss://primary.example/ws"
+    assert (
+        os.environ["BROKER_WS_URLS"]
+        == "wss://primary.example/ws,wss://backup.example/ws"
+    )
+
+    event_entries = [
+        entry for entry in runtime.activity.snapshot() if entry["stage"] == "event_bus"
+    ]
+    assert event_entries
+    assert any("disabled" in entry["detail"] for entry in event_entries)
+    assert any("primary.example" in entry["detail"] for entry in event_entries)
