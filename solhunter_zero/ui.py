@@ -69,6 +69,28 @@ HISTORY_MAX_ENTRIES = 200
 DISCOVERY_RECENT_DISPLAY_LIMIT = 120
 
 
+DEFAULT_STARTUP_PROBE_TIMEOUT = 5.0
+"""Default timeout (seconds) for startup probe HTTP requests."""
+
+MIN_STARTUP_PROBE_TIMEOUT = 0.5
+"""Minimum allowed timeout to avoid overly aggressive failures."""
+
+DEFAULT_STARTUP_PROBE_RETRIES = 9
+"""Default number of retries (resulting in 10 attempts including the first)."""
+
+DEFAULT_STARTUP_PROBE_INITIAL_DELAY = 0.5
+"""Default delay (seconds) before the first retry."""
+
+MIN_STARTUP_PROBE_INITIAL_DELAY = 0.1
+"""Minimum delay used when parsing config/environment values."""
+
+DEFAULT_STARTUP_PROBE_BACKOFF = 1.5
+"""Backoff multiplier applied after each retry."""
+
+DEFAULT_STARTUP_PROBE_MAX_DELAY = 3.0
+"""Maximum delay between retries; ``0`` disables the cap."""
+
+
 def _normalize_discovery_recent(values: Any) -> List[Any]:
     """Return *values* as a list suitable for JSON serialization."""
 
@@ -3207,39 +3229,61 @@ class UIServer:
             self._startup_probe_enabled = bool(startup_probe)
 
         probe_config = self._resolve_startup_probe_config()
-        default_timeout = 2.0
-        timeout_default = self._coerce_float(
-            probe_config.get("timeout"), default_timeout, min_value=0.0
+
+        timeout_default = max(
+            self._coerce_float(
+                probe_config.get("timeout"),
+                DEFAULT_STARTUP_PROBE_TIMEOUT,
+                min_value=MIN_STARTUP_PROBE_TIMEOUT,
+            ),
+            MIN_STARTUP_PROBE_TIMEOUT,
         )
         self._startup_probe_timeout = parse_float_env(
-            "UI_STARTUP_PROBE_TIMEOUT", timeout_default, min_value=0.0
+            "UI_STARTUP_PROBE_TIMEOUT",
+            timeout_default,
+            min_value=MIN_STARTUP_PROBE_TIMEOUT,
         )
 
         retries_default = self._coerce_int(
-            probe_config.get("retries"), 2, min_value=0
+            probe_config.get("retries"), DEFAULT_STARTUP_PROBE_RETRIES, min_value=0
         )
         self._startup_probe_retries = parse_int_env(
             "UI_STARTUP_PROBE_RETRIES", retries_default, min_value=0
         )
 
-        initial_delay_default = self._coerce_float(
-            probe_config.get("initial_delay"), 0.2, min_value=0.0
+        initial_delay_default = max(
+            self._coerce_float(
+                probe_config.get("initial_delay"),
+                DEFAULT_STARTUP_PROBE_INITIAL_DELAY,
+                min_value=MIN_STARTUP_PROBE_INITIAL_DELAY,
+            ),
+            MIN_STARTUP_PROBE_INITIAL_DELAY,
         )
         self._startup_probe_initial_delay = parse_float_env(
             "UI_STARTUP_PROBE_INITIAL_DELAY",
             initial_delay_default,
-            min_value=0.0,
+            min_value=MIN_STARTUP_PROBE_INITIAL_DELAY,
         )
 
-        backoff_default = self._coerce_float(
-            probe_config.get("backoff"), 2.0, min_value=1.0
+        backoff_default = max(
+            self._coerce_float(
+                probe_config.get("backoff"),
+                DEFAULT_STARTUP_PROBE_BACKOFF,
+                min_value=1.0,
+            ),
+            1.0,
         )
         self._startup_probe_backoff = parse_float_env(
             "UI_STARTUP_PROBE_BACKOFF", backoff_default, min_value=1.0
         )
 
-        max_delay_default = self._coerce_float(
-            probe_config.get("max_delay"), 1.0, min_value=0.0
+        max_delay_default = max(
+            self._coerce_float(
+                probe_config.get("max_delay"),
+                DEFAULT_STARTUP_PROBE_MAX_DELAY,
+                min_value=0.0,
+            ),
+            0.0,
         )
         self._startup_probe_max_delay = parse_float_env(
             "UI_STARTUP_PROBE_MAX_DELAY", max_delay_default, min_value=0.0

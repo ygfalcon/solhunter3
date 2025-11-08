@@ -645,6 +645,43 @@ def test_uiserver_start_probe_retries_transient_failure(monkeypatch):
         server.stop()
 
 
+def test_uiserver_start_probe_waits_for_delayed_readiness(monkeypatch):
+    monkeypatch.setenv("UI_STARTUP_PROBE", "1")
+    for name in [
+        "UI_STARTUP_PROBE_RETRIES",
+        "UI_STARTUP_PROBE_INITIAL_DELAY",
+        "UI_STARTUP_PROBE_BACKOFF",
+        "UI_STARTUP_PROBE_MAX_DELAY",
+    ]:
+        monkeypatch.delenv(name, raising=False)
+
+    state = ui.UIState(status_provider=_healthy_status_snapshot)
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+
+    attempts = {"count": 0}
+    sleep_calls = []
+
+    def _slow_probe(url: str) -> None:
+        attempts["count"] += 1
+        if attempts["count"] < 4:
+            raise urllib.error.URLError("not ready")
+
+    def _fake_sleep(duration: float) -> None:
+        sleep_calls.append(duration)
+
+    monkeypatch.setattr(server, "_perform_startup_probe_request", _slow_probe)
+    monkeypatch.setattr(time, "sleep", _fake_sleep)
+
+    server._run_startup_probe()
+
+    assert attempts["count"] == 4
+    assert sleep_calls
+    assert sleep_calls[0] == pytest.approx(server._startup_probe_initial_delay)
+    if server._startup_probe_max_delay > 0:
+        assert all(delay <= server._startup_probe_max_delay for delay in sleep_calls)
+    assert sum(sleep_calls) >= server._startup_probe_initial_delay
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
 async def test_uiserver_async_probe_allows_other_coroutines(monkeypatch, anyio_backend):
