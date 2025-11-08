@@ -41,10 +41,19 @@ class ScoringService:
                 env_workers = int(raw_env)
             except ValueError:
                 log.warning("Invalid SCORING_WORKERS=%r; ignoring", raw_env)
-        chosen = workers if workers is not None else env_workers
-        if chosen is None or chosen <= 0:
-            chosen = os.cpu_count() or 5
-        self._worker_limit = max(5, int(chosen))
+
+        chosen: Optional[int] = None
+        if workers is not None and workers >= 1:
+            chosen = int(workers)
+        elif env_workers is not None and env_workers >= 1:
+            chosen = int(env_workers)
+
+        if chosen is None:
+            # Fall back to a reasonable default (CPU count or 5) when no valid value is provided.
+            fallback = os.cpu_count() or 5
+            chosen = max(1, int(fallback))
+
+        self._worker_count = chosen
         self._worker_tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
@@ -74,7 +83,7 @@ class ScoringService:
         cooldown = max(self.cooldown, float(os.getenv("SCORING_COOLDOWN", "0.5") or 0.5))
         workers = [
             asyncio.create_task(self._worker_loop(idx, cooldown), name=f"scoring_worker:{idx}")
-            for idx in range(self._worker_limit)
+            for idx in range(self._worker_count)
         ]
         self._worker_tasks = workers
         try:
