@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
+from urllib.parse import urlparse, urlunparse
 
 from .. import config
 from ..token_aliases import canonical_mint, validate_mint
@@ -206,13 +207,47 @@ class DiscoveryAgent:
         text = url.strip()
         if not text:
             return None
-        if text.startswith("wss://") or text.startswith("ws://"):
+        parsed = urlparse(text)
+        if parsed.scheme in {"ws", "wss"}:
             return text
-        if text.startswith("https://"):
-            return "wss://" + text[len("https://") :]
-        if text.startswith("http://"):
-            return "ws://" + text[len("http://") :]
-        return text
+        if parsed.scheme in {"http", "https"}:
+            scheme = "wss" if parsed.scheme == "https" else "ws"
+            netloc = parsed.netloc
+            path = parsed.path
+            if not netloc and path:
+                netloc, _, remainder = path.partition("/")
+                path = f"/{remainder}" if remainder else ""
+            rebuilt = (
+                scheme,
+                netloc,
+                path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+            return urlunparse(rebuilt)
+        if "://" in text:
+            return text
+        host_parsed = urlparse(f"//{text}")
+        netloc = host_parsed.netloc
+        path = host_parsed.path
+        if not netloc and path:
+            netloc, _, remainder = path.partition("/")
+            path = f"/{remainder}" if remainder else ""
+        try:
+            port = host_parsed.port
+        except ValueError:
+            port = None
+        scheme = "wss" if port == 443 else "ws"
+        rebuilt = (
+            scheme,
+            netloc,
+            path,
+            host_parsed.params,
+            host_parsed.query,
+            host_parsed.fragment,
+        )
+        return urlunparse(rebuilt)
 
     # ------------------------------------------------------------------
     # Core discovery API
