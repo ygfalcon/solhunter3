@@ -381,3 +381,49 @@ async def test_prepare_configuration_sets_pytorch_env(monkeypatch, tmp_path):
     assert captured["cfg"] is config
     assert runtime.cfg is config
     assert os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") == "1"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_prepare_configuration_overrides_existing_birdeye_key(
+    monkeypatch, tmp_path, caplog
+):
+    runtime = trading_runtime.TradingRuntime(
+        config_path=str(tmp_path / "config.toml")
+    )
+
+    placeholder = "placeholder-key"
+    config_key = "config-value"
+
+    monkeypatch.setenv("BIRDEYE_API_KEY", placeholder)
+
+    config = {"birdeye_api_key": config_key}
+
+    async def fake_startup(
+        config_path: str | None,
+        *,
+        offline: bool,
+        dry_run: bool,
+        testnet: bool,
+        preloaded_config: dict | None = None,
+    ) -> tuple[dict, object, None]:
+        return config, object(), None
+
+    monkeypatch.setattr(trading_runtime, "perform_startup_async", fake_startup)
+    monkeypatch.setattr(trading_runtime, "load_config", lambda path=None: config)
+    monkeypatch.setattr(trading_runtime, "apply_env_overrides", lambda cfg: cfg)
+    monkeypatch.setattr(trading_runtime, "set_env_from_config", lambda cfg: None)
+
+    from solhunter_zero import scanner_common
+
+    monkeypatch.setattr(scanner_common, "BIRDEYE_API_KEY", placeholder)
+    monkeypatch.setattr(scanner_common, "HEADERS", {"X-API-KEY": placeholder})
+
+    with caplog.at_level(logging.INFO):
+        await runtime._prepare_configuration()
+
+    assert os.getenv("BIRDEYE_API_KEY") == config_key
+    assert scanner_common.BIRDEYE_API_KEY == config_key
+    assert scanner_common.HEADERS["X-API-KEY"] == config_key
+    assert any(
+        "BIRDEYE_API_KEY" in record.getMessage() for record in caplog.records
+    )
