@@ -2,7 +2,7 @@
 
  - A default keypair (`keypairs/default.json`) and configuration (`config.toml`) are bundled for immediate runs.
  - To customize, copy `config/default.toml` to `config.toml` and edit the values.
-- `start_live --config configs/live_recommended.toml` runs the event-driven orchestrator and is the default live entry point.
+- `start_live --config configs/live_recommended.toml` runs the event-driven orchestrator, forcing the new pipeline (`NEW_PIPELINE=1`) and is the default live entry point.
 - `make start` runs `scripts/startup.py` for guided setup and launches `depth_service` automatically.
 - Use `solhunter-start` to launch the same startup routine with `--one-click` by default while still accepting additional flags.
 - Pass `--min-delay` or `--max-delay` to enforce minimum or maximum delay between trade iterations when running the bot.

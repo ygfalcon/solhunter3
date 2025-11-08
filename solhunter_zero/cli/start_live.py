@@ -14,6 +14,9 @@ def _prepare_environment() -> None:
 
     os.environ["NEW_RUNTIME"] = "1"
     os.environ["EVENT_DRIVEN"] = "1"
+    # Force the TradingRuntime to boot with the modern pipeline so tests and
+    # operators always exercise the new event-driven flow when using this CLI.
+    os.environ["NEW_PIPELINE"] = "1"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
