@@ -36,7 +36,7 @@ from solhunter_zero.config import (
 )
 from solhunter_zero.redis_util import ensure_local_redis_if_needed
 from solhunter_zero.logging_utils import configure_runtime_logging
-from solhunter_zero.feature_flags import get_feature_flags
+from solhunter_zero.feature_flags import FeatureFlags, get_feature_flags
 from solhunter_zero.production import (
     Provider,
     load_production_env,
@@ -60,6 +60,9 @@ from solhunter_zero.health_runtime import (
 log = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+_PIPELINE_CONFIG: Mapping[str, object] | None = None
 
 
 def _process_alive(pid: int) -> bool:
@@ -259,7 +262,36 @@ def _parse_float_env(name: str, default: float) -> float:
     return max(0.1, value)
 
 
-def _resolve_rl_health_url_for_gate() -> str:
+def _rl_health_gate_skip_reason(flags: FeatureFlags | None, config: Mapping[str, object] | None) -> str | None:
+    """Return the reason to skip the RL gate when RL is disabled."""
+
+    if flags is not None:
+        mode = (flags.mode or "").lower()
+        if mode != "live":
+            return f"MODE={mode}" if mode else "mode unset"
+
+        if getattr(flags, "rl_weights_disabled", False):
+            return "RL_WEIGHTS_DISABLED=1"
+
+    if isinstance(config, Mapping):
+        use_rl = config.get("use_rl_weights")
+        if use_rl is not None and not bool(use_rl):
+            return "config.use_rl_weights disabled"
+
+    return None
+
+
+def _resolve_rl_health_url_for_gate() -> str | None:
+    try:
+        flags = get_feature_flags()
+    except Exception:  # pragma: no cover - defensive guard
+        flags = None
+
+    reason = _rl_health_gate_skip_reason(flags, _PIPELINE_CONFIG)
+    if reason is not None:
+        log.info("Skipping RL health gate: %s", reason)
+        return None
+
     try:
         url = resolve_rl_health_url(require_health_file=True)
     except Exception as exc:
@@ -268,10 +300,12 @@ def _resolve_rl_health_url_for_gate() -> str:
     return url
 
 
-def rl_health_gate() -> str:
+def rl_health_gate() -> str | None:
     """Block startup until the external RL daemon reports healthy."""
 
     url = _resolve_rl_health_url_for_gate()
+    if not url:
+        return None
     retries = _parse_int_env("RL_HEALTH_RETRIES", 30)
     interval = _parse_float_env("RL_HEALTH_INTERVAL", 1.0)
     log.info(
@@ -517,6 +551,8 @@ def main(argv: list[str] | None = None) -> int:
             if not args.skip_clean:
                 run_stage("process-cleanup", kill_lingering_processes, stage_results)
             env = run_stage("ensure-environment", lambda: ensure_environment(args.config), stage_results)
+            global _PIPELINE_CONFIG
+            _PIPELINE_CONFIG = env.get("config") if isinstance(env, dict) else None
             keypair_info = run_stage(
                 "resolve-live-keypair",
                 lambda: ensure_live_keypair(env.get("config")),
