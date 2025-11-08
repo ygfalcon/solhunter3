@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from .discovery_service import DiscoveryService
 from .evaluation_service import EvaluationService
@@ -15,6 +15,29 @@ from .types import ActionBundle, EvaluationResult, ExecutionReceipt, ScoredToken
 from .feedback_service import FeedbackService
 
 log = logging.getLogger(__name__)
+
+
+def _snapshot_mapping(config: Mapping[str, Any] | None) -> Dict[str, Any] | None:
+    """Return a shallow copy of ``config`` if possible."""
+
+    if config is None:
+        return None
+    if isinstance(config, dict):
+        snapshot: Dict[str, Any] = {}
+        for key, value in config.items():
+            snapshot[str(key)] = value
+        return snapshot
+    items = getattr(config, "items", None)
+    if callable(items):
+        try:
+            pairs = list(items())
+        except Exception:
+            return None
+        snapshot: Dict[str, Any] = {}
+        for key, value in pairs:
+            snapshot[str(key)] = value
+        return snapshot
+    return None
 
 
 class PipelineCoordinator:
@@ -42,6 +65,7 @@ class PipelineCoordinator:
         discovery_startup_clones: Optional[int] = None,
         discovery_startup_clone_timeout: Optional[float] = None,
         testnet: Optional[bool] = None,
+        discovery_config: Mapping[str, Any] | None = None,
     ) -> None:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
@@ -172,6 +196,7 @@ class PipelineCoordinator:
 
         self.offline = bool(offline)
         self.token_file = str(token_file) if token_file else None
+        self._discovery_config_snapshot = _snapshot_mapping(discovery_config)
 
         self._discovery_service = DiscoveryService(
             self._discovery_queue,
@@ -179,6 +204,7 @@ class PipelineCoordinator:
             cache_ttl=self.discovery_cache_ttl,
             offline=self.offline,
             token_file=self.token_file,
+            config=self._discovery_config_snapshot,
             **discovery_kwargs,
         )
         self._scoring_service = ScoringService(
@@ -278,9 +304,20 @@ class PipelineCoordinator:
         """Clear cached discovery state so new settings take effect promptly."""
 
         try:
+            self._discovery_service.update_config(self._discovery_config_snapshot)
             self._discovery_service.refresh()
         except Exception:
             log.exception("PipelineCoordinator: failed to refresh discovery service")
+
+    def set_discovery_config(self, config: Mapping[str, Any] | None) -> None:
+        """Update the discovery configuration snapshot used by the service."""
+
+        snapshot = _snapshot_mapping(config)
+        self._discovery_config_snapshot = snapshot
+        try:
+            self._discovery_service.update_config(snapshot)
+        except Exception:
+            log.exception("PipelineCoordinator: failed to propagate discovery config update")
 
     async def _on_evaluation_result(self, result: EvaluationResult) -> None:
         payload = {

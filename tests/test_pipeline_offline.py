@@ -61,6 +61,67 @@ async def test_pipeline_discovery_uses_token_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_pipeline_respects_configured_discovery_method(monkeypatch):
+    from solhunter_zero.pipeline.coordinator import PipelineCoordinator
+    from solhunter_zero.agents import discovery as discovery_mod
+    from solhunter_zero import discovery_state
+
+    monkeypatch.delenv("DISCOVERY_METHOD", raising=False)
+    discovery_state.clear_override()
+
+    captured: dict[str, str] = {}
+
+    async def fake_discover_tokens(
+        self,
+        *,
+        offline: bool = False,
+        token_file: str | None = None,
+        method: str | None = None,
+        use_cache: bool = True,
+    ) -> list[str]:
+        captured["method"] = method or ""
+        return []
+
+    monkeypatch.setattr(
+        discovery_mod.DiscoveryAgent,
+        "discover_tokens",
+        fake_discover_tokens,
+        raising=False,
+    )
+
+    class DummyExecutor:
+        async def execute(self, action: dict) -> dict:  # pragma: no cover - not exercised
+            return {"action": action}
+
+    class DummyAgentManager:
+        def __init__(self) -> None:
+            self.executor = DummyExecutor()
+            self.memory_agent = None
+
+        async def evaluate_with_swarm(self, token: str, portfolio: object) -> SimpleNamespace:
+            return SimpleNamespace(actions=[])
+
+    class DummyPortfolio:
+        def record_prices(self, prices: dict | None = None) -> None:  # pragma: no cover - not used
+            return None
+
+        def update_risk_metrics(self) -> None:  # pragma: no cover - not used
+            return None
+
+    coordinator = PipelineCoordinator(
+        DummyAgentManager(),
+        DummyPortfolio(),
+        discovery_interval=0.1,
+        discovery_cache_ttl=0.1,
+        discovery_config={"discovery_method": "mempool"},
+    )
+
+    tokens, _details = await coordinator._discovery_service._fetch()
+    assert tokens == []
+    assert captured.get("method") == "mempool"
+
+
+@pytest.mark.anyio
 async def test_trading_runtime_passes_offline_and_token_file(monkeypatch, tmp_path):
     from solhunter_zero.runtime import trading_runtime as runtime_mod
 
@@ -79,13 +140,16 @@ async def test_trading_runtime_passes_offline_and_token_file(monkeypatch, tmp_pa
             self.started = True
 
     class DummyPortfolio:
-        def __init__(self, path: str) -> None:
+        def __init__(self, path: str, **kwargs: Any) -> None:
             self.path = path
 
         def record_prices(self, prices: dict | None = None) -> None:  # pragma: no cover - not used
             return None
 
         def update_risk_metrics(self) -> None:  # pragma: no cover - not used
+            return None
+
+        async def load_async(self) -> None:  # pragma: no cover - not used
             return None
 
     class DummyAgentManager:
@@ -147,13 +211,16 @@ async def test_trading_runtime_dry_run_keeps_live_discovery(monkeypatch, tmp_pat
             self.started = True
 
     class DummyPortfolio:
-        def __init__(self, path: str) -> None:
+        def __init__(self, path: str, **kwargs: Any) -> None:
             self.path = path
 
         def record_prices(self, prices: dict | None = None) -> None:  # pragma: no cover - not used
             return None
 
         def update_risk_metrics(self) -> None:  # pragma: no cover - not used
+            return None
+
+        async def load_async(self) -> None:  # pragma: no cover - not used
             return None
 
     class DummyExecutor:
@@ -270,13 +337,16 @@ async def test_trading_runtime_applies_testnet_flag(monkeypatch, tmp_path, sourc
             self.started = True
 
     class DummyPortfolio:
-        def __init__(self, path: str) -> None:
+        def __init__(self, path: str, **kwargs: Any) -> None:
             self.path = path
 
         def record_prices(self, prices: dict | None = None) -> None:  # pragma: no cover - not used
             return None
 
         def update_risk_metrics(self) -> None:  # pragma: no cover - not used
+            return None
+
+        async def load_async(self) -> None:  # pragma: no cover - not used
             return None
 
     class DummyExecutor:
