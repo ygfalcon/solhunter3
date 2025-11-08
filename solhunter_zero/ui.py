@@ -3311,10 +3311,19 @@ class UIServer:
 
         resolved_host = self.resolved_host
         requested_host = (self.host or "").strip()
+        bind_host = requested_host or resolved_host
 
         os.environ["UI_PORT"] = str(self.port)
         os.environ["PORT"] = str(self.port)
-        os.environ["UI_HOST"] = requested_host or resolved_host
+        os.environ["UI_HOST"] = bind_host
+        if resolved_host:
+            os.environ["UI_RESOLVED_HOST"] = resolved_host
+        else:
+            os.environ.pop("UI_RESOLVED_HOST", None)
+        if requested_host:
+            os.environ["UI_REQUESTED_HOST"] = requested_host
+        else:
+            os.environ.pop("UI_REQUESTED_HOST", None)
 
         startup_event = threading.Event()
         exception_queue: Queue[BaseException] = Queue(maxsize=1)

@@ -183,7 +183,9 @@ This document lists environment variables recognized by the project.
 | `TRAILING_STOP` | `0` | Configures trailing stop |
 | `TREND_CACHE_TTL` | `60` | TTL for trend cache cache |
 | `TWITTER_FEEDS` | `https://nitter.net/solana/rss` | Configures twitter feeds |
-| `UI_HOST` | `127.0.0.1` | Host interface requested for the UI server; after startup the runtime keeps this value (for example `0.0.0.0`) and only substitutes the resolved loopback when the host is left blank. |
+| `UI_HOST` | `127.0.0.1` | Host interface bound by the UI server. When configured to a non-loopback host, see `UI_RESOLVED_HOST` for the loopback address used for local access. |
+| `UI_RESOLVED_HOST` | `127.0.0.1` | Loopback interface resolved for local access. Set alongside `UI_HOST` when binding to a non-loopback address for backwards compatibility. |
+| `UI_REQUESTED_HOST` | `` | Original host requested via configuration. Present only when a non-empty host was provided. |
 | `UI_PORT` | `5000` | Port bound by the UI server; mirrors `PORT` after startup. |
 | `USE_DEPTH_FEED` | `0` | Enable depth feed |
 | `USE_DEPTH_STREAM` | `1` | Enable depth stream |

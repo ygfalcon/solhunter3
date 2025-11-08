@@ -143,6 +143,8 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
     runtime.status.heartbeat_ts = time.time()
 
     monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+    monkeypatch.delenv("UI_REQUESTED_HOST", raising=False)
+    monkeypatch.delenv("UI_RESOLVED_HOST", raising=False)
 
     monkeypatch.setenv("UI_PORT", "11111")
     monkeypatch.setenv("PORT", "22222")
@@ -182,6 +184,12 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
             assert os.getenv("UI_PORT") == str(runtime.ui_port)
             assert os.getenv("PORT") == str(runtime.ui_port)
             assert os.getenv("UI_HOST") == runtime.ui_server.host
+            assert os.getenv("UI_RESOLVED_HOST") == runtime.ui_server.resolved_host
+            expected_request_host = runtime.ui_server.host.strip()
+            if expected_request_host:
+                assert os.getenv("UI_REQUESTED_HOST") == expected_request_host
+            else:
+                assert os.getenv("UI_REQUESTED_HOST") is None
             assert runtime.cfg.get("ui_port") == runtime.ui_port
         finally:
             runtime.ui_server.stop()
@@ -220,6 +228,28 @@ async def test_trading_runtime_config_reports_live_port_after_fallback(monkeypat
             runtime.ui_server.stop()
     finally:
         busy_sock.close()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_trading_runtime_sets_env_for_non_loopback_host(monkeypatch):
+    runtime = trading_runtime.TradingRuntime(ui_host="0.0.0.0")
+
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+    monkeypatch.delenv("UI_REQUESTED_HOST", raising=False)
+    monkeypatch.delenv("UI_RESOLVED_HOST", raising=False)
+
+    runtime.ui_port = 0
+
+    await runtime._start_ui()
+
+    try:
+        assert runtime.ui_server is not None
+        assert os.getenv("UI_HOST") == "0.0.0.0"
+        assert os.getenv("UI_REQUESTED_HOST") == "0.0.0.0"
+        assert os.getenv("UI_RESOLVED_HOST") == runtime.ui_server.resolved_host
+        assert runtime.ui_server.resolved_host != "0.0.0.0"
+    finally:
+        runtime.ui_server.stop()
 
 
 @pytest.mark.anyio("asyncio")
