@@ -645,6 +645,45 @@ def test_uiserver_start_probe_retries_transient_failure(monkeypatch):
         server.stop()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_uiserver_async_probe_allows_other_coroutines(monkeypatch, anyio_backend):
+    monkeypatch.setenv("UI_STARTUP_PROBE", "1")
+    state = ui.UIState(status_provider=_healthy_status_snapshot)
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+
+    server._startup_probe_retries = 1
+    server._startup_probe_initial_delay = 0.1
+    server._startup_probe_max_delay = 0.1
+    server._startup_probe_backoff = 1.0
+
+    loop = asyncio.get_running_loop()
+    sleep_started = asyncio.Event()
+
+    def _failing_request(url: str) -> None:
+        loop.call_soon_threadsafe(sleep_started.set)
+        raise urllib.error.URLError("not ready")
+
+    monkeypatch.setattr(server, "_perform_startup_probe_request", _failing_request)
+
+    probe_task = asyncio.create_task(server.run_startup_probe_async())
+    await sleep_started.wait()
+
+    other_completed = False
+
+    async def _other() -> None:
+        nonlocal other_completed
+        await asyncio.sleep(0.05)
+        other_completed = True
+
+    await _other()
+    assert other_completed
+    assert not probe_task.done()
+
+    with pytest.raises(RuntimeError, match="connection error: not ready"):
+        await probe_task
+
+
 def test_uiserver_start_probe_respects_config_and_env(monkeypatch):
     monkeypatch.setenv("UI_STARTUP_PROBE", "1")
     monkeypatch.setenv("UI_STARTUP_PROBE_TIMEOUT", "3.5")

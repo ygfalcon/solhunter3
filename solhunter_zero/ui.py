@@ -25,6 +25,7 @@ front of it if richer dashboards are required.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import ipaddress
 import logging
@@ -3248,6 +3249,33 @@ class UIServer:
         if self._thread and self._thread.is_alive():
             return
 
+        server = self._prepare_server()
+
+        try:
+            self._run_startup_probe()
+        except Exception as exc:
+            self._teardown_startup_failure(server, shutdown=True)
+            raise UIStartupError(
+                f"UI startup probe failed on {self.host}:{self.port}: {exc}"
+            ) from exc
+
+    async def start_async(self) -> None:
+        """Start the UI server while awaiting the startup probe asynchronously."""
+
+        if self._thread and self._thread.is_alive():
+            return
+
+        server = self._prepare_server()
+
+        try:
+            await self._run_startup_probe_async()
+        except Exception as exc:
+            self._teardown_startup_failure(server, shutdown=True)
+            raise UIStartupError(
+                f"UI startup probe failed on {self.host}:{self.port}: {exc}"
+            ) from exc
+
+    def _prepare_server(self) -> "BaseWSGIServer":
         from werkzeug.serving import BaseWSGIServer, make_server
 
         try:
@@ -3275,6 +3303,7 @@ class UIServer:
             raise UIStartupError(
                 f"failed to bind UI server on {self.host}:{self.port}: {exc}"
             ) from exc
+
         self._server = server
         # ``make_server`` may assign a random port when ``self.port`` is 0.
         # Capture the final port so callers observe the actual binding.
@@ -3306,7 +3335,8 @@ class UIServer:
         self._thread.start()
 
         if not startup_event.wait(timeout=5):
-            self._thread.join(timeout=0.1)
+            if self._thread:
+                self._thread.join(timeout=0.1)
             self._thread = None
             try:
                 server.server_close()
@@ -3317,38 +3347,32 @@ class UIServer:
                 f"UI server failed to start on {self.host}:{self.port}"
             )
 
-        def _teardown_startup_failure(*, shutdown: bool) -> None:
-            if shutdown:
-                try:
-                    server.shutdown()
-                except Exception:  # pragma: no cover - best effort cleanup
-                    pass
-            if self._thread:
-                self._thread.join(timeout=1)
-            self._thread = None
-            try:
-                server.server_close()
-            except Exception:  # pragma: no cover - best effort cleanup
-                pass
-            self._server = None
-
         try:
             exc = exception_queue.get_nowait()
         except Empty:
-            pass
+            return server
         else:
-            _teardown_startup_failure(shutdown=False)
+            self._teardown_startup_failure(server, shutdown=False)
             raise UIStartupError(
                 f"UI server failed to start on {self.host}:{self.port}"
             ) from exc
 
+    def _teardown_startup_failure(
+        self, server: "BaseWSGIServer", *, shutdown: bool
+    ) -> None:
+        if shutdown:
+            try:
+                server.shutdown()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
+        if self._thread:
+            self._thread.join(timeout=1)
+        self._thread = None
         try:
-            self._run_startup_probe()
-        except Exception as exc:
-            _teardown_startup_failure(shutdown=True)
-            raise UIStartupError(
-                f"UI startup probe failed on {self.host}:{self.port}: {exc}"
-            ) from exc
+            server.server_close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+        self._server = None
 
     def stop(self) -> None:
         if not self._thread:
@@ -3370,6 +3394,19 @@ class UIServer:
         if self._thread:
             self._thread.join(timeout=2)
         self._thread = None
+
+    def _build_startup_probe_url(self) -> str:
+        probe_host = self._resolve_shutdown_host()
+        formatted_host = self._format_host_for_url(probe_host)
+        return f"http://{formatted_host}:{self.port}/health"
+
+    def _perform_startup_probe_request(self, url: str) -> None:
+        import urllib.request
+
+        with urllib.request.urlopen(url, timeout=self._startup_probe_timeout) as response:
+            status = getattr(response, "status", getattr(response, "code", 200))
+            if int(status) >= 400:
+                raise RuntimeError(f"unexpected HTTP status {status}")
 
     def _resolve_shutdown_host(self) -> str:
         raw_host = (self.host or "").strip()
@@ -3482,14 +3519,12 @@ class UIServer:
             return
 
         import urllib.error
-        import urllib.request
 
-        probe_host = self._resolve_shutdown_host()
-        formatted_host = self._format_host_for_url(probe_host)
-        url = f"http://{formatted_host}:{self.port}/health"
+        url = self._build_startup_probe_url()
 
         log.debug(
-            "UIServer: running startup probe against %s", url.replace(self._shutdown_token or "", "***")
+            "UIServer: running startup probe against %s",
+            url.replace(self._shutdown_token or "", "***"),
         )
 
         attempts = self._startup_probe_retries + 1
@@ -3498,10 +3533,7 @@ class UIServer:
 
         for attempt in range(1, attempts + 1):
             try:
-                with urllib.request.urlopen(url, timeout=self._startup_probe_timeout) as response:
-                    status = getattr(response, "status", getattr(response, "code", 200))
-                    if int(status) >= 400:
-                        raise RuntimeError(f"unexpected HTTP status {status}")
+                self._perform_startup_probe_request(url)
                 return
             except urllib.error.HTTPError as exc:
                 last_error = (RuntimeError(f"HTTP {exc.code}: {exc.reason}"), exc)
@@ -3526,6 +3558,61 @@ class UIServer:
             )
             if sleep_for > 0:
                 time.sleep(sleep_for)
+            delay = max(delay * self._startup_probe_backoff, 0.0)
+
+        if last_error:
+            error, cause = last_error
+            if cause is not None:
+                raise error from cause
+            raise error
+
+    async def run_startup_probe_async(self) -> None:
+        await self._run_startup_probe_async()
+
+    async def _run_startup_probe_async(self) -> None:
+        if not self._startup_probe_enabled:
+            return
+
+        import urllib.error
+
+        url = self._build_startup_probe_url()
+
+        log.debug(
+            "UIServer: running startup probe against %s",
+            url.replace(self._shutdown_token or "", "***"),
+        )
+
+        attempts = self._startup_probe_retries + 1
+        delay = self._startup_probe_initial_delay
+        last_error: tuple[BaseException, BaseException | None] | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                await asyncio.to_thread(self._perform_startup_probe_request, url)
+                return
+            except urllib.error.HTTPError as exc:
+                last_error = (RuntimeError(f"HTTP {exc.code}: {exc.reason}"), exc)
+            except urllib.error.URLError as exc:
+                last_error = (RuntimeError(f"connection error: {exc.reason}"), exc)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                last_error = (exc, None)
+
+            if attempt == attempts:
+                break
+
+            sleep_for = delay
+            if self._startup_probe_max_delay > 0:
+                sleep_for = min(self._startup_probe_max_delay, sleep_for)
+            sleep_for = max(0.0, sleep_for)
+            log.debug(
+                "UIServer: startup probe attempt %s/%s failed (%s); retrying in %.2fs",
+                attempt,
+                attempts,
+                last_error[0] if last_error else "unknown error",
+                sleep_for,
+            )
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
             delay = max(delay * self._startup_probe_backoff, 0.0)
 
         if last_error:
