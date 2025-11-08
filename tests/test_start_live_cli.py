@@ -10,6 +10,7 @@ import tomllib
 from solhunter_zero.cli import start_live
 from solhunter_zero import primary_entry_point
 from solhunter_zero.config import ConfigFileNotFound
+from solhunter_zero.ui import UIStartupError
 
 
 def test_start_live_console_script_registered() -> None:
@@ -48,5 +49,31 @@ def test_start_live_reports_missing_config(
     assert any(
         "Unable to start trading runtime" in record.getMessage()
         and missing_config in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_start_live_reports_ui_startup_error(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ui_error_message = "UI failed to bind port"
+
+    class FakeRuntime:
+        def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - trivial
+            pass
+
+        def run_forever(self) -> None:
+            raise UIStartupError(ui_error_message)
+
+    caplog.set_level(logging.ERROR, logger="solhunter_zero.primary_entry_point")
+    monkeypatch.setattr(primary_entry_point, "TradingRuntime", FakeRuntime)
+
+    exit_code = start_live.main(["--config", "/path/to/config.toml"])
+
+    assert exit_code == 1
+    assert any(
+        "Unable to start trading runtime UI" in record.getMessage()
+        and ui_error_message in record.getMessage()
         for record in caplog.records
     )
