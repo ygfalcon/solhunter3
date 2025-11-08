@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import heapq
 import time
 from collections import OrderedDict
@@ -41,36 +42,40 @@ class TTLCache:
         # Track pending tasks per event loop to avoid cross-loop awaits
         self._pending: dict[tuple[Hashable, asyncio.AbstractEventLoop], asyncio.Task] = {}
         self._lock = asyncio.Lock()
+        self._thread_lock = threading.RLock()
 
     # internal helpers -----------------------------------------------------
     def _purge(self) -> None:
-        now = time.monotonic()
-        heap = self._expiry_heap
-        data = self._data
-        while heap and heap[0][0] <= now:
-            exp, key = heapq.heappop(heap)
-            item = data.get(key)
-            if item is None:
-                continue
-            _, real_exp = item
-            if real_exp <= now:
-                data.pop(key, None)
+        with self._thread_lock:
+            now = time.monotonic()
+            heap = self._expiry_heap
+            data = self._data
+            while heap and heap[0][0] <= now:
+                exp, key = heapq.heappop(heap)
+                item = data.get(key)
+                if item is None:
+                    continue
+                _, real_exp = item
+                if real_exp <= now:
+                    data.pop(key, None)
 
     def _evict(self) -> None:
-        while len(self._data) > self.maxsize:
-            self._data.popitem(last=False)
+        with self._thread_lock:
+            while len(self._data) > self.maxsize:
+                self._data.popitem(last=False)
 
     # basic dict API -------------------------------------------------------
     def get(self, key: Hashable, default: Any = None) -> Any:
-        self._purge()
-        item = self._data.get(key)
-        if item is None:
-            return default
-        value, exp = item
-        if exp <= time.monotonic():
-            self._data.pop(key, None)
-            return default
-        return value
+        with self._thread_lock:
+            self._purge()
+            item = self._data.get(key)
+            if item is None:
+                return default
+            value, exp = item
+            if exp <= time.monotonic():
+                self._data.pop(key, None)
+                return default
+            return value
 
     def __contains__(self, key: Hashable) -> bool:  # pragma: no cover - trivial
         return self.get(key) is not None
@@ -85,29 +90,34 @@ class TTLCache:
         self.set(key, value)
 
     def set(self, key: Hashable, value: Any) -> None:
-        self._purge()
-        exp = time.monotonic() + self.ttl
-        self._data[key] = (value, exp)
-        heapq.heappush(self._expiry_heap, (exp, key))
-        self._evict()
+        with self._thread_lock:
+            self._purge()
+            exp = time.monotonic() + self.ttl
+            self._data[key] = (value, exp)
+            heapq.heappush(self._expiry_heap, (exp, key))
+            self._evict()
 
     def pop(self, key: Hashable, default: Any = None) -> Any:
-        item = self._data.pop(key, None)
+        with self._thread_lock:
+            item = self._data.pop(key, None)
         if item is None:
             return default
         return item[0]
 
     def clear(self) -> None:  # pragma: no cover - trivial
-        self._data.clear()
-        self._expiry_heap.clear()
+        with self._thread_lock:
+            self._data.clear()
+            self._expiry_heap.clear()
 
     def keys(self):  # pragma: no cover - trivial
-        self._purge()
-        return list(self._data.keys())
+        with self._thread_lock:
+            self._purge()
+            return list(self._data.keys())
 
     def __len__(self) -> int:  # pragma: no cover - trivial
-        self._purge()
-        return len(self._data)
+        with self._thread_lock:
+            self._purge()
+            return len(self._data)
 
     # async helpers -------------------------------------------------------
     async def get_or_set_async(

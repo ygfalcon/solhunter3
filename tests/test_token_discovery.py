@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 from solhunter_zero import token_discovery as td
 
@@ -147,3 +148,84 @@ def test_collect_mempool_signals_times_out(monkeypatch):
 
     assert scores == {}
     assert any("timed out" in message for message in messages), messages
+
+
+def test_warm_cache_safe_with_concurrent_fetch(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    async def empty_mempool(*_args, **_kwargs):
+        if False:  # pragma: no cover - generator stub
+            yield None
+
+    monkeypatch.setattr(
+        td,
+        "stream_ranked_mempool_tokens_with_depth",
+        lambda *_a, **_k: empty_mempool(),
+    )
+
+    call_threads: list[str] = []
+    counter_lock = threading.Lock()
+    first_call_started = threading.Event()
+    second_call_started = threading.Event()
+    original_thread = threading.Thread
+    worker_finished = threading.Event()
+    worker_errors: list[BaseException] = []
+
+    class RecordingThread(original_thread):
+        def run(self) -> None:
+            try:
+                super().run()
+            except BaseException as exc:  # pragma: no cover - defensive
+                worker_errors.append(exc)
+                raise
+            finally:
+                worker_finished.set()
+
+    monkeypatch.setattr(td.threading, "Thread", RecordingThread)
+
+    async def fake_fetch() -> list[dict[str, float]]:
+        with counter_lock:
+            idx = len(call_threads) + 1
+            call_threads.append(threading.current_thread().name)
+        if idx == 1:
+            first_call_started.set()
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, second_call_started.wait)
+        else:
+            second_call_started.set()
+            await asyncio.sleep(0)
+
+        cached = td._BIRDEYE_CACHE.get("tokens") or []
+        data = [
+            {
+                "address": f"token-{idx}",
+                "symbol": f"T{idx}",
+                "name": f"Token {idx}",
+                "liquidity": 100000.0 + idx,
+                "volume": 200000.0 + idx,
+                "price": 1.0,
+                "price_change": 0.0,
+                "sources": {"birdeye"},
+                "cached_before": [entry.get("address") for entry in cached],
+            }
+        ]
+        td._BIRDEYE_CACHE.set("tokens", data)
+        return data
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_fetch)
+
+    td.warm_cache("https://rpc", limit=1)
+
+    assert first_call_started.wait(timeout=1.0)
+
+    asyncio.run(td._fetch_birdeye_tokens())
+
+    assert worker_finished.wait(timeout=1.0)
+    assert not worker_errors
+
+    final = td._BIRDEYE_CACHE.get("tokens")
+
+    assert final is not None
+    assert all(entry.get("address") for entry in final)
+    assert len(call_threads) == 2
+    assert {"discovery-warm", "MainThread"} <= set(call_threads)
