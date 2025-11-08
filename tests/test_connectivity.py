@@ -48,6 +48,13 @@ async def test_probe_ui_ws_hello(monkeypatch):
     assert result.ok
 
 
+def test_skip_ui_targets_via_env():
+    checker = ConnectivityChecker(env={"CONNECTIVITY_SKIP_UI_PROBES": "true", "UI_HOST": "dummy"})
+    names = {target["name"] for target in checker.targets}
+    assert "ui-ws" not in names
+    assert "ui-http" not in names
+
+
 def _make_ui_app():
     app = web.Application()
 

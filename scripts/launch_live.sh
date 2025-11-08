@@ -932,6 +932,8 @@ kill "$PAPER_PID" >/dev/null 2>&1 || true
 wait "$PAPER_PID" 2>/dev/null || true
 log_info "Paper runtime stopped after preflight"
 
+export CONNECTIVITY_SKIP_UI_PROBES=1
+log_info "Paper runtime offline; skipping UI connectivity probes during soak"
 log_info "Starting connectivity soak for ${SOAK_DURATION}s"
 connectivity_soak() {
   "$PYTHON_BIN" - <<'PY'
@@ -967,6 +969,8 @@ if ! SOAK_RESULT=$(connectivity_soak); then
 fi
 
 log_info "Connectivity soak complete: $SOAK_RESULT"
+unset CONNECTIVITY_SKIP_UI_PROBES
+log_info "UI connectivity probes re-enabled for live launch"
 
 export MODE=live
 # keep env aligned with the flag we passed to the controller
