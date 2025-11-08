@@ -1,7 +1,10 @@
 import asyncio
 import os
 import time
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from solhunter_zero.agents.discovery import DiscoveryAgent
 from solhunter_zero.scanner_common import DEFAULT_SOLANA_RPC, DEFAULT_SOLANA_WS
@@ -398,8 +401,16 @@ def test_collect_mempool_times_out(monkeypatch):
         "warning",
         lambda msg, *args, **kwargs: warnings.append(msg % args if args else str(msg)),
     )
-    monkeypatch.setattr(discovery_mod, "_MEMPOOL_STREAM_TIMEOUT", 0.01)
-    monkeypatch.setattr(discovery_mod, "_MEMPOOL_STREAM_TIMEOUT_RETRIES", 1)
+    monkeypatch.setattr(
+        discovery_mod,
+        "resolve_discovery_runtime_settings",
+        lambda **kwargs: SimpleNamespace(
+            mempool_threshold=float(kwargs.get("mempool_threshold", 0.0) or 0.0),
+            mempool_timeout=0.01,
+            mempool_timeout_retries=1,
+            metric_batch_size=1,
+        ),
+    )
 
     agent = discovery_mod.DiscoveryAgent()
 
@@ -414,3 +425,47 @@ def test_collect_mempool_times_out(monkeypatch):
 
     runtime_logs = [item for item in captured if item[0] == "runtime.log"]
     assert runtime_logs, "timeout should publish runtime metrics"
+
+
+def test_collect_mempool_respects_updated_runtime(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    thresholds: list[float] = []
+    timeouts: list[float] = []
+
+    async def fake_stream(_url, threshold):
+        thresholds.append(threshold)
+        yield {"address": "tok", "score": 1.0}
+
+    async def fake_wait_for(awaitable, timeout, **kwargs):
+        timeouts.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(
+        discovery_mod,
+        "stream_ranked_mempool_tokens_with_depth",
+        fake_stream,
+    )
+    monkeypatch.setattr(discovery_mod.asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setenv("DISCOVERY_LIMIT", "1")
+    monkeypatch.setenv("DISCOVERY_MEMPOOL_TIMEOUT_RETRIES", "1")
+
+    monkeypatch.setenv("MEMPOOL_SCORE_THRESHOLD", "0.05")
+    monkeypatch.setenv("DISCOVERY_MEMPOOL_TIMEOUT", "0.2")
+    agent = discovery_mod.DiscoveryAgent()
+
+    async def run_once():
+        return await agent._collect_mempool()
+
+    tokens, details = asyncio.run(run_once())
+    assert tokens == ["tok"]
+    assert details["tok"]["score"] == 1.0
+    assert thresholds[-1] == pytest.approx(0.05)
+    assert timeouts[-1] == pytest.approx(0.2)
+
+    monkeypatch.setenv("MEMPOOL_SCORE_THRESHOLD", "0.15")
+    monkeypatch.setenv("DISCOVERY_MEMPOOL_TIMEOUT", "0.6")
+    tokens, details = asyncio.run(run_once())
+    assert tokens == ["tok"]
+    assert thresholds[-1] == pytest.approx(0.15)
+    assert timeouts[-1] == pytest.approx(0.6)

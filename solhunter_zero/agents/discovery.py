@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from .. import config
-from ..discovery import merge_sources
+from ..discovery import (
+    DiscoveryRuntimeSettings,
+    merge_sources,
+    resolve_discovery_runtime_settings,
+)
 from ..event_bus import publish
 from ..mempool_scanner import stream_ranked_mempool_tokens_with_depth
 from ..scanner_common import (
@@ -23,11 +27,6 @@ from ..schemas import RuntimeLog
 from ..token_scanner import enrich_tokens_async, scan_tokens_async
 
 logger = logging.getLogger(__name__)
-
-_MEMPOOL_STREAM_TIMEOUT = float(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT", "2.5") or 2.5)
-_MEMPOOL_STREAM_TIMEOUT_RETRIES = max(
-    1, int(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT_RETRIES", "3") or 3)
-)
 
 _CACHE: dict[str, object] = {
     "tokens": [],
@@ -88,7 +87,8 @@ class DiscoveryAgent:
         self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
         self.max_attempts = max(1, int(os.getenv("TOKEN_DISCOVERY_RETRIES", "2") or 2))
-        self.mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
+        runtime = resolve_discovery_runtime_settings()
+        self.mempool_threshold = runtime.mempool_threshold
         self.default_method = DEFAULT_DISCOVERY_METHOD
         self._warned_missing_birdeye = False
         self.last_details: Dict[str, Dict[str, Any]] = {}
@@ -149,6 +149,9 @@ class DiscoveryAgent:
                 }
             )
 
+        runtime = resolve_discovery_runtime_settings()
+        self.mempool_threshold = runtime.mempool_threshold
+
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
@@ -162,7 +165,13 @@ class DiscoveryAgent:
 
         url = rpc_url or self.ws_url or self.rpc_url
         url = self._as_websocket_url(url) or self.ws_url or self.rpc_url
-        thresh = self.mempool_threshold if threshold is None else float(threshold)
+        if threshold is None:
+            runtime = resolve_discovery_runtime_settings()
+            thresh = runtime.mempool_threshold
+            self.mempool_threshold = thresh
+        else:
+            thresh = float(threshold)
+            self.mempool_threshold = thresh
         return stream_ranked_mempool_tokens_with_depth(url, threshold=thresh)
 
     # ------------------------------------------------------------------
@@ -362,6 +371,11 @@ class DiscoveryAgent:
         offline: bool,
         token_file: Optional[str],
     ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
+        runtime_settings = None
+        if method in {"websocket", "mempool"}:
+            runtime_settings = resolve_discovery_runtime_settings()
+            self.mempool_threshold = runtime_settings.mempool_threshold
+
         if (offline or method == "file") and token_file:
             try:
                 tokens = scan_tokens_from_file(token_file, limit=self.limit)
@@ -378,7 +392,11 @@ class DiscoveryAgent:
             results = await merge_sources(
                 self.rpc_url,
                 limit=self.limit,
-                mempool_threshold=self.mempool_threshold,
+                mempool_threshold=(
+                    runtime_settings.mempool_threshold
+                    if runtime_settings is not None
+                    else self.mempool_threshold
+                ),
                 ws_url=self.ws_url,
             )
             if isinstance(results, list) and len(results) > self.limit:
@@ -391,7 +409,7 @@ class DiscoveryAgent:
             return list(details.keys()), details
 
         if method == "mempool":
-            return await self._collect_mempool()
+            return await self._collect_mempool(runtime_settings)
 
         if method == "onchain":
             try:
@@ -419,19 +437,24 @@ class DiscoveryAgent:
                 tokens = [tok for tok in raw_tokens if isinstance(tok, str)]
         return tokens, {}
 
-    async def _collect_mempool(self) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
-        gen = self.stream_mempool_events(threshold=self.mempool_threshold)
+    async def _collect_mempool(
+        self, runtime: Optional[DiscoveryRuntimeSettings] = None
+    ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
+        runtime = runtime or resolve_discovery_runtime_settings()
+        self.mempool_threshold = runtime.mempool_threshold
+        gen = self.stream_mempool_events(threshold=runtime.mempool_threshold)
         tokens: List[str] = []
         details: Dict[str, Dict[str, Any]] = {}
         timeouts = 0
-        timeout = max(_MEMPOOL_STREAM_TIMEOUT, 0.1)
+        timeout = max(runtime.mempool_timeout, 0.1)
+        retries = runtime.mempool_timeout_retries
         try:
             while len(tokens) < self.limit:
                 try:
                     item = await asyncio.wait_for(anext(gen), timeout=timeout)
                 except asyncio.TimeoutError:
                     timeouts += 1
-                    if timeouts >= _MEMPOOL_STREAM_TIMEOUT_RETRIES:
+                    if timeouts >= retries:
                         logger.warning(
                             "Mempool stream timed out after %d attempts", timeouts
                         )
@@ -447,7 +470,7 @@ class DiscoveryAgent:
                     logger.debug(
                         "Mempool stream timeout (attempt %d/%d)",
                         timeouts,
-                        _MEMPOOL_STREAM_TIMEOUT_RETRIES,
+                        retries,
                     )
                     await asyncio.sleep(0)
                     continue

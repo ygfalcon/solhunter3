@@ -5,7 +5,8 @@ import contextlib
 import logging
 import math
 import os
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
 
 from . import onchain_metrics
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
@@ -15,14 +16,21 @@ from .token_scanner import TRENDING_METADATA, enrich_tokens_async, scan_tokens_a
 logger = logging.getLogger(__name__)
 
 _DEFAULT_LIMIT = int(os.getenv("DISCOVERY_MAX_TOKENS", "50") or 50)
-_DEFAULT_MEMPOOL_THRESHOLD = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
-_MEMPOOL_TIMEOUT = float(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT", "2.5") or 2.5)
-_MEMPOOL_TIMEOUT_RETRIES = max(
-    1, int(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT_RETRIES", "3") or 3)
-)
-_METRIC_BATCH_SIZE = max(
-    1, int(os.getenv("DISCOVERY_METRIC_BATCH_SIZE", "8") or 8)
-)
+
+DEFAULT_MEMPOOL_THRESHOLD = 0.0
+DEFAULT_MEMPOOL_TIMEOUT = 2.5
+DEFAULT_MEMPOOL_TIMEOUT_RETRIES = 3
+DEFAULT_METRIC_BATCH_SIZE = 8
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryRuntimeSettings:
+    """Container for runtime-configurable discovery parameters."""
+
+    mempool_threshold: float = DEFAULT_MEMPOOL_THRESHOLD
+    mempool_timeout: float = DEFAULT_MEMPOOL_TIMEOUT
+    mempool_timeout_retries: int = DEFAULT_MEMPOOL_TIMEOUT_RETRIES
+    metric_batch_size: int = DEFAULT_METRIC_BATCH_SIZE
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -35,6 +43,83 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
         return float(text)
     except Exception:
         return default
+
+
+def _coerce_int(value: Any, default: int, minimum: int = 1) -> int:
+    try:
+        if isinstance(value, bool):
+            raise TypeError("booleans are not valid")
+        if isinstance(value, int):
+            result = value
+        elif isinstance(value, float):
+            result = int(value)
+        else:
+            text = str(value).strip()
+            if not text:
+                raise ValueError("empty string")
+            result = int(float(text))
+    except Exception:
+        result = default
+    if result < minimum:
+        result = minimum
+    return result
+
+
+def resolve_discovery_runtime_settings(
+    *,
+    mempool_threshold: Any | None = None,
+    mempool_timeout: Any | None = None,
+    mempool_timeout_retries: Any | None = None,
+    metric_batch_size: Any | None = None,
+    environ: Mapping[str, Any] | None = None,
+) -> DiscoveryRuntimeSettings:
+    """Return runtime configuration for discovery helpers.
+
+    Values are read from ``environ`` (defaults to :mod:`os.environ`) unless an
+    explicit override is provided.  This indirection allows tests to swap in
+    custom values without mutating global module state.
+    """
+
+    env: Mapping[str, Any] = environ if environ is not None else os.environ
+
+    def _select(name: str, override: Any | None, default: Any) -> Any:
+        if override is not None:
+            return override
+        return env.get(name, default)
+
+    threshold_value = _coerce_float(
+        _select("MEMPOOL_SCORE_THRESHOLD", mempool_threshold, DEFAULT_MEMPOOL_THRESHOLD),
+        default=DEFAULT_MEMPOOL_THRESHOLD,
+    )
+    timeout_value = _coerce_float(
+        _select("DISCOVERY_MEMPOOL_TIMEOUT", mempool_timeout, DEFAULT_MEMPOOL_TIMEOUT),
+        default=DEFAULT_MEMPOOL_TIMEOUT,
+    )
+    retries_value = _coerce_int(
+        _select(
+            "DISCOVERY_MEMPOOL_TIMEOUT_RETRIES",
+            mempool_timeout_retries,
+            DEFAULT_MEMPOOL_TIMEOUT_RETRIES,
+        ),
+        default=DEFAULT_MEMPOOL_TIMEOUT_RETRIES,
+        minimum=1,
+    )
+    metric_batch_value = _coerce_int(
+        _select(
+            "DISCOVERY_METRIC_BATCH_SIZE",
+            metric_batch_size,
+            DEFAULT_METRIC_BATCH_SIZE,
+        ),
+        default=DEFAULT_METRIC_BATCH_SIZE,
+        minimum=1,
+    )
+
+    return DiscoveryRuntimeSettings(
+        mempool_threshold=threshold_value,
+        mempool_timeout=timeout_value,
+        mempool_timeout_retries=retries_value,
+        metric_batch_size=metric_batch_value,
+    )
 
 
 def _score_component(value: float) -> float:
@@ -61,29 +146,37 @@ async def _collect_mempool_candidates(
     rpc_url: str,
     *,
     limit: int,
-    threshold: float,
+    threshold: float | None = None,
     ws_url: str | None = None,
+    runtime: DiscoveryRuntimeSettings | None = None,
 ) -> List[Dict[str, Any]]:
     """Collect a handful of ranked mempool events with depth information."""
 
     if not rpc_url:
         return []
 
+    runtime = runtime or resolve_discovery_runtime_settings(
+        mempool_threshold=threshold
+    )
+    threshold_value = runtime.mempool_threshold
     results: List[Dict[str, Any]] = []
     seen: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []
     gen = None
     timeouts = 0
-    timeout = max(_MEMPOOL_TIMEOUT, 0.1)
+    timeout = max(runtime.mempool_timeout, 0.1)
+    retries = runtime.mempool_timeout_retries
     target_url = ws_url or rpc_url
     try:
-        gen = stream_ranked_mempool_tokens_with_depth(target_url, threshold=threshold)
+        gen = stream_ranked_mempool_tokens_with_depth(
+            target_url, threshold=threshold_value
+        )
         while len(order) < limit:
             try:
                 item = await asyncio.wait_for(anext(gen), timeout=timeout)
             except asyncio.TimeoutError:
                 timeouts += 1
-                if timeouts >= _MEMPOOL_TIMEOUT_RETRIES:
+                if timeouts >= retries:
                     logger.debug(
                         "Mempool stream timed out after %d attempts", timeouts
                     )
@@ -260,10 +353,8 @@ async def merge_sources(
 
     requested = int(limit) if limit is not None else _DEFAULT_LIMIT
     size = max(1, min(requested, _DEFAULT_LIMIT))
-    threshold = (
-        float(mempool_threshold)
-        if mempool_threshold is not None
-        else _DEFAULT_MEMPOOL_THRESHOLD
+    runtime = resolve_discovery_runtime_settings(
+        mempool_threshold=mempool_threshold
     )
 
     trending_task = asyncio.create_task(fetch_trending_tokens_async(limit=size))
@@ -271,7 +362,10 @@ async def merge_sources(
         scan_tokens_onchain(rpc_url, return_metrics=True)
     )
     mempool_candidates = await _collect_mempool_candidates(
-        rpc_url, limit=size, threshold=threshold, ws_url=ws_url
+        rpc_url,
+        limit=size,
+        ws_url=ws_url,
+        runtime=runtime,
     )
 
     trending_result, onchain_result = await asyncio.gather(
@@ -298,13 +392,13 @@ async def merge_sources(
         trending_tokens,
         rpc_url,
         onchain_metrics.fetch_volume_onchain_async,
-        _METRIC_BATCH_SIZE,
+        runtime.metric_batch_size,
     )
     liquidities = await _gather_metrics_in_batches(
         trending_tokens,
         rpc_url,
         onchain_metrics.fetch_liquidity_onchain_async,
-        _METRIC_BATCH_SIZE,
+        runtime.metric_batch_size,
     )
 
     combined: Dict[str, Dict[str, Any]] = {}
@@ -387,6 +481,8 @@ async def merge_sources(
 
 
 __all__ = [
+    "DiscoveryRuntimeSettings",
     "fetch_trending_tokens_async",
     "merge_sources",
+    "resolve_discovery_runtime_settings",
 ]

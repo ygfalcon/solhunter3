@@ -75,8 +75,10 @@ def test_latest_detail_payload_overrides_and_updates_score(monkeypatch):
     async def fake_onchain(url, return_metrics=False):
         return []
 
-    async def fake_collect(_rpc_url, *, limit, threshold, ws_url=None):
-        _ = (limit, threshold, ws_url)
+    async def fake_collect(
+        _rpc_url, *, limit, threshold=0.0, ws_url=None, runtime=None
+    ):
+        _ = (limit, threshold, ws_url, runtime)
         return [
             {
                 "address": "a",
@@ -247,7 +249,7 @@ def test_merge_sources_respects_metric_batch(monkeypatch):
     volume_counter = {"active": 0, "max": 0}
     liquidity_counter = {"active": 0, "max": 0}
 
-    monkeypatch.setattr("solhunter_zero.discovery._METRIC_BATCH_SIZE", 2)
+    monkeypatch.setenv("DISCOVERY_METRIC_BATCH_SIZE", "2")
     monkeypatch.setattr(
         "solhunter_zero.discovery.fetch_trending_tokens_async", fake_trend
     )
@@ -268,3 +270,65 @@ def test_merge_sources_respects_metric_batch(monkeypatch):
     assert [entry["address"] for entry in result][: len(tokens)] == tokens
     assert volume_counter["max"] == 2
     assert liquidity_counter["max"] == 2
+
+
+def test_merge_sources_reloads_metric_batch(monkeypatch):
+    tokens = [f"mint-{idx}" for idx in range(6)]
+
+    async def fake_trend(limit=None):
+        return tokens
+
+    async def fake_onchain(url, return_metrics=False):
+        return []
+
+    async def fake_collect(*_a, **_k):
+        return []
+
+    volume_counter = {"active": 0, "max": 0}
+    liquidity_counter = {"active": 0, "max": 0}
+
+    async def volume_stub(token, url):
+        volume_counter["active"] += 1
+        volume_counter["max"] = max(volume_counter["max"], volume_counter["active"])
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        volume_counter["active"] -= 1
+        return 1.0
+
+    async def liquidity_stub(token, url):
+        liquidity_counter["active"] += 1
+        liquidity_counter["max"] = max(
+            liquidity_counter["max"], liquidity_counter["active"]
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        liquidity_counter["active"] -= 1
+        return 1.0
+
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.fetch_trending_tokens_async", fake_trend
+    )
+    monkeypatch.setattr("solhunter_zero.discovery.scan_tokens_onchain", fake_onchain)
+    monkeypatch.setattr(
+        "solhunter_zero.discovery._collect_mempool_candidates", fake_collect
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.onchain_metrics.fetch_volume_onchain_async",
+        volume_stub,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.onchain_metrics.fetch_liquidity_onchain_async",
+        liquidity_stub,
+    )
+
+    def _run(expected_batch: int) -> None:
+        volume_counter["active"] = volume_counter["max"] = 0
+        liquidity_counter["active"] = liquidity_counter["max"] = 0
+        monkeypatch.setenv("DISCOVERY_METRIC_BATCH_SIZE", str(expected_batch))
+        result = asyncio.run(merge_sources("rpc", limit=len(tokens)))
+        assert [entry["address"] for entry in result][: len(tokens)] == tokens
+        assert volume_counter["max"] == expected_batch
+        assert liquidity_counter["max"] == expected_batch
+
+    _run(1)
+    _run(3)
