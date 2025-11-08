@@ -202,6 +202,13 @@ class DiscoveryService:
                     if number is not None:
                         metadata[key] = number
                     continue
+                if key == "depth" or key.startswith("depth_"):
+                    number = _coerce_float(value)
+                    if number is not None:
+                        metadata[key] = number
+                    elif value is not None:
+                        metadata[key] = value
+                    continue
                 metadata[key] = value
 
         raw = TRENDING_METADATA.get(token)
