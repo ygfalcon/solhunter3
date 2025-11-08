@@ -442,7 +442,24 @@ class DiscoveryService:
             return
         if not metadata_changed:
             changed_tokens = []
-        await self.queue.put(batch)
+
+        while True:
+            if self._stopped.is_set():
+                log.warning(
+                    "DiscoveryService dropping %d tokens because service is stopping",
+                    len(batch),
+                )
+                return
+            try:
+                await asyncio.wait_for(self.queue.put(batch), timeout=1.0)
+                break
+            except asyncio.TimeoutError:
+                log.warning(
+                    "DiscoveryService queue full; dropping %d token(s)",
+                    len(batch),
+                )
+                return
+
         log.info("DiscoveryService queued %d tokens", len(batch))
         previous = list(self._last_emitted)
         payload = {
