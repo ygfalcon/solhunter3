@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import time
 from typing import Awaitable, Callable, List, Optional
 
@@ -27,11 +28,24 @@ class ExecutionService:
     ) -> None:
         self.input_queue = input_queue
         self.agent_manager = agent_manager
-        try:
-            lane_count = int(lane_workers)
-        except (TypeError, ValueError):
-            lane_count = 5
-        self.lane_workers = max(5, lane_count)
+        def _coerce_lane_count(value: object) -> int | None:
+            if value in (None, ""):
+                return None
+            try:
+                parsed = int(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return None
+            if parsed <= 0:
+                return None
+            return parsed
+
+        lane_count = _coerce_lane_count(os.getenv("EXECUTION_LANE_WORKERS"))
+        if lane_count is None:
+            lane_count = _coerce_lane_count(lane_workers)
+        if lane_count is None:
+            lane_count = 2
+
+        self.lane_workers = lane_count
         self._stopped = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._worker_tasks: list[asyncio.Task] = []
