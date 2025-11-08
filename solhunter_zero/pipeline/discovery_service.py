@@ -32,6 +32,9 @@ _METADATA_LIST_KEYS = {"sources"}
 _METADATA_TOLERANCE = 1e-6
 
 
+_UNSET = object()
+
+
 def _coerce_float(value: Any) -> float | None:
     """Best-effort conversion of ``value`` to ``float``."""
 
@@ -177,8 +180,63 @@ class DiscoveryService:
         self._last_details = dict(details)
         return list(tokens), details
 
-    def refresh(self) -> None:
-        """Reset cached discovery state to pick up configuration changes."""
+    def refresh(
+        self,
+        *,
+        offline: object = _UNSET,
+        token_file: object = _UNSET,
+        limit: object = _UNSET,
+        backoff_factor: object = _UNSET,
+        max_backoff: object = _UNSET,
+    ) -> None:
+        """Reset cached discovery state and apply updated configuration."""
+
+        if offline is not _UNSET:
+            try:
+                self.offline = bool(offline)
+            except Exception:
+                log.warning("DiscoveryService refresh: invalid offline value %r", offline)
+
+        if token_file is not _UNSET:
+            if token_file in (None, ""):
+                self.token_file = None
+            else:
+                try:
+                    text = str(token_file).strip()
+                except Exception:
+                    log.warning("DiscoveryService refresh: invalid token file %r", token_file)
+                else:
+                    self.token_file = text or None
+
+        if limit is not _UNSET:
+            if limit in (None, "", 0):
+                self.limit = None
+            else:
+                try:
+                    parsed_limit = int(limit)
+                except (TypeError, ValueError):
+                    log.warning("DiscoveryService refresh: invalid limit %r", limit)
+                else:
+                    self.limit = parsed_limit if parsed_limit > 0 else None
+
+        if backoff_factor is not _UNSET and backoff_factor is not None:
+            try:
+                parsed_backoff = float(backoff_factor)
+            except (TypeError, ValueError):
+                log.warning("DiscoveryService refresh: invalid backoff_factor %r", backoff_factor)
+            else:
+                self.backoff_factor = max(1.0, parsed_backoff)
+
+        if max_backoff is not _UNSET:
+            if max_backoff in (None, ""):
+                self.max_backoff = None
+            else:
+                try:
+                    parsed_max = float(max_backoff)
+                except (TypeError, ValueError):
+                    log.warning("DiscoveryService refresh: invalid max_backoff %r", max_backoff)
+                else:
+                    self.max_backoff = max(0.0, parsed_max)
 
         refresher = getattr(self._agent, "refresh_settings", None)
         if callable(refresher):

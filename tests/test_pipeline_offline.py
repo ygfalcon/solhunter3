@@ -13,6 +13,7 @@ def anyio_backend() -> str:
 async def test_pipeline_discovery_uses_token_file(tmp_path, monkeypatch):
     from solhunter_zero.pipeline.coordinator import PipelineCoordinator
     from solhunter_zero.agents import discovery as discovery_mod
+    from solhunter_zero import discovery_state
 
     # Fail fast if any live discovery helper is invoked.
     async def _fail(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover - defensive
@@ -58,6 +59,104 @@ async def test_pipeline_discovery_uses_token_file(tmp_path, monkeypatch):
     assert tokens == expected_tokens
     assert coordinator._discovery_service.offline is True
     assert coordinator._discovery_service.token_file == str(token_file)
+
+
+@pytest.mark.anyio
+async def test_pipeline_refresh_updates_discovery_settings(monkeypatch, tmp_path):
+    from solhunter_zero.pipeline.coordinator import PipelineCoordinator
+    from solhunter_zero.agents import discovery as discovery_mod
+    from solhunter_zero import discovery_state
+
+    token_file = tmp_path / "dynamic_tokens.txt"
+    offline_tokens = ["TokOffline1", "TokOffline2", "TokOffline3"]
+    token_file.write_text("\n".join(offline_tokens))
+    live_tokens = ["TokLive1", "TokLive2", "TokLive3"]
+
+    call_count = {"value": 0}
+    captured: list[tuple[bool, str | None]] = []
+
+    async def fake_discover(
+        self,
+        *,
+        offline: bool,
+        token_file: str | None,
+        method: str | None = None,
+        **_: Any,
+    ) -> list[str]:
+        call_count["value"] += 1
+        captured.append((offline, token_file))
+        self.last_details = {}
+        if call_count["value"] == 1:
+            return list(live_tokens)
+        if call_count["value"] == 2:
+            assert offline is True
+            assert token_file == str(token_file_path)
+            return token_file_path.read_text().splitlines()
+        assert offline is True
+        return []
+
+    token_file_path = token_file
+    monkeypatch.setattr(discovery_mod.DiscoveryAgent, "discover_tokens", fake_discover)
+    monkeypatch.setattr(discovery_state, "current_method", lambda **_: "helius")
+
+    class DummyExecutor:
+        async def execute(self, action: dict) -> dict:  # pragma: no cover - not exercised
+            return {"action": action}
+
+    class DummyAgentManager:
+        def __init__(self) -> None:
+            self.executor = DummyExecutor()
+            self.memory_agent = None
+
+        async def evaluate_with_swarm(self, token: str, portfolio: object) -> SimpleNamespace:
+            return SimpleNamespace(actions=[])
+
+    class DummyPortfolio:
+        def record_prices(self, prices: dict | None = None) -> None:  # pragma: no cover - not used
+            return None
+
+        def update_risk_metrics(self) -> None:  # pragma: no cover - not used
+            return None
+
+    coordinator = PipelineCoordinator(
+        DummyAgentManager(),
+        DummyPortfolio(),
+        discovery_interval=0.1,
+        discovery_cache_ttl=0.0,
+        discovery_empty_cache_ttl=0.5,
+    )
+
+    tokens, _details = await coordinator._discovery_service._fetch()
+    assert tokens == live_tokens
+    assert captured[-1] == (False, None)
+
+    coordinator.offline = True
+    coordinator.token_file = str(token_file_path)
+    coordinator.discovery_limit = 2
+    coordinator.discovery_backoff_factor = 4.0
+    coordinator.discovery_max_backoff = 0.3
+
+    coordinator.refresh_discovery()
+
+    tokens, _details = await coordinator._discovery_service._fetch()
+    assert tokens == offline_tokens[:2]
+    assert captured[-1] == (True, str(token_file_path))
+    assert coordinator._discovery_service.offline is True
+    assert coordinator._discovery_service.token_file == str(token_file_path)
+    assert coordinator._discovery_service.limit == 2
+    assert coordinator._discovery_service.backoff_factor == pytest.approx(4.0)
+    assert coordinator._discovery_service.max_backoff == pytest.approx(0.3)
+    assert coordinator.discovery_backoff_factor == pytest.approx(4.0)
+    assert coordinator.discovery_max_backoff == pytest.approx(0.3)
+    assert coordinator.discovery_limit == 2
+
+    coordinator._discovery_service._cooldown_until = 0.0
+    tokens, _details = await coordinator._discovery_service._fetch()
+    assert tokens == []
+    assert captured[-1] == (True, str(token_file_path))
+    assert coordinator._discovery_service._current_backoff == pytest.approx(0.3)
+    assert coordinator._discovery_service._consecutive_empty == 1
+    assert call_count["value"] == 3
 
 
 @pytest.mark.anyio

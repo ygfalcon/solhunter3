@@ -432,3 +432,69 @@ async def test_fetch_refreshes_agent_when_method_env_changes(monkeypatch):
     assert tokens == ["tok"]
     assert details == {}
     assert seen_methods[-1] == "mempool"
+
+
+@pytest.mark.anyio
+async def test_refresh_applies_new_configuration(monkeypatch, tmp_path):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(
+        queue,
+        interval=0.1,
+        cache_ttl=0.0,
+        empty_cache_ttl=0.5,
+        backoff_factor=2.0,
+        max_backoff=1.0,
+    )
+
+    token_file = tmp_path / "tokens.txt"
+    expected_tokens = ["TokA", "TokB", "TokC"]
+    token_file.write_text("\n".join(expected_tokens))
+
+    captured: list[tuple[bool, str | None, str | None]] = []
+    token_file_path = token_file
+
+    async def fake_discover(
+        self,
+        *,
+        offline: bool,
+        token_file: str | None,
+        method: str | None = None,
+        **_: object,
+    ) -> list[str]:
+        captured.append((offline, token_file, method))
+        self.last_details = {}
+        if len(captured) == 1:
+            assert offline is True
+            assert token_file == str(token_file_path)
+            return token_file_path.read_text().splitlines()
+        assert offline is True
+        return []
+
+    monkeypatch.setattr(discovery_mod.DiscoveryAgent, "discover_tokens", fake_discover)
+    monkeypatch.setattr(discovery_mod.discovery_state, "current_method", lambda **_: "helius")
+
+    service.refresh(
+        offline=True,
+        token_file=str(token_file_path),
+        limit=2,
+        backoff_factor=3.0,
+        max_backoff=0.25,
+    )
+
+    tokens, details = await service._fetch()
+    assert tokens == expected_tokens[:2]
+    assert details == {}
+    assert captured[-1][0] is True
+    assert captured[-1][1] == str(token_file_path)
+    assert service.offline is True
+    assert service.token_file == str(token_file_path)
+    assert service.limit == 2
+    assert service.backoff_factor == pytest.approx(3.0)
+    assert service.max_backoff == pytest.approx(0.25)
+
+    tokens, details = await service._fetch()
+    assert tokens == []
+    assert details == {}
+    assert captured[-1][0] is True
+    assert service._current_backoff == pytest.approx(0.25)
+    assert service._consecutive_empty == 1

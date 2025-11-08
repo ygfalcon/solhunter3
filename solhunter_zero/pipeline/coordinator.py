@@ -169,6 +169,9 @@ class PipelineCoordinator:
             token_file=self.token_file,
             **discovery_kwargs,
         )
+        self.discovery_backoff_factor = self._discovery_service.backoff_factor
+        self.discovery_max_backoff = self._discovery_service.max_backoff
+        self.discovery_limit = self._discovery_service.limit
         self._scoring_service = ScoringService(
             self._discovery_queue,
             self._scoring_queue,
@@ -266,7 +269,18 @@ class PipelineCoordinator:
         """Clear cached discovery state so new settings take effect promptly."""
 
         try:
-            self._discovery_service.refresh()
+            self._discovery_service.refresh(
+                offline=self.offline,
+                token_file=self.token_file,
+                limit=self.discovery_limit,
+                backoff_factor=self.discovery_backoff_factor,
+                max_backoff=self.discovery_max_backoff,
+            )
+            self.offline = bool(self._discovery_service.offline)
+            self.token_file = self._discovery_service.token_file
+            self.discovery_limit = self._discovery_service.limit
+            self.discovery_backoff_factor = self._discovery_service.backoff_factor
+            self.discovery_max_backoff = self._discovery_service.max_backoff
         except Exception:
             log.exception("PipelineCoordinator: failed to refresh discovery service")
 
