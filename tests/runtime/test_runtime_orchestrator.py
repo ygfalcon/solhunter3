@@ -140,7 +140,7 @@ async def test_start_bus_reinitializes_after_local_bind(monkeypatch, request):
     await orchestrator.start_bus()
 
     assert init_calls["count"] == 2
-    assert fake_start_ws_server.calls == [("localhost", 9101)]
+    assert fake_start_ws_server.calls == [("127.0.0.1", 9101)]
     assert orchestrator.handles.local_ws_bound is True
     assert event_bus_module.BUS.broker_urls == ["ws://127.0.0.1:9101"]
 

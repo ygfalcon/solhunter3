@@ -117,17 +117,39 @@ def _get_config() -> tuple[str | None, dict]:
     return cfg_path, cfg
 
 
-def _start_event_bus(url: str) -> None:
+def _resolve_event_bus_host(
+    cfg: dict | None = None, override: str | None = None
+) -> str | None:
+    """Return the preferred websocket host from overrides, env, or config."""
+
+    if override and override.strip():
+        return override.strip()
+
+    env_host = os.getenv("EVENT_BUS_WS_HOST", "").strip()
+    if env_host:
+        return env_host
+
+    if cfg is not None:
+        cfg_host = cfg.get("event_bus_ws_host")
+        if cfg_host:
+            return str(cfg_host).strip()
+
+    return None
+
+
+def _start_event_bus(url: str, *, cfg: dict | None = None, host: str | None = None) -> None:
     """Launch the websocket event bus locally and ensure it is reachable."""
     global _EVENT_LOOP, _EVENT_THREAD
     parsed = urllib.parse.urlparse(url)
-    host = parsed.hostname or "localhost"
+    listen_host = _resolve_event_bus_host(cfg, override=host)
+    if not listen_host:
+        listen_host = parsed.hostname or "localhost"
     port = parsed.port or 8766
     loop = asyncio.new_event_loop()
     _EVENT_LOOP = loop
 
     async def runner() -> None:
-        await event_bus.start_ws_server(host, port)
+        await event_bus.start_ws_server(listen_host, port)
 
     def _run() -> None:
         asyncio.set_event_loop(loop)
@@ -139,9 +161,13 @@ def _start_event_bus(url: str) -> None:
     thread.start()
 
     async def _check() -> str:
-        listen_host, listen_port = event_bus.get_ws_address()
-        local_url = f"ws://{listen_host}:{listen_port}"
-        async with websockets.connect(local_url):
+        resolved_host, listen_port = event_bus.get_ws_address()
+        probe_host = resolved_host
+        if probe_host in {"0.0.0.0", "::"}:
+            probe_host = "127.0.0.1"
+        probe_url = f"ws://{probe_host}:{listen_port}"
+        local_url = f"ws://{resolved_host}:{listen_port}"
+        async with websockets.connect(probe_url):
             return local_url
 
     deadline = time.time() + 5
@@ -163,13 +189,18 @@ def _maybe_start_event_bus(cfg: dict) -> None:
     if os.getenv("EVENT_BUS_DISABLE_LOCAL", "").strip().lower() in {"1", "true", "yes"}:
         return
     url = os.getenv("EVENT_BUS_URL") or cfg.get("event_bus_url")
+    host_override = _resolve_event_bus_host(cfg)
     if not url:
-        _start_event_bus(DEFAULT_WS_URL)
+        parsed_default = urllib.parse.urlparse(DEFAULT_WS_URL)
+        default_host = host_override or parsed_default.hostname or "127.0.0.1"
+        default_port = parsed_default.port or 8769
+        url = f"ws://{default_host}:{default_port}"
+        _start_event_bus(url, cfg=cfg, host=host_override)
         return
     host = urllib.parse.urlparse(url).hostname
     if host and host in {"localhost", "0.0.0.0", "127.0.0.1"}:
         try:
-            _start_event_bus(url)
+            _start_event_bus(url, cfg=cfg, host=host_override)
         except Exception as exc:
             print(f"Could not start event bus at {url}: {exc}", file=sys.stderr)
             sys.exit(1)

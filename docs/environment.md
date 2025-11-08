@@ -52,6 +52,7 @@ This document lists environment variables recognized by the project.
 | `EVENT_BUS_MMAP_SIZE` | `` | Configures event bus mmap size |
 | `EVENT_BUS_PEERS` | `` | Configures event bus peers |
 | `EVENT_BUS_URL` | `ws://0.0.0.0:8787` | URL for event bus |
+| `EVENT_BUS_WS_HOST` | `127.0.0.1` | Host interface for the local event bus websocket |
 | `EVENT_COMPRESSION` | `` | Configures event compression |
 | `EVENT_COMPRESSION_THRESHOLD` | `512` | Threshold for event compression |
 | `EVENT_MMAP_BATCH_MS` | `` | Configures event mmap batch ms |

@@ -101,15 +101,23 @@ class RuntimeOrchestrator:
         ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
         original_event_bus_url = os.environ.get("EVENT_BUS_URL")
         original_broker_ws_urls = os.environ.get("BROKER_WS_URLS")
-        os.environ.setdefault("EVENT_BUS_URL", f"ws://127.0.0.1:{ws_port}")
-        os.environ.setdefault("BROKER_WS_URLS", f"ws://127.0.0.1:{ws_port}")
+        original_ws_host = os.environ.get("EVENT_BUS_WS_HOST")
+        host_env = os.getenv("EVENT_BUS_WS_HOST", "").strip()
         # Load config early so event bus has proper env/urls
         try:
             from ..config import get_broker_urls, set_env_from_config
             cfg = apply_env_overrides(load_selected_config() or load_config(self.config_path))
+            cfg_host = str(cfg.get("event_bus_ws_host", "")).strip() if cfg else ""
             set_env_from_config(cfg)
+            if not host_env:
+                host_env = os.getenv("EVENT_BUS_WS_HOST", "").strip()
         except Exception:
             cfg = None
+            cfg_host = ""
+        listen_host = host_env or cfg_host or "127.0.0.1"
+        os.environ.setdefault("EVENT_BUS_WS_HOST", listen_host)
+        os.environ.setdefault("EVENT_BUS_URL", f"ws://{listen_host}:{ws_port}")
+        os.environ.setdefault("BROKER_WS_URLS", f"ws://{listen_host}:{ws_port}")
         # Opportunistically ensure local redis if configured to localhost
         try:
             from ..redis_util import ensure_local_redis_if_needed
@@ -132,10 +140,10 @@ class RuntimeOrchestrator:
         # Prefer a dedicated local WS port to avoid conflicts
         local_ws_bound = False
         try:
-            await event_bus.start_ws_server("localhost", ws_port)
+            await event_bus.start_ws_server(listen_host, ws_port)
             local_ws_bound = True
             self.handles.bus_started = True
-            await self._publish_stage("bus:ws", True, f"port={ws_port}")
+            await self._publish_stage("bus:ws", True, f"host={listen_host} port={ws_port}")
         except Exception as exc:
             detail = f"{exc}; keeping remote broker configuration"
             await self._publish_stage("bus:ws", False, detail)
@@ -143,8 +151,9 @@ class RuntimeOrchestrator:
 
         if local_ws_bound:
             # Ensure peers point to the local WS
-            os.environ["BROKER_WS_URLS"] = f"ws://127.0.0.1:{ws_port}"
-            os.environ["EVENT_BUS_URL"] = f"ws://127.0.0.1:{ws_port}"
+            os.environ["BROKER_WS_URLS"] = f"ws://{listen_host}:{ws_port}"
+            os.environ["EVENT_BUS_URL"] = f"ws://{listen_host}:{ws_port}"
+            os.environ["EVENT_BUS_WS_HOST"] = listen_host
         else:
             # Restore original broker configuration when local WS is unavailable
             if original_broker_ws_urls is None:
@@ -155,6 +164,10 @@ class RuntimeOrchestrator:
                 os.environ.pop("EVENT_BUS_URL", None)
             else:
                 os.environ["EVENT_BUS_URL"] = original_event_bus_url
+            if original_ws_host is None:
+                os.environ.pop("EVENT_BUS_WS_HOST", None)
+            else:
+                os.environ["EVENT_BUS_WS_HOST"] = original_ws_host
         self.handles.local_ws_bound = local_ws_bound
         initialize_event_bus()
         ok = await event_bus.verify_broker_connection(timeout=1.0)

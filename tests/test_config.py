@@ -143,6 +143,7 @@ def test_apply_env_overrides(monkeypatch):
         "agents": ["a"],
         "agent_weights": {"a": 1.0},
         "event_bus_url": "ws://old",
+        "event_bus_ws_host": "127.0.0.1",
     }
     monkeypatch.delenv("SOLANA_RPC_URL", raising=False)
     monkeypatch.setenv("BIRDEYE_API_KEY", "NEW")
@@ -151,6 +152,7 @@ def test_apply_env_overrides(monkeypatch):
     monkeypatch.setenv("AGENTS", dumps(["x", "y"]))
     monkeypatch.setenv("AGENT_WEIGHTS", dumps({"x": 1, "y": 1}))
     monkeypatch.setenv("EVENT_BUS_URL", "ws://new")
+    monkeypatch.setenv("EVENT_BUS_WS_HOST", "0.0.0.0")
     result = apply_env_overrides(cfg)
     assert result["birdeye_api_key"] == "NEW"
     assert str(result["solana_rpc_url"]).rstrip("/") == "https://mainnet.helius-rpc.com/?api-key=af30888b-b79f-4b12-b3fd-c5375d5bad2d"
@@ -159,6 +161,7 @@ def test_apply_env_overrides(monkeypatch):
     assert result["agents"] == ["x", "y"]
     assert result["agent_weights"] == {"x": 1, "y": 1}
     assert result["event_bus_url"] == "ws://new"
+    assert result["event_bus_ws_host"] == "0.0.0.0"
 
 
 def test_apply_env_overrides_invalid_values(monkeypatch):
@@ -235,12 +238,14 @@ def test_set_env_from_config(monkeypatch):
         "token_suffix": "xyz",
         "agents": ["sim"],
         "agent_weights": {"sim": 1.0},
+        "event_bus_ws_host": "127.0.0.1",
     }
     monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
     monkeypatch.delenv("RISK_TOLERANCE", raising=False)
     monkeypatch.delenv("TOKEN_SUFFIX", raising=False)
     monkeypatch.delenv("AGENTS", raising=False)
     monkeypatch.delenv("AGENT_WEIGHTS", raising=False)
+    monkeypatch.delenv("EVENT_BUS_WS_HOST", raising=False)
     monkeypatch.setenv("SOLANA_RPC_URL", "EXIST")
     set_env_from_config(cfg)
     assert os.getenv("BIRDEYE_API_KEY") == "A"
@@ -249,6 +254,7 @@ def test_set_env_from_config(monkeypatch):
     assert os.getenv("TOKEN_SUFFIX") == "xyz"
     assert os.getenv("AGENTS") is None
     assert os.getenv("AGENT_WEIGHTS") is None
+    assert os.getenv("EVENT_BUS_WS_HOST") == "127.0.0.1"
 
 
 def test_set_env_llm(monkeypatch):

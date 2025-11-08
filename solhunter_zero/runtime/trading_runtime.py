@@ -610,7 +610,14 @@ class TradingRuntime:
             raise
 
         ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
-        event_bus_url = f"ws://127.0.0.1:{ws_port}"
+        host_env = os.getenv("EVENT_BUS_WS_HOST", "").strip()
+        cfg_host = ""
+        if self.cfg:
+            cfg_val = self.cfg.get("event_bus_ws_host")
+            if cfg_val:
+                cfg_host = str(cfg_val).strip()
+        listen_host = host_env or cfg_host or "127.0.0.1"
+        event_bus_url = f"ws://{listen_host}:{ws_port}"
 
         local_ws_disabled = parse_bool_env("EVENT_BUS_DISABLE_LOCAL")
         start_attempts = 3
@@ -655,7 +662,7 @@ class TradingRuntime:
 
         for idx, (stage, port_candidate) in enumerate(attempt_sequence, start=1):
             try:
-                server = await start_ws_server("127.0.0.1", port_candidate)
+                server = await start_ws_server(listen_host, port_candidate)
             except Exception as exc:
                 start_error = exc
                 log.exception(
@@ -683,7 +690,7 @@ class TradingRuntime:
                                     bound_port = sockname
                         except Exception:
                             bound_port = port_candidate
-                        event_bus_url = f"ws://127.0.0.1:{bound_port}"
+                        event_bus_url = f"ws://{listen_host}:{bound_port}"
                         os.environ["EVENT_BUS_URL"] = event_bus_url
                         os.environ["BROKER_WS_URLS"] = event_bus_url
                     fallback_used = stage == "fallback"

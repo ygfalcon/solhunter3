@@ -405,3 +405,56 @@ async def test_start_event_bus_updates_env_for_dynamic_port(monkeypatch):
     assert os.environ["BROKER_WS_URLS"] == f"ws://127.0.0.1:{bound_port}"
     assert runtime.bus_started is True
     assert subscribe_called is True
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_event_bus_honors_ws_host_override(monkeypatch):
+    monkeypatch.delenv("EVENT_BUS_DISABLE_LOCAL", raising=False)
+    monkeypatch.setenv("EVENT_BUS_WS_HOST", "0.0.0.0")
+
+    runtime = trading_runtime.TradingRuntime()
+    runtime.cfg = {}
+
+    bound_port = 9543
+    start_calls = []
+
+    class DummySocket:
+        def __init__(self, port: int) -> None:
+            self._port = port
+
+        def getsockname(self):
+            return ("0.0.0.0", self._port)
+
+    class DummyServer:
+        def __init__(self, port: int) -> None:
+            self.sockets = [DummySocket(port)]
+
+    async def fake_start_ws_server(host, port):
+        start_calls.append((host, port))
+        return DummyServer(bound_port)
+
+    async def fake_verify_broker_connection(*, timeout):
+        return True
+
+    monkeypatch.setattr(trading_runtime, "start_ws_server", fake_start_ws_server)
+    monkeypatch.setattr(
+        trading_runtime, "verify_broker_connection", fake_verify_broker_connection
+    )
+    monkeypatch.setattr(
+        trading_runtime, "ensure_local_redis_if_needed", lambda urls: None
+    )
+
+    subscribe_called = False
+
+    def fake_subscribe():
+        nonlocal subscribe_called
+        subscribe_called = True
+
+    monkeypatch.setattr(runtime, "_subscribe_to_events", fake_subscribe)
+
+    await runtime._start_event_bus()
+
+    assert start_calls == [("0.0.0.0", 8779)]
+    assert os.environ["EVENT_BUS_URL"] == f"ws://0.0.0.0:{bound_port}"
+    assert os.environ["BROKER_WS_URLS"] == f"ws://0.0.0.0:{bound_port}"
+    assert subscribe_called is True

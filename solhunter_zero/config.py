@@ -131,6 +131,7 @@ ENV_VARS = {
     "jito_ws_url": "JITO_WS_URL",
     "jito_ws_auth": "JITO_WS_AUTH",
     "event_bus_url": "EVENT_BUS_URL",
+    "event_bus_ws_host": "EVENT_BUS_WS_HOST",
     "event_bus_peers": "EVENT_BUS_PEERS",
     "broker_url": "BROKER_URL",
     "broker_urls": "BROKER_URLS",
@@ -392,10 +393,12 @@ def find_config_file() -> str | None:
             p = ROOT / p
         if p.is_file():
             return str(p)
-    for name in ("config.toml", "config.yaml", "config.yml"):
+    names = ("config.toml", "config.yaml", "config.yml")
+    for name in names:
         p = Path.cwd() / name
         if p.is_file():
             return str(p)
+    for name in names:
         p = ROOT / name
         if p.is_file():
             return str(p)
