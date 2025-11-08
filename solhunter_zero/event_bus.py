@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 import errno
+import time
 
 from urllib.parse import urlparse
 
@@ -383,6 +384,12 @@ def _get_event_batch_ms(cfg=None) -> int:
     from .config import get_event_batch_ms
     return get_event_batch_ms(cfg)
 
+
+def _get_event_queue_limit(cfg=None) -> int:
+    from .config import get_event_queue_limit
+    return get_event_queue_limit(cfg)
+
+
 def _get_event_mmap_batch_ms(cfg=None) -> int:
     from .config import get_event_mmap_batch_ms
     return get_event_mmap_batch_ms(cfg)
@@ -410,6 +417,15 @@ _WS_PING_TIMEOUT = float(os.getenv("WS_PING_TIMEOUT", "20") or 20)
 
 # how long to buffer outgoing events before flushing (ms)
 _EVENT_BATCH_MS = int(os.getenv("EVENT_BATCH_MS", "10") or 10)
+
+# maximum number of websocket frames queued before backpressure kicks in
+_EVENT_QUEUE_LIMIT = int(os.getenv("EVENT_QUEUE_MAXSIZE", "2048") or 2048)
+
+# throttling settings for backpressure logging
+_BACKPRESSURE_LOG_INTERVAL = 5.0
+_BACKPRESSURE_LAST_LOG = 0.0
+_BACKPRESSURE_DROPPED = 0
+_BACKPRESSURE_LAST_TS = 0.0
 
 # magic header for batched binary websocket messages
 _BATCH_MAGIC = b"EBAT"
@@ -496,6 +512,73 @@ _ws_server = None
 _flush_task: asyncio.Task | None = None
 _outgoing_queue: Queue | None = None
 _ws_tasks: Set[asyncio.Task] = set()
+
+
+def _reset_backpressure_stats() -> None:
+    """Clear backpressure counters (used in tests)."""
+
+    global _BACKPRESSURE_DROPPED, _BACKPRESSURE_LAST_TS, _BACKPRESSURE_LAST_LOG
+    _BACKPRESSURE_DROPPED = 0
+    _BACKPRESSURE_LAST_TS = 0.0
+    _BACKPRESSURE_LAST_LOG = 0.0
+
+
+def _create_outgoing_queue() -> Queue:
+    """Return a new queue respecting the configured limit."""
+
+    maxsize = max(0, int(_EVENT_QUEUE_LIMIT))
+    return Queue(maxsize=maxsize)
+
+
+def _record_backpressure(q: Queue) -> None:
+    """Increment counters and emit telemetry for dropped batches."""
+
+    global _BACKPRESSURE_DROPPED, _BACKPRESSURE_LAST_TS, _BACKPRESSURE_LAST_LOG
+
+    _BACKPRESSURE_DROPPED += 1
+    _BACKPRESSURE_LAST_TS = time.time()
+    stats = {
+        "dropped_batches": _BACKPRESSURE_DROPPED,
+        "queue_limit": int(_EVENT_QUEUE_LIMIT),
+        "queued": q.qsize(),
+        "timestamp": _BACKPRESSURE_LAST_TS,
+    }
+    try:
+        publish("event_bus_backpressure", stats, _broadcast=False)
+    except Exception:  # pragma: no cover - telemetry best effort
+        logging.getLogger(__name__).exception("Failed to publish backpressure telemetry")
+    now = time.monotonic()
+    if now - _BACKPRESSURE_LAST_LOG >= _BACKPRESSURE_LOG_INTERVAL:
+        logging.getLogger(__name__).warning(
+            "Event bus websocket queue full (limit=%s); dropped=%s queued=%s",
+            _EVENT_QUEUE_LIMIT,
+            _BACKPRESSURE_DROPPED,
+            q.qsize(),
+        )
+        _BACKPRESSURE_LAST_LOG = now
+
+
+def _queue_outgoing_message(msg: Any) -> bool:
+    """Attempt to queue ``msg``; drop oldest entry when full."""
+
+    q = _outgoing_queue
+    if q is None:
+        return False
+    try:
+        q.put_nowait(msg)
+        return True
+    except asyncio.QueueFull:
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            q.put_nowait(msg)
+            inserted = True
+        except asyncio.QueueFull:
+            inserted = False
+        _record_backpressure(q)
+        return inserted
 
 
 def _track_ws_task(task: asyncio.Task) -> None:
@@ -911,9 +994,7 @@ def _publish_impl(topic: str, payload: Any, *, _broadcast: bool = True) -> None:
     if websockets and _broadcast:
         assert msg is not None
         if loop:
-            if _outgoing_queue is not None:
-                _outgoing_queue.put_nowait(msg)
-            else:
+            if not _queue_outgoing_message(msg):
                 loop.create_task(broadcast_ws(msg))
         else:
             asyncio.run(broadcast_ws(msg))
@@ -1005,7 +1086,25 @@ def configure(**kw) -> None:
 
 
 def reset() -> None:
+    global _outgoing_queue, _flush_task
     BUS.reset()
+    if _flush_task is not None:
+        _flush_task.cancel()
+        _flush_task = None
+    _outgoing_queue = None
+    _reset_backpressure_stats()
+
+
+def get_backpressure_stats() -> Dict[str, Any]:
+    """Return snapshot of websocket backpressure counters."""
+
+    q = _outgoing_queue
+    return {
+        "dropped_batches": _BACKPRESSURE_DROPPED,
+        "last_dropped_ts": _BACKPRESSURE_LAST_TS,
+        "queue_limit": int(_EVENT_QUEUE_LIMIT),
+        "queued": q.qsize() if q is not None else 0,
+    }
 
 
 async def broadcast_ws(
@@ -1366,7 +1465,7 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
 
     if os.getenv("EVENT_BUS_DISABLE_LOCAL", "").lower() in {"1", "true", "yes"}:
         if _outgoing_queue is None:
-            _outgoing_queue = Queue()
+            _outgoing_queue = _create_outgoing_queue()
         return None
     if not websockets:
         raise RuntimeError("websockets library required")
@@ -1410,7 +1509,7 @@ async def start_ws_server(host: str = "localhost", port: int = 8769):
             _ws_client_topics.pop(ws, None)
 
     if _outgoing_queue is None:
-        _outgoing_queue = Queue()
+        _outgoing_queue = _create_outgoing_queue()
     if _flush_task is None or _flush_task.done():
         loop = asyncio.get_running_loop()
         _flush_task = loop.create_task(_flush_outgoing())
@@ -1541,7 +1640,7 @@ async def connect_ws(url: str):
     _peer_urls.add(url)
     global _outgoing_queue, _flush_task
     if _outgoing_queue is None:
-        _outgoing_queue = Queue()
+        _outgoing_queue = _create_outgoing_queue()
     if _flush_task is None or _flush_task.done():
         loop = asyncio.get_running_loop()
         _flush_task = loop.create_task(_flush_outgoing())
@@ -1830,6 +1929,37 @@ subscription("config_updated", _reload_serialization).__enter__()
 # ---------------------------------------------------------------------------
 
 
+def _reload_queue_limit(cfg) -> None:
+    global _EVENT_QUEUE_LIMIT
+    try:
+        val = int(_get_event_queue_limit(cfg) or 0)
+    except Exception:
+        val = 0
+    if val < 0:
+        val = 0
+    _EVENT_QUEUE_LIMIT = val
+    q = _outgoing_queue
+    if q is not None:
+        new_limit = max(0, _EVENT_QUEUE_LIMIT)
+        try:
+            q._maxsize = new_limit  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        if new_limit > 0:
+            dropped = 0
+            while q.qsize() > new_limit:
+                try:
+                    q.get_nowait()
+                    dropped += 1
+                except asyncio.QueueEmpty:
+                    break
+            if dropped:
+                _record_backpressure(q)
+
+
+subscription("config_updated", _reload_queue_limit).__enter__()
+
+
 def _reload_batch(cfg) -> None:
     global _EVENT_BATCH_MS
     try:
@@ -1915,6 +2045,7 @@ def initialize_event_bus() -> None:
     """Reload event bus settings after environment variables are configured."""
     try:
         _reload_serialization(None)
+        _reload_queue_limit(None)
         _reload_bus(None)
         _reload_broker(None)
     except RedisConnectionError:

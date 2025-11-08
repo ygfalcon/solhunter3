@@ -758,6 +758,16 @@ def get_event_batch_ms(cfg: Mapping[str, Any] | None = None) -> int:
     return int(val or 0)
 
 
+def get_event_queue_limit(cfg: Mapping[str, Any] | None = None) -> int:
+    """Return maximum websocket queue size before backpressure drops."""
+
+    cfg = cfg or _ACTIVE_CONFIG
+    val = os.getenv("EVENT_QUEUE_MAXSIZE")
+    if val is None or val == "":
+        val = cfg.get("event_queue_maxsize", 0)
+    return int(val or 0)
+
+
 def get_event_mmap_batch_ms(cfg: Mapping[str, Any] | None = None) -> int:
     """Return mmap event batching interval in milliseconds."""
     cfg = cfg or _ACTIVE_CONFIG
