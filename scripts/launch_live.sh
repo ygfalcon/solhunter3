@@ -858,6 +858,7 @@ wait_for_ready() {
   local ui_seen=0
   local bus_seen=0
   local golden_seen=0
+  local golden_disabled_seen=0
   local runtime_seen=0
   while [[ $waited -lt $READY_TIMEOUT ]]; do
     if [[ -n $notify && -f $notify ]]; then
@@ -869,8 +870,13 @@ wait_for_ready() {
     if [[ $bus_seen -eq 0 ]] && grep -q "Event bus: connected" "$log" 2>/dev/null; then
       bus_seen=1
     fi
-    if [[ $golden_seen -eq 0 ]] && grep -q "GOLDEN_READY" "$log" 2>/dev/null; then
-      golden_seen=1
+    if [[ $golden_seen -eq 0 ]]; then
+      if grep -q "GOLDEN_READY" "$log" 2>/dev/null; then
+        golden_seen=1
+      elif [[ $golden_disabled_seen -eq 0 ]] && grep -qE "golden:start[^\\n]*disabled" "$log" 2>/dev/null; then
+        golden_disabled_seen=1
+        golden_seen=1
+      fi
     fi
     if [[ $runtime_seen -eq 0 ]] && grep -q "RUNTIME_READY" "$log" 2>/dev/null; then
       runtime_seen=1
