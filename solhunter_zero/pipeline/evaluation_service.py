@@ -38,12 +38,18 @@ class EvaluationService:
         self._stopped = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._worker_tasks: list[asyncio.Task] = []
-        workers = default_workers if default_workers is not None else (os.cpu_count() or 4)
-        try:
-            worker_count = int(workers)
-        except (TypeError, ValueError):
-            worker_count = os.cpu_count() or 4
-        self._worker_limit = max(5, worker_count)
+        fallback_workers = os.cpu_count() or 4
+        if default_workers is None:
+            worker_count = fallback_workers
+        else:
+            try:
+                worker_count = int(default_workers)
+            except (TypeError, ValueError):
+                worker_count = fallback_workers
+            else:
+                if worker_count < 1:
+                    worker_count = fallback_workers
+        self._worker_limit = worker_count
         self._on_result = on_result
         self._should_skip = should_skip
         self._min_volume = self._parse_threshold("DISCOVERY_MIN_VOLUME_USD")

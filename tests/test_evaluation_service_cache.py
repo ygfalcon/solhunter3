@@ -105,3 +105,30 @@ async def test_evaluation_cache_prunes_expired_entries(monkeypatch):
 
     assert agent.calls == len(tokens)
     assert len(service._cache) == 1
+
+
+@pytest.mark.anyio
+async def test_evaluation_service_respects_single_worker():
+    input_queue: asyncio.Queue = asyncio.Queue()
+    output_queue: asyncio.Queue = asyncio.Queue()
+    service = EvaluationService(
+        input_queue,
+        output_queue,
+        _CountingAgent(),
+        Portfolio(path=None),
+        cache_ttl=0.0,
+        default_workers=1,
+    )
+
+    assert service._worker_limit == 1
+
+    await service.start()
+
+    for _ in range(5):
+        if service._worker_tasks:
+            break
+        await asyncio.sleep(0)
+
+    assert len(service._worker_tasks) == 1
+
+    await service.stop()
