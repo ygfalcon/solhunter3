@@ -21,6 +21,7 @@ EXIT_CONNECTIVITY=3
 EXIT_HEALTH=4
 EXIT_DEPS=5
 EXIT_SCHEMA=6
+EXIT_SOCKET=7
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VENV_DIR="$ROOT_DIR/.venv"
@@ -241,11 +242,11 @@ def port_busy() -> bool:
 
 for attempt in range(5):
     if not port_busy():
-        print("free")
+        print(f"free {host} {port}")
         break
     time.sleep(1.0)
 else:
-    print("busy")
+    print(f"busy {host} {port}")
 PY
 }
 
@@ -664,11 +665,16 @@ if ! BUS_MANIFEST=$(normalize_bus_configuration); then
 fi
 log_info "$BUS_MANIFEST"
 
-SOCKET_STATE=$(wait_for_socket_release)
+SOCKET_STATE_RAW=$(wait_for_socket_release)
+read -r SOCKET_STATE SOCKET_HOST SOCKET_PORT <<<"$SOCKET_STATE_RAW"
+SOCKET_HOST=${SOCKET_HOST:-127.0.0.1}
+SOCKET_PORT=${SOCKET_PORT:-8779}
 if [[ $SOCKET_STATE == "busy" ]]; then
-  log_warn "Event bus port appears to be in use; waiting grace window has expired, continuing with launch"
+  log_warn "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} is still in use after the grace window; aborting launch"
+  log_warn "Hint: terminate the lingering process (e.g. pkill -f 'event_bus') and run bash scripts/clean_session.sh to clear stale locks before retrying"
+  exit $EXIT_SOCKET
 else
-  log_info "Event bus port ready"
+  log_info "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} ready"
 fi
 
 acquire_runtime_lock

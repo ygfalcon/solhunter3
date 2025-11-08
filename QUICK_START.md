@@ -113,6 +113,8 @@ pytest tests/staging/test_investor_showcase.py
 
 - **RPC unreachable** — ensure `SOLANA_RPC_URL` points to a healthy endpoint and that your network allows outbound requests.
 - **Wallet balance too low** — fund the default keypair or lower `min_portfolio_value` in `config.toml`.
+- **Event bus port busy** — the launcher now exits if `ws://127.0.0.1:8779` is still claimed. Stop the previous run (for example,
+  `pkill -f event_bus`) and run `bash scripts/clean_session.sh` to clear stale locks before restarting.
 
 ## Devnet Demo (Live Signing on Testnet)
 
