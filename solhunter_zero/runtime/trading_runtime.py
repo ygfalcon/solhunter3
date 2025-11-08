@@ -854,6 +854,10 @@ class TradingRuntime:
         self.ui_state.settings_provider = self._collect_settings_panel
         self.ui_state.exit_provider = self._collect_exit_panel
         self.ui_state.health_provider = self._collect_health_metrics
+        self.ui_state.fills_provider = self._provide_execution_fills
+        self.ui_state.positions_provider = self._provide_portfolio_positions
+        self.ui_state.pnl_provider = self._provide_portfolio_pnl
+        self.ui_state.risk_provider = self._provide_risk_snapshot
         self.ui_state.close_position_handler = self._handle_close_request
 
         if not self._ui_enabled:
@@ -2406,6 +2410,246 @@ class TradingRuntime:
             "paper_positions": positions,
             "live_fills": [],
         }
+
+    def _provide_execution_fills(self, limit: int) -> List[Dict[str, Any]]:
+        try:
+            limit_value = max(int(limit), 0)
+        except Exception:
+            limit_value = 0
+        with self._swarm_lock:
+            virtual_fills = list(self._virtual_fills)
+            live_fills = list(self._live_fills)
+
+        entries: List[Dict[str, Any]] = []
+        for payload in virtual_fills:
+            record = self._format_fill_record(payload, source="virtual")
+            if record:
+                entries.append(record)
+        for payload in live_fills:
+            record = self._format_fill_record(payload, source="live")
+            if record:
+                entries.append(record)
+
+        for record in entries:
+            timestamp = record.get("timestamp")
+            received = record.get("received_at")
+            record["_sort_key"] = (
+                timestamp
+                if isinstance(timestamp, (int, float))
+                else received
+                if isinstance(received, (int, float))
+                else 0.0
+            )
+
+        entries.sort(key=lambda item: item.get("_sort_key", 0.0), reverse=True)
+        for record in entries:
+            record.pop("_sort_key", None)
+
+        if limit_value:
+            return entries[:limit_value]
+        return entries
+
+    def _format_fill_record(
+        self, payload: Mapping[str, Any], *, source: str
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {"source": source}
+
+        record: Dict[str, Any] = {"source": source}
+        consumed: set[str] = {"_received", "ts", "timestamp"}
+
+        mint = payload.get("mint")
+        if mint is not None:
+            record["mint"] = str(mint)
+        side = payload.get("side")
+        if isinstance(side, str):
+            normalized = side.strip().lower()
+            if normalized:
+                record["side"] = normalized
+        consumed.add("side")
+
+        numeric_fields = {
+            "qty_base",
+            "qty_quote",
+            "price_usd",
+            "fees_usd",
+            "slippage_bps",
+            "latency_ms",
+            "realized_usd",
+            "unrealized_usd",
+            "turnover_usd",
+            "notional_usd",
+        }
+        for field in numeric_fields:
+            value = _maybe_float(payload.get(field))
+            if value is not None:
+                record[field] = value
+            consumed.add(field)
+
+        ts_value = payload.get("ts")
+        if ts_value is None:
+            ts_value = payload.get("timestamp")
+        timestamp = _maybe_float(ts_value)
+        if timestamp is not None:
+            record["timestamp"] = timestamp
+        received = _maybe_float(payload.get("_received"))
+        if received is not None:
+            record["received_at"] = received
+
+        meta = payload.get("meta")
+        if meta is not None:
+            record["meta"] = _serialize(meta)
+        consumed.add("meta")
+
+        passthrough_fields = (
+            "order_id",
+            "route",
+            "venue",
+            "strategy",
+            "reason",
+            "status",
+            "txid",
+            "client_id",
+            "snapshot_hash",
+            "exchange",
+        )
+        for field in passthrough_fields:
+            if field in payload:
+                value = payload.get(field)
+                if value is not None:
+                    record[field] = _serialize(value)
+                consumed.add(field)
+
+        extras: Dict[str, Any] = {}
+        for key, value in payload.items():
+            if key in consumed:
+                continue
+            extras[str(key)] = _serialize(value)
+        if extras:
+            record["extra"] = extras
+
+        return {k: v for k, v in record.items() if v is not None}
+
+    def _portfolio_positions_snapshot(self) -> List[Dict[str, Any]]:
+        portfolio = self.portfolio
+        if portfolio is None:
+            return []
+        balances: Mapping[str, Any] | None = getattr(portfolio, "balances", None)
+        if not isinstance(balances, Mapping):
+            return []
+
+        entries: List[Dict[str, Any]] = []
+        for mint, position in list(balances.items()):
+            snapshot = self._format_position_record(str(mint), position)
+            if snapshot:
+                entries.append(snapshot)
+
+        entries.sort(key=lambda entry: abs(entry.get("notional_usd", 0.0)), reverse=True)
+        return entries
+
+    def _format_position_record(self, mint: str, position: Any) -> Dict[str, Any]:
+        record: Dict[str, Any] = {"mint": mint}
+
+        qty = _maybe_float(getattr(position, "amount", None))
+        if qty is not None:
+            record["qty_base"] = qty
+            record["side"] = "long" if qty >= 0 else "short"
+
+        entry_price = _maybe_float(getattr(position, "entry_price", None))
+        if entry_price is not None:
+            record["entry_price"] = entry_price
+
+        last_mark = _maybe_float(getattr(position, "last_mark", None))
+        if last_mark is None:
+            last_mark = entry_price
+        if last_mark is not None:
+            record["last_mark"] = last_mark
+
+        if qty is not None and last_mark is not None:
+            record["notional_usd"] = qty * last_mark
+
+        breakeven = _maybe_float(getattr(position, "breakeven_price", None))
+        if breakeven is not None:
+            record["breakeven_price"] = breakeven
+
+        breakeven_bps = _maybe_float(getattr(position, "breakeven_bps", None))
+        if breakeven_bps is not None:
+            record["breakeven_bps"] = breakeven_bps
+
+        realized = _maybe_float(getattr(position, "realized_pnl", None))
+        if realized is not None:
+            record["realized_usd"] = realized
+
+        unrealized = _maybe_float(getattr(position, "unrealized_pnl", None))
+        if unrealized is not None:
+            record["unrealized_usd"] = unrealized
+
+        lifecycle = getattr(position, "lifecycle", None)
+        if lifecycle:
+            record["lifecycle"] = str(lifecycle)
+
+        attribution = getattr(position, "attribution", None)
+        if attribution:
+            record["attribution"] = _serialize(attribution)
+
+        return {k: v for k, v in record.items() if v is not None}
+
+    def _provide_portfolio_positions(self) -> List[Dict[str, Any]]:
+        return self._portfolio_positions_snapshot()
+
+    def _provide_portfolio_pnl(self, window: str) -> Dict[str, Any]:
+        positions = self._portfolio_positions_snapshot()
+        realized_total = 0.0
+        unrealized_total = 0.0
+        for position in positions:
+            realized_total += float(position.get("realized_usd") or 0.0)
+            unrealized_total += float(position.get("unrealized_usd") or 0.0)
+
+        result: Dict[str, Any] = {
+            "window": str(window),
+            "realized_usd": realized_total,
+            "unrealized_usd": unrealized_total,
+            "total_usd": realized_total + unrealized_total,
+            "positions": len(positions),
+            "details": positions,
+            "updated_at": time.time(),
+        }
+
+        with self._swarm_lock:
+            fills = list(self._virtual_fills)
+        if fills:
+            ts_value = fills[0].get("ts") or fills[0].get("timestamp")
+            latest = _maybe_float(ts_value)
+            if latest is not None:
+                result["latest_fill_ts"] = latest
+
+        return result
+
+    def _provide_risk_snapshot(self) -> Dict[str, Any]:
+        portfolio = self.portfolio
+        if portfolio is None:
+            return {}
+        metrics = getattr(portfolio, "risk_metrics", None)
+        if not isinstance(metrics, Mapping) or not metrics:
+            return {}
+
+        snapshot: Dict[str, Any] = {}
+        for key, value in metrics.items():
+            if value is None:
+                continue
+            converted: Any
+            if hasattr(value, "tolist"):
+                try:
+                    converted = value.tolist()  # type: ignore[assignment]
+                except Exception:
+                    converted = _serialize(value)
+            else:
+                converted = _serialize(value)
+            snapshot[str(key)] = converted
+
+        if "updated_at" not in snapshot:
+            snapshot["updated_at"] = time.time()
+        return snapshot
 
     def _collect_rl_panel(self) -> Dict[str, Any]:
         now = time.time()
