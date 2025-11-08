@@ -70,6 +70,72 @@ async def test_trading_runtime_run_cleans_up_on_start_failure(monkeypatch, caplo
 
 
 @pytest.mark.anyio("asyncio")
+async def test_start_agents_allows_concurrent_sleep(monkeypatch, tmp_path):
+    runtime = trading_runtime.TradingRuntime()
+    runtime.cfg = {
+        "memory_path": "sqlite:///memory.db",
+        "portfolio_path": str(tmp_path / "portfolio.json"),
+    }
+    runtime._use_new_pipeline = False
+    runtime._derive_offline_modes = lambda: (False, False, None, False)
+
+    class DummyMemory:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def start_writer(self) -> None:
+            return None
+
+    class DummyAgentManager:
+        executor = None
+
+        def __init__(self) -> None:
+            self.weights = {}
+
+        @classmethod
+        def from_config(cls, cfg):
+            return cls()
+
+        @classmethod
+        def from_default(cls):
+            return cls()
+
+    monkeypatch.setattr(trading_runtime, "Memory", DummyMemory)
+    monkeypatch.setattr(trading_runtime, "AgentManager", DummyAgentManager)
+    monkeypatch.setattr(
+        trading_runtime,
+        "_init_rl_training",
+        AsyncMock(return_value=None),
+    )
+
+    load_events: list[str] = []
+    load_duration = 0.2
+
+    def blocking_load(self):
+        load_events.append("start")
+        time.sleep(load_duration)
+        load_events.append("end")
+        setattr(self, "loaded", True)
+
+    monkeypatch.setattr(trading_runtime.Portfolio, "load", blocking_load, raising=False)
+
+    sleep_delay = 0.05
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    sleep_task = asyncio.create_task(asyncio.sleep(sleep_delay))
+    agents_task = asyncio.create_task(runtime._start_agents())
+
+    await sleep_task
+    elapsed = loop.time() - start
+    assert elapsed < load_duration
+
+    await agents_task
+    assert load_events == ["start", "end"]
+    assert runtime.portfolio is not None
+    assert getattr(runtime.portfolio, "loaded", False) is True
+
+
+@pytest.mark.anyio("asyncio")
 async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch):
     runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
     runtime.status.event_bus = True
