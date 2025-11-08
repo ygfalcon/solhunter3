@@ -4,7 +4,7 @@ import os
 import socket
 import subprocess
 import time
-from typing import Iterable
+from typing import Iterable, Optional
 
 
 def _is_local_host(host: str) -> bool:
@@ -19,7 +19,9 @@ def _can_connect(host: str, port: int, timeout: float = 0.2) -> bool:
         return False
 
 
-def ensure_local_redis_if_needed(urls: Iterable[str] | None) -> None:
+def ensure_local_redis_if_needed(
+    urls: Iterable[str] | None,
+) -> Optional[subprocess.Popen[bytes]]:
     """Start a local redis-server if any URL targets localhost and isn't reachable.
 
     Raises ``RuntimeError`` when redis-server cannot be launched or refuses to
@@ -27,7 +29,7 @@ def ensure_local_redis_if_needed(urls: Iterable[str] | None) -> None:
     failures as fatal because they imply the broker cannot be reached.
     """
     if not urls:
-        return
+        return None
     host, port = None, None
     for u in urls:
         if not (u.startswith("redis://") or u.startswith("rediss://")):
@@ -44,9 +46,9 @@ def ensure_local_redis_if_needed(urls: Iterable[str] | None) -> None:
             host, port = h, pt
             break
     if host is None:
-        return
+        return None
     if _can_connect(host, port):
-        return
+        return None
     try:
         # Silence output; rely on later ping attempts to confirm readiness
         proc = subprocess.Popen(
@@ -60,7 +62,7 @@ def ensure_local_redis_if_needed(urls: Iterable[str] | None) -> None:
     # Wait briefly for startup
     for _ in range(10):
         if _can_connect(host, port):
-            return
+            return proc
         time.sleep(0.3)
 
     exit_code = None
@@ -72,6 +74,19 @@ def ensure_local_redis_if_needed(urls: Iterable[str] | None) -> None:
         raise RuntimeError(
             f"redis-server exited with code {exit_code} before accepting connections on {host}:{port}"
         )
+
+    try:
+        terminate = getattr(proc, "terminate", None)
+        if callable(terminate):
+            terminate()
+            wait_fn = getattr(proc, "wait", None)
+            if callable(wait_fn):
+                try:
+                    wait_fn(timeout=1.0)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     raise RuntimeError(
         f"timed out waiting for redis-server to accept connections on {host}:{port}"

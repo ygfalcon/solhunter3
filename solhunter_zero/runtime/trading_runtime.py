@@ -52,6 +52,7 @@ from ..util import parse_bool_env
 log = logging.getLogger(__name__)
 
 DEPTH_PROCESS_SHUTDOWN_TIMEOUT = 5.0
+REDIS_PROCESS_SHUTDOWN_TIMEOUT = 5.0
 
 _RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
 _RL_HEALTH_INITIAL_INTERVAL = 5.0
@@ -198,6 +199,7 @@ class TradingRuntime:
         self._recent_tokens_limit = int(os.getenv("UI_DISCOVERY_LIMIT", "200") or 200)
         self._start_time: Optional[float] = None
         self._last_iteration_elapsed: Optional[float] = None
+        self._redis_process: Optional[subprocess.Popen[bytes]] = None
         self._last_iteration_errors: List[str] = []
         self._last_actions: List[Dict[str, Any]] = []
         self._offline_mode: bool = False
@@ -304,6 +306,49 @@ class TradingRuntime:
             with contextlib.suppress(Exception):
                 await stop_ws_server()
             self.bus_started = False
+
+        redis_proc = self._redis_process
+        self._redis_process = None
+        if redis_proc is not None:
+            running = True
+            poll = getattr(redis_proc, "poll", None)
+            try:
+                running = poll() is None if callable(poll) else True
+            except Exception:
+                running = True
+
+            if running:
+                try:
+                    terminate = getattr(redis_proc, "terminate", None)
+                    if callable(terminate):
+                        terminate()
+                except Exception:
+                    log.exception(
+                        "Failed to terminate local redis-server process gracefully"
+                    )
+                else:
+                    wait_fn = getattr(redis_proc, "wait", None)
+                    if callable(wait_fn):
+                        try:
+                            wait_fn(timeout=REDIS_PROCESS_SHUTDOWN_TIMEOUT)
+                        except subprocess.TimeoutExpired:
+                            message = (
+                                "redis-server process did not exit within "
+                                f"{REDIS_PROCESS_SHUTDOWN_TIMEOUT} seconds"
+                            )
+                            log.warning(message)
+                            self.activity.add("broker", message, ok=False)
+                            kill_fn = getattr(redis_proc, "kill", None)
+                            if callable(kill_fn):
+                                with contextlib.suppress(Exception):
+                                    kill_fn()
+                                if callable(wait_fn):
+                                    with contextlib.suppress(Exception):
+                                        wait_fn(timeout=1.0)
+                        except Exception:
+                            log.exception(
+                                "Error while waiting for redis-server process to exit"
+                            )
 
         if self.ui_server:
             self.ui_server.stop()
@@ -548,7 +593,9 @@ class TradingRuntime:
     async def _start_event_bus(self) -> None:
         broker_urls = get_broker_urls(self.cfg) if self.cfg else []
         try:
-            ensure_local_redis_if_needed(broker_urls)
+            redis_proc = ensure_local_redis_if_needed(broker_urls)
+            if redis_proc is not None:
+                self._redis_process = redis_proc
         except Exception as exc:
             message = f"failed to ensure local Redis broker: {exc}"
             self.activity.add("broker", message, ok=False)
