@@ -205,6 +205,78 @@ async def test_close_position_endpoint_uses_runtime_handler(monkeypatch):
     assert recorded == {"mint": "SOL", "qty": 2.5}
 
 
+@pytest.mark.anyio("asyncio")
+async def test_api_token_endpoints_expose_runtime_snapshots(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "0")
+    runtime = TradingRuntime()
+
+    now = time.time()
+    with runtime._swarm_lock:
+        runtime._token_facts["PIPE"] = {
+            "mint": "PIPE",
+            "symbol": "PIPE",
+            "name": "Pipeline",
+            "decimals": 6,
+            "token_program": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "asof": now,
+            "_received": now,
+        }
+        runtime._market_ohlcv["PIPE"] = {
+            "mint": "PIPE",
+            "o": 1.15,
+            "h": 1.30,
+            "l": 1.10,
+            "c": 1.23,
+            "vol_usd": 456.0,
+            "vol_base": 12.0,
+            "buyers": 7,
+            "sellers": 4,
+            "asof_close": now,
+            "interval": "5m",
+            "_received": now,
+        }
+        runtime._market_depth["PIPE"] = {
+            "mint": "PIPE",
+            "spread_bps": 12.0,
+            "bids": [[1.22, 5.0]],
+            "asks": [[1.24, 4.0]],
+            "asof": now,
+            "_received": now,
+        }
+
+    await runtime._start_ui()
+
+    app = create_app(runtime.ui_state)
+    client = app.test_client()
+
+    meta_response = client.get("/api/token/meta/PIPE")
+    assert meta_response.status_code == 200
+    meta_payload = meta_response.get_json()
+    assert meta_payload["mint"] == "PIPE"
+    assert meta_payload["symbol"] == "PIPE"
+    assert meta_payload["age_seconds"] >= 0.0
+
+    snapshot_response = client.get("/api/token/PIPE")
+    assert snapshot_response.status_code == 200
+    snapshot_payload = snapshot_response.get_json()
+    assert snapshot_payload["mint"] == "PIPE"
+    assert snapshot_payload["name"] == "Pipeline"
+
+    price_response = client.get("/api/price/PIPE")
+    assert price_response.status_code == 200
+    price_payload = price_response.get_json()
+    assert price_payload["close"] == pytest.approx(1.23)
+    assert price_payload["volume"] == pytest.approx(456.0)
+    assert price_payload["buyers"] == 7
+
+    depth_response = client.get("/api/depth/PIPE")
+    assert depth_response.status_code == 200
+    depth_payload = depth_response.get_json()
+    assert depth_payload["mint"] == "PIPE"
+    assert depth_payload["bids"]
+    assert depth_payload["asks"]
+
+
 def test_collect_health_metrics(monkeypatch):
     runtime = TradingRuntime()
     runtime.status.event_bus = True

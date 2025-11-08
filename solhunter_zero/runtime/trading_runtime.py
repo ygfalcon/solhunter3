@@ -855,6 +855,10 @@ class TradingRuntime:
         self.ui_state.exit_provider = self._collect_exit_panel
         self.ui_state.health_provider = self._collect_health_metrics
         self.ui_state.close_position_handler = self._handle_close_request
+        self.ui_state.token_meta_provider = self._snapshot_token_meta
+        self.ui_state.token_snapshot_provider = self._snapshot_token_snapshot
+        self.ui_state.token_price_provider = self._snapshot_token_price
+        self.ui_state.token_depth_provider = self._snapshot_token_depth
 
         if not self._ui_enabled:
             self.ui_server = None
@@ -1707,6 +1711,51 @@ class TradingRuntime:
             }
         return {"tokens": ordered, "selected": None}
 
+    def _snapshot_token_snapshot(self, mint: str) -> Dict[str, Any]:
+        key = str(mint or "").strip()
+        if not key:
+            return {}
+        with self._swarm_lock:
+            payload = self._token_facts.get(key)
+            if payload is None:
+                return {}
+            snapshot = copy.deepcopy(payload)
+        snapshot.setdefault("mint", key)
+        now = time.time()
+        ts = _entry_timestamp(snapshot, "asof")
+        age = _age_seconds(ts, now)
+        if age is None and snapshot.get("_received") is not None:
+            try:
+                age = max(0.0, now - float(snapshot["_received"]))
+            except Exception:
+                age = None
+        snapshot["age_seconds"] = age
+        snapshot["age_label"] = _format_age(age)
+        return snapshot
+
+    def _snapshot_token_meta(self, mint: str) -> Dict[str, Any]:
+        snapshot = self._snapshot_token_snapshot(mint)
+        if not snapshot:
+            return {}
+        fields = (
+            "mint",
+            "symbol",
+            "name",
+            "decimals",
+            "token_program",
+            "flags",
+            "venues",
+            "asof",
+            "age_seconds",
+            "age_label",
+        )
+        result: Dict[str, Any] = {}
+        for field in fields:
+            value = snapshot.get(field)
+            if value is not None:
+                result[field] = value
+        return result
+
     def _collect_market_panel(self) -> Dict[str, Any]:
         now = time.time()
         with self._swarm_lock:
@@ -1790,6 +1839,63 @@ class TradingRuntime:
             "depth_ms": max(depth_lags) if depth_lags else None,
         }
         return {"markets": markets, "updated_at": None, "lag_ms": summary}
+
+    def _snapshot_token_price(self, mint: str) -> Dict[str, Any]:
+        key = str(mint or "").strip()
+        if not key:
+            return {}
+        with self._swarm_lock:
+            payload = self._market_ohlcv.get(key)
+            if payload is None:
+                return {}
+            candle = copy.deepcopy(payload)
+        candle.setdefault("mint", key)
+        now = time.time()
+        ts_close = _entry_timestamp(candle, "asof_close")
+        age = _age_seconds(ts_close, now)
+        if age is None and candle.get("_received") is not None:
+            try:
+                age = max(0.0, now - float(candle["_received"]))
+            except Exception:
+                age = None
+        result: Dict[str, Any] = {
+            "mint": candle.get("mint") or key,
+            "open": _maybe_float(candle.get("o")),
+            "high": _maybe_float(candle.get("h")),
+            "low": _maybe_float(candle.get("l")),
+            "close": _maybe_float(candle.get("c")),
+            "volume": _maybe_float(candle.get("vol_usd") or candle.get("volume_usd")),
+            "volume_base": _maybe_float(candle.get("vol_base") or candle.get("volume_base")),
+            "buyers": candle.get("buyers"),
+            "sellers": candle.get("sellers"),
+            "interval": candle.get("interval"),
+            "asof_close": candle.get("asof_close"),
+            "age_seconds": age,
+            "age_label": _format_age(age),
+        }
+        return {key: value for key, value in result.items() if value is not None}
+
+    def _snapshot_token_depth(self, mint: str) -> Dict[str, Any]:
+        key = str(mint or "").strip()
+        if not key:
+            return {}
+        with self._swarm_lock:
+            payload = self._market_depth.get(key)
+            if payload is None:
+                return {}
+            depth = copy.deepcopy(payload)
+        depth.setdefault("mint", key)
+        now = time.time()
+        ts_depth = _entry_timestamp(depth, "asof")
+        age = _age_seconds(ts_depth, now)
+        if age is None and depth.get("_received") is not None:
+            try:
+                age = max(0.0, now - float(depth["_received"]))
+            except Exception:
+                age = None
+        depth["age_seconds"] = age
+        depth["age_label"] = _format_age(age)
+        return depth
 
     def _collect_golden_panel(self) -> Dict[str, Any]:
         now = time.time()

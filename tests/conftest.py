@@ -3,7 +3,7 @@ import os
 import sys
 import types
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Dict, Sequence
 import importlib.util
 import importlib.machinery
 import pytest
@@ -37,6 +37,42 @@ if importlib.util.find_spec("aiohttp") is None:
     aiohttp_mod.ClientSession = object
     aiohttp_mod.TCPConnector = object
 
+    abc_mod = types.ModuleType("aiohttp.abc")
+    abc_mod.__spec__ = importlib.machinery.ModuleSpec("aiohttp.abc", None)
+
+    class AbstractResolver:  # pragma: no cover - stub type
+        async def close(self) -> None:
+            return None
+
+    abc_mod.AbstractResolver = AbstractResolver
+
+    class ClientTimeout:  # pragma: no cover - stub type
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    class ClientError(Exception):  # pragma: no cover - stub type
+        pass
+
+    class ClientConnectionError(ClientError):  # pragma: no cover - stub type
+        pass
+
+    class ClientResponseError(ClientError):  # pragma: no cover - stub type
+        pass
+
+    class WSMsgType:  # pragma: no cover - stub type
+        TEXT = "text"
+        BINARY = "binary"
+        ERROR = "error"
+
+    resolver_mod = types.ModuleType("aiohttp.resolver")
+    resolver_mod.__spec__ = importlib.machinery.ModuleSpec("aiohttp.resolver", None)
+
+    class DefaultResolver(AbstractResolver):  # pragma: no cover - stub type
+        async def resolve(self, *args, **kwargs):
+            return []
+
+    resolver_mod.DefaultResolver = DefaultResolver
+
     web_mod = types.ModuleType("aiohttp.web")
     web_mod.__spec__ = importlib.machinery.ModuleSpec("aiohttp.web", None)
 
@@ -50,7 +86,16 @@ if importlib.util.find_spec("aiohttp") is None:
     web_mod.json_response = json_response
 
     aiohttp_mod.web = web_mod
+    aiohttp_mod.abc = abc_mod
+    aiohttp_mod.resolver = resolver_mod
+    aiohttp_mod.ClientTimeout = ClientTimeout
+    aiohttp_mod.ClientError = ClientError
+    aiohttp_mod.ClientConnectionError = ClientConnectionError
+    aiohttp_mod.ClientResponseError = ClientResponseError
+    aiohttp_mod.WSMsgType = WSMsgType
     sys.modules["aiohttp.web"] = web_mod
+    sys.modules["aiohttp.abc"] = abc_mod
+    sys.modules["aiohttp.resolver"] = resolver_mod
     sys.modules["aiohttp"] = aiohttp_mod
 
 # Stub other optional dependencies when unavailable
@@ -64,6 +109,199 @@ if importlib.util.find_spec("sentence_transformers") is None:
     st_mod = types.ModuleType("sentence_transformers")
     st_mod.__spec__ = importlib.machinery.ModuleSpec("sentence_transformers", None)
     sys.modules.setdefault("sentence_transformers", st_mod)
+
+if importlib.util.find_spec("pydantic") is None:
+    pydantic_mod = types.ModuleType("pydantic")
+    pydantic_mod.__spec__ = importlib.machinery.ModuleSpec("pydantic", None)
+
+    class _ValidationError(Exception):  # pragma: no cover - stub type
+        def __init__(self, message: str = "", *args: Any, **kwargs: Any) -> None:
+            super().__init__(message)
+
+    class _BaseModel:  # pragma: no cover - stub type
+        def __init__(self, **kwargs: Any) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+        def dict(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+            return dict(self.__dict__)
+
+        def model_dump(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+            return self.dict(*args, **kwargs)
+
+    def _create_model(name: str, **fields: Any) -> type:  # pragma: no cover - stub
+        return type(name, (object,), {})
+
+    class _AnyUrl(str):  # pragma: no cover - stub type
+        pass
+
+    def _validator(*args: Any, **kwargs: Any):  # pragma: no cover - stub decorator
+        def _wrap(func):
+            return func
+
+        return _wrap
+
+    pydantic_mod.ValidationError = _ValidationError
+    pydantic_mod.BaseModel = _BaseModel
+    pydantic_mod.create_model = _create_model
+    pydantic_mod.Field = lambda *a, **k: None
+    pydantic_mod.AnyUrl = _AnyUrl
+    pydantic_mod.field_validator = _validator
+    pydantic_mod.model_validator = _validator
+    pydantic_mod.ValidationInfo = object
+    pydantic_mod.validator = _validator
+    pydantic_mod.root_validator = _validator
+    sys.modules.setdefault("pydantic", pydantic_mod)
+
+if importlib.util.find_spec("solana") is None:
+    solana_mod = types.ModuleType("solana")
+    solana_mod.__spec__ = importlib.machinery.ModuleSpec("solana", None)
+    solana_mod.__path__ = []  # pragma: no cover - package stub
+
+    rpc_mod = types.ModuleType("solana.rpc")
+    rpc_mod.__spec__ = importlib.machinery.ModuleSpec("solana.rpc", None)
+
+    api_mod = types.ModuleType("solana.rpc.api")
+    api_mod.__spec__ = importlib.machinery.ModuleSpec("solana.rpc.api", None)
+
+    class _Client:  # pragma: no cover - stub type
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    api_mod.Client = _Client
+
+    async_api_mod = types.ModuleType("solana.rpc.async_api")
+    async_api_mod.__spec__ = importlib.machinery.ModuleSpec("solana.rpc.async_api", None)
+
+    class _AsyncClient:  # pragma: no cover - stub type
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def close(self) -> None:
+            return None
+
+    async_api_mod.AsyncClient = _AsyncClient
+
+    core_mod = types.ModuleType("solana.rpc.core")
+    core_mod.__spec__ = importlib.machinery.ModuleSpec("solana.rpc.core", None)
+
+    class RPCException(Exception):  # pragma: no cover - stub type
+        pass
+
+    core_mod.RPCException = RPCException
+
+    types_mod = types.ModuleType("solana.rpc.types")
+    types_mod.__spec__ = importlib.machinery.ModuleSpec("solana.rpc.types", None)
+
+    class TokenAccountOpts:  # pragma: no cover - stub type
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    types_mod.TokenAccountOpts = TokenAccountOpts
+
+    rpc_mod.api = api_mod
+    rpc_mod.async_api = async_api_mod
+    rpc_mod.core = core_mod
+    rpc_mod.types = types_mod
+
+    solana_mod.rpc = rpc_mod
+
+    sys.modules.setdefault("solana", solana_mod)
+    sys.modules.setdefault("solana.rpc", rpc_mod)
+    sys.modules.setdefault("solana.rpc.api", api_mod)
+    sys.modules.setdefault("solana.rpc.async_api", async_api_mod)
+    sys.modules.setdefault("solana.rpc.core", core_mod)
+    sys.modules.setdefault("solana.rpc.types", types_mod)
+
+if importlib.util.find_spec("solders") is None:
+    solders_mod = types.ModuleType("solders")
+    solders_mod.__spec__ = importlib.machinery.ModuleSpec("solders", None)
+    solders_mod.__path__ = []  # pragma: no cover - package stub
+
+    pubkey_mod = types.ModuleType("solders.pubkey")
+    pubkey_mod.__spec__ = importlib.machinery.ModuleSpec("solders.pubkey", None)
+
+    class Pubkey(str):  # pragma: no cover - stub type
+        @classmethod
+        def from_string(cls, value: str) -> "Pubkey":
+            return cls(value)
+
+    pubkey_mod.Pubkey = Pubkey
+    solders_mod.pubkey = pubkey_mod
+
+    keypair_mod = types.ModuleType("solders.keypair")
+    keypair_mod.__spec__ = importlib.machinery.ModuleSpec("solders.keypair", None)
+
+    class Keypair:  # pragma: no cover - stub type
+        @classmethod
+        def from_base58_string(cls, value: str) -> "Keypair":
+            return cls()
+
+        def pubkey(self) -> Pubkey:
+            return Pubkey("0" * 32)
+
+    keypair_mod.Keypair = Keypair
+    solders_mod.keypair = keypair_mod
+
+    transaction_mod = types.ModuleType("solders.transaction")
+    transaction_mod.__spec__ = importlib.machinery.ModuleSpec("solders.transaction", None)
+
+    class VersionedTransaction:  # pragma: no cover - stub type
+        pass
+
+    transaction_mod.VersionedTransaction = VersionedTransaction
+    solders_mod.transaction = transaction_mod
+
+    sys.modules.setdefault("solders", solders_mod)
+    sys.modules.setdefault("solders.pubkey", pubkey_mod)
+    sys.modules.setdefault("solders.keypair", keypair_mod)
+    sys.modules.setdefault("solders.transaction", transaction_mod)
+
+if importlib.util.find_spec("cryptography") is None:
+    cryptography_mod = types.ModuleType("cryptography")
+    cryptography_mod.__spec__ = importlib.machinery.ModuleSpec("cryptography", None)
+    cryptography_mod.__path__ = []  # pragma: no cover - package stub
+
+    fernet_mod = types.ModuleType("cryptography.fernet")
+    fernet_mod.__spec__ = importlib.machinery.ModuleSpec("cryptography.fernet", None)
+
+    class Fernet:  # pragma: no cover - stub type
+        def __init__(self, key: bytes) -> None:
+            self.key = key
+
+        def encrypt(self, data: bytes) -> bytes:
+            return data
+
+        def decrypt(self, token: bytes) -> bytes:
+            return token
+
+    class InvalidToken(Exception):  # pragma: no cover - stub type
+        pass
+
+    fernet_mod.Fernet = Fernet
+    fernet_mod.InvalidToken = InvalidToken
+    cryptography_mod.fernet = fernet_mod
+
+    sys.modules.setdefault("cryptography", cryptography_mod)
+    sys.modules.setdefault("cryptography.fernet", fernet_mod)
+
+if importlib.util.find_spec("rich") is None:
+    rich_mod = types.ModuleType("rich")
+    rich_mod.__spec__ = importlib.machinery.ModuleSpec("rich", None)
+    rich_mod.__path__ = []  # pragma: no cover - package stub
+
+    console_mod = types.ModuleType("rich.console")
+    console_mod.__spec__ = importlib.machinery.ModuleSpec("rich.console", None)
+
+    class Console:  # pragma: no cover - stub type
+        def print(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    console_mod.Console = Console
+    rich_mod.console = console_mod
+
+    sys.modules.setdefault("rich", rich_mod)
+    sys.modules.setdefault("rich.console", console_mod)
 
 
 try:
