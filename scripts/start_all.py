@@ -61,6 +61,11 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+RUNTIME_LOG_DIR = Path("artifacts/logs")
+RUNTIME_LOG_NAME = "runtime.log"
+RUNTIME_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB
+RUNTIME_LOG_BACKUP_COUNT = 3
+
 
 def _process_alive(pid: int) -> bool:
     if pid <= 0:
@@ -289,6 +294,39 @@ def rl_health_gate() -> str:
     return url
 
 
+def _rotate_runtime_log(log_path: Path) -> None:
+    try:
+        size = log_path.stat().st_size
+    except FileNotFoundError:
+        return
+
+    if size < RUNTIME_LOG_MAX_BYTES:
+        return
+
+    if RUNTIME_LOG_BACKUP_COUNT < 1:
+        log_path.unlink(missing_ok=True)
+        return
+
+    oldest = log_path.with_name(f"{log_path.name}.{RUNTIME_LOG_BACKUP_COUNT}")
+    if oldest.exists():
+        oldest.unlink()
+
+    for idx in range(RUNTIME_LOG_BACKUP_COUNT - 1, 0, -1):
+        src = log_path.with_name(f"{log_path.name}.{idx}")
+        if src.exists():
+            src.rename(log_path.with_name(f"{log_path.name}.{idx + 1}"))
+
+    log_path.rename(log_path.with_name(f"{log_path.name}.1"))
+
+
+def _prepare_runtime_log() -> Path:
+    log_dir = RUNTIME_LOG_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / RUNTIME_LOG_NAME
+    _rotate_runtime_log(log_path)
+    return log_path
+
+
 def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
     ui_port = str(args.ui_port)
     os.environ["UI_PORT"] = ui_port
@@ -307,21 +345,25 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
     if args.max_delay is not None:
         cmd.append(f"--max-delay={args.max_delay}")
 
+    log_path = _prepare_runtime_log()
     log.info("Launching runtime in detached mode: %s", " ".join(cmd))
+    log.info("Runtime stdout/stderr redirected to %s", log_path)
     env = os.environ.copy()
     env["UI_PORT"] = ui_port
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-    )
-    time.sleep(0.5)
-    if proc.poll() is not None:
-        raise RuntimeError(
-            "Runtime process exited immediately with code"
-            f" {proc.returncode}. Check logs for more details."
+    with log_path.open("ab", buffering=0) as log_file:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            env=env,
         )
+        time.sleep(0.5)
+        if proc.poll() is not None:
+            log_file.flush()
+            raise RuntimeError(
+                "Runtime process exited immediately with code"
+                f" {proc.returncode}. Check logs at {log_path} for more details."
+            )
     log.info("Launched runtime pid=%s", proc.pid)
     return 0
 

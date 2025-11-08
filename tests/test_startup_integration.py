@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -119,4 +120,45 @@ def test_start_all_allows_when_rl_healthy(monkeypatch):
             except SystemExit as e:
                 # If later gates exit, ensure it's NOT the RL gate
                 assert "RL daemon gate failed" not in str(e)
+
+
+def test_launch_detached_writes_runtime_log(tmp_path, monkeypatch):
+    import scripts.start_all as start_module
+
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(start_module, "RUNTIME_LOG_DIR", log_dir)
+    monkeypatch.setattr(start_module.time, "sleep", lambda _delay: None)
+
+    def fake_popen(cmd, stdout, stderr, env):
+        assert stderr is start_module.subprocess.STDOUT
+        stdout.write(b"boom\n")
+        stdout.flush()
+
+        class Proc:
+            def __init__(self):
+                self.returncode = 1
+
+            def poll(self):
+                return self.returncode
+
+        return Proc()
+
+    monkeypatch.setattr(start_module.subprocess, "Popen", fake_popen)
+
+    args = SimpleNamespace(
+        ui_port=9999,
+        ui_host="127.0.0.1",
+        loop_delay=None,
+        min_delay=None,
+        max_delay=None,
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        start_module.launch_detached(args, "/tmp/config.toml")
+
+    log_path = log_dir / start_module.RUNTIME_LOG_NAME
+    assert log_path.exists()
+    assert "Check logs at" in str(excinfo.value)
+    assert str(log_path) in str(excinfo.value)
+    assert "boom" in log_path.read_text()
 
