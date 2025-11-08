@@ -144,6 +144,46 @@ def test_refresh_settings_updates_limits_and_clears_cache(monkeypatch):
     assert discovery_mod._CACHE["method"] == ""
 
 
+def test_refresh_settings_prefers_configured_rpc(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+    import solhunter_zero.config as config_mod
+
+    monkeypatch.setattr(config_mod, "_VALIDATED_URLS", {})
+    monkeypatch.setenv("SOLANA_RPC_URL", "https://env.initial")
+    monkeypatch.setenv("SOLANA_WS_URL", "wss://env.initial")
+
+    active_cfg = {"solana_rpc_url": "https://cfg.one", "solana_ws_url": ""}
+    monkeypatch.setattr(config_mod, "_ACTIVE_CONFIG", active_cfg, raising=False)
+
+    agent = DiscoveryAgent()
+
+    assert agent.rpc_url == "https://cfg.one"
+    assert os.getenv("SOLANA_RPC_URL") == "https://cfg.one"
+    assert agent.ws_url == "wss://env.initial"
+
+    discovery_mod._CACHE.update(
+        {
+            "tokens": ["cached"],
+            "ts": time.time(),
+            "limit": agent.limit,
+            "method": agent.default_method or "",
+            "token_file": "tok",
+            "token_file_mtime": 1.0,
+        }
+    )
+
+    active_cfg["solana_rpc_url"] = "https://cfg.two"
+
+    agent.refresh_settings()
+
+    assert agent.rpc_url == "https://cfg.two"
+    assert os.getenv("SOLANA_RPC_URL") == "https://cfg.two"
+    assert discovery_mod._CACHE["tokens"] == []
+    assert discovery_mod._CACHE["ts"] == 0.0
+    assert discovery_mod._CACHE["limit"] == 0
+    assert discovery_mod._CACHE["method"] == ""
+
+
 def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
     calls = []
 
