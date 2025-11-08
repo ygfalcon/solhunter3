@@ -448,6 +448,23 @@ async def merge_sources(
             _coerce_float(entry.get("liquidity")),
             _coerce_float(payload.get("liquidity")),
         )
+        depth_value = payload.get("depth")
+        if depth_value is not None:
+            entry["depth"] = max(
+                _coerce_float(entry.get("depth")), _coerce_float(depth_value)
+            )
+        depth_rate = payload.get("depth_tx_rate")
+        if depth_rate is not None:
+            entry["depth_tx_rate"] = max(
+                _coerce_float(entry.get("depth_tx_rate")),
+                _coerce_float(depth_rate),
+            )
+        for key, value in payload.items():
+            if not key.startswith("depth_") or key in {"depth_tx_rate"}:
+                continue
+            if value is None:
+                continue
+            entry[key] = value
         _update_entry(entry, payload)
 
     final: List[Dict[str, Any]] = []
