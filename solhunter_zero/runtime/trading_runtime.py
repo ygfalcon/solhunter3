@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import contextlib
+import errno
+import ipaddress
 import json
 import logging
 import os
@@ -1446,15 +1447,48 @@ class TradingRuntime:
             if any(term in lower for term in ("key", "secret", "token", "pass", "auth")):
                 continue
             sanitized[str(key)] = _serialize(value)
-        resolved_host = None
+        resolved_host: Optional[str] = None
         if self.ui_server is not None:
-            resolved_host = getattr(self.ui_server, "resolved_host", None)
-        bind_host = self.ui_host
+            raw_resolved = getattr(self.ui_server, "resolved_host", None)
+            if raw_resolved is not None:
+                resolved_host = str(raw_resolved)
+
+        def _normalize_host(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                cleaned = value.strip()
+                return cleaned or None
+            return str(value)
+
+        def _should_prefer(host: Optional[str]) -> bool:
+            if not host:
+                return False
+            try:
+                ip_obj = ipaddress.ip_address(host)
+            except ValueError:
+                return True
+            return not ip_obj.is_loopback
+
+        bind_host = _normalize_host(self.ui_host)
+        configured_host = _normalize_host(cfg.get("ui_host"))
+
+        if bind_host is None and configured_host is not None:
+            bind_host = configured_host
+
         local_access_host = None
         if resolved_host and resolved_host != bind_host:
             local_access_host = resolved_host
-        live_host = resolved_host or bind_host
-        sanitized["ui_host"] = _serialize(bind_host)
+
+        exposed_host: Optional[str] = None
+        if _should_prefer(configured_host):
+            exposed_host = configured_host
+        elif _should_prefer(bind_host):
+            exposed_host = bind_host
+        else:
+            exposed_host = resolved_host or bind_host or configured_host
+
+        sanitized["ui_host"] = _serialize(exposed_host)
         if local_access_host is not None:
             sanitized["local_access_host"] = _serialize(local_access_host)
         sanitized["ui_port"] = _serialize(self.ui_port)
@@ -1479,7 +1513,7 @@ class TradingRuntime:
         ui_port = self.ui_port
         formatted_host: Optional[str] = None
         if self.ui_server is not None:
-            host_for_url = resolved_host or live_host
+            host_for_url = exposed_host
             if host_for_url is not None:
                 formatted_host = self.ui_server._format_host_for_url(host_for_url)
         return {
@@ -1494,7 +1528,7 @@ class TradingRuntime:
             "env": env_summary,
             "iteration_count": self._iteration_count,
             "last_iteration_timestamp": iteration.get("timestamp"),
-            "ui_host": bind_host,
+            "ui_host": exposed_host,
             "ui_port": ui_port,
             "bind_host": bind_host,
             "local_access_host": local_access_host,
