@@ -65,6 +65,41 @@ DictProvider = Callable[[], Dict[str, Any]]
 
 
 HISTORY_MAX_ENTRIES = 200
+DISCOVERY_RECENT_DISPLAY_LIMIT = 120
+
+
+def _normalize_discovery_recent(values: Any) -> List[Any]:
+    """Return *values* as a list suitable for JSON serialization."""
+
+    if isinstance(values, list):
+        return list(values)
+    if values is None:
+        return []
+    try:
+        return list(values)
+    except TypeError:
+        return []
+
+
+def _limit_discovery_recent(
+    discovery: Mapping[str, Any] | None,
+    *,
+    limit: int = DISCOVERY_RECENT_DISPLAY_LIMIT,
+) -> Dict[str, Any]:
+    """Return a copy of *discovery* capped to *limit* recent tokens."""
+
+    if isinstance(discovery, Mapping):
+        capped = dict(discovery)
+    elif discovery is None:
+        capped = {}
+    else:
+        capped = {"recent": discovery}
+
+    recent_values = _normalize_discovery_recent(capped.get("recent", []))
+    if limit >= 0:
+        recent_values = recent_values[:limit]
+    capped["recent"] = recent_values
+    return capped
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +556,10 @@ def create_app(
         if request.args.get("format", "").lower() == "json":
             status = state.snapshot_status()
             summary = state.snapshot_summary()
-            discovery = state.snapshot_discovery()
+            discovery = _limit_discovery_recent(
+                state.snapshot_discovery(),
+                limit=DISCOVERY_RECENT_DISPLAY_LIMIT,
+            )
             actions = list(state.snapshot_actions())
             activity = list(state.snapshot_activity())
             trades = list(state.snapshot_trades())
@@ -580,7 +618,10 @@ def create_app(
 
         status = state.snapshot_status()
         summary = state.snapshot_summary()
-        discovery = state.snapshot_discovery()
+        discovery = _limit_discovery_recent(
+            state.snapshot_discovery(),
+            limit=DISCOVERY_RECENT_DISPLAY_LIMIT,
+        )
         activity = list(state.snapshot_activity())
         trades = list(state.snapshot_trades())
         logs = list(state.snapshot_logs())
@@ -647,7 +688,7 @@ def create_app(
             reversed(discovery_recent_all[-3:])
         )
         discovery_recent_display = list(
-            reversed(discovery_recent_all[-120:])
+            reversed(discovery_recent_all[-DISCOVERY_RECENT_DISPLAY_LIMIT:])
         )
         raw_backoff_remaining = discovery.get("cooldown_remaining")
         discovery_backoff_remaining: Optional[float] = None

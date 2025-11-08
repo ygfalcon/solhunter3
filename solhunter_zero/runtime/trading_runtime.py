@@ -1290,7 +1290,7 @@ class TradingRuntime:
         with self._iteration_lock:
             latest = list(self._last_iteration.get("tokens_used", []) or [])
         snapshot: Dict[str, Any] = {
-            "recent": recent[:50],
+            "recent": recent[: self._recent_tokens_limit],
             "recent_count": len(recent),
             "latest_iteration_tokens": latest,
         }
