@@ -3307,6 +3307,8 @@ class UIServer:
     @staticmethod
     def _format_host_for_url(host: str) -> str:
         if ":" in host and not host.startswith("["):
+            if "%" in host:
+                host = host.replace("%", "%25")
             return f"[{host}]"
         return host
 

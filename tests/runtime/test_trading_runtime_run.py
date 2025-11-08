@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from solhunter_zero.runtime import trading_runtime
+from solhunter_zero.ui import UIServer
 
 
 @pytest.fixture
@@ -210,6 +211,15 @@ async def test_trading_runtime_start_ui_formats_unspecified_host(monkeypatch):
         )
     finally:
         runtime.ui_server.stop()
+
+
+def test_format_host_for_url_scoped_ipv6():
+    host = "fe80::1%en0"
+
+    formatted = UIServer._format_host_for_url(host)
+
+    assert formatted == "[fe80::1%25en0]"
+    assert f"http://{formatted}:1234/health" == "http://[fe80::1%25en0]:1234/health"
 
 
 @pytest.mark.anyio("asyncio")
