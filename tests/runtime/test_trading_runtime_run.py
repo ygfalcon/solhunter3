@@ -115,7 +115,7 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
             )
             assert os.getenv("UI_PORT") == str(runtime.ui_port)
             assert os.getenv("PORT") == str(runtime.ui_port)
-            assert os.getenv("UI_HOST") == runtime.ui_server.resolved_host
+            assert os.getenv("UI_HOST") == runtime.ui_server.host
             assert runtime.cfg.get("ui_port") == runtime.ui_port
         finally:
             runtime.ui_server.stop()

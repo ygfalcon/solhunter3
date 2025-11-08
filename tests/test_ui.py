@@ -678,3 +678,17 @@ def test_uiserver_start_probe_respects_config_and_env(monkeypatch):
     assert server._startup_probe_initial_delay == pytest.approx(0.1)
     assert server._startup_probe_backoff == pytest.approx(1.5)
     assert server._startup_probe_max_delay == pytest.approx(0.5)
+
+
+def test_uiserver_preserves_requested_host(monkeypatch):
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+    monkeypatch.setenv("UI_HOST", "placeholder")
+
+    state = ui.UIState(status_provider=_healthy_status_snapshot)
+    server = ui.UIServer(state, host="0.0.0.0", port=0)
+
+    try:
+        server.start()
+        assert os.getenv("UI_HOST") == "0.0.0.0"
+    finally:
+        server.stop()
