@@ -3,6 +3,7 @@ import logging
 import os
 import socket
 import time
+from urllib.parse import urlparse
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -330,6 +331,33 @@ async def test_trading_runtime_config_preserves_requested_bind_host(monkeypatch)
         runtime.ui_server.stop()
 
 
+@pytest.mark.anyio("asyncio")
+async def test_trading_runtime_config_reports_url_for_exposed_host(monkeypatch):
+    runtime = trading_runtime.TradingRuntime(ui_host="0.0.0.0")
+    runtime.status.event_bus = True
+    runtime.status.trading_loop = True
+    runtime.status.heartbeat_ts = time.time()
+
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+
+    await runtime._start_ui()
+    try:
+        assert runtime.ui_server is not None
+        config_snapshot = runtime.ui_state.snapshot_config()
+
+        assert config_snapshot["ui_host"] == "0.0.0.0"
+        assert config_snapshot["bind_host"] == "0.0.0.0"
+        assert config_snapshot["local_access_host"] == runtime.ui_server.resolved_host
+
+        ui_url = config_snapshot["ui_url"]
+        assert ui_url
+        parsed = urlparse(ui_url)
+        assert parsed.hostname == config_snapshot["ui_host"]
+        assert parsed.port == runtime.ui_port
+    finally:
+        runtime.ui_server.stop()
+
+
 def test_format_host_for_url_scoped_ipv6():
     host = "fe80::1%en0"
 
@@ -337,6 +365,35 @@ def test_format_host_for_url_scoped_ipv6():
 
     assert formatted == "[fe80::1%25en0]"
     assert f"http://{formatted}:1234/health" == "http://[fe80::1%25en0]:1234/health"
+
+
+def test_collect_config_prefers_configured_host_for_ipv6_urls():
+    runtime = trading_runtime.TradingRuntime(ui_host="::")
+    runtime.cfg = {"ui_host": "::"}
+    runtime.ui_port = 4321
+
+    formatted_hosts: list[str] = []
+
+    class DummyServer:
+        resolved_host = "::1"
+
+        def _format_host_for_url(self, host: str) -> str:
+            formatted_hosts.append(host)
+            return f"[{host}]"
+
+    runtime.ui_server = DummyServer()
+
+    config_snapshot = runtime._collect_config()
+
+    assert config_snapshot["ui_host"] == "::"
+    assert config_snapshot["bind_host"] == "::"
+    assert config_snapshot["local_access_host"] == "::1"
+    assert config_snapshot["ui_url"] == "http://[::]:4321"
+    assert formatted_hosts == ["::"]
+
+    sanitized = config_snapshot["sanitized_config"]
+    assert sanitized["ui_host"] == "::"
+    assert sanitized["local_access_host"] == "::1"
 
 
 @pytest.mark.anyio("asyncio")
