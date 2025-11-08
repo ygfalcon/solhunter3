@@ -224,6 +224,7 @@ class RuntimeStatus:
     trading_loop: bool = False
     depth_service: bool = False
     rl_daemon: bool = False
+    ui: bool = False
     heartbeat_ts: Optional[float] = None
 
 
@@ -317,6 +318,7 @@ class TradingRuntime:
         self._last_iteration_elapsed: Optional[float] = None
         self._last_iteration_errors: List[str] = []
         self._last_actions: List[Dict[str, Any]] = []
+        self._ui_start_error: Optional[str] = None
         history_limit = int(os.getenv("ITERATION_HISTORY_LIMIT", "120") or 120)
         self._iteration_history: Deque[Dict[str, Any]] = deque(maxlen=history_limit)
         self._history_lock = threading.Lock()
@@ -427,8 +429,14 @@ class TradingRuntime:
         log.log(logging.INFO if bus_ok else logging.WARNING, "TradingRuntime: event bus %s", detail)
         await self._start_ui()
         ui_detail = "enabled" if self.ui_server else "disabled"
+        if not self.ui_server and self._ui_start_error:
+            ui_detail = self._ui_start_error
         self.activity.add("ui", ui_detail, ok=bool(self.ui_server))
-        log.info("TradingRuntime: UI %s", ui_detail)
+        log.log(
+            logging.INFO if self.ui_server else logging.WARNING,
+            "TradingRuntime: UI %s",
+            ui_detail,
+        )
         await self._start_agents()
         self.activity.add("agents", "ready")
         log.info("TradingRuntime: agents ready")
@@ -491,6 +499,7 @@ class TradingRuntime:
         if self.ui_server:
             self.ui_server.stop()
             self.ui_server = None
+        self.status.ui = False
 
         if ui_ws_started:
             stop_websockets()
@@ -878,14 +887,26 @@ class TradingRuntime:
 
         self._ui_ws_threads = None
         self._ui_ws_started_here = False
+        self._ui_start_error = None
 
         if not self._ui_enabled:
             self.ui_server = None
             log.info("TradingRuntime: UI disabled via UI_ENABLED")
+            self.status.ui = False
+            self._ui_start_error = "disabled via UI_ENABLED"
             return
 
-        self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
-        self.ui_server.start()
+        try:
+            self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
+            self.ui_server.start()
+        except Exception as exc:
+            log.exception("TradingRuntime: failed to start UI server")
+            self.ui_server = None
+            self.status.ui = False
+            self._ui_start_error = f"failed: {exc}"
+            return
+
+        self.status.ui = True
         threads = start_websockets()
         self._ui_ws_threads = threads
         self._ui_ws_started_here = bool(threads)
@@ -1386,6 +1407,7 @@ class TradingRuntime:
             "depth_service": depth_ok,
             "rl_daemon": rl_running,
             "rl_daemon_status": rl_snapshot,
+            "ui": self.status.ui,
             "heartbeat": self.status.heartbeat_ts,
             "iterations_completed": self._iteration_count,
             "trade_count": len(self._trades),
