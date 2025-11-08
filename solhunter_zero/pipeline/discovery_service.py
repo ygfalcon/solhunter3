@@ -586,9 +586,10 @@ class DiscoveryService:
             "DiscoveryService priming discovery with %d startup clone(s)", clones
         )
         timeout = self.startup_clone_timeout
+        method = discovery_state.current_method()
         scheduled: list[tuple[int, asyncio.Task]] = []
         for idx in range(clones):
-            clone_coro = self._clone_fetch(idx)
+            clone_coro = self._clone_fetch(idx, method=method)
             if timeout is not None:
                 clone_coro = asyncio.wait_for(clone_coro, timeout)
             task = asyncio.create_task(clone_coro, name=f"discovery_prime_{idx}")
@@ -641,12 +642,15 @@ class DiscoveryService:
         else:
             log.info("DiscoveryService startup clones produced no tokens")
 
-    async def _clone_fetch(self, idx: int) -> tuple[list[str], Dict[str, Dict[str, Any]]]:
+    async def _clone_fetch(
+        self, idx: int, *, method: str | None = None
+    ) -> tuple[list[str], Dict[str, Dict[str, Any]]]:
         agent = DiscoveryAgent()
         try:
             tokens = await agent.discover_tokens(
                 offline=self.offline,
                 token_file=self.token_file,
+                method=method,
                 use_cache=False,
             )
             if self.limit:

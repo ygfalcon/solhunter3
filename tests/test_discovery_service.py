@@ -3,6 +3,7 @@ import time
 
 import pytest
 
+from solhunter_zero import discovery_state
 from solhunter_zero.pipeline import discovery_service as discovery_mod
 
 
@@ -202,7 +203,9 @@ async def test_startup_clone_timeout(monkeypatch):
 
     cancelled = {"value": False}
 
-    async def fake_clone(self, idx: int) -> tuple[list[str], dict[str, dict[str, object]]]:
+    async def fake_clone(
+        self, idx: int, *, method: str | None = None
+    ) -> tuple[list[str], dict[str, dict[str, object]]]:
         if idx == 0:
             try:
                 await asyncio.Event().wait()
@@ -226,6 +229,57 @@ async def test_startup_clone_timeout(monkeypatch):
     assert cancelled["value"] is True
 
     await service.stop()
+
+
+@pytest.mark.anyio
+async def test_startup_clones_honor_override(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    methods: list[str | None] = []
+    emitted: list[list[str]] = []
+
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.last_details: dict[str, dict[str, object]] = {}
+
+        async def discover_tokens(
+            self,
+            *,
+            offline: bool = False,
+            token_file: str | None = None,
+            method: str | None = None,
+            use_cache: bool = True,
+        ) -> list[str]:
+            methods.append(method)
+            token = f"Tok{len(methods)}"
+            self.last_details[token] = {"source": method}
+            return [token]
+
+    async def fake_emit(
+        self,
+        tokens: list[str],
+        *,
+        fresh: bool,
+    ) -> None:
+        emitted.append([str(tok) for tok in tokens])
+
+    monkeypatch.setattr(discovery_mod, "DiscoveryAgent", FakeAgent)
+    monkeypatch.setattr(discovery_mod.DiscoveryService, "_emit_tokens", fake_emit)
+
+    service = discovery_mod.DiscoveryService(
+        queue,
+        interval=0.1,
+        cache_ttl=0.0,
+        startup_clones=2,
+    )
+
+    previous, _ = discovery_state.set_override("mempool")
+    try:
+        await service._prime_startup_clones()
+    finally:
+        discovery_state.set_override(previous)
+
+    assert methods == ["mempool", "mempool"]
+    assert emitted == [["Tok1", "Tok2"]]
 
 
 @pytest.mark.anyio
