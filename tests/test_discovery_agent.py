@@ -264,3 +264,27 @@ def test_discover_tokens_includes_social_mentions(monkeypatch):
     tokens = asyncio.run(agent.discover_tokens())
     assert tokens == ["So11111111111111111111111111111111111111112"]
     assert agent.last_details[tokens[0]]["social_mentions"] == 4
+
+
+def test_discover_tokens_offline_skips_social_mentions(monkeypatch):
+    _reset_cache()
+    agent = DiscoveryAgent()
+    agent.news_feeds = ["http://ok"]
+    agent.social_limit = 3
+    agent.social_min_mentions = 1
+
+    async def fake_discover_once(self, *, method, offline, token_file):
+        return [VALID_MINT], {}
+
+    async def fail_fetch(*args, **kwargs):  # pragma: no cover - should never run
+        raise AssertionError("fetch_token_mentions_async should not be called when offline")
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.fetch_token_mentions_async",
+        fail_fetch,
+    )
+
+    tokens = asyncio.run(agent.discover_tokens(offline=True))
+    assert tokens == [VALID_MINT]
+    assert agent.last_details == {}
