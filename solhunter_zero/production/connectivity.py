@@ -77,12 +77,21 @@ class ConnectivityChecker:
         self.max_attempts = int(self.env.get("CONNECTIVITY_MAX_ATTEMPTS", "4"))
         self.breaker_threshold = breaker_threshold
         self.breaker_cooldown = breaker_cooldown
+        self.skip_ui_probes = self._env_flag("CONNECTIVITY_SKIP_UI_PROBES")
         self._breaker_state: MutableMapping[str, float] = {}
         self._failure_counts: MutableMapping[str, int] = defaultdict(int)
         self._metrics: MutableMapping[str, Dict[str, Any]] = defaultdict(
             lambda: {"latencies": [], "errors": Counter(), "statuses": Counter()}
         )
         self.targets = self._build_targets()
+
+    def _env_flag(self, key: str) -> bool:
+        raw = self.env.get(key)
+        if raw is None:
+            return False
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
     # ------------------------------------------------------------------
     # Target configuration
@@ -99,27 +108,29 @@ class ConnectivityChecker:
             price_base = env.get("HELIUS_PRICE_BASE_URL") or "https://api.helius.xyz"
             rest = f"{price_base.rstrip('/')}/v0/token-metadata"
         redis_url = env.get("REDIS_URL") or "redis://127.0.0.1:6379/1"
-        ui_ws = (
-            env.get("UI_EVENTS_WS")
-            or env.get("UI_EVENTS_WS_URL")
-            or env.get("UI_WS_URL")
-        )
-        if not ui_ws:
-            host = env.get("UI_HOST", "127.0.0.1")
-            if host in {"0.0.0.0", "::"}:
-                host = "127.0.0.1"
-            port = env.get("UI_PORT", "5001")
-            scheme = (env.get("UI_WS_SCHEME") or env.get("WS_SCHEME") or "ws").strip().lower()
-            if scheme not in {"ws", "wss"}:
-                scheme = "ws"
-            path_template = env.get("UI_WS_PATH_TEMPLATE") or "/ws/{channel}"
-            try:
-                path = path_template.format(channel="events")
-            except Exception:
-                path = "/ws/events"
-            if not path.startswith("/"):
-                path = "/" + path.lstrip("/")
-            ui_ws = f"{scheme}://{host}:{port}{path}"
+        ui_ws = None
+        if not self.skip_ui_probes:
+            ui_ws = (
+                env.get("UI_EVENTS_WS")
+                or env.get("UI_EVENTS_WS_URL")
+                or env.get("UI_WS_URL")
+            )
+            if not ui_ws:
+                host = env.get("UI_HOST", "127.0.0.1")
+                if host in {"0.0.0.0", "::"}:
+                    host = "127.0.0.1"
+                port = env.get("UI_PORT", "5001")
+                scheme = (env.get("UI_WS_SCHEME") or env.get("WS_SCHEME") or "ws").strip().lower()
+                if scheme not in {"ws", "wss"}:
+                    scheme = "ws"
+                path_template = env.get("UI_WS_PATH_TEMPLATE") or "/ws/{channel}"
+                try:
+                    path = path_template.format(channel="events")
+                except Exception:
+                    path = "/ws/events"
+                if not path.startswith("/"):
+                    path = "/" + path.lstrip("/")
+                ui_ws = f"{scheme}://{host}:{port}{path}"
         ws_gateway = env.get("GATEWAY_WS_URL") or env.get("WS_GATEWAY_URL")
         targets: list[dict[str, Any]] = []
         if rpc:
@@ -144,19 +155,23 @@ class ConnectivityChecker:
             targets.append({"name": "helius-rest", "type": "http", "url": rest})
         if redis_url:
             targets.append({"name": "redis", "type": "redis", "url": redis_url})
-        ui_http = env.get("UI_HEALTH_URL")
-        if not ui_http:
-            host = env.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
-            if host in {"0.0.0.0", "::"}:
-                host = "127.0.0.1"
-            port = env.get("UI_PORT", env.get("PORT", "5001") or "5001")
-            scheme = (env.get("UI_HTTP_SCHEME") or env.get("UI_SCHEME") or "http").strip().lower()
-            if scheme not in {"http", "https"}:
-                scheme = "http"
-            path = env.get("UI_HEALTH_PATH") or "/health"
-            if not path.startswith("/"):
-                path = "/" + path
-            ui_http = f"{scheme}://{host}:{port}{path}"
+        ui_http = None
+        if not self.skip_ui_probes:
+            ui_http = env.get("UI_HEALTH_URL")
+            if not ui_http:
+                host = env.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
+                if host in {"0.0.0.0", "::"}:
+                    host = "127.0.0.1"
+                port = env.get("UI_PORT", env.get("PORT", "5001") or "5001")
+                scheme = (env.get("UI_HTTP_SCHEME") or env.get("UI_SCHEME") or "http").strip().lower()
+                if scheme not in {"http", "https"}:
+                    scheme = "http"
+                path = env.get("UI_HEALTH_PATH") or "/health"
+                if not path.startswith("/"):
+                    path = "/" + path
+                ui_http = f"{scheme}://{host}:{port}{path}"
+        if self.skip_ui_probes:
+            logger.info("UI connectivity targets disabled via CONNECTIVITY_SKIP_UI_PROBES")
         if ui_ws:
             targets.append({"name": "ui-ws", "type": "ws", "url": ui_ws})
         if ui_http:
