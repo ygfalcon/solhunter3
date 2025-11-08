@@ -226,16 +226,69 @@ def verify_live_account() -> dict:
     return {"balance_sol": balance, "blockhash": blockhash}
 
 
-def apply_production_defaults() -> dict[str, str]:
-    overrides = {
-        "SOLHUNTER_MODE": "live",
-        "MODE": "live",
-        "EVENT_BUS_URL": "ws://127.0.0.1:8779",
-        "BROKER_WS_URLS": "ws://127.0.0.1:8769",
-    }
-    for key, value in overrides.items():
-        os.environ[key] = value
-    return overrides
+def _config_has_broker(cfg: Mapping[str, object] | None) -> bool:
+    if not cfg:
+        return False
+    raw = cfg.get("broker_urls")
+    if isinstance(raw, str):
+        if raw.strip():
+            return True
+    elif isinstance(raw, Sequence):
+        for item in raw:
+            if str(item).strip():
+                return True
+    raw_single = cfg.get("broker_url")
+    if isinstance(raw_single, str) and raw_single.strip():
+        return True
+    return False
+
+
+def _config_has_event_bus(cfg: Mapping[str, object] | None) -> bool:
+    if not cfg:
+        return False
+    raw = cfg.get("event_bus_url")
+    if isinstance(raw, str) and raw.strip():
+        return True
+    return False
+
+
+def _config_mode(cfg: Mapping[str, object] | None) -> str | None:
+    if not cfg:
+        return None
+    raw = cfg.get("mode")
+    if isinstance(raw, str):
+        cleaned = raw.strip()
+        if cleaned:
+            return cleaned
+    return None
+
+
+def apply_production_defaults(cfg: Mapping[str, object] | None = None) -> dict[str, str]:
+    applied: dict[str, str] = {}
+
+    mode = _config_mode(cfg) or "live"
+    for key in ("SOLHUNTER_MODE", "MODE"):
+        if key not in os.environ:
+            os.environ.setdefault(key, mode)
+            applied[key] = os.environ[key]
+
+    broker_env_configured = any(
+        os.getenv(name) for name in ("BROKER_WS_URLS", "BROKER_URLS", "BROKER_URL")
+    )
+    if not broker_env_configured and _config_has_broker(cfg):
+        broker_env_configured = True
+    if not broker_env_configured and "BROKER_WS_URLS" not in os.environ:
+        os.environ.setdefault("BROKER_WS_URLS", "ws://127.0.0.1:8769")
+        applied["BROKER_WS_URLS"] = os.environ["BROKER_WS_URLS"]
+
+    event_bus_configured = bool(os.getenv("EVENT_BUS_URL"))
+    if not event_bus_configured and _config_has_event_bus(cfg):
+        event_bus_configured = True
+    if not event_bus_configured and "EVENT_BUS_URL" not in os.environ:
+        os.environ.setdefault("EVENT_BUS_URL", "ws://127.0.0.1:8779")
+        applied["EVENT_BUS_URL"] = os.environ["EVENT_BUS_URL"]
+
+    return applied
 
 
 def _parse_int_env(name: str, default: int) -> int:
@@ -561,7 +614,11 @@ def main(argv: list[str] | None = None) -> int:
             env.update(keypair_info)
             cfg_path = env["config_path"]
             loaded_env = run_stage("load-production-env", _load_production_environment, stage_results)
-            run_stage("apply-prod-defaults", apply_production_defaults, stage_results)
+            run_stage(
+                "apply-prod-defaults",
+                lambda: apply_production_defaults(env.get("config")),
+                stage_results,
+            )
             run_stage("validate-keys", _validate_keys, stage_results)
             run_stage("write-env-manifest", lambda: _write_manifest(loaded_env), stage_results)
             run_stage("verify-onchain-account", verify_live_account, stage_results)

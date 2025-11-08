@@ -682,6 +682,68 @@ solana_keypair = "kp2"
     assert env1['SOLANA_KEYPAIR'] == 'kp1'
 
 
+@pytest.mark.parametrize("preset", [False, True])
+def test_apply_production_defaults_broker_matrix(monkeypatch, preset):
+    import importlib
+
+    start_all = importlib.reload(importlib.import_module("scripts.start_all"))
+
+    for name in [
+        "BROKER_WS_URLS",
+        "BROKER_URLS",
+        "BROKER_URL",
+        "EVENT_BUS_URL",
+        "MODE",
+        "SOLHUNTER_MODE",
+    ]:
+        monkeypatch.delenv(name, raising=False)
+
+    cfg: dict[str, object] = {}
+    if preset:
+        monkeypatch.setenv("BROKER_WS_URLS", "ws://broker.example:1234")
+
+    applied = start_all.apply_production_defaults(cfg)
+
+    if preset:
+        assert "BROKER_WS_URLS" not in applied
+        assert os.environ["BROKER_WS_URLS"] == "ws://broker.example:1234"
+    else:
+        assert applied["BROKER_WS_URLS"] == "ws://127.0.0.1:8769"
+        assert os.environ["BROKER_WS_URLS"] == "ws://127.0.0.1:8769"
+
+    assert os.environ["MODE"] == os.environ["SOLHUNTER_MODE"] == "live"
+
+
+def test_apply_production_defaults_respects_config(monkeypatch):
+    import importlib
+
+    start_all = importlib.reload(importlib.import_module("scripts.start_all"))
+
+    for name in [
+        "BROKER_WS_URLS",
+        "BROKER_URLS",
+        "BROKER_URL",
+        "EVENT_BUS_URL",
+        "MODE",
+        "SOLHUNTER_MODE",
+    ]:
+        monkeypatch.delenv(name, raising=False)
+
+    cfg = {
+        "mode": "paper",
+        "broker_urls": ["redis://redis.example:6379"],
+        "event_bus_url": "wss://bus.example/ws",
+    }
+
+    applied = start_all.apply_production_defaults(cfg)
+
+    assert "BROKER_WS_URLS" not in applied
+    assert "EVENT_BUS_URL" not in applied
+    assert "BROKER_WS_URLS" not in os.environ
+    assert "EVENT_BUS_URL" not in os.environ
+    assert os.environ["MODE"] == os.environ["SOLHUNTER_MODE"] == "paper"
+
+
 def test_ensure_keypair_generates_default(tmp_path, monkeypatch):
     monkeypatch.setenv("KEYPAIR_DIR", str(tmp_path))
     import sys
