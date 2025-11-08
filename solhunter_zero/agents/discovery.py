@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import time
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
@@ -249,12 +250,19 @@ class DiscoveryAgent:
             and now - float(_CACHE.get("ts", 0.0)) < ttl
             and (not method_override or cached_method == active_method or not cached_method)
         ):
-            if cache_limit and cache_limit >= self.limit:
+            effective_limit = self._limit_value()
+            if effective_limit is None:
                 logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
-                return cached_tokens[: self.limit]
-            if len(cached_tokens) >= self.limit:
-                logger.debug("DiscoveryAgent: returning cached tokens (limit=%s)", self.limit)
-                return cached_tokens[: self.limit]
+                return list(cached_tokens)
+            if cache_limit and cache_limit >= effective_limit:
+                logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
+                return cached_tokens[:effective_limit]
+            if len(cached_tokens) >= effective_limit:
+                logger.debug(
+                    "DiscoveryAgent: returning cached tokens (limit=%s)",
+                    effective_limit,
+                )
+                return cached_tokens[:effective_limit]
 
         attempts = self.max_attempts
         details: Dict[str, Dict[str, Any]] = {}
@@ -288,10 +296,11 @@ class DiscoveryAgent:
         self.last_method = active_method
 
         detail = f"yield={len(tokens)}"
-        if self.limit:
-            detail = f"{detail}/{self.limit}"
+        effective_limit = self._limit_value()
+        if effective_limit is not None:
+            detail = f"{detail}/{effective_limit}"
         detail = f"{detail} method={active_method}"
-        if self.limit and len(tokens) < self.limit:
+        if effective_limit is not None and len(tokens) < effective_limit:
             detail = f"{detail} partial"
         publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
         logger.info(
@@ -301,7 +310,7 @@ class DiscoveryAgent:
         if ttl > 0 and tokens:
             _CACHE["tokens"] = list(tokens)
             _CACHE["ts"] = now
-            _CACHE["limit"] = self.limit
+            _CACHE["limit"] = effective_limit if effective_limit is not None else 0
             _CACHE["method"] = active_method
 
         return tokens
@@ -318,7 +327,9 @@ class DiscoveryAgent:
     ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
         if (offline or method == "file") and token_file:
             try:
-                tokens = scan_tokens_from_file(token_file, limit=self.limit)
+                tokens = scan_tokens_from_file(
+                    token_file, limit=self._limit_value()
+                )
                 return tokens, {}
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Failed to read token_file %s: %s", token_file, exc)
@@ -328,8 +339,9 @@ class DiscoveryAgent:
             kwargs: Dict[str, Any] = {
                 "mempool_threshold": self.mempool_threshold,
             }
-            if self.limit:
-                kwargs["limit"] = self.limit
+            limit_value = self._limit_value()
+            if limit_value is not None:
+                kwargs["limit"] = limit_value
             if self.ws_url:
                 kwargs["ws_url"] = self.ws_url
             call_kwargs = dict(kwargs)
@@ -347,8 +359,13 @@ class DiscoveryAgent:
                             break
                     if not handled:
                         raise
-            if isinstance(results, list) and len(results) > self.limit:
-                results = results[: self.limit]
+            limit_value = self._limit_value()
+            if (
+                isinstance(results, list)
+                and limit_value is not None
+                and len(results) > limit_value
+            ):
+                results = results[:limit_value]
             details = {}
             for item in results:
                 if not isinstance(item, dict):
@@ -378,7 +395,7 @@ class DiscoveryAgent:
                 found = await scan_tokens_onchain(
                     self.rpc_url,
                     return_metrics=True,
-                    max_tokens=self.limit,
+                    max_tokens=self._limit_value(),
                 )
             except Exception as exc:
                 logger.warning("On-chain discovery failed: %s", exc)
@@ -403,9 +420,11 @@ class DiscoveryAgent:
             return tokens, details
 
         # Default: BirdEye/Helius trending via REST
+        limit_value = self._limit_value()
+        request_limit = limit_value if limit_value is not None else max(self.limit, 1, len(_STATIC_FALLBACK))
         raw_tokens = await scan_tokens_async(
             rpc_url=self.rpc_url,
-            limit=self.limit,
+            limit=request_limit,
             enrich=False,
             api_key=self.birdeye_api_key,
         )
@@ -458,6 +477,7 @@ class DiscoveryAgent:
         gen = self.stream_mempool_events(threshold=self.mempool_threshold)
         tokens: List[str] = []
         details: Dict[str, Dict[str, Any]] = {}
+        limit_cap = self._limit_cap()
         try:
             async for item in gen:
                 if not isinstance(item, dict):
@@ -468,7 +488,7 @@ class DiscoveryAgent:
                 if address not in details:
                     tokens.append(address)
                 details[address] = dict(item)
-                if len(tokens) >= self.limit:
+                if len(tokens) >= limit_cap:
                     break
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Mempool stream failed: %s", exc)
@@ -481,6 +501,7 @@ class DiscoveryAgent:
     def _normalise(self, tokens: Iterable[Any]) -> List[str]:
         seen: set[str] = set()
         filtered: List[str] = []
+        limit_cap = self._limit_cap()
         for token in tokens:
             if not isinstance(token, str):
                 continue
@@ -493,7 +514,7 @@ class DiscoveryAgent:
                 continue
             seen.add(candidate)
             filtered.append(candidate)
-            if len(filtered) >= self.limit:
+            if len(filtered) >= limit_cap:
                 break
         return filtered
 
@@ -502,14 +523,18 @@ class DiscoveryAgent:
         if cached:
             logger.warning("DiscoveryAgent falling back to cached tokens (%d)", len(cached))
             result: List[str] = []
-            for tok in cached[: self.limit]:
+            limit_value = self._limit_value()
+            iterable = cached if limit_value is None else cached[:limit_value]
+            for tok in iterable:
                 canonical = canonical_mint(tok)
                 if validate_mint(canonical):
                     result.append(canonical)
             return result
         logger.warning("DiscoveryAgent using static discovery fallback")
         result: List[str] = []
-        for tok in _STATIC_FALLBACK[: self.limit]:
+        limit_value = self._limit_value()
+        iterable = _STATIC_FALLBACK if limit_value is None else _STATIC_FALLBACK[:limit_value]
+        for tok in iterable:
             canonical = canonical_mint(tok)
             if validate_mint(canonical):
                 result.append(canonical)
@@ -521,6 +546,19 @@ class DiscoveryAgent:
         if token in _FILTER_WHITELIST:
             return False
         return token.startswith("11") and len(token) >= 8
+
+    def _limit_value(self) -> int | None:
+        """Return the configured discovery limit, treating ``<=0`` as unbounded."""
+
+        if self.limit and self.limit > 0:
+            return self.limit
+        return None
+
+    def _limit_cap(self) -> float:
+        """Return a numeric cap for list growth with ``math.inf`` when unbounded."""
+
+        limit_value = self._limit_value()
+        return float(limit_value) if limit_value is not None else math.inf
 
     @staticmethod
     def _split_env_list(name: str) -> List[str]:

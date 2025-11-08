@@ -48,6 +48,7 @@ files unless the loader is invoked with `overwrite=True`.
 | `DEX_METRICS_CACHE_TTL` | `30` | TTL for dex metrics cache cache |
 | `DEX_METRIC_URLS` | `` | Configures dex metric urls |
 | `DISCORD_FEEDS` | `https://discord.com/api/guilds/613425648685547541/widget.json` | Configures discord feeds |
+| `DISCOVERY_LIMIT` | `60` | Maximum number of tokens the discovery agent returns; set to `0` or a negative value to disable the cap |
 | `DISCOVERY_METHOD` | `websocket` | Configures discovery method |
 | `DISCOVERY_SOCIAL_LIMIT` | `12` | Maximum number of social tokens to merge into discovery |
 | `DISCOVERY_SOCIAL_MIN_MENTIONS` | `2` | Minimum mention count required for social candidates |

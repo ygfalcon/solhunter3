@@ -197,3 +197,23 @@ def test_discover_tokens_includes_social_mentions(monkeypatch):
     tokens = asyncio.run(agent.discover_tokens())
     assert tokens == ["So11111111111111111111111111111111111111112"]
     assert agent.last_details[tokens[0]]["social_mentions"] == 4
+
+
+def test_normalise_limit_zero_returns_all_tokens():
+    _reset_cache()
+    agent = DiscoveryAgent()
+    agent.limit = 0
+
+    tokens = agent._normalise(list(discovery_mod._STATIC_FALLBACK))
+
+    assert tokens == list(discovery_mod._STATIC_FALLBACK)
+
+
+def test_normalise_positive_limit_truncates():
+    _reset_cache()
+    agent = DiscoveryAgent()
+    agent.limit = 2
+
+    tokens = agent._normalise(list(discovery_mod._STATIC_FALLBACK))
+
+    assert tokens == list(discovery_mod._STATIC_FALLBACK[:2])
