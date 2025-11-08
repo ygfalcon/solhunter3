@@ -259,6 +259,37 @@ async def test_emit_tokens_publishes_event(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_emit_tokens_skips_identical_batches(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    events: list[dict[str, object]] = []
+
+    def fake_publish(topic, payload, *args, **kwargs):
+        if topic == "token_discovered":
+            events.append(dict(payload))
+
+    monkeypatch.setattr(
+        "solhunter_zero.pipeline.discovery_service.publish", fake_publish
+    )
+
+    token = "DupTok"
+    discovery_mod.TRENDING_METADATA[token] = {"liquidity": 1.0}
+
+    try:
+        await service._emit_tokens([token], fresh=True)
+        await queue.get()
+        events.clear()
+
+        await service._emit_tokens([token], fresh=True)
+
+        assert queue.empty()
+        assert events == []
+    finally:
+        monkeypatch.delitem(discovery_mod.TRENDING_METADATA, token, raising=False)
+
+
+@pytest.mark.anyio
 async def test_metadata_refresh_bypasses_duplicate_guard(monkeypatch):
     queue: asyncio.Queue = asyncio.Queue()
     service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)

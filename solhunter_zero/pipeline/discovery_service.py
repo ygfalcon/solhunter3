@@ -462,7 +462,7 @@ class DiscoveryService:
         metadata_refresh = (
             metadata_changed and not fresh and seq == self._last_emitted
         )
-        if (not metadata_changed) and not fresh and seq == self._last_emitted:
+        if (not metadata_changed) and seq == self._last_emitted:
             log.debug(
                 "DiscoveryService skipping cached emission (%d tokens)", len(seq)
             )
