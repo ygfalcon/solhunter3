@@ -8,6 +8,7 @@ import logging
 import sys
 
 from .config import ConfigFileNotFound
+from .ui import UIStartupError
 from .runtime.trading_runtime import TradingRuntime
 
 
@@ -45,8 +46,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         run_from_args(args)
-    except (ConfigFileNotFound, ValueError) as exc:
-        log.error("Unable to start trading runtime: %s", exc)
+    except (ConfigFileNotFound, ValueError, UIStartupError) as exc:
+        if isinstance(exc, UIStartupError):
+            log.error("Unable to start trading runtime UI: %s", exc)
+        else:
+            log.error("Unable to start trading runtime: %s", exc)
         return 1
     return 0
 
