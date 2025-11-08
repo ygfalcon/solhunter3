@@ -1385,6 +1385,8 @@ function setupTokenPanel() {
       ['Name', meta.name || '—'],
       ['Mint', mintForRender || '—'],
       ['Liquidity', price && price.liquidity !== undefined ? formatCurrency(price.liquidity) : '—'],
+      ['Depth', meta.depth !== undefined ? formatCurrency(meta.depth) : '—'],
+      ['Mempool TX Rate', meta.depth_tx_rate !== undefined ? formatNumber(meta.depth_tx_rate, 2) : '—'],
       ['Holders', meta.holders !== undefined ? formatNumber(meta.holders, 0) : '—'],
       ['Pool', Array.isArray(meta.pools) ? meta.pools.join(', ') : (meta.pool || '—')],
       ['Price', price && price.price !== undefined ? formatNumber(price.price, 6) : '—'],
