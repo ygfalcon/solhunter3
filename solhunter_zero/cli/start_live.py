@@ -14,6 +14,7 @@ def _prepare_environment() -> None:
 
     os.environ["NEW_RUNTIME"] = "1"
     os.environ["EVENT_DRIVEN"] = "1"
+    os.environ["NEW_PIPELINE"] = "1"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
