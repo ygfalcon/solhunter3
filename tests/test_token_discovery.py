@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from solhunter_zero import token_discovery as td
 
 
@@ -147,3 +149,27 @@ def test_collect_mempool_signals_times_out(monkeypatch):
 
     assert scores == {}
     assert any("timed out" in message for message in messages), messages
+
+
+def test_discover_candidates_cancellation_propagates(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    start = asyncio.Event()
+    blocker = asyncio.Event()
+
+    async def slow_fetch():
+        start.set()
+        await blocker.wait()
+        return []
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", slow_fetch)
+    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+
+    async def runner():
+        task = asyncio.create_task(td.discover_candidates("https://rpc"))
+        await start.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(runner())

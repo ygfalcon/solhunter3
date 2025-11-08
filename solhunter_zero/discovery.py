@@ -51,6 +51,8 @@ async def fetch_trending_tokens_async(limit: int | None = None) -> List[str]:
     tokens = await scan_tokens_async(limit=size)
     try:
         enriched = await enrich_tokens_async(tokens)
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:  # pragma: no cover - defensive fallback
         logger.debug("RPC enrichment failed: %s", exc)
         enriched = [tok for tok in tokens if isinstance(tok, str)]
@@ -91,6 +93,8 @@ async def _collect_mempool_candidates(
                 continue
             except StopAsyncIteration:
                 break
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("Mempool stream yielded error: %s", exc)
                 break
@@ -229,6 +233,8 @@ async def _gather_metrics_in_batches(
         for token in tokens:
             try:
                 results.append(await fetcher(token, rpc_url))
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:  # pragma: no cover - defensive
                 results.append(exc)
         return results
@@ -240,6 +246,9 @@ async def _gather_metrics_in_batches(
             *[fetcher(token, rpc_url) for token in batch],
             return_exceptions=True,
         )
+        for item in batch_results:
+            if isinstance(item, asyncio.CancelledError):
+                raise item
         collected.extend(batch_results)
     return collected
 
@@ -279,6 +288,8 @@ async def merge_sources(
     )
 
     trending_tokens: List[str] = []
+    if isinstance(trending_result, asyncio.CancelledError):
+        raise trending_result
     if isinstance(trending_result, Exception):
         logger.debug("Trending discovery failed: %s", trending_result)
     else:
@@ -287,6 +298,8 @@ async def merge_sources(
         ][:size]
 
     onchain_tokens: List[Dict[str, Any]] = []
+    if isinstance(onchain_result, asyncio.CancelledError):
+        raise onchain_result
     if isinstance(onchain_result, Exception):
         logger.debug("On-chain discovery failed: %s", onchain_result)
     else:

@@ -119,6 +119,8 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
                 if not tokens:
                     _BIRDEYE_CACHE.set("tokens", [])
                 break
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.warning("BirdEye token fetch failed at offset %s: %s", offset, exc)
                 if not tokens:
@@ -229,6 +231,8 @@ async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, 
                 break
             except StopAsyncIteration:
                 break
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.debug("Mempool stream unavailable: %s", exc)
                 break
