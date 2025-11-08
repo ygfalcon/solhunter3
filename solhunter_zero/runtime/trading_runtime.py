@@ -123,6 +123,7 @@ class RuntimeStatus:
     trading_loop: bool = False
     depth_service: bool = False
     rl_daemon: bool = False
+    ui_failed: bool = False
     heartbeat_ts: Optional[float] = None
 
 
@@ -198,6 +199,8 @@ class TradingRuntime:
         self._recent_tokens_limit = int(os.getenv("UI_DISCOVERY_LIMIT", "200") or 200)
         self._start_time: Optional[float] = None
         self._last_iteration_elapsed: Optional[float] = None
+        self._ui_failure: Optional[str] = None
+        self._ui_failure_lock = threading.Lock()
         self._last_iteration_errors: List[str] = []
         self._last_actions: List[Dict[str, Any]] = []
         self._offline_mode: bool = False
@@ -788,11 +791,16 @@ class TradingRuntime:
                 return True
             return False
 
+        self.status.ui_failed = False
+        with self._ui_failure_lock:
+            self._ui_failure = None
+
         for attempt, port_candidate in enumerate(port_candidates, start=1):
             self.ui_server = UIServer(
                 self.ui_state,
                 host=self.ui_host,
                 port=port_candidate,
+                on_failure=self._on_ui_server_failure,
             )
             try:
                 self.ui_server.start()
@@ -1190,6 +1198,14 @@ class TradingRuntime:
     # UI data helpers
     # ------------------------------------------------------------------
 
+    def _on_ui_server_failure(self, exc: BaseException) -> None:
+        detail = f"server crashed: {exc}" if exc else "server crashed"
+        with self._ui_failure_lock:
+            self._ui_failure = detail
+        self.status.ui_failed = True
+        self.activity.add("ui", detail, ok=False)
+        log.error("TradingRuntime: UI server failure: %s", detail)
+
     def _collect_status(self) -> Dict[str, Any]:
         depth_ok = False
         if self.depth_proc is not None:
@@ -1206,6 +1222,25 @@ class TradingRuntime:
         self.status.rl_daemon = rl_running
         with self._trades_lock:
             trade_count = len(self._trades)
+        ui_server = self.ui_server
+        ui_failed = False
+        ui_failure_detail: Optional[str] = None
+        if ui_server is not None:
+            ui_failed = bool(getattr(ui_server, "failed", False))
+            failure_exc = getattr(ui_server, "failure_exception", None)
+            if callable(failure_exc) and not isinstance(failure_exc, BaseException):
+                try:
+                    failure_exc = failure_exc()
+                except Exception:
+                    failure_exc = None
+            if isinstance(failure_exc, BaseException):
+                ui_failure_detail = f"{failure_exc.__class__.__name__}: {failure_exc}"
+        with self._ui_failure_lock:
+            stored_failure = self._ui_failure
+        if stored_failure:
+            ui_failure_detail = stored_failure
+            ui_failed = True
+        self.status.ui_failed = ui_failed
         status = {
             "event_bus": self.status.event_bus,
             "trading_loop": self.status.trading_loop,
@@ -1216,7 +1251,10 @@ class TradingRuntime:
             "iterations_completed": self._iteration_count,
             "trade_count": trade_count,
             "activity_count": len(self.activity.snapshot()),
+            "ui_failed": ui_failed,
         }
+        if ui_failure_detail:
+            status["ui_failure"] = ui_failure_detail
         if hasattr(self.state, "last_tokens"):
             tokens = list(getattr(self.state, "last_tokens", []) or [])
             status["pipeline_tokens"] = tokens[:10]
