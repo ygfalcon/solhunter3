@@ -70,6 +70,16 @@ async def test_trading_runtime_run_cleans_up_on_start_failure(monkeypatch, caplo
     )
 
 
+def test_trading_runtime_resolves_relative_token_file(tmp_path):
+    runtime = trading_runtime.TradingRuntime(
+        config_path=str(tmp_path / "configs" / "custom.toml")
+    )
+    runtime.cfg = {"token_list": "tokens.csv"}
+
+    expected = tmp_path / "configs" / "tokens.csv"
+    assert runtime._resolve_token_file() == str(expected)
+
+
 @pytest.mark.anyio("asyncio")
 async def test_start_agents_allows_concurrent_sleep(monkeypatch, tmp_path):
     runtime = trading_runtime.TradingRuntime()

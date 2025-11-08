@@ -1940,8 +1940,24 @@ class TradingRuntime:
             candidate = os.getenv("TOKEN_FILE") or os.getenv("TOKEN_LIST")
         if not candidate:
             return None
+
+        config_dir: Optional[Path] = None
+        if self.config_path:
+            try:
+                config_path = Path(str(self.config_path)).expanduser()
+                config_dir = config_path if config_path.is_dir() else config_path.parent
+            except Exception:
+                config_dir = None
+
         try:
-            path = Path(str(candidate)).expanduser()
+            candidate_path = Path(str(candidate))
+            if (
+                config_dir is not None
+                and not str(candidate).startswith("~")
+                and not candidate_path.is_absolute()
+            ):
+                candidate_path = config_dir / candidate_path
+            path = candidate_path.expanduser()
         except Exception:
             return str(candidate)
         return str(path)
