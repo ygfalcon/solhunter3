@@ -268,6 +268,50 @@ async def test_ui_health_reports_websocket_channels_ok(monkeypatch):
         await runtime.stop()
 
 
+@pytest.mark.anyio("asyncio")
+async def test_stop_tears_down_websockets_started_by_runtime(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "1")
+
+    runtime = TradingRuntime()
+
+    class _StubUIServer:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.running = False
+
+        def start(self) -> None:
+            self.running = True
+
+        def stop(self) -> None:
+            self.running = False
+
+    monkeypatch.setattr(runtime_module, "UIServer", _StubUIServer)
+
+    started_threads: dict[str, threading.Thread] = {}
+
+    def _fake_start_websockets() -> dict[str, threading.Thread]:
+        if started_threads:
+            return started_threads
+        dummy_thread = threading.Thread(target=lambda: None, name="ui-ws-dummy")
+        started_threads.update({"events": dummy_thread})
+        return started_threads
+
+    stop_calls = {"count": 0}
+
+    def _fake_stop_websockets() -> None:
+        stop_calls["count"] += 1
+
+    monkeypatch.setattr(ui_module, "start_websockets", _fake_start_websockets)
+    monkeypatch.setattr(ui_module, "stop_websockets", _fake_stop_websockets)
+
+    await runtime._start_ui()
+    assert runtime._ui_ws_threads == started_threads
+    assert runtime._ui_ws_started_here is True
+
+    await runtime.stop()
+    assert stop_calls["count"] == 1
+    assert runtime._ui_ws_threads is None
+
+
 def test_collect_health_metrics(monkeypatch):
     runtime = TradingRuntime()
     runtime.status.event_bus = True

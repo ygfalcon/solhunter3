@@ -886,9 +886,15 @@ class TradingRuntime:
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
+
         threads = start_websockets()
         self._ui_ws_threads = threads
         self._ui_ws_started_here = bool(threads)
+        if threads:
+            log.info(
+                "TradingRuntime: UI websockets started (channels=%s)",
+                ", ".join(sorted(threads)),
+            )
         self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
 
     async def _start_agents(self) -> None:
