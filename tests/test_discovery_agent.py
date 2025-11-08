@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import time
 import types
 
 if "base58" not in sys.modules:
@@ -44,6 +45,46 @@ def test_stream_mempool_events(monkeypatch):
 
     data = asyncio.run(run())
     assert data["address"] == VALID_MINT
+
+
+def test_collect_mempool_times_out(monkeypatch, caplog):
+    _reset_cache()
+
+    class NeverYield:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(1.0)
+            return {"address": VALID_MINT}
+
+        async def aclose(self):
+            return None
+
+    def never_stream(*_args, **_kwargs):
+        return NeverYield()
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.stream_ranked_mempool_tokens_with_depth",
+        never_stream,
+    )
+    monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT", 0.01)
+    monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT_RETRIES", 1)
+
+    agent = DiscoveryAgent()
+
+    async def run():
+        with caplog.at_level("DEBUG"):
+            return await agent._collect_mempool()
+
+    start = time.perf_counter()
+    tokens, details = asyncio.run(run())
+    elapsed = time.perf_counter() - start
+
+    assert tokens == []
+    assert details == {}
+    assert elapsed < 0.5
+    assert "Mempool stream timed out" in caplog.text
 
 
 def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
