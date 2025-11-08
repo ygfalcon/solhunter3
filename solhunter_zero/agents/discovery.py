@@ -9,7 +9,11 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from .. import config
 from ..token_aliases import canonical_mint, validate_mint
-from ..discovery import merge_sources
+from ..discovery import (
+    _MEMPOOL_TIMEOUT,
+    _MEMPOOL_TIMEOUT_RETRIES,
+    merge_sources,
+)
 from ..event_bus import publish
 from ..mempool_scanner import stream_ranked_mempool_tokens_with_depth
 from ..scanner_common import (
@@ -458,8 +462,29 @@ class DiscoveryAgent:
         gen = self.stream_mempool_events(threshold=self.mempool_threshold)
         tokens: List[str] = []
         details: Dict[str, Dict[str, Any]] = {}
+        timeout = max(float(_MEMPOOL_TIMEOUT), 0.1)
+        retries = max(1, int(_MEMPOOL_TIMEOUT_RETRIES))
+        timeouts = 0
         try:
-            async for item in gen:
+            while len(tokens) < self.limit:
+                try:
+                    item = await asyncio.wait_for(anext(gen), timeout=timeout)
+                except asyncio.TimeoutError:
+                    timeouts += 1
+                    if timeouts >= retries:
+                        logger.debug(
+                            "Mempool stream timed out after %d attempts", timeouts
+                        )
+                        break
+                    continue
+                except StopAsyncIteration:
+                    break
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Mempool stream failed: %s", exc)
+                    break
+                else:
+                    timeouts = 0
+
                 if not isinstance(item, dict):
                     continue
                 address = canonical_mint(item.get("address"))
@@ -470,8 +495,6 @@ class DiscoveryAgent:
                 details[address] = dict(item)
                 if len(tokens) >= self.limit:
                     break
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Mempool stream failed: %s", exc)
         finally:
             if hasattr(gen, "aclose"):
                 with contextlib.suppress(Exception):
