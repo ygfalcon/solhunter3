@@ -337,22 +337,34 @@ class DiscoveryAgent:
             if self.ws_url:
                 kwargs["ws_url"] = self.ws_url
             call_kwargs = dict(kwargs)
+            merge_error = False
+            results: Any = []
             while True:
                 try:
-                    results = await merge_sources(self.rpc_url, **call_kwargs)
+                    try:
+                        results = await merge_sources(self.rpc_url, **call_kwargs)
+                        break
+                    except TypeError as exc:
+                        message = str(exc)
+                        handled = False
+                        for key in ("ws_url", "limit"):
+                            if key in call_kwargs and key in message:
+                                call_kwargs.pop(key, None)
+                                handled = True
+                                break
+                        if not handled:
+                            raise
+                except TypeError:
+                    raise
+                except Exception as exc:
+                    merge_error = True
+                    logger.warning("Websocket merge failed: %s", exc)
+                    results = []
                     break
-                except TypeError as exc:
-                    message = str(exc)
-                    handled = False
-                    for key in ("ws_url", "limit"):
-                        if key in call_kwargs and key in message:
-                            call_kwargs.pop(key, None)
-                            handled = True
-                            break
-                    if not handled:
-                        raise
             if isinstance(results, list) and len(results) > self.limit:
                 results = results[: self.limit]
+            if merge_error:
+                return await self._fallback_after_merge_failure()
             details = {}
             for item in results:
                 if not isinstance(item, dict):
@@ -448,15 +460,7 @@ class DiscoveryAgent:
             details = {k: v for k, v in details.items() if not self._should_skip_token(k)}
             if details:
                 return list(details.keys()), details
-
-        logger.warning("Websocket merge yielded no tokens; trying mempool fallback")
-        mem_tokens, mem_details = await self._collect_mempool()
-        if mem_tokens:
-            return mem_tokens, mem_details
-
-        logger.warning("All discovery sources empty; returning static fallback")
-        fallback = [tok for tok in self._fallback_tokens() if not self._should_skip_token(tok)]
-        return fallback, {}
+        return await self._fallback_after_merge_failure()
 
     async def _collect_mempool(self) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
         gen = self.stream_mempool_events(threshold=self.mempool_threshold)
@@ -500,6 +504,18 @@ class DiscoveryAgent:
                 with contextlib.suppress(Exception):
                     await gen.aclose()  # type: ignore[attr-defined]
         return tokens, details
+
+    async def _fallback_after_merge_failure(
+        self,
+    ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
+        logger.warning("Websocket merge yielded no tokens; trying mempool fallback")
+        mem_tokens, mem_details = await self._collect_mempool()
+        if mem_tokens:
+            return mem_tokens, mem_details
+
+        logger.warning("All discovery sources empty; returning static fallback")
+        fallback = [tok for tok in self._fallback_tokens() if not self._should_skip_token(tok)]
+        return fallback, {}
 
     def _normalise(self, tokens: Iterable[Any]) -> List[str]:
         seen: set[str] = set()
