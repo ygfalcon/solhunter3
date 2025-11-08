@@ -829,6 +829,8 @@ class TradingRuntime:
             raise RuntimeError("UI server failed without an explicit error")
 
         self.ui_port = self.ui_server.port
+        if isinstance(self.cfg, dict):
+            self.cfg["ui_port"] = self.ui_port
         activity_host = self.ui_server.resolved_host
         formatted_host = self.ui_server._format_host_for_url(activity_host)
         if isinstance(self.cfg, dict):

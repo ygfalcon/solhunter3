@@ -78,6 +78,11 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
 
     monkeypatch.setenv("UI_STARTUP_PROBE", "0")
 
+    monkeypatch.setenv("UI_PORT", "11111")
+    monkeypatch.setenv("PORT", "22222")
+    monkeypatch.setenv("UI_HOST", "example.invalid")
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+
     busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         busy_sock.bind(("127.0.0.1", 0))
@@ -108,6 +113,10 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
                 )
                 for entry in entries
             )
+            assert os.getenv("UI_PORT") == str(runtime.ui_port)
+            assert os.getenv("PORT") == str(runtime.ui_port)
+            assert os.getenv("UI_HOST") == runtime.ui_server.resolved_host
+            assert runtime.cfg.get("ui_port") == runtime.ui_port
         finally:
             runtime.ui_server.stop()
     finally:
@@ -153,6 +162,8 @@ async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
     runtime.status.event_bus = True
     runtime.status.trading_loop = True
     runtime.status.heartbeat_ts = time.time()
+
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
 
     monkeypatch.setenv("UI_STARTUP_PROBE", "0")
 
