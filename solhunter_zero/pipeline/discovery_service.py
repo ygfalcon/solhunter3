@@ -290,6 +290,12 @@ class DiscoveryService:
             token = str(tok)
             token_details = detail_lookup.get(token) if detail_lookup else None
             metadata = self._candidate_metadata(token, token_details)
+            if isinstance(token_details, dict) and "verified" in token_details:
+                verified_value = token_details.get("verified")
+                if isinstance(verified_value, bool):
+                    metadata["verified"] = verified_value
+                elif verified_value is not None:
+                    metadata["verified"] = bool(verified_value)
             result.append(
                 TokenCandidate(
                     token=token,

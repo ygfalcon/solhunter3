@@ -151,6 +151,91 @@ def test_discover_tokens_trims_and_deduplicates(monkeypatch):
     assert discovery_mod._CACHE["tokens"] == tokens
 
 
+def test_discover_tokens_marks_unverified_on_enrich_failure(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    raw = [
+        "MintA11111111111111111111111111111111111111",
+        "MintB22222222222222222222222222222222222222",
+    ]
+
+    async def fake_scan(*_args, **_kwargs):
+        return list(raw)
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("rpc unavailable")
+
+    monkeypatch.setattr(discovery_mod, "scan_tokens_async", fake_scan)
+    monkeypatch.setattr(discovery_mod, "enrich_tokens_async", fail)
+    monkeypatch.setattr(
+        discovery_mod,
+        "_CACHE",
+        {
+            "tokens": [],
+            "ts": 0.0,
+            "limit": 0,
+            "method": "",
+            "token_file": None,
+            "token_file_mtime": None,
+        },
+    )
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0")
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
+
+    agent = DiscoveryAgent()
+
+    tokens = asyncio.run(agent.discover_tokens())
+
+    assert tokens == raw
+    assert set(agent.last_details) == set(raw)
+    assert all(
+        detail.get("verified") is False for detail in agent.last_details.values()
+    )
+
+
+def test_discover_tokens_marks_unverified_when_enrich_returns_empty(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    raw = [
+        "MintC33333333333333333333333333333333333333",
+        "MintD44444444444444444444444444444444444444",
+    ]
+
+    async def fake_scan(*_args, **_kwargs):
+        return list(raw)
+
+    async def fake_enrich(tokens, **_kwargs):
+        assert tokens == raw
+        return []
+
+    monkeypatch.setattr(discovery_mod, "scan_tokens_async", fake_scan)
+    monkeypatch.setattr(discovery_mod, "enrich_tokens_async", fake_enrich)
+    monkeypatch.setattr(
+        discovery_mod,
+        "_CACHE",
+        {
+            "tokens": [],
+            "ts": 0.0,
+            "limit": 0,
+            "method": "",
+            "token_file": None,
+            "token_file_mtime": None,
+        },
+    )
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0")
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
+
+    agent = DiscoveryAgent()
+
+    tokens = asyncio.run(agent.discover_tokens())
+
+    assert tokens == raw
+    assert set(agent.last_details) == set(raw)
+    assert all(
+        detail.get("verified") is False for detail in agent.last_details.values()
+    )
+
+
 def test_stream_mempool_events(monkeypatch):
     monkeypatch.setattr(
         "solhunter_zero.agents.discovery.stream_ranked_mempool_tokens_with_depth",
