@@ -21,7 +21,9 @@ VALID_MINT = "So11111111111111111111111111111111111111112"
 
 
 def _reset_cache():
-    discovery_mod._CACHE.update({"tokens": [], "ts": 0.0, "limit": 0, "method": ""})
+    discovery_mod._CACHE.update(
+        {"tokens": [], "ts": 0.0, "limit": 0, "method": "", "rpc_identity": ""}
+    )
 
 
 async def fake_stream(url, **_):
@@ -264,3 +266,43 @@ def test_discover_tokens_includes_social_mentions(monkeypatch):
     tokens = asyncio.run(agent.discover_tokens())
     assert tokens == ["So11111111111111111111111111111111111111112"]
     assert agent.last_details[tokens[0]]["social_mentions"] == 4
+
+
+def test_discovery_cache_is_scoped_per_rpc(monkeypatch):
+    _reset_cache()
+    monkeypatch.setenv("SOLANA_RPC_URL", "https://mainnet.rpc.local")
+
+    call_count = {"value": 0}
+
+    async def fake_discover_once(self, *, method, offline, token_file):
+        call_count["value"] += 1
+        return [VALID_MINT], {}
+
+    async def passthrough_social(self, tokens, details):
+        return tokens, details or {}
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+    monkeypatch.setattr(DiscoveryAgent, "_apply_social_mentions", passthrough_social)
+
+    agent = DiscoveryAgent()
+    agent.cache_ttl = 60.0
+
+    tokens_mainnet_first = asyncio.run(agent.discover_tokens())
+    assert tokens_mainnet_first == [VALID_MINT]
+    assert call_count["value"] == 1
+
+    tokens_mainnet_cached = asyncio.run(agent.discover_tokens())
+    assert tokens_mainnet_cached == [VALID_MINT]
+    assert call_count["value"] == 1
+
+    monkeypatch.setenv("SOLANA_RPC_URL", "https://devnet.rpc.local")
+    agent_devnet = DiscoveryAgent()
+    agent_devnet.cache_ttl = 60.0
+
+    tokens_devnet = asyncio.run(agent_devnet.discover_tokens())
+    assert tokens_devnet == [VALID_MINT]
+    assert call_count["value"] == 2
+
+    tokens_devnet_cached = asyncio.run(agent_devnet.discover_tokens())
+    assert tokens_devnet_cached == [VALID_MINT]
+    assert call_count["value"] == 2
