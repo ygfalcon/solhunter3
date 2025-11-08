@@ -128,6 +128,35 @@ def test_connect_with_wss_url(monkeypatch):
     assert urls == ["wss://node"]
 
 
+def test_connect_with_host_only_url(monkeypatch):
+    urls = []
+
+    def fake_connect(url):
+        urls.append(url)
+        return FakeConnect(url, [])
+
+    monkeypatch.setattr(mp_scanner, "connect", fake_connect)
+
+    class _PK(str):
+        @property
+        def _key(self):
+            return self
+
+    monkeypatch.setattr(mp_scanner, "PublicKey", _PK)
+    monkeypatch.setattr(mp_scanner, "RpcTransactionLogsFilterMentions", lambda *a, **k: None)
+
+    async def run():
+        gen = mp_scanner.stream_mempool_tokens("rpc.solana.com")
+        try:
+            await anext(gen)
+        except StopAsyncIteration:
+            pass
+        await gen.aclose()
+
+    asyncio.run(run())
+    assert urls == ["wss://rpc.solana.com"]
+
+
 def test_filter_creation_uses_public_api(monkeypatch):
     calls = []
 

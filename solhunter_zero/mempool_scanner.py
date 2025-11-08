@@ -19,6 +19,7 @@ from .dynamic_limit import _target_concurrency, _step_limit
 from . import resource_monitor
 from .event_bus import subscription
 from .system import detect_cpu_count
+from .url_helpers import as_websocket_url
 
 spec = importlib.util.find_spec("solana.publickey")
 if spec is not None:  # pragma: no cover - optional dependency path
@@ -104,11 +105,11 @@ def _looks_like_mint(value: str | None) -> bool:
 
 
 def _to_ws_url(url: str) -> str:
-    """Return websocket URL matching the given HTTP(S) URL."""
-    if url.startswith("http://"):
-        return "ws://" + url[len("http://") :]
-    if url.startswith("https://"):
-        return "wss://" + url[len("https://") :]
+    """Normalise *url* into a websocket endpoint when possible."""
+
+    resolved = as_websocket_url(url)
+    if resolved:
+        return resolved
     return url
 
 
