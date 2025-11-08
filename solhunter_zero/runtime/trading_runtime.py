@@ -55,9 +55,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         resolve_momentum_flag,
     )
     from ..golden_pipeline.service import GoldenPipelineService
-from ..ui import UIState, UIServer, start_websockets, stop_websockets
+from ..ui import UIState, UIServer, get_ws_urls, start_websockets, stop_websockets
 from ..util import parse_bool_env
 from .runtime_wiring import resolve_golden_enabled
+from .orchestrator import _publish_ui_url_to_redis, _runtime_artifact_dir
 from .schema_adapters import read_golden, read_ohlcv
 from .tuning import analyse_evaluation
 from .self_check import SelfCheckRunner
@@ -889,7 +890,39 @@ class TradingRuntime:
         threads = start_websockets()
         self._ui_ws_threads = threads
         self._ui_ws_started_here = bool(threads)
-        self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
+        url_host = "127.0.0.1" if self.ui_host in {"0.0.0.0", "::"} else self.ui_host
+        scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
+        ui_url = f"{scheme}://{url_host}:{self.ui_port}"
+        try:
+            ws_urls = get_ws_urls()
+        except Exception:
+            ws_urls = {}
+        rl_url = ws_urls.get("rl") or "-"
+        events_url = ws_urls.get("events") or "-"
+        logs_url = ws_urls.get("logs") or "-"
+        readiness_line = (
+            "UI_READY "
+            f"url={ui_url} "
+            f"rl_ws={rl_url} "
+            f"events_ws={events_url} "
+            f"logs_ws={logs_url}"
+        )
+        log.info(readiness_line)
+        artifact_dir: Path | None = None
+        try:
+            artifact_dir = _runtime_artifact_dir()
+        except Exception as exc:  # pragma: no cover - filesystem issues
+            log.warning("Failed to prepare UI artifact directory: %s", exc)
+        if artifact_dir is not None:
+            try:
+                (artifact_dir / "ui_url.txt").write_text(ui_url, encoding="utf-8")
+            except Exception as exc:  # pragma: no cover - filesystem issues
+                log.warning("Failed to write UI URL artifact: %s", exc)
+        try:
+            _publish_ui_url_to_redis(ui_url)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("Error publishing UI URL to redis: %s", exc)
+        self.activity.add("ui", ui_url)
 
     async def _start_agents(self) -> None:
         memory_path = self.cfg.get("memory_path", "sqlite:///memory.db")

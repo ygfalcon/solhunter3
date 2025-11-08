@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import re
 import sys
@@ -504,6 +505,57 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
 
     if runtime.ui_server is not None:
         runtime.ui_server.stop()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_ui_logs_ready_and_persists_url(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("RUNTIME_ARTIFACT_ROOT", str(tmp_path))
+    monkeypatch.setenv("RUN_ID", "ui-ready-test")
+    monkeypatch.delenv("UI_HTTP_SCHEME", raising=False)
+    monkeypatch.delenv("UI_SCHEME", raising=False)
+
+    published: list[str] = []
+
+    class _StubUIServer:
+        def __init__(self, _state, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.started = False
+
+    monkeypatch.setattr(runtime_module, "UIServer", _StubUIServer)
+    monkeypatch.setattr(runtime_module, "start_websockets", lambda: {})
+    monkeypatch.setattr(runtime_module, "get_ws_urls", lambda: {
+        "rl": "ws://rl.test/ws/rl",
+        "events": "ws://events.test/ws/events",
+        "logs": "ws://logs.test/ws/logs",
+    })
+    monkeypatch.setattr(
+        runtime_module,
+        "_publish_ui_url_to_redis",
+        lambda url: published.append(url),
+    )
+
+    caplog.set_level(logging.INFO, logger=runtime_module.__name__)
+    runtime = runtime_module.TradingRuntime(ui_host="0.0.0.0", ui_port=6101)
+
+    await runtime._start_ui()
+
+    expected_url = "http://127.0.0.1:6101"
+    assert any(
+        record.message.startswith("UI_READY ") and f"url={expected_url}" in record.message
+        for record in caplog.records
+    )
+
+    artifact_file = tmp_path / "ui-ready-test" / "ui_url.txt"
+    assert artifact_file.exists()
+    assert artifact_file.read_text(encoding="utf-8") == expected_url
+    assert published == [expected_url]
 
 
 @pytest.mark.anyio("asyncio")
