@@ -144,6 +144,32 @@ def test_discover_tokens_retries_on_empty_merge(monkeypatch, caplog):
     assert "No tokens discovered" in caplog.text
 
 
+def test_discover_tokens_recovers_from_merge_exception(monkeypatch, caplog):
+    _reset_cache()
+
+    async def fake_merge(*_, **__):
+        raise ConnectionError("network down")
+
+    async def fake_collect_mempool(self):
+        return [VALID_MINT], {VALID_MINT: {"address": VALID_MINT}}
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.merge_sources", fake_merge
+    )
+    monkeypatch.setattr(DiscoveryAgent, "_collect_mempool", fake_collect_mempool)
+
+    agent = DiscoveryAgent()
+
+    async def run():
+        with caplog.at_level("WARNING"):
+            return await agent.discover_tokens(method="websocket")
+
+    tokens = asyncio.run(run())
+    assert tokens == [VALID_MINT]
+    assert "Websocket merge failed" in caplog.text
+    assert "Websocket merge yielded no tokens" in caplog.text
+
+
 def test_collect_social_mentions(monkeypatch):
     _reset_cache()
     agent = DiscoveryAgent()
