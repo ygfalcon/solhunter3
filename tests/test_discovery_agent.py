@@ -102,6 +102,48 @@ def test_discovery_agent_sets_helius_defaults(monkeypatch):
     assert os.getenv("SOLANA_WS_URL") == DEFAULT_SOLANA_WS
 
 
+def test_refresh_settings_updates_limits_and_clears_cache(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    monkeypatch.setenv("DISCOVERY_LIMIT", "4")
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "200")
+    monkeypatch.setenv("TOKEN_DISCOVERY_BACKOFF", "3.5")
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "4")
+    monkeypatch.setenv("MEMPOOL_SCORE_THRESHOLD", "1.5")
+    monkeypatch.setenv("BIRDEYE_API_KEY", "initial-key")
+
+    agent = DiscoveryAgent()
+
+    assert agent.limit == 4
+    assert agent.cache_ttl == 200.0
+    assert agent.backoff == 3.5
+    assert agent.max_attempts == 4
+    assert agent.mempool_threshold == 1.5
+
+    discovery_mod._CACHE["tokens"] = ["cached"]
+    discovery_mod._CACHE["ts"] = time.time()
+    discovery_mod._CACHE["limit"] = agent.limit
+    discovery_mod._CACHE["method"] = agent.default_method
+
+    monkeypatch.setenv("DISCOVERY_LIMIT", "2")
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "5")
+    monkeypatch.setenv("TOKEN_DISCOVERY_BACKOFF", "0.25")
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "9")
+    monkeypatch.setenv("MEMPOOL_SCORE_THRESHOLD", "7.25")
+
+    agent.refresh_settings()
+
+    assert agent.limit == 2
+    assert agent.cache_ttl == 5.0
+    assert agent.backoff == 0.25
+    assert agent.max_attempts == 9
+    assert agent.mempool_threshold == 7.25
+    assert discovery_mod._CACHE["tokens"] == []
+    assert discovery_mod._CACHE["ts"] == 0.0
+    assert discovery_mod._CACHE["limit"] == 0
+    assert discovery_mod._CACHE["method"] == ""
+
+
 def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
     calls = []
 

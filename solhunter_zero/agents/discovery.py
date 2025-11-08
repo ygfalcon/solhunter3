@@ -104,6 +104,11 @@ class DiscoveryAgent:
         previous_ws = getattr(self, "ws_url", None)
         previous_api_key = getattr(self, "birdeye_api_key", None)
         previous_method = getattr(self, "default_method", None)
+        previous_limit = getattr(self, "limit", None)
+        previous_cache_ttl = getattr(self, "cache_ttl", None)
+        previous_backoff = getattr(self, "backoff", None)
+        previous_attempts = getattr(self, "max_attempts", None)
+        previous_mempool_threshold = getattr(self, "mempool_threshold", None)
 
         rpc_env = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
         os.environ.setdefault("SOLANA_RPC_URL", rpc_env)
@@ -131,11 +136,40 @@ class DiscoveryAgent:
         env_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
         self.default_method = env_method or DEFAULT_DISCOVERY_METHOD
 
+        limit = int(os.getenv("DISCOVERY_LIMIT", "60") or 60)
+        cache_ttl = max(
+            0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0)
+        )
+        backoff = max(
+            0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0)
+        )
+        attempts = max(1, int(os.getenv("TOKEN_DISCOVERY_RETRIES", "2") or 2))
+        mempool_threshold = float(
+            os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0
+        )
+
+        settings_changed = any(
+            (
+                limit != previous_limit,
+                cache_ttl != previous_cache_ttl,
+                backoff != previous_backoff,
+                attempts != previous_attempts,
+                mempool_threshold != previous_mempool_threshold,
+            )
+        )
+
+        self.limit = limit
+        self.cache_ttl = cache_ttl
+        self.backoff = backoff
+        self.max_attempts = attempts
+        self.mempool_threshold = mempool_threshold
+
         if (
             self.rpc_url != previous_rpc
             or self.ws_url != previous_ws
             or self.birdeye_api_key != previous_api_key
             or self.default_method != previous_method
+            or settings_changed
         ):
             _CACHE.clear()
             _CACHE.update(
