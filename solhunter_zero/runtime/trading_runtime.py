@@ -848,7 +848,8 @@ class TradingRuntime:
 
         self.memory = Memory(memory_path)
         self.memory.start_writer()
-        self.portfolio = Portfolio(path=portfolio_path)
+        self.portfolio = Portfolio(path=portfolio_path, auto_load=False)
+        await self.portfolio.load_async()
 
         manager = AgentManager.from_config(self.cfg)
         if manager is None:

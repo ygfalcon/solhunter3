@@ -1,8 +1,10 @@
 from __future__ import annotations
-from .jsonutil import loads, dumps
+import asyncio
 import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Mapping
+
+from .jsonutil import loads, dumps
 
 from .risk import RiskManager
 
@@ -26,6 +28,7 @@ class Position:
 @dataclass
 class Portfolio:
     path: Optional[str] = "portfolio.json"
+    auto_load: bool = True
     balances: Dict[str, Position] = field(default_factory=dict)
     max_value: float = 0.0
     price_history: Dict[str, list[float]] = field(default_factory=dict)
@@ -33,7 +36,8 @@ class Portfolio:
     risk_metrics: Dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.load()
+        if self.auto_load:
+            self.load()
 
     # persistence helpers -------------------------------------------------
     def load(self) -> None:
@@ -73,6 +77,9 @@ class Portfolio:
                 balances={t: p.amount for t, p in self.balances.items()}
             ),
         )
+
+    async def load_async(self) -> None:
+        await asyncio.to_thread(self.load)
 
     async def save_async(self) -> None:
         if not self.path:
