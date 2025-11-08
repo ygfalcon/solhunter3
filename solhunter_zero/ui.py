@@ -32,6 +32,7 @@ import os
 import secrets
 import subprocess
 import threading
+import time
 from queue import Empty, Queue
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
@@ -52,7 +53,7 @@ from .agents.discovery import (
 )
 from . import discovery_state, wallet
 from . import config as config_module
-from .util import parse_bool_env
+from .util import parse_bool_env, parse_float_env, parse_int_env
 
 
 log = logging.getLogger(__name__)
@@ -3162,7 +3163,45 @@ class UIServer:
             self._startup_probe_enabled = parse_bool_env("UI_STARTUP_PROBE", True)
         else:
             self._startup_probe_enabled = bool(startup_probe)
-        self._startup_probe_timeout = 0.5
+
+        probe_config = self._resolve_startup_probe_config()
+        default_timeout = 2.0
+        timeout_default = self._coerce_float(
+            probe_config.get("timeout"), default_timeout, min_value=0.0
+        )
+        self._startup_probe_timeout = parse_float_env(
+            "UI_STARTUP_PROBE_TIMEOUT", timeout_default, min_value=0.0
+        )
+
+        retries_default = self._coerce_int(
+            probe_config.get("retries"), 2, min_value=0
+        )
+        self._startup_probe_retries = parse_int_env(
+            "UI_STARTUP_PROBE_RETRIES", retries_default, min_value=0
+        )
+
+        initial_delay_default = self._coerce_float(
+            probe_config.get("initial_delay"), 0.2, min_value=0.0
+        )
+        self._startup_probe_initial_delay = parse_float_env(
+            "UI_STARTUP_PROBE_INITIAL_DELAY",
+            initial_delay_default,
+            min_value=0.0,
+        )
+
+        backoff_default = self._coerce_float(
+            probe_config.get("backoff"), 2.0, min_value=1.0
+        )
+        self._startup_probe_backoff = parse_float_env(
+            "UI_STARTUP_PROBE_BACKOFF", backoff_default, min_value=1.0
+        )
+
+        max_delay_default = self._coerce_float(
+            probe_config.get("max_delay"), 1.0, min_value=0.0
+        )
+        self._startup_probe_max_delay = parse_float_env(
+            "UI_STARTUP_PROBE_MAX_DELAY", max_delay_default, min_value=0.0
+        )
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -3326,6 +3365,77 @@ class UIServer:
         except Exception:  # pragma: no cover - best effort fallback
             pass
 
+    def _resolve_startup_probe_config(self) -> Mapping[str, Any]:
+        try:
+            config_snapshot = self.state.snapshot_config()
+        except Exception:  # pragma: no cover - best effort config lookup
+            log.debug("UIServer: failed to read startup probe config", exc_info=True)
+            return {}
+
+        probe_config = self._dig_mapping(config_snapshot, ("ui", "startup_probe"))
+        if isinstance(probe_config, Mapping):
+            return probe_config
+        return {}
+
+    @staticmethod
+    def _dig_mapping(
+        mapping: Mapping[str, Any] | None, path: Iterable[str]
+    ) -> Mapping[str, Any] | None:
+        current: Any = mapping
+        for key in path:
+            if not isinstance(current, Mapping):
+                return None
+            current = current.get(key)
+        if isinstance(current, Mapping):
+            return current
+        return None
+
+    @staticmethod
+    def _coerce_float(
+        value: Any,
+        default: float,
+        *,
+        min_value: float | None = None,
+        max_value: float | None = None,
+    ) -> float:
+        if value is None:
+            return default
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            try:
+                parsed = float(str(value).strip())
+            except (AttributeError, ValueError):
+                return default
+        if min_value is not None and parsed < min_value:
+            return default
+        if max_value is not None and parsed > max_value:
+            return default
+        return parsed
+
+    @staticmethod
+    def _coerce_int(
+        value: Any,
+        default: int,
+        *,
+        min_value: int | None = None,
+        max_value: int | None = None,
+    ) -> int:
+        if value is None:
+            return default
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            try:
+                parsed = int(str(value).strip())
+            except (AttributeError, ValueError):
+                return default
+        if min_value is not None and parsed < min_value:
+            return default
+        if max_value is not None and parsed > max_value:
+            return default
+        return parsed
+
     def _run_startup_probe(self) -> None:
         if not self._startup_probe_enabled:
             return
@@ -3341,12 +3451,44 @@ class UIServer:
             "UIServer: running startup probe against %s", url.replace(self._shutdown_token or "", "***")
         )
 
-        try:
-            with urllib.request.urlopen(url, timeout=self._startup_probe_timeout) as response:
-                status = getattr(response, "status", getattr(response, "code", 200))
-                if int(status) >= 400:
-                    raise RuntimeError(f"unexpected HTTP status {status}")
-        except urllib.error.HTTPError as exc:
-            raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"connection error: {exc.reason}") from exc
+        attempts = self._startup_probe_retries + 1
+        delay = self._startup_probe_initial_delay
+        last_error: tuple[BaseException, BaseException | None] | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                with urllib.request.urlopen(url, timeout=self._startup_probe_timeout) as response:
+                    status = getattr(response, "status", getattr(response, "code", 200))
+                    if int(status) >= 400:
+                        raise RuntimeError(f"unexpected HTTP status {status}")
+                return
+            except urllib.error.HTTPError as exc:
+                last_error = (RuntimeError(f"HTTP {exc.code}: {exc.reason}"), exc)
+            except urllib.error.URLError as exc:
+                last_error = (RuntimeError(f"connection error: {exc.reason}"), exc)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                last_error = (exc, None)
+
+            if attempt == attempts:
+                break
+
+            sleep_for = delay
+            if self._startup_probe_max_delay > 0:
+                sleep_for = min(self._startup_probe_max_delay, sleep_for)
+            sleep_for = max(0.0, sleep_for)
+            log.debug(
+                "UIServer: startup probe attempt %s/%s failed (%s); retrying in %.2fs",
+                attempt,
+                attempts,
+                last_error[0] if last_error else "unknown error",
+                sleep_for,
+            )
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            delay = max(delay * self._startup_probe_backoff, 0.0)
+
+        if last_error:
+            error, cause = last_error
+            if cause is not None:
+                raise error from cause
+            raise error

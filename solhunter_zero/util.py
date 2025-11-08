@@ -36,6 +36,60 @@ def parse_bool_env(name: str, default: bool = False) -> bool:
     return default
 
 
+def parse_float_env(
+    name: str,
+    default: float,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
+    """Return the float value for environment variable ``name``.
+
+    Parsing falls back to ``default`` when ``name`` is unset, contains an
+    invalid value, or violates the optional ``min_value``/``max_value`` bounds.
+    """
+
+    val = os.getenv(name)
+    if val is None:
+        return default
+    try:
+        parsed = float(val.strip())
+    except (AttributeError, ValueError):
+        return default
+    if min_value is not None and parsed < min_value:
+        return default
+    if max_value is not None and parsed > max_value:
+        return default
+    return parsed
+
+
+def parse_int_env(
+    name: str,
+    default: int,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    """Return the integer value for environment variable ``name``.
+
+    Parsing falls back to ``default`` when ``name`` is unset, contains an
+    invalid value, or violates the optional ``min_value``/``max_value`` bounds.
+    """
+
+    val = os.getenv(name)
+    if val is None:
+        return default
+    try:
+        parsed = int(val.strip())
+    except (AttributeError, ValueError):
+        return default
+    if min_value is not None and parsed < min_value:
+        return default
+    if max_value is not None and parsed > max_value:
+        return default
+    return parsed
+
+
 def install_uvloop() -> None:
     """Install ``uvloop`` if available.
 
