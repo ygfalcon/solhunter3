@@ -855,6 +855,7 @@ class TradingRuntime:
         self.ui_state.logs_provider = lambda: list(self._ui_logs)
         self.ui_state.summary_provider = self._collect_summary
         self.ui_state.discovery_provider = self._collect_discovery
+        self.ui_state.discovery_recent_provider = self._collect_recent_discovery
         self.ui_state.config_provider = self._collect_config
         self.ui_state.actions_provider = self._collect_actions
         self.ui_state.history_provider = self._collect_history
@@ -2776,6 +2777,19 @@ class TradingRuntime:
             "RL_WEIGHTS_DISABLED": os.getenv("RL_WEIGHTS_DISABLED"),
         }
         return {"controls": controls, "overrides": overrides, "staleness": {}}
+
+    def _collect_recent_discovery(self, limit: int) -> List[Dict[str, Any]]:
+        try:
+            limit_value = int(limit)
+        except (TypeError, ValueError):
+            limit_value = self._recent_tokens_limit
+        if limit_value < 0:
+            limit_value = 0
+        if limit_value > self._recent_tokens_limit:
+            limit_value = self._recent_tokens_limit
+        with self._discovery_lock:
+            tokens = list(self._recent_tokens)[:limit_value]
+        return [{"value": str(token)} for token in tokens]
 
     def _collect_discovery(self) -> Dict[str, Any]:
         with self._discovery_lock:

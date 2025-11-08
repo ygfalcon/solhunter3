@@ -126,6 +126,26 @@ async def test_exit_panel_provider_exposes_manager_summary(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_discovery_recent_endpoint_returns_tokens(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "0")
+    runtime = TradingRuntime()
+
+    with runtime._discovery_lock:
+        for token in ("mint1", "mint2", "mint3"):
+            runtime._recent_tokens.appendleft(token)
+
+    await runtime._start_ui()
+
+    app = create_app(runtime.ui_state)
+    client = app.test_client()
+    resp = client.get("/api/discovery/recent?limit=2")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [entry["value"] for entry in data] == ["mint3", "mint2"]
+
+
+@pytest.mark.anyio("asyncio")
 async def test_market_panel_renders_pipeline_keys(monkeypatch):
     monkeypatch.setenv("UI_ENABLED", "0")
     runtime = TradingRuntime()
