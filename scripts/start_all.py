@@ -18,6 +18,7 @@ import contextlib
 import errno
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -181,8 +182,17 @@ def kill_lingering_processes() -> None:
         "run_rl_daemon.py",
     ]
     log.info("Scanning for lingering processes: patterns=%s", patterns)
+    pkill_path = shutil.which("pkill")
+    if not pkill_path:
+        log.warning("Skipping process cleanup: 'pkill' not available on PATH")
+        return
     for pat in patterns:
-        subprocess.run(["pkill", "-f", pat], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            [pkill_path, "-f", pat],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     time.sleep(0.5)
     log.debug("Process cleanup completed")
 
