@@ -110,13 +110,34 @@ class DiscoveryAgent:
         previous_attempts = getattr(self, "max_attempts", None)
         previous_mempool_threshold = getattr(self, "mempool_threshold", None)
 
-        rpc_env = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
-        os.environ.setdefault("SOLANA_RPC_URL", rpc_env)
+        active_cfg = getattr(config, "_ACTIVE_CONFIG", {}) or {}
+        cfg_get = getattr(active_cfg, "get", None)
+
+        rpc_from_cfg = ""
+        ws_from_cfg = ""
+        if callable(cfg_get):
+            raw_rpc = cfg_get("solana_rpc_url", None)
+            if raw_rpc:
+                rpc_from_cfg = str(raw_rpc).strip()
+            raw_ws = cfg_get("solana_ws_url", None)
+            if raw_ws:
+                ws_from_cfg = str(raw_ws).strip()
+
+        if rpc_from_cfg:
+            rpc_env = rpc_from_cfg
+            os.environ["SOLANA_RPC_URL"] = rpc_env
+        else:
+            rpc_env = os.getenv("SOLANA_RPC_URL")
+            if not rpc_env:
+                rpc_env = DEFAULT_SOLANA_RPC
+                os.environ["SOLANA_RPC_URL"] = rpc_env
         self.rpc_url = rpc_env
 
-        ws_resolved = self._resolve_ws_url() or DEFAULT_SOLANA_WS
-        if ws_resolved:
-            os.environ.setdefault("SOLANA_WS_URL", ws_resolved)
+        ws_resolved = self._resolve_ws_url(ws_from_cfg or None) or DEFAULT_SOLANA_WS
+        if ws_from_cfg:
+            os.environ["SOLANA_WS_URL"] = ws_resolved
+        elif not os.getenv("SOLANA_WS_URL"):
+            os.environ["SOLANA_WS_URL"] = ws_resolved
         self.ws_url = ws_resolved
 
         api_key = os.getenv(
@@ -202,27 +223,25 @@ class DiscoveryAgent:
     # ------------------------------------------------------------------
     # Internal wiring helpers
     # ------------------------------------------------------------------
-    def _resolve_ws_url(self) -> Optional[str]:
+    def _resolve_ws_url(self, preferred_ws: Optional[str] = None) -> Optional[str]:
         """Derive and cache a websocket RPC endpoint."""
 
-        ws_url: Optional[str]
-        try:
-            ws_url = config.get_solana_ws_url()
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.debug("get_solana_ws_url failed: %s", exc)
-            ws_url = None
+        candidates: list[Optional[str]] = []
+        if preferred_ws:
+            candidates.append(preferred_ws)
+        else:
+            try:
+                candidates.append(config.get_solana_ws_url())
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.debug("get_solana_ws_url failed: %s", exc)
+                candidates.append(None)
 
-        ws_url = self._as_websocket_url(ws_url) or self._as_websocket_url(
-            os.getenv("SOLANA_WS_URL")
-        )
-
-        if not ws_url:
-            ws_url = self._as_websocket_url(self.rpc_url)
-
-        if ws_url:
-            os.environ.setdefault("SOLANA_WS_URL", ws_url)
-
-        return ws_url
+        candidates.extend([os.getenv("SOLANA_WS_URL"), self.rpc_url, DEFAULT_SOLANA_WS])
+        for candidate in candidates:
+            ws_url = self._as_websocket_url(candidate)
+            if ws_url:
+                return ws_url
+        return None
 
     @staticmethod
     def _as_websocket_url(url: Optional[str]) -> Optional[str]:
