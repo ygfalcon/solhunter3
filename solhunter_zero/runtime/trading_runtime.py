@@ -992,6 +992,7 @@ class TradingRuntime:
                 except Exception:  # pragma: no cover - defensive logging
                     log.exception("Failed to toggle executor modes")
 
+            discovery_config_snapshot = self._pipeline_discovery_config()
             self.pipeline = PipelineCoordinator(
                 self.agent_manager,
                 self.portfolio,
@@ -1012,6 +1013,7 @@ class TradingRuntime:
                 discovery_limit=discovery_limit_cfg,
                 discovery_startup_clones=discovery_startup_clones,
                 discovery_startup_clone_timeout=discovery_startup_clone_timeout,
+                discovery_config=discovery_config_snapshot,
             )
             log.info(
                 "TradingRuntime: pipeline created; evaluations will run through AgentManager swarm"
@@ -1417,6 +1419,23 @@ class TradingRuntime:
                 }
             )
 
+        return snapshot
+
+    def _pipeline_discovery_config(self) -> Dict[str, Any]:
+        cfg = self.cfg or {}
+        snapshot: Dict[str, Any] = {}
+        for key, value in cfg.items():
+            try:
+                key_text = str(key)
+            except Exception:
+                continue
+            lower = key_text.lower()
+            if (
+                any(term in lower for term in ("key", "secret", "token", "pass", "auth"))
+                and lower != "discovery_method"
+            ):
+                continue
+            snapshot[key_text] = value
         return snapshot
 
     def _collect_config(self) -> Dict[str, Any]:

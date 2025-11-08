@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 from .. import discovery_state
 from ..agents.discovery import DiscoveryAgent
@@ -49,6 +49,29 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
+def _snapshot_config(config: Mapping[str, Any] | None) -> Dict[str, Any] | None:
+    """Return a shallow copy of ``config`` suitable for discovery state."""
+
+    if config is None:
+        return None
+    if isinstance(config, dict):
+        snapshot: Dict[str, Any] = {}
+        for key, value in config.items():
+            snapshot[str(key)] = value
+        return snapshot
+    items = getattr(config, "items", None)
+    if callable(items):
+        snapshot: Dict[str, Any] = {}
+        try:
+            iterator = items()
+        except Exception:
+            iterator = []
+        for key, value in iterator:
+            snapshot[str(key)] = value
+        return snapshot
+    return None
+
+
 class DiscoveryService:
     """Produce ``TokenCandidate`` batches for downstream scoring."""
 
@@ -66,6 +89,7 @@ class DiscoveryService:
         token_file: Optional[str] = None,
         startup_clones: Optional[int] = None,
         startup_clone_timeout: Optional[float] = None,
+        config: Mapping[str, Any] | None = None,
     ) -> None:
         self.queue = queue
         self.interval = max(0.1, float(interval))
@@ -78,6 +102,7 @@ class DiscoveryService:
         self.limit = limit
         self.offline = offline
         self.token_file = token_file
+        self._config_snapshot = _snapshot_config(config)
         clones_override: Optional[int] = None
         raw_clones = os.getenv("DISCOVERY_STARTUP_CLONES")
         if raw_clones:
@@ -183,7 +208,7 @@ class DiscoveryService:
             self._last_fetch_fresh = False
             return list(self._last_tokens), dict(self._last_details)
         worker = agent or self._agent
-        method = discovery_state.current_method()
+        method = discovery_state.current_method(config=self._config_snapshot)
         tokens = await worker.discover_tokens(
             offline=self.offline,
             token_file=self.token_file,
@@ -222,6 +247,11 @@ class DiscoveryService:
         self._last_emitted = []
         self._last_metadata_snapshot = {}
         self._last_fetch_fresh = True
+
+    def update_config(self, config: Mapping[str, Any] | None) -> None:
+        """Replace the cached runtime configuration snapshot."""
+
+        self._config_snapshot = _snapshot_config(config)
 
     def _capture_agent_settings(self) -> Dict[str, Optional[str]]:
         keys = (
