@@ -16,6 +16,7 @@ from .scanner_common import (
     BIRDEYE_API,
     BIRDEYE_API_KEY,
     HEADERS,
+    STATIC_FALLBACK_TOKENS,
 )
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
@@ -43,6 +44,25 @@ _BIRDEYE_BACKOFF = float(os.getenv("DISCOVERY_BIRDEYE_BACKOFF", "1.0") or 1.0)
 _BIRDEYE_BACKOFF_MAX = float(os.getenv("DISCOVERY_BIRDEYE_BACKOFF_MAX", "8.0") or 8.0)
 
 _BIRDEYE_CACHE: TTLCache[str, List[Dict[str, float]]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
+
+_FALLBACK_METADATA = {
+    "So11111111111111111111111111111111111111112": {
+        "symbol": "SOL",
+        "name": "Wrapped SOL",
+    },
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+        "symbol": "USDC",
+        "name": "USD Coin",
+    },
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": {
+        "symbol": "BONK",
+        "name": "BONK",
+    },
+    "JUP4Fb2cqiRUcaTHdrPC8h7gTZMAbxq12n6u43iCz46": {
+        "symbol": "JUP",
+        "name": "Jupiter",
+    },
+}
 
 
 def _score_component(value: float) -> float:
@@ -352,6 +372,24 @@ async def discover_candidates(
     for entry in ordered[:limit]:
         entry["sources"] = sorted(entry.get("sources", []))
         final.append(entry)
+
+    if not final:
+        for mint in STATIC_FALLBACK_TOKENS:
+            meta = _FALLBACK_METADATA.get(mint, {})
+            fallback_entry = {
+                "address": mint,
+                "symbol": meta.get("symbol", ""),
+                "name": meta.get("name", mint),
+                "liquidity": 0.0,
+                "volume": 0.0,
+                "price": 0.0,
+                "price_change": 0.0,
+                "score": 0.0,
+                "sources": ["static-fallback"],
+            }
+            final.append(fallback_entry)
+            if len(final) >= limit:
+                break
 
     return final
 

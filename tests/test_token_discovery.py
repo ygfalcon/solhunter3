@@ -1,6 +1,7 @@
 import asyncio
 
 from solhunter_zero import token_discovery as td
+from solhunter_zero.scanner_common import STATIC_FALLBACK_TOKENS
 
 
 def test_discover_candidates_prioritises_scores(monkeypatch):
@@ -147,3 +148,26 @@ def test_collect_mempool_signals_times_out(monkeypatch):
 
     assert scores == {}
     assert any("timed out" in message for message in messages), messages
+
+
+def test_discover_candidates_uses_static_fallback_when_empty(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    async def fake_birdeye():
+        return []
+
+    async def fake_mempool(_rpc_url, _threshold):
+        return {}
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_birdeye)
+    monkeypatch.setattr(td, "_collect_mempool_signals", fake_mempool)
+
+    async def run():
+        return await td.discover_candidates("https://rpc", limit=3, mempool_threshold=0.0)
+
+    results = asyncio.run(run())
+
+    assert len(results) == 3
+    assert [entry["address"] for entry in results] == list(STATIC_FALLBACK_TOKENS)[:3]
+    assert {entry["sources"][0] for entry in results} == {"static-fallback"}
+    assert all(entry["score"] == 0.0 for entry in results)
