@@ -21,6 +21,7 @@ from ..scanner_common import (
 from ..scanner_onchain import scan_tokens_onchain
 from ..schemas import RuntimeLog
 from ..token_scanner import enrich_tokens_async, scan_tokens_async
+from ..metrics import get_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,7 @@ class DiscoveryAgent:
         method: Optional[str] = None,
         use_cache: bool = True,
     ) -> List[str]:
+        overall_start = time.perf_counter()
         now = time.time()
         ttl = self.cache_ttl
         method_override = method is not None
@@ -297,121 +299,186 @@ class DiscoveryAgent:
         normalized_token_path: str | None = None
         token_mtime: float | None = None
 
-        if use_cache:
-            cached_tokens = (
-                list(_CACHE.get("tokens", []))
-                if isinstance(_CACHE.get("tokens"), list)
-                else []
-            )
-            cache_limit = int(_CACHE.get("limit", 0))
-            cached_method = (_CACHE.get("method") or "").lower()
-
-            if token_file:
-                token_path = Path(token_file).expanduser()
-                try:
-                    resolved = token_path.resolve(strict=False)
-                except (OSError, RuntimeError):
-                    resolved = token_path
-                normalized_token_path = str(resolved)
-                try:
-                    token_mtime = resolved.stat().st_mtime
-                except OSError:
-                    try:
-                        token_mtime = token_path.stat().st_mtime
-                    except OSError:
-                        token_mtime = None
-
-            cached_token_file = _CACHE.get("token_file")
-            cached_token_mtime = _CACHE.get("token_file_mtime")
-            cache_matches_token_file = True
-            if normalized_token_path != cached_token_file:
-                if normalized_token_path or cached_token_file:
-                    cache_matches_token_file = False
-            if cache_matches_token_file:
-                if (
-                    cached_token_mtime is not None
-                    and token_mtime is not None
-                    and token_mtime != cached_token_mtime
-                ):
-                    cache_matches_token_file = False
-                elif (cached_token_mtime is None) != (token_mtime is None):
-                    cache_matches_token_file = False
-
-            if (
-                ttl > 0
-                and cached_tokens
-                and now - float(_CACHE.get("ts", 0.0)) < ttl
-                and (
-                    not method_override
-                    or cached_method == active_method
-                    or not cached_method
-                )
-                and cache_matches_token_file
-            ):
-                if cache_limit and cache_limit >= self.limit:
-                    logger.debug(
-                        "DiscoveryAgent: returning cached tokens (ttl=%s)", ttl
-                    )
-                    return cached_tokens[: self.limit]
-                if len(cached_tokens) >= self.limit:
-                    logger.debug(
-                        "DiscoveryAgent: returning cached tokens (limit=%s)",
-                        self.limit,
-                    )
-                    return cached_tokens[: self.limit]
-
-        attempts = self.max_attempts
-        details: Dict[str, Dict[str, Any]] = {}
-        tokens: List[str] = []
-
-        for attempt in range(attempts):
-            tokens, details = await self._discover_once(
-                method=active_method,
-                offline=offline,
-                token_file=token_file,
-            )
-            tokens = self._normalise(tokens)
-            if tokens:
-                break
-            if attempt < attempts - 1:
-                logger.warning(
-                    "No tokens discovered (method=%s, attempt=%d/%d)",
-                    active_method,
-                    attempt + 1,
-                    attempts,
-                )
-                await asyncio.sleep(self.backoff)
-
-        if not tokens:
-            tokens = self._normalise(self._fallback_tokens())
-            details = {}
-
-        self.last_tokens = tokens
-        self.last_details = details
-        self.last_method = active_method
+        metrics_client = get_metrics()
+        metrics_tags = {
+            "method": active_method,
+            "offline": "true" if offline else "false",
+        }
+        metrics_client.increment(
+            "discovery.method.invocations", tags=metrics_tags
+        )
+        metrics_result = "error"
+        metrics_tokens = 0
+        metrics_error: str | None = None
 
         try:
-            publish(
-                "runtime.log",
-                RuntimeLog(stage="discovery", detail=f"yield={len(tokens)}"),
-            )
-        except Exception:  # pragma: no cover - logging only
-            logger.debug(
-                "Failed to publish discovery yield runtime log", exc_info=True
-            )
-        logger.info(
-            "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
-        )
+            if use_cache:
+                cached_tokens = (
+                    list(_CACHE.get("tokens", []))
+                    if isinstance(_CACHE.get("tokens"), list)
+                    else []
+                )
+                cache_limit = int(_CACHE.get("limit", 0))
+                cached_method = (_CACHE.get("method") or "").lower()
 
-        if use_cache and ttl > 0 and tokens:
-            _CACHE["tokens"] = list(tokens)
-            _CACHE["ts"] = now
-            _CACHE["limit"] = self.limit
-            _CACHE["method"] = active_method
-            _CACHE["token_file"] = normalized_token_path
-            _CACHE["token_file_mtime"] = token_mtime
+                if token_file:
+                    token_path = Path(token_file).expanduser()
+                    try:
+                        resolved = token_path.resolve(strict=False)
+                    except (OSError, RuntimeError):
+                        resolved = token_path
+                    normalized_token_path = str(resolved)
+                    try:
+                        token_mtime = resolved.stat().st_mtime
+                    except OSError:
+                        try:
+                            token_mtime = token_path.stat().st_mtime
+                        except OSError:
+                            token_mtime = None
 
-        return tokens
+                cached_token_file = _CACHE.get("token_file")
+                cached_token_mtime = _CACHE.get("token_file_mtime")
+                cache_matches_token_file = True
+                if normalized_token_path != cached_token_file:
+                    if normalized_token_path or cached_token_file:
+                        cache_matches_token_file = False
+                if cache_matches_token_file:
+                    if (
+                        cached_token_mtime is not None
+                        and token_mtime is not None
+                        and token_mtime != cached_token_mtime
+                    ):
+                        cache_matches_token_file = False
+                    elif (cached_token_mtime is None) != (token_mtime is None):
+                        cache_matches_token_file = False
+
+                if (
+                    ttl > 0
+                    and cached_tokens
+                    and now - float(_CACHE.get("ts", 0.0)) < ttl
+                    and (
+                        not method_override
+                        or cached_method == active_method
+                        or not cached_method
+                    )
+                    and cache_matches_token_file
+                ):
+                    if cache_limit and cache_limit >= self.limit:
+                        payload = cached_tokens[: self.limit]
+                        metrics_tokens = len(payload)
+                        metrics_result = "cached"
+                        logger.debug(
+                            "DiscoveryAgent: returning cached tokens (ttl=%s)", ttl
+                        )
+                        return payload
+                    if len(cached_tokens) >= self.limit:
+                        payload = cached_tokens[: self.limit]
+                        metrics_tokens = len(payload)
+                        metrics_result = "cached"
+                        logger.debug(
+                            "DiscoveryAgent: returning cached tokens (limit=%s)",
+                            self.limit,
+                        )
+                        return payload
+
+            attempts = self.max_attempts
+            details: Dict[str, Dict[str, Any]] = {}
+            tokens: List[str] = []
+
+            for attempt in range(attempts):
+                tokens, details = await self._discover_once(
+                    method=active_method,
+                    offline=offline,
+                    token_file=token_file,
+                )
+                tokens = self._normalise(tokens)
+                if tokens:
+                    metrics_result = "success"
+                    break
+                metrics_result = "empty"
+                if attempt < attempts - 1:
+                    logger.warning(
+                        "No tokens discovered (method=%s, attempt=%d/%d)",
+                        active_method,
+                        attempt + 1,
+                        attempts,
+                    )
+                    await asyncio.sleep(self.backoff)
+
+            if not tokens:
+                tokens = self._normalise(self._fallback_tokens())
+                details = {}
+                metrics_result = "fallback" if tokens else "empty"
+
+            self.last_tokens = tokens
+            self.last_details = details
+            self.last_method = active_method
+
+            metrics_tokens = len(tokens)
+
+            try:
+                publish(
+                    "runtime.log",
+                    RuntimeLog(stage="discovery", detail=f"yield={len(tokens)}"),
+                )
+            except Exception:  # pragma: no cover - logging only
+                logger.debug(
+                    "Failed to publish discovery yield runtime log", exc_info=True
+                )
+            logger.info(
+                "DiscoveryAgent yielded %d tokens via %s",
+                len(tokens),
+                active_method,
+            )
+
+            if use_cache and ttl > 0 and tokens:
+                _CACHE["tokens"] = list(tokens)
+                _CACHE["ts"] = now
+                _CACHE["limit"] = self.limit
+                _CACHE["method"] = active_method
+                _CACHE["token_file"] = normalized_token_path
+                _CACHE["token_file_mtime"] = token_mtime
+
+            return tokens
+        except Exception as exc:
+            metrics_error = type(exc).__name__ or exc.__class__.__name__
+            raise
+        finally:
+            duration = time.perf_counter() - overall_start
+            if metrics_error is not None:
+                metrics_client.increment(
+                    "discovery.method.error",
+                    tags={**metrics_tags, "error": metrics_error},
+                )
+                metrics_client.increment(
+                    "discovery.method.result",
+                    tags={**metrics_tags, "result": "error"},
+                )
+                metrics_client.observe(
+                    "discovery.method.duration_seconds",
+                    duration,
+                    tags={**metrics_tags, "result": "error"},
+                )
+                metrics_client.gauge(
+                    "discovery.method.tokens",
+                    0.0,
+                    tags=metrics_tags,
+                )
+            else:
+                metrics_client.increment(
+                    "discovery.method.result",
+                    tags={**metrics_tags, "result": metrics_result},
+                )
+                metrics_client.observe(
+                    "discovery.method.duration_seconds",
+                    duration,
+                    tags={**metrics_tags, "result": metrics_result},
+                )
+                metrics_client.gauge(
+                    "discovery.method.tokens",
+                    float(metrics_tokens),
+                    tags=metrics_tags,
+                )
 
     # ------------------------------------------------------------------
     # Internal helpers

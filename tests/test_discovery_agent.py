@@ -3,12 +3,125 @@ import os
 import time
 from typing import Any
 
+import pytest
+
 from solhunter_zero.agents.discovery import DiscoveryAgent
 from solhunter_zero.scanner_common import DEFAULT_SOLANA_RPC, DEFAULT_SOLANA_WS
+from solhunter_zero.metrics import set_metrics_client
+
+
+class RecordingMetrics:
+    def __init__(self) -> None:
+        self.counters: list[tuple[str, float, dict[str, str]]] = []
+        self.gauges: list[tuple[str, float, dict[str, str]]] = []
+        self.observations: list[tuple[str, float, dict[str, str]]] = []
+
+    def increment(
+        self, name: str, value: float = 1.0, *, tags: dict[str, str] | None = None
+    ) -> None:
+        self.counters.append((name, value, dict(tags or {})))
+
+    def gauge(
+        self, name: str, value: float, *, tags: dict[str, str] | None = None
+    ) -> None:
+        self.gauges.append((name, float(value), dict(tags or {})))
+
+    def observe(
+        self, name: str, value: float, *, tags: dict[str, str] | None = None
+    ) -> None:
+        self.observations.append((name, float(value), dict(tags or {})))
 
 
 async def fake_stream(url, **_):
     yield {"address": "tok", "score": 12.0}
+
+
+def _metric_entries(entries, metric_name: str):
+    return [item for item in entries if item[0] == metric_name]
+
+
+def _has_tag(entry_tags: dict[str, str], **expected: str) -> bool:
+    return all(entry_tags.get(key) == value for key, value in expected.items())
+
+
+def test_discover_tokens_records_metrics_success(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    metrics = RecordingMetrics()
+    set_metrics_client(metrics)
+    monkeypatch.setattr(discovery_mod, "_CACHE", {})
+
+    async def fake_discover_once(self, *, method, offline, token_file):
+        return ["MintSuccess"], {}
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+
+    try:
+        agent = DiscoveryAgent()
+        tokens = asyncio.run(agent.discover_tokens())
+
+        assert tokens == ["MintSuccess"]
+
+        invocation_entries = _metric_entries(
+            metrics.counters, "discovery.method.invocations"
+        )
+        assert invocation_entries
+        assert _has_tag(
+            invocation_entries[0][2], method=agent.default_method.lower()
+        ) or _has_tag(invocation_entries[0][2], method=agent.default_method)
+
+        result_entries = _metric_entries(metrics.counters, "discovery.method.result")
+        assert any(_has_tag(tags, result="success") for _, _, tags in result_entries)
+
+        gauge_entries = _metric_entries(metrics.gauges, "discovery.method.tokens")
+        assert any(value == pytest.approx(1.0) for _, value, _ in gauge_entries)
+
+        duration_entries = _metric_entries(
+            metrics.observations, "discovery.method.duration_seconds"
+        )
+        assert any(
+            tags.get("result") == "success" and value >= 0.0
+            for _, value, tags in duration_entries
+        )
+    finally:
+        set_metrics_client(None)
+
+
+def test_discover_tokens_records_error_metrics(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    metrics = RecordingMetrics()
+    set_metrics_client(metrics)
+    monkeypatch.setattr(discovery_mod, "_CACHE", {})
+
+    async def failing_discover_once(self, *, method, offline, token_file):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", failing_discover_once)
+
+    try:
+        agent = DiscoveryAgent()
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(agent.discover_tokens())
+
+        error_entries = _metric_entries(metrics.counters, "discovery.method.error")
+        assert any(
+            _has_tag(tags, error="RuntimeError") for _, _, tags in error_entries
+        )
+
+        result_entries = _metric_entries(metrics.counters, "discovery.method.result")
+        assert any(_has_tag(tags, result="error") for _, _, tags in result_entries)
+
+        gauge_entries = _metric_entries(metrics.gauges, "discovery.method.tokens")
+        assert any(value == pytest.approx(0.0) for _, value, _ in gauge_entries)
+
+        duration_entries = _metric_entries(
+            metrics.observations, "discovery.method.duration_seconds"
+        )
+        assert any(_has_tag(tags, result="error") for _, _, tags in duration_entries)
+    finally:
+        set_metrics_client(None)
 
 
 def test_discover_tokens_trims_and_deduplicates(monkeypatch):
