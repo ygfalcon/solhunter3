@@ -95,6 +95,11 @@ def _emit_runtime_manifest() -> None:
         os.environ[key] = raw
         candidate = raw if "://" in raw else f"redis://{raw}"
         parsed = urlparse(candidate)
+        scheme = parsed.scheme or "redis"
+        if scheme not in {"redis", "rediss"}:
+            raise SystemExit(
+                f"Invalid Redis URL scheme for {key}: {scheme!r}; expected redis:// or rediss://"
+            )
         host = parsed.hostname or "localhost"
         port = parsed.port or 6379
         segment = (parsed.path or "/").lstrip("/").split("/", 1)[0]
@@ -104,16 +109,16 @@ def _emit_runtime_manifest() -> None:
             raise SystemExit(f"Invalid Redis URL for {key}: {raw}") from exc
         if db_index != 1:
             raise SystemExit(
-                f"{key} targets Redis database {db_index}; configure redis://localhost:6379/1 for all runtime services."
+                f"{key} targets Redis database {db_index}; configure Redis database 1 for all runtime services."
             )
-        normalized = f"redis://{host}:{port}/{db_index}"
+        normalized = f"{scheme}://{host}:{port}/{db_index}"
         os.environ[key] = normalized
         if canonical_url is None:
             canonical_url = normalized
         elif normalized != canonical_url:
             raise SystemExit(
                 "All runtime components must share the same Redis endpoint. Set REDIS_URL, MINT_STREAM_REDIS_URL, "
-                "MEMPOOL_STREAM_REDIS_URL, and AMM_WATCH_REDIS_URL to the same redis://host:port/1 value."
+                "MEMPOOL_STREAM_REDIS_URL, and AMM_WATCH_REDIS_URL to the same host:port/1 value."
             )
 
     for key in ("MINT_STREAM_BROKER_CHANNEL", "MEMPOOL_STREAM_BROKER_CHANNEL", "AMM_WATCH_BROKER_CHANNEL"):
