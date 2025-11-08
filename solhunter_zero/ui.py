@@ -25,6 +25,7 @@ front of it if richer dashboards are required.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import ipaddress
 import logging
@@ -3353,23 +3354,73 @@ class UIServer:
     def stop(self) -> None:
         if not self._thread:
             return
-        try:
-            import urllib.request
 
-            shutdown_host = self.resolved_host
-            formatted_host = self._format_host_for_url(shutdown_host)
-            if not self._shutdown_token:
-                raise RuntimeError("missing shutdown token")
-            request_obj = urllib.request.Request(
-                f"http://{formatted_host}:{self.port}/__shutdown__",
-                headers={"X-UI-Shutdown-Token": self._shutdown_token},
-            )
-            urllib.request.urlopen(request_obj, timeout=1)
-        except Exception:
-            self._shutdown_directly()
+        loop: asyncio.AbstractEventLoop | None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is None:
+            if not self._send_shutdown_request():
+                self._shutdown_directly()
+        else:
+            try:
+                graceful_future = loop.run_in_executor(
+                    None, self._send_shutdown_request
+                )
+            except RuntimeError:
+                if not self._send_shutdown_request():
+                    self._shutdown_directly()
+            else:
+                graceful_future.add_done_callback(
+                    lambda fut: loop.call_soon_threadsafe(
+                        self._finalize_graceful_shutdown, loop, fut
+                    )
+                )
+
         if self._thread:
             self._thread.join(timeout=2)
         self._thread = None
+
+    def _finalize_graceful_shutdown(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        future: asyncio.Future[bool],
+    ) -> None:
+        try:
+            success = bool(future.result())
+        except Exception:
+            success = False
+        if not success:
+            self._schedule_direct_shutdown(loop)
+
+    def _schedule_direct_shutdown(self, loop: asyncio.AbstractEventLoop) -> None:
+        try:
+            loop.run_in_executor(None, self._shutdown_directly)
+        except RuntimeError:
+            self._shutdown_directly()
+
+    def _send_shutdown_request(self) -> bool:
+        try:
+            import urllib.request
+        except Exception:
+            return False
+
+        if not self._shutdown_token:
+            return False
+
+        shutdown_host = self.resolved_host
+        formatted_host = self._format_host_for_url(shutdown_host)
+        request_obj = urllib.request.Request(
+            f"http://{formatted_host}:{self.port}/__shutdown__",
+            headers={"X-UI-Shutdown-Token": self._shutdown_token},
+        )
+        try:
+            urllib.request.urlopen(request_obj, timeout=1)
+        except Exception:
+            return False
+        return True
 
     def _resolve_shutdown_host(self) -> str:
         raw_host = (self.host or "").strip()

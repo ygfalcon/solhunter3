@@ -678,3 +678,56 @@ def test_uiserver_start_probe_respects_config_and_env(monkeypatch):
     assert server._startup_probe_initial_delay == pytest.approx(0.1)
     assert server._startup_probe_backoff == pytest.approx(1.5)
     assert server._startup_probe_max_delay == pytest.approx(0.5)
+
+
+def test_uiserver_stop_fallback_runs_off_loop(monkeypatch):
+    state = ui.UIState(status_provider=_healthy_status_snapshot)
+    server = ui.UIServer(state, host="127.0.0.1", port=0)
+    server.start()
+
+    try:
+        ui_thread = server._thread
+        assert ui_thread is not None
+
+        assert server._server is not None
+        original_shutdown = server._server.shutdown  # type: ignore[assignment]
+        shutdown_threads: list[threading.Thread] = []
+        shutdown_event = threading.Event()
+
+        def slow_shutdown() -> None:
+            shutdown_threads.append(threading.current_thread())
+            shutdown_event.set()
+            time.sleep(0.3)
+            original_shutdown()
+
+        monkeypatch.setattr(server._server, "shutdown", slow_shutdown)
+
+        def failing_urlopen(*_args, **_kwargs):
+            raise OSError("simulated connection failure")
+
+        monkeypatch.setattr(urllib.request, "urlopen", failing_urlopen)
+
+        monkeypatch.setattr(ui_thread, "join", lambda timeout=None: None)
+
+        async def _exercise_stop() -> None:
+            loop_thread = threading.current_thread()
+            start = time.perf_counter()
+            server.stop()
+            elapsed = time.perf_counter() - start
+
+            assert elapsed < 0.1
+            assert await asyncio.to_thread(shutdown_event.wait, 1.0)
+            assert shutdown_threads
+            assert shutdown_threads[0] is not loop_thread
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_exercise_stop())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+        threading.Thread.join(ui_thread, timeout=2)
+    finally:
+        server.stop()
