@@ -26,6 +26,8 @@ async def test_scoring_service_restart(monkeypatch):
     service = ScoringService(input_queue, output_queue, portfolio, cooldown=0, workers=1)
 
     await service.start()
+    await asyncio.sleep(0)
+    assert len(service._worker_tasks) == 1
 
     first = TokenCandidate(
         token="token-1",
@@ -54,6 +56,25 @@ async def test_scoring_service_restart(monkeypatch):
     await service.stop()
 
     monkeypatch.delenv("SCORING_COOLDOWN", raising=False)
+
+
+@pytest.mark.anyio
+async def test_scoring_service_single_worker_env(monkeypatch):
+    monkeypatch.setenv("SCORING_COOLDOWN", "0")
+    monkeypatch.setenv("SCORING_WORKERS", "1")
+    input_queue: asyncio.Queue[list[TokenCandidate]] = asyncio.Queue()
+    output_queue: asyncio.Queue = asyncio.Queue()
+    portfolio = _DummyPortfolio()
+    service = ScoringService(input_queue, output_queue, portfolio, cooldown=0)
+
+    await service.start()
+    await asyncio.sleep(0)
+    try:
+        assert len(service._worker_tasks) == 1
+    finally:
+        await service.stop()
+        monkeypatch.delenv("SCORING_COOLDOWN", raising=False)
+        monkeypatch.delenv("SCORING_WORKERS", raising=False)
 
 
 @pytest.mark.anyio
