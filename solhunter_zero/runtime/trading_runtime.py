@@ -914,6 +914,9 @@ class TradingRuntime:
             discovery_startup_clones = _maybe_int(
                 self.cfg.get("discovery_startup_clones")
             )
+            discovery_startup_clone_timeout = _maybe_float(
+                self.cfg.get("discovery_startup_clone_timeout")
+            )
 
             live_discovery_active = (
                 live_discovery_override
@@ -956,6 +959,7 @@ class TradingRuntime:
                 discovery_max_backoff=discovery_max_backoff,
                 discovery_limit=discovery_limit_cfg,
                 discovery_startup_clones=discovery_startup_clones,
+                discovery_startup_clone_timeout=discovery_startup_clone_timeout,
             )
             log.info(
                 "TradingRuntime: pipeline created; evaluations will run through AgentManager swarm"

@@ -40,6 +40,7 @@ class PipelineCoordinator:
         discovery_max_backoff: Optional[float] = None,
         discovery_limit: Optional[int] = None,
         discovery_startup_clones: Optional[int] = None,
+        discovery_startup_clone_timeout: Optional[float] = None,
         testnet: Optional[bool] = None,
     ) -> None:
         self.agent_manager = agent_manager
@@ -134,6 +135,17 @@ class PipelineCoordinator:
                     "Invalid discovery_startup_clones=%r; ignoring",
                     discovery_startup_clones,
                 )
+        if discovery_startup_clone_timeout is not None:
+            try:
+                timeout_val = float(discovery_startup_clone_timeout)
+            except (TypeError, ValueError):
+                log.warning(
+                    "Invalid discovery_startup_clone_timeout=%r; ignoring",
+                    discovery_startup_clone_timeout,
+                )
+            else:
+                if timeout_val > 0.0:
+                    discovery_kwargs["startup_clone_timeout"] = timeout_val
 
         limit_override: Optional[int] = None
         if discovery_limit is not None:
