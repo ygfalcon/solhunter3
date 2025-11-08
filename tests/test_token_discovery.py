@@ -108,6 +108,176 @@ def test_discover_candidates_prioritises_scores(monkeypatch):
     assert len(fake_session.calls) == 1
 
 
+def test_fetch_birdeye_tokens_retries_transient_then_succeeds(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_BIRDEYE_RETRIES", 3)
+
+    class FakeResp:
+        def __init__(self, status, payload=None, text="err"):
+            self.status = status
+            self._payload = payload or {}
+            self._text = text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return self._payload
+
+        async def text(self):
+            return self._text
+
+        def raise_for_status(self):
+            return None
+
+    class FakeSession:
+        def __init__(self, responses):
+            self._responses = list(responses)
+            self.calls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            if not self._responses:
+                raise AssertionError("No more fake responses configured")
+            return self._responses.pop(0)
+
+    responses = [
+        FakeResp(500, text="server boom"),
+        FakeResp(
+            200,
+            payload={
+                "data": {
+                    "tokens": [
+                        {
+                            "address": "retry1",
+                            "name": "Retry Token",
+                            "symbol": "RTY",
+                            "v24hUSD": 100000,
+                            "liquidity": 150000,
+                            "price": 0.5,
+                            "v24hChangePercent": 1.0,
+                        }
+                    ],
+                    "total": 1,
+                }
+            },
+        ),
+    ]
+    fake_session = FakeSession(responses)
+
+    class FakeClientSession:
+        def __init__(self, *args, **kwargs):
+            self._session = fake_session
+
+        async def __aenter__(self):
+            return self._session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(duration):
+        sleep_calls.append(duration)
+
+    monkeypatch.setattr(td.aiohttp, "ClientSession", FakeClientSession)
+    monkeypatch.setattr(td.asyncio, "sleep", fake_sleep)
+
+    async def run():
+        return await td._fetch_birdeye_tokens()
+
+    results = asyncio.run(run())
+
+    assert [token["address"] for token in results] == ["retry1"]
+    assert len(fake_session.calls) == 2
+    assert len(sleep_calls) == 1
+
+
+def test_fetch_birdeye_tokens_retries_until_exhausted(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_BIRDEYE_RETRIES", 3)
+
+    class FakeResp:
+        def __init__(self, status, text="err"):
+            self.status = status
+            self._text = text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return {}
+
+        async def text(self):
+            return self._text
+
+        def raise_for_status(self):
+            return None
+
+    class FakeSession:
+        def __init__(self, responses):
+            self._responses = list(responses)
+            self.calls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            if not self._responses:
+                raise AssertionError("No more fake responses configured")
+            return self._responses.pop(0)
+
+    responses = [
+        FakeResp(500, text="server boom"),
+        FakeResp(503, text="try later"),
+        FakeResp(500, text="still down"),
+    ]
+    fake_session = FakeSession(responses)
+
+    class FakeClientSession:
+        def __init__(self, *args, **kwargs):
+            self._session = fake_session
+
+        async def __aenter__(self):
+            return self._session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(duration):
+        sleep_calls.append(duration)
+
+    monkeypatch.setattr(td.aiohttp, "ClientSession", FakeClientSession)
+    monkeypatch.setattr(td.asyncio, "sleep", fake_sleep)
+
+    async def run():
+        return await td._fetch_birdeye_tokens()
+
+    results = asyncio.run(run())
+
+    assert results == []
+    assert len(fake_session.calls) == td._BIRDEYE_RETRIES
+    assert len(sleep_calls) == td._BIRDEYE_RETRIES - 1
+
+
 def test_collect_mempool_signals_times_out(monkeypatch):
     async def silent_gen(*_args, **_kwargs):
         while True:
