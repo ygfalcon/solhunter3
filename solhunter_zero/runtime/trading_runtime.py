@@ -795,7 +795,7 @@ class TradingRuntime:
                 port=port_candidate,
             )
             try:
-                self.ui_server.start()
+                await self.ui_server.start_async()
             except UIStartupError as exc:
                 last_error = exc
                 should_retry = _is_addr_in_use(exc) and attempt < len(port_candidates)
