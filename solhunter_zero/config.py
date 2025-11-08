@@ -198,6 +198,7 @@ ENV_VARS = {
     "depth_service": "DEPTH_SERVICE",
     "depth_max_restarts": "DEPTH_MAX_RESTARTS",
     "use_depth_stream": "USE_DEPTH_STREAM",
+    "live_min_sol": "LIVE_MIN_SOL",
     "use_depth_feed": "USE_DEPTH_FEED",
     "use_rust_exec": "USE_RUST_EXEC",
     "use_service_exec": "USE_SERVICE_EXEC",

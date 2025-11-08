@@ -219,6 +219,21 @@ def ensure_live_keypair(cfg: dict | None) -> dict:
     return {"keypair_path": str(resolved), "keypair_pubkey": str(pubkey)}
 
 
+def _resolve_min_live_sol_threshold() -> float:
+    raw = os.getenv("LIVE_MIN_SOL", "").strip()
+    if not raw:
+        return 0.0
+    try:
+        threshold = float(raw)
+    except Exception:
+        log.warning("Invalid LIVE_MIN_SOL=%r; using default 0.0", raw)
+        return 0.0
+    if threshold < 0:
+        log.warning("LIVE_MIN_SOL=%r below zero; using default 0.0", raw)
+        return 0.0
+    return threshold
+
+
 def verify_live_account() -> dict:
     try:
         mode = get_feature_flags().mode.lower()
@@ -226,9 +241,18 @@ def verify_live_account() -> dict:
         mode = "paper"
     if mode != "live":
         return {"skipped": True}
-    balance, blockhash = verify_onchain_funds(min_sol=0.0)
-    log.info("Keypair balance %.6f SOL; latest blockhash %s", balance, blockhash)
-    return {"balance_sol": balance, "blockhash": blockhash}
+    min_sol = _resolve_min_live_sol_threshold()
+    balance, blockhash = verify_onchain_funds(min_sol=min_sol)
+    if min_sol > 0:
+        log.info(
+            "Keypair balance %.6f SOL (minimum required %.6f); latest blockhash %s",
+            balance,
+            min_sol,
+            blockhash,
+        )
+    else:
+        log.info("Keypair balance %.6f SOL; latest blockhash %s", balance, blockhash)
+    return {"balance_sol": balance, "blockhash": blockhash, "min_required_sol": min_sol}
 
 
 def _config_has_broker(cfg: Mapping[str, object] | None) -> bool:
@@ -478,7 +502,7 @@ def run_stage(name: str, func: Callable[[], T], stage_results: list[StageResult]
     started = time.perf_counter()
     try:
         result = func()
-    except Exception as exc:  # pragma: no cover - exercised in failure scenarios
+    except BaseException as exc:  # pragma: no cover - exercised in failure scenarios
         duration = time.perf_counter() - started
         stage_results.append(StageResult(name=name, success=False, duration=duration, error=str(exc)))
         log.error("✗ Stage %s failed after %.2fs", name, duration, exc_info=exc)

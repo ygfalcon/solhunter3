@@ -5,7 +5,8 @@ import stat
 import pytest
 from solders.keypair import Keypair
 
-from solhunter_zero.production.keypair import resolve_live_keypair
+from solhunter_zero.production.keypair import resolve_live_keypair, verify_onchain_funds
+from solhunter_zero.gas import LAMPORTS_PER_SOL
 
 
 def _write_keypair(path) -> None:
@@ -55,3 +56,30 @@ def test_resolve_live_keypair_permissions(tmp_path, monkeypatch):
         assert "permissions 0600" in str(exc)
     else:
         pytest.fail("expected SystemExit due to permissions")
+
+
+def test_verify_onchain_funds_threshold(monkeypatch, tmp_path):
+    keyfile = tmp_path / "id.json"
+    _write_keypair(keyfile)
+    monkeypatch.setenv("KEYPAIR_PATH", str(keyfile))
+    monkeypatch.setenv("SOLANA_RPC_URL", "https://example.invalid")
+
+    class DummyClient:
+        def __init__(self, rpc_url: str, timeout=None) -> None:
+            assert rpc_url == "https://example.invalid"
+            self.timeout = timeout
+
+        def get_balance(self, pubkey):  # pragma: no cover - interface mimics solana client
+            return {"result": {"value": int(0.3 * LAMPORTS_PER_SOL)}}
+
+        def get_latest_blockhash(self):  # pragma: no cover - interface mimics solana client
+            return {"result": {"value": {"blockhash": "abc123"}}}
+
+    monkeypatch.setattr("solhunter_zero.production.keypair.Client", DummyClient)
+
+    with pytest.raises(SystemExit) as exc_info:
+        verify_onchain_funds(min_sol=0.5)
+
+    message = str(exc_info.value)
+    assert "insufficient SOL" in message
+    assert "minimum required is 0.500000000" in message

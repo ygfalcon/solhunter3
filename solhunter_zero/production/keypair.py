@@ -210,7 +210,9 @@ def verify_onchain_funds(
     balance_sol = lamports / LAMPORTS_PER_SOL
     if balance_sol <= min_sol:
         raise SystemExit(
-            f"Keypair {pubkey} has insufficient SOL ({balance_sol:.9f}). Fund the account before launching live trading."
+            "Keypair "
+            f"{pubkey} has insufficient SOL ({balance_sol:.9f}); minimum required is {min_sol:.9f}. "
+            "Fund the account before launching live trading."
         )
 
     try:
