@@ -3,7 +3,34 @@ import time
 
 import pytest
 
+from solhunter_zero.metrics import set_metrics_client
 from solhunter_zero.pipeline import discovery_service as discovery_mod
+
+
+class RecordingMetrics:
+    def __init__(self) -> None:
+        self.counters: list[tuple[str, float, dict[str, str]]] = []
+        self.gauges: list[tuple[str, float, dict[str, str]]] = []
+        self.observations: list[tuple[str, float, dict[str, str]]] = []
+
+    def increment(
+        self, name: str, value: float = 1.0, *, tags: dict[str, str] | None = None
+    ) -> None:
+        self.counters.append((name, value, dict(tags or {})))
+
+    def gauge(
+        self, name: str, value: float, *, tags: dict[str, str] | None = None
+    ) -> None:
+        self.gauges.append((name, float(value), dict(tags or {})))
+
+    def observe(
+        self, name: str, value: float, *, tags: dict[str, str] | None = None
+    ) -> None:
+        self.observations.append((name, float(value), dict(tags or {})))
+
+
+def _metric_entries(entries, metric_name: str):
+    return [item for item in entries if item[0] == metric_name]
 
 
 @pytest.fixture
@@ -256,6 +283,90 @@ async def test_emit_tokens_publishes_event(monkeypatch):
 
     await service._emit_tokens(["TokA", "TokB"], fresh=False)
     assert len(events) == 1
+
+
+@pytest.mark.anyio
+async def test_emit_tokens_records_queue_metrics(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    metrics = RecordingMetrics()
+    set_metrics_client(metrics)
+    try:
+        await service._emit_tokens(["TokA"], fresh=True)
+        await queue.get()
+
+        queue_depth_entries = _metric_entries(
+            metrics.gauges, "discovery.emit.queue_depth"
+        )
+        assert any(entry[2].get("stage") == "before" for entry in queue_depth_entries)
+        assert any(entry[2].get("stage") == "after" for entry in queue_depth_entries)
+
+        batch_entries = _metric_entries(metrics.gauges, "discovery.emit.batch_size")
+        assert any(value == pytest.approx(1.0) for _, value, _ in batch_entries)
+    finally:
+        set_metrics_client(None)
+
+
+@pytest.mark.anyio
+async def test_emit_tokens_records_skip_metrics(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    base_metrics = RecordingMetrics()
+    set_metrics_client(base_metrics)
+    try:
+        await service._emit_tokens(["TokA"], fresh=True)
+        await queue.get()
+
+        skip_metrics = RecordingMetrics()
+        set_metrics_client(skip_metrics)
+
+        await service._emit_tokens(["TokA"], fresh=False)
+
+        skip_entries = _metric_entries(skip_metrics.counters, "discovery.emit.skipped")
+        assert any(entry[2].get("reason") == "unchanged" for entry in skip_entries)
+
+        queue_depth_entries = _metric_entries(
+            skip_metrics.gauges, "discovery.emit.queue_depth"
+        )
+        assert any(entry[2].get("stage") == "skipped" for entry in queue_depth_entries)
+    finally:
+        set_metrics_client(None)
+
+
+@pytest.mark.anyio
+async def test_emit_tokens_records_metadata_refresh_metrics(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    token = "MetaTok"
+    discovery_mod.TRENDING_METADATA[token] = {"liquidity": 1.0}
+
+    metrics = RecordingMetrics()
+    set_metrics_client(metrics)
+    try:
+        await service._emit_tokens([token], fresh=True)
+        await queue.get()
+
+        refresh_metrics = RecordingMetrics()
+        set_metrics_client(refresh_metrics)
+
+        discovery_mod.TRENDING_METADATA[token] = {"liquidity": 5.0}
+        await service._emit_tokens([token], fresh=False)
+        await queue.get()
+
+        refresh_entries = _metric_entries(
+            refresh_metrics.counters, "discovery.emit.metadata_refresh"
+        )
+        assert refresh_entries
+        changed_entries = _metric_entries(
+            refresh_metrics.gauges, "discovery.emit.metadata_changed_tokens"
+        )
+        assert any(value == pytest.approx(1.0) for _, value, _ in changed_entries)
+    finally:
+        set_metrics_client(None)
+        discovery_mod.TRENDING_METADATA.pop(token, None)
 
 
 @pytest.mark.anyio

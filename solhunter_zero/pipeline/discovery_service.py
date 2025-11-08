@@ -11,6 +11,7 @@ from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
 from .types import TokenCandidate
 from ..event_bus import publish
+from ..metrics import MetricsClient, get_metrics
 
 log = logging.getLogger(__name__)
 
@@ -449,8 +450,15 @@ class DiscoveryService:
         return False
 
     async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
+        metrics = get_metrics()
+        base_tags = {"fresh": "true" if fresh else "false"}
+
         seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
         if not seq:
+            metrics.increment(
+                "discovery.emit.skipped", tags={**base_tags, "reason": "empty"}
+            )
+            self._record_queue_metric(metrics, base_tags, stage="skipped")
             return
         batch = self._build_candidates(seq)
         metadata_snapshot: Dict[str, Dict[str, Any]] = {}
@@ -462,21 +470,44 @@ class DiscoveryService:
         metadata_refresh = (
             metadata_changed and not fresh and seq == self._last_emitted
         )
+        event_tags = {**base_tags, "metadata_refresh": "true" if metadata_refresh else "false"}
+        if metadata_refresh:
+            metrics.increment("discovery.emit.metadata_refresh", tags=event_tags)
+            metrics.gauge(
+                "discovery.emit.metadata_changed_tokens",
+                float(len(changed_tokens)),
+                tags=event_tags,
+            )
         if (not metadata_changed) and not fresh and seq == self._last_emitted:
             log.debug(
                 "DiscoveryService skipping cached emission (%d tokens)", len(seq)
             )
             self._last_metadata_snapshot = metadata_snapshot
+            metrics.increment(
+                "discovery.emit.skipped",
+                tags={**event_tags, "reason": "unchanged"},
+            )
+            self._record_queue_metric(metrics, event_tags, stage="skipped")
             return
         if not metadata_changed:
             changed_tokens = []
 
+        metrics.gauge(
+            "discovery.emit.batch_size", float(len(batch)), tags=event_tags
+        )
+
+        self._record_queue_metric(metrics, event_tags, stage="before")
         while True:
             if self._stopped.is_set():
                 log.warning(
                     "DiscoveryService dropping %d tokens because service is stopping",
                     len(batch),
                 )
+                metrics.increment(
+                    "discovery.emit.skipped",
+                    tags={**event_tags, "reason": "stopping"},
+                )
+                self._record_queue_metric(metrics, event_tags, stage="skipped")
                 return
             try:
                 await asyncio.wait_for(self.queue.put(batch), timeout=1.0)
@@ -486,9 +517,15 @@ class DiscoveryService:
                     "DiscoveryService queue full; dropping %d token(s)",
                     len(batch),
                 )
+                metrics.increment(
+                    "discovery.emit.skipped",
+                    tags={**event_tags, "reason": "queue_full"},
+                )
+                self._record_queue_metric(metrics, event_tags, stage="skipped")
                 return
 
         log.info("DiscoveryService queued %d tokens", len(batch))
+        self._record_queue_metric(metrics, event_tags, stage="after")
         previous = list(self._last_emitted)
         payload = {
             "tokens": list(seq),
@@ -502,6 +539,26 @@ class DiscoveryService:
             publish("token_discovered", payload)
         self._last_emitted = list(seq)
         self._last_metadata_snapshot = metadata_snapshot
+
+    def _record_queue_metric(
+        self,
+        metrics: MetricsClient,
+        tags: Dict[str, str],
+        *,
+        stage: str,
+    ) -> None:
+        qsize_fn = getattr(self.queue, "qsize", None)
+        if not callable(qsize_fn):
+            return
+        try:
+            depth = float(qsize_fn())
+        except Exception:  # pragma: no cover - optional
+            return
+        metrics.gauge(
+            "discovery.emit.queue_depth",
+            depth,
+            tags={**tags, "stage": stage},
+        )
 
     def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
         payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]

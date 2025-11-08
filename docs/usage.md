@@ -91,3 +91,44 @@ Jito's challenge with your trading keypair to obtain the JWT; editing
 `.env` or exporting `JITO_AUTH` lets you substitute a token retrieved
 elsewhere.
 
+## Discovery Metrics
+
+Discovery now emits lightweight StatsD-style metrics so operators can
+observe token sourcing and emission behaviour without scraping logs. If
+``STATSD_HOST`` is set (and the optional ``statsd`` package is installed)
+these metrics are sent directly to the configured endpoint; otherwise
+they fall back to a no-op client so the agent can still run locally.
+
+### `discover_tokens`
+
+Each invocation of ``DiscoveryAgent.discover_tokens`` produces:
+
+* ``discovery.method.invocations`` – counter tagged with the discovery
+  ``method`` and whether the call was ``offline``.
+* ``discovery.method.result`` – counter tracking ``result`` outcomes
+  (``success``, ``fallback``, ``cached``, ``empty``, ``error``).
+* ``discovery.method.error`` – counter tagged with the ``error`` class
+  name when discovery raises.
+* ``discovery.method.duration_seconds`` – timer tagged with the final
+  ``result`` so dashboards can plot per-method latency.
+* ``discovery.method.tokens`` – gauge of the number of addresses yielded
+  for that invocation.
+
+### `DiscoveryService._emit_tokens`
+
+The discovery service publishes queue-level metrics whenever batches are
+considered for downstream consumers:
+
+* ``discovery.emit.batch_size`` – gauge of candidate batch size.
+* ``discovery.emit.queue_depth`` – gauge of ``stage`` (``before``,
+  ``after``, ``skipped``) queue depth tagged with ``fresh`` and
+  ``metadata_refresh`` to highlight blocking consumers.
+* ``discovery.emit.metadata_refresh`` – counter indicating metadata-only
+  refreshes, alongside ``discovery.emit.metadata_changed_tokens`` which
+  gauges how many tokens changed.
+* ``discovery.emit.skipped`` – counter tracking skipped emissions with a
+  ``reason`` tag (``empty``, ``unchanged``, ``queue_full``, ``stopping``).
+
+Dashboards can now alert on stalled discovery queues, unexpected error
+types, or missing metadata refreshes directly from these signals.
+
