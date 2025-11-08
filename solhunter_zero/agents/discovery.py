@@ -29,14 +29,15 @@ _MEMPOOL_STREAM_TIMEOUT_RETRIES = max(
     1, int(os.getenv("DISCOVERY_MEMPOOL_TIMEOUT_RETRIES", "3") or 3)
 )
 
-_CACHE: dict[str, object] = {
-    "tokens": [],
-    "ts": 0.0,
-    "limit": 0,
-    "method": "",
-    "token_file": None,
-    "token_file_mtime": None,
-}
+def _initial_cache_state() -> dict[str, object]:
+    return {
+        "tokens": [],
+        "ts": 0.0,
+        "limit": 0,
+        "method": "",
+        "token_file": None,
+        "token_file_mtime": None,
+    }
 _STATIC_FALLBACK = list(STATIC_FALLBACK_TOKENS)
 
 DEFAULT_DISCOVERY_METHOD = "helius"
@@ -80,7 +81,12 @@ def resolve_discovery_method(value: Any) -> Optional[str]:
 class DiscoveryAgent:
     """Token discovery orchestrator supporting multiple discovery methods."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        cache: Optional[dict[str, object]] = None,
+        cache_lock: Optional[asyncio.Lock] = None,
+    ) -> None:
         self.rpc_url = DEFAULT_SOLANA_RPC
         self.ws_url = DEFAULT_SOLANA_WS
         self.birdeye_api_key = ""
@@ -94,8 +100,18 @@ class DiscoveryAgent:
         self.last_details: Dict[str, Dict[str, Any]] = {}
         self.last_tokens: List[str] = []
         self.last_method: str | None = None
+        self._cache = cache if cache is not None else _initial_cache_state()
+        self._cache_lock = cache_lock
 
         self.refresh_settings()
+
+    @property
+    def cache(self) -> dict[str, object]:
+        return self._cache
+
+    def _reset_cache(self) -> None:
+        self._cache.clear()
+        self._cache.update(_initial_cache_state())
 
     def refresh_settings(self) -> None:
         """Refresh environment-derived settings like RPC, WS, and API keys."""
@@ -192,17 +208,7 @@ class DiscoveryAgent:
             or self.default_method != previous_method
             or settings_changed
         ):
-            _CACHE.clear()
-            _CACHE.update(
-                {
-                    "tokens": [],
-                    "ts": 0.0,
-                    "limit": 0,
-                    "method": "",
-                    "token_file": None,
-                    "token_file_mtime": None,
-                }
-            )
+            self._reset_cache()
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -296,15 +302,58 @@ class DiscoveryAgent:
             active_method = OFFLINE_DEFAULT_METHOD
         normalized_token_path: str | None = None
         token_mtime: float | None = None
+        cache_limit = 0
+        cached_method = ""
+        cached_token_file: str | None = None
+        cached_token_mtime: float | None = None
+        cached_tokens: List[str] = []
+        cached_ts = 0.0
 
         if use_cache:
-            cached_tokens = (
-                list(_CACHE.get("tokens", []))
-                if isinstance(_CACHE.get("tokens"), list)
-                else []
-            )
-            cache_limit = int(_CACHE.get("limit", 0))
-            cached_method = (_CACHE.get("method") or "").lower()
+            cache = self._cache
+            if self._cache_lock:
+                async with self._cache_lock:
+                    cached_tokens = (
+                        list(cache.get("tokens", []))
+                        if isinstance(cache.get("tokens"), list)
+                        else []
+                    )
+                    cache_limit = int(cache.get("limit", 0))
+                    cached_method = (cache.get("method") or "").lower()
+                    token_file_value = cache.get("token_file")
+                    cached_token_file = (
+                        str(token_file_value)
+                        if isinstance(token_file_value, str)
+                        else None
+                    )
+                    token_mtime_value = cache.get("token_file_mtime")
+                    cached_token_mtime = (
+                        float(token_mtime_value)
+                        if isinstance(token_mtime_value, (int, float))
+                        else None
+                    )
+                    cached_ts = float(cache.get("ts", 0.0))
+            else:
+                cached_tokens = (
+                    list(cache.get("tokens", []))
+                    if isinstance(cache.get("tokens"), list)
+                    else []
+                )
+                cache_limit = int(cache.get("limit", 0))
+                cached_method = (cache.get("method") or "").lower()
+                token_file_value = cache.get("token_file")
+                cached_token_file = (
+                    str(token_file_value)
+                    if isinstance(token_file_value, str)
+                    else None
+                )
+                token_mtime_value = cache.get("token_file_mtime")
+                cached_token_mtime = (
+                    float(token_mtime_value)
+                    if isinstance(token_mtime_value, (int, float))
+                    else None
+                )
+                cached_ts = float(cache.get("ts", 0.0))
 
             if token_file:
                 token_path = Path(token_file).expanduser()
@@ -321,8 +370,6 @@ class DiscoveryAgent:
                     except OSError:
                         token_mtime = None
 
-            cached_token_file = _CACHE.get("token_file")
-            cached_token_mtime = _CACHE.get("token_file_mtime")
             cache_matches_token_file = True
             if normalized_token_path != cached_token_file:
                 if normalized_token_path or cached_token_file:
@@ -340,7 +387,7 @@ class DiscoveryAgent:
             if (
                 ttl > 0
                 and cached_tokens
-                and now - float(_CACHE.get("ts", 0.0)) < ttl
+                and now - cached_ts < ttl
                 and (
                     not method_override
                     or cached_method == active_method
@@ -383,7 +430,7 @@ class DiscoveryAgent:
                 await asyncio.sleep(self.backoff)
 
         if not tokens:
-            tokens = self._normalise(self._fallback_tokens())
+            tokens = self._normalise(await self._fallback_tokens())
             details = {}
 
         self.last_tokens = tokens
@@ -404,12 +451,22 @@ class DiscoveryAgent:
         )
 
         if use_cache and ttl > 0 and tokens:
-            _CACHE["tokens"] = list(tokens)
-            _CACHE["ts"] = now
-            _CACHE["limit"] = self.limit
-            _CACHE["method"] = active_method
-            _CACHE["token_file"] = normalized_token_path
-            _CACHE["token_file_mtime"] = token_mtime
+            cache = self._cache
+            if self._cache_lock:
+                async with self._cache_lock:
+                    cache["tokens"] = list(tokens)
+                    cache["ts"] = now
+                    cache["limit"] = self.limit
+                    cache["method"] = active_method
+                    cache["token_file"] = normalized_token_path
+                    cache["token_file_mtime"] = token_mtime
+            else:
+                cache["tokens"] = list(tokens)
+                cache["ts"] = now
+                cache["limit"] = self.limit
+                cache["method"] = active_method
+                cache["token_file"] = normalized_token_path
+                cache["token_file_mtime"] = token_mtime
 
         return tokens
 
@@ -433,7 +490,7 @@ class DiscoveryAgent:
 
         if offline:
             if method != "file" or not token_file:
-                return self._fallback_tokens(), {}
+                return await self._fallback_tokens(), {}
 
         if method == "websocket":
             results = await merge_sources(
@@ -553,8 +610,21 @@ class DiscoveryAgent:
                 break
         return filtered
 
-    def _fallback_tokens(self) -> List[str]:
-        cached = list(_CACHE.get("tokens", [])) if isinstance(_CACHE.get("tokens"), list) else []
+    async def _fallback_tokens(self) -> List[str]:
+        cache = self._cache
+        if self._cache_lock:
+            async with self._cache_lock:
+                cached = (
+                    list(cache.get("tokens", []))
+                    if isinstance(cache.get("tokens"), list)
+                    else []
+                )
+        else:
+            cached = (
+                list(cache.get("tokens", []))
+                if isinstance(cache.get("tokens"), list)
+                else []
+            )
         if cached:
             logger.warning("DiscoveryAgent falling back to cached tokens (%d)", len(cached))
             return cached[: self.limit]

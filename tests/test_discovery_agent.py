@@ -12,8 +12,6 @@ async def fake_stream(url, **_):
 
 
 def test_discover_tokens_trims_and_deduplicates(monkeypatch):
-    import solhunter_zero.agents.discovery as discovery_mod
-
     async def fake_discover_once(self, *, method, offline, token_file):
         return [
             "  MintA11111111111111111111111111111111111111  ",
@@ -22,7 +20,6 @@ def test_discover_tokens_trims_and_deduplicates(monkeypatch):
             "   ",
         ], {}
 
-    monkeypatch.setattr(discovery_mod, "_CACHE", {})
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
     monkeypatch.setenv("DISCOVERY_CACHE_TTL", "120")
 
@@ -35,7 +32,7 @@ def test_discover_tokens_trims_and_deduplicates(monkeypatch):
         "MintB22222222222222222222222222222222222222",
     ]
     assert agent.last_tokens == tokens
-    assert discovery_mod._CACHE["tokens"] == tokens
+    assert agent.cache["tokens"] == tokens
 
 
 def test_stream_mempool_events(monkeypatch):
@@ -103,8 +100,6 @@ def test_discovery_agent_sets_helius_defaults(monkeypatch):
 
 
 def test_refresh_settings_updates_limits_and_clears_cache(monkeypatch):
-    import solhunter_zero.agents.discovery as discovery_mod
-
     monkeypatch.setenv("DISCOVERY_LIMIT", "4")
     monkeypatch.setenv("DISCOVERY_CACHE_TTL", "200")
     monkeypatch.setenv("TOKEN_DISCOVERY_BACKOFF", "3.5")
@@ -120,10 +115,10 @@ def test_refresh_settings_updates_limits_and_clears_cache(monkeypatch):
     assert agent.max_attempts == 4
     assert agent.mempool_threshold == 1.5
 
-    discovery_mod._CACHE["tokens"] = ["cached"]
-    discovery_mod._CACHE["ts"] = time.time()
-    discovery_mod._CACHE["limit"] = agent.limit
-    discovery_mod._CACHE["method"] = agent.default_method
+    agent.cache["tokens"] = ["cached"]
+    agent.cache["ts"] = time.time()
+    agent.cache["limit"] = agent.limit
+    agent.cache["method"] = agent.default_method
 
     monkeypatch.setenv("DISCOVERY_LIMIT", "2")
     monkeypatch.setenv("DISCOVERY_CACHE_TTL", "5")
@@ -138,14 +133,13 @@ def test_refresh_settings_updates_limits_and_clears_cache(monkeypatch):
     assert agent.backoff == 0.25
     assert agent.max_attempts == 9
     assert agent.mempool_threshold == 7.25
-    assert discovery_mod._CACHE["tokens"] == []
-    assert discovery_mod._CACHE["ts"] == 0.0
-    assert discovery_mod._CACHE["limit"] == 0
-    assert discovery_mod._CACHE["method"] == ""
+    assert agent.cache["tokens"] == []
+    assert agent.cache["ts"] == 0.0
+    assert agent.cache["limit"] == 0
+    assert agent.cache["method"] == ""
 
 
 def test_refresh_settings_prefers_configured_rpc(monkeypatch):
-    import solhunter_zero.agents.discovery as discovery_mod
     import solhunter_zero.config as config_mod
 
     monkeypatch.setattr(config_mod, "_VALIDATED_URLS", {})
@@ -161,7 +155,7 @@ def test_refresh_settings_prefers_configured_rpc(monkeypatch):
     assert os.getenv("SOLANA_RPC_URL") == "https://cfg.one"
     assert agent.ws_url == "wss://env.initial"
 
-    discovery_mod._CACHE.update(
+    agent.cache.update(
         {
             "tokens": ["cached"],
             "ts": time.time(),
@@ -178,10 +172,10 @@ def test_refresh_settings_prefers_configured_rpc(monkeypatch):
 
     assert agent.rpc_url == "https://cfg.two"
     assert os.getenv("SOLANA_RPC_URL") == "https://cfg.two"
-    assert discovery_mod._CACHE["tokens"] == []
-    assert discovery_mod._CACHE["ts"] == 0.0
-    assert discovery_mod._CACHE["limit"] == 0
-    assert discovery_mod._CACHE["method"] == ""
+    assert agent.cache["tokens"] == []
+    assert agent.cache["ts"] == 0.0
+    assert agent.cache["limit"] == 0
+    assert agent.cache["method"] == ""
 
 
 def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
@@ -269,11 +263,11 @@ def test_offline_discovery_uses_fallback(monkeypatch):
     monkeypatch.setattr(discovery_mod, "merge_sources", fail)
     monkeypatch.setattr(discovery_mod, "scan_tokens_onchain", fail)
     monkeypatch.setattr(discovery_mod, "enrich_tokens_async", fail)
-    monkeypatch.setattr(discovery_mod, "_CACHE", {"tokens": [], "ts": 0.0, "limit": 0, "method": ""})
     monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0")
     monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
 
     agent = DiscoveryAgent()
+    agent.cache.clear()
 
     tokens = asyncio.run(agent.discover_tokens(offline=True))
 
@@ -291,11 +285,11 @@ def test_offline_discovery_with_network_override(monkeypatch):
     monkeypatch.setattr(discovery_mod, "merge_sources", fail)
     monkeypatch.setattr(discovery_mod, "scan_tokens_onchain", fail)
     monkeypatch.setattr(discovery_mod, "enrich_tokens_async", fail)
-    monkeypatch.setattr(discovery_mod, "_CACHE", {"tokens": [], "ts": 0.0, "limit": 0, "method": ""})
     monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0")
     monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
 
     agent = DiscoveryAgent()
+    agent.cache.clear()
 
     tokens = asyncio.run(agent.discover_tokens(offline=True, method="helius"))
 
@@ -307,21 +301,10 @@ def test_token_file_cache_updates_on_change(tmp_path, monkeypatch):
     import solhunter_zero.agents.discovery as discovery_mod
 
     path = tmp_path / "tokens.txt"
-    monkeypatch.setattr(
-        discovery_mod,
-        "_CACHE",
-        {
-            "tokens": [],
-            "ts": 0.0,
-            "limit": 0,
-            "method": "",
-            "token_file": None,
-            "token_file_mtime": None,
-        },
-    )
     monkeypatch.setenv("DISCOVERY_CACHE_TTL", "120")
 
     agent = DiscoveryAgent()
+    agent.cache.clear()
 
     path.write_text(
         "TokA11111111111111111111111111111111111111\n"
@@ -346,8 +329,6 @@ def test_token_file_cache_updates_on_change(tmp_path, monkeypatch):
 
 
 def test_clone_fetches_bypass_global_cache(monkeypatch):
-    import solhunter_zero.agents.discovery as discovery_mod
-
     call_counter = {"count": 0}
 
     async def fake_discover_once(self, *, method, offline, token_file):
@@ -356,26 +337,14 @@ def test_clone_fetches_bypass_global_cache(monkeypatch):
         return [token], {}
 
     monkeypatch.setenv("DISCOVERY_CACHE_TTL", "300")
-    monkeypatch.setattr(
-        discovery_mod,
-        "_CACHE",
-        {
-            "tokens": [],
-            "ts": 0.0,
-            "limit": 0,
-            "method": "",
-            "token_file": None,
-            "token_file_mtime": None,
-        },
-    )
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
 
     agent = DiscoveryAgent()
-
-    discovery_mod._CACHE["tokens"] = ["CachedToken"]
-    discovery_mod._CACHE["ts"] = time.time()
-    discovery_mod._CACHE["limit"] = agent.limit
-    discovery_mod._CACHE["method"] = agent.default_method
+    agent.cache.clear()
+    agent.cache["tokens"] = ["CachedToken"]
+    agent.cache["ts"] = time.time()
+    agent.cache["limit"] = agent.limit
+    agent.cache["method"] = agent.default_method
 
     first = asyncio.run(agent.discover_tokens(use_cache=False))
     second = asyncio.run(agent.discover_tokens(use_cache=False))
@@ -383,13 +352,13 @@ def test_clone_fetches_bypass_global_cache(monkeypatch):
     assert first == ["Tok1"]
     assert second == ["Tok2"]
     assert call_counter["count"] == 2
-    assert discovery_mod._CACHE["tokens"] == ["CachedToken"]
+    assert agent.cache["tokens"] == ["CachedToken"]
 
-    discovery_mod._CACHE["ts"] = 0.0
+    agent.cache["ts"] = 0.0
 
     third = asyncio.run(agent.discover_tokens())
     assert third == ["Tok3"]
-    assert discovery_mod._CACHE["tokens"] == ["Tok3"]
+    assert agent.cache["tokens"] == ["Tok3"]
 
     cached = asyncio.run(agent.discover_tokens())
     assert cached == ["Tok3"]
@@ -464,23 +433,12 @@ def test_discovery_agent_handles_publish_failure(monkeypatch):
     def boom(*_args, **_kwargs):
         raise RuntimeError("publish failed")
 
-    monkeypatch.setattr(
-        discovery_mod,
-        "_CACHE",
-        {
-            "tokens": [],
-            "ts": 0.0,
-            "limit": 0,
-            "method": "",
-            "token_file": None,
-            "token_file_mtime": None,
-        },
-    )
     monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0")
     monkeypatch.setattr(discovery_mod, "publish", boom)
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
 
     agent = DiscoveryAgent()
+    agent.cache.clear()
 
     tokens = asyncio.run(agent.discover_tokens(use_cache=False))
 

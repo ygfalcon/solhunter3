@@ -118,7 +118,9 @@ class DiscoveryService:
             self.startup_clone_timeout = parsed_timeout
         else:
             self.startup_clone_timeout = None
-        self._agent = DiscoveryAgent()
+        self._cache_lock = asyncio.Lock()
+        self._agent = DiscoveryAgent(cache_lock=self._cache_lock)
+        self._shared_cache: Dict[str, object] = self._agent.cache
         self._settings_snapshot = self._capture_agent_settings()
         self._last_tokens: list[str] = []
         self._last_details: Dict[str, Dict[str, Any]] = {}
@@ -642,7 +644,7 @@ class DiscoveryService:
             log.info("DiscoveryService startup clones produced no tokens")
 
     async def _clone_fetch(self, idx: int) -> tuple[list[str], Dict[str, Dict[str, Any]]]:
-        agent = DiscoveryAgent()
+        agent = DiscoveryAgent(cache=self._shared_cache, cache_lock=self._cache_lock)
         try:
             tokens = await agent.discover_tokens(
                 offline=self.offline,
