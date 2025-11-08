@@ -70,6 +70,8 @@ async def test_trading_runtime_run_cleans_up_on_start_failure(monkeypatch, caplo
 async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch):
     runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
 
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+
     busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         busy_sock.bind(("127.0.0.1", 0))
@@ -107,8 +109,43 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
 
 
 @pytest.mark.anyio("asyncio")
+async def test_trading_runtime_config_reports_live_port_after_fallback(monkeypatch):
+    runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
+
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+
+    busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        busy_sock.bind(("127.0.0.1", 0))
+        busy_sock.listen(1)
+        busy_port = busy_sock.getsockname()[1]
+
+        runtime.ui_port = busy_port
+        runtime.cfg = {"ui_port": busy_port, "ui_host": "stale-host"}
+
+        await runtime._start_ui()
+
+        try:
+            assert runtime.ui_server is not None
+            config_snapshot = runtime.ui_state.snapshot_config()
+
+            assert config_snapshot["ui_port"] == runtime.ui_port
+            assert config_snapshot["ui_host"] == runtime.ui_server.resolved_host
+
+            sanitized = config_snapshot["sanitized_config"]
+            assert sanitized["ui_port"] == runtime.ui_port
+            assert sanitized["ui_host"] == runtime.ui_server.resolved_host
+        finally:
+            runtime.ui_server.stop()
+    finally:
+        busy_sock.close()
+
+
+@pytest.mark.anyio("asyncio")
 async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
     runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
+
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
 
     busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     fallback_hint = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -155,8 +192,10 @@ async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
-async def test_trading_runtime_start_ui_formats_unspecified_host():
+async def test_trading_runtime_start_ui_formats_unspecified_host(monkeypatch):
     runtime = trading_runtime.TradingRuntime(ui_host="0.0.0.0")
+
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
 
     await runtime._start_ui()
     try:
