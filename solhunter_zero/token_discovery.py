@@ -84,45 +84,88 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
             "Accept": "application/json",
         }
 
+    abort = False
     async with aiohttp.ClientSession(timeout=ClientTimeout(total=12)) as session:
-        while offset < _MAX_OFFSET and len(tokens) < target_count:
+        while offset < _MAX_OFFSET and len(tokens) < target_count and not abort:
             params = {
                 "offset": offset,
                 "limit": _PAGE_LIMIT,
                 "sortBy": "v24hUSD",
                 "chain": "solana",  # also pass chain in query to satisfy stricter backends
             }
-            try:
-                async with session.get(BIRDEYE_API, params=params, headers=_headers()) as resp:
-                    if resp.status in (429, 503):
-                        if tokens:
-                            logger.info("BirdEye %s after %s tokens; using partial batch", resp.status, len(tokens))
+            payload: Dict[str, object] | None = None
+            for attempt in range(1, _BIRDEYE_RETRIES + 1):
+                try:
+                    async with session.get(BIRDEYE_API, params=params, headers=_headers()) as resp:
+                        if resp.status in (429, 503) and tokens:
+                            logger.info(
+                                "BirdEye %s after %s tokens; using partial batch",
+                                resp.status,
+                                len(tokens),
+                            )
+                            abort = True
                             break
-                        text = await resp.text()
-                        logger.warning("BirdEye %s at offset %s: %s; backoff %.1fs", resp.status, offset, text[:200], backoff)
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
-                        continue
 
-                    if resp.status == 400:
-                        text = await resp.text()
-                        logger.warning("BirdEye 400 at offset %s (params=%r): %s", offset, params, text[:200])
-                        # Do not loop infinitely on 400; bail out.
+                        if resp.status == 400:
+                            text = await resp.text()
+                            logger.warning(
+                                "BirdEye 400 at offset %s (params=%r): %s",
+                                offset,
+                                params,
+                                text[:200],
+                            )
+                            abort = True
+                            break
+
+                        if resp.status == 429 or resp.status >= 500:
+                            text = await resp.text()
+                            logger.warning(
+                                "BirdEye %s at offset %s (attempt %s/%s): %s; backoff %.1fs",
+                                resp.status,
+                                offset,
+                                attempt,
+                                _BIRDEYE_RETRIES,
+                                text[:200],
+                                backoff,
+                            )
+                            if attempt == _BIRDEYE_RETRIES:
+                                if not tokens:
+                                    _BIRDEYE_CACHE.set("tokens", [])
+                                abort = True
+                                break
+                            await asyncio.sleep(backoff)
+                            backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
+                            continue
+
+                        resp.raise_for_status()
+                        payload = await resp.json()
+                        backoff = _BIRDEYE_BACKOFF  # reset backoff on success
                         break
 
-                    resp.raise_for_status()
-                    payload = await resp.json()
-                    backoff = _BIRDEYE_BACKOFF  # reset backoff on success
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "BirdEye token fetch error at offset %s (attempt %s/%s): %s",
+                        offset,
+                        attempt,
+                        _BIRDEYE_RETRIES,
+                        exc,
+                    )
+                    if attempt == _BIRDEYE_RETRIES:
+                        if not tokens:
+                            _BIRDEYE_CACHE.set("tokens", [])
+                        abort = True
+                        break
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
+                    continue
+                except Exception as exc:
+                    logger.warning("BirdEye token fetch failed at offset %s: %s", offset, exc)
+                    if not tokens:
+                        _BIRDEYE_CACHE.set("tokens", [])
+                    abort = True
+                    break
 
-            except aiohttp.ClientResponseError as exc:
-                logger.warning("BirdEye token fetch failed at offset %s: %s", offset, exc)
-                if not tokens:
-                    _BIRDEYE_CACHE.set("tokens", [])
-                break
-            except Exception as exc:
-                logger.warning("BirdEye token fetch failed at offset %s: %s", offset, exc)
-                if not tokens:
-                    _BIRDEYE_CACHE.set("tokens", [])
+            if abort or payload is None:
                 break
 
             data = payload.get("data", {})
