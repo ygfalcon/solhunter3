@@ -829,15 +829,13 @@ class TradingRuntime:
             raise RuntimeError("UI server failed without an explicit error")
 
         self.ui_port = self.ui_server.port
-        if isinstance(self.cfg, dict):
-            self.cfg["ui_port"] = self.ui_port
         activity_host = self.ui_server.resolved_host
         formatted_host = self.ui_server._format_host_for_url(activity_host)
         if isinstance(self.cfg, dict):
             try:
                 self.cfg["ui_port"] = self.ui_port
-                if activity_host:
-                    self.cfg["ui_host"] = activity_host
+                if self.ui_host:
+                    self.cfg["ui_host"] = self.ui_host
             except Exception:  # pragma: no cover - defensive update
                 pass
         self.activity.add("ui", f"http://{formatted_host}:{self.ui_port}")
@@ -1374,8 +1372,14 @@ class TradingRuntime:
         resolved_host = None
         if self.ui_server is not None:
             resolved_host = getattr(self.ui_server, "resolved_host", None)
-        live_host = resolved_host or self.ui_host
-        sanitized["ui_host"] = _serialize(live_host)
+        bind_host = self.ui_host
+        local_access_host = None
+        if resolved_host and resolved_host != bind_host:
+            local_access_host = resolved_host
+        live_host = resolved_host or bind_host
+        sanitized["ui_host"] = _serialize(bind_host)
+        if local_access_host is not None:
+            sanitized["local_access_host"] = _serialize(local_access_host)
         sanitized["ui_port"] = _serialize(self.ui_port)
         env_summary: Dict[str, Optional[str]] = {}
         for env_key in (
@@ -1413,8 +1417,10 @@ class TradingRuntime:
             "env": env_summary,
             "iteration_count": self._iteration_count,
             "last_iteration_timestamp": iteration.get("timestamp"),
-            "ui_host": live_host,
+            "ui_host": bind_host,
             "ui_port": ui_port,
+            "bind_host": bind_host,
+            "local_access_host": local_access_host,
             "ui_url": f"http://{formatted_host}:{ui_port}" if formatted_host is not None and ui_port is not None else None,
             "sanitized_config": sanitized,
         }

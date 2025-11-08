@@ -235,6 +235,35 @@ async def test_trading_runtime_start_ui_formats_unspecified_host(monkeypatch):
         runtime.ui_server.stop()
 
 
+@pytest.mark.anyio("asyncio")
+async def test_trading_runtime_config_preserves_requested_bind_host(monkeypatch):
+    runtime = trading_runtime.TradingRuntime(ui_host="0.0.0.0")
+    runtime.status.event_bus = True
+    runtime.status.trading_loop = True
+    runtime.status.heartbeat_ts = time.time()
+
+    monkeypatch.setenv("UI_STARTUP_PROBE", "0")
+
+    await runtime._start_ui()
+    try:
+        assert runtime.ui_server is not None
+        resolved_host = runtime.ui_server.resolved_host
+
+        assert runtime.cfg.get("ui_host") == "0.0.0.0"
+
+        config_snapshot = runtime.ui_state.snapshot_config()
+
+        assert config_snapshot["ui_host"] == "0.0.0.0"
+        assert config_snapshot["bind_host"] == "0.0.0.0"
+        assert config_snapshot["local_access_host"] == resolved_host
+
+        sanitized = config_snapshot["sanitized_config"]
+        assert sanitized["ui_host"] == "0.0.0.0"
+        assert sanitized["local_access_host"] == resolved_host
+    finally:
+        runtime.ui_server.stop()
+
+
 def test_format_host_for_url_scoped_ipv6():
     host = "fe80::1%en0"
 
