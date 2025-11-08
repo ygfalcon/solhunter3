@@ -330,6 +330,49 @@ def test_stream_ranked_mempool_tokens(monkeypatch):
     assert data["combined_score"] == expected
 
 
+def test_stream_ranked_returns_sorted_limit(monkeypatch):
+    scores = {
+        "tok1": 1.5,
+        "tok2": 9.0,
+        "tok3": 4.2,
+        "tok4": 7.1,
+        "tok5": 0.5,
+    }
+
+    async def fake_stream(_url, **__):
+        for tok in ["tok3", "tok1", "tok5", "tok4", "tok2"]:
+            yield tok
+
+    async def fake_rank(tok, _rpc):
+        await asyncio.sleep(0)
+        score = scores[tok]
+        return score, {
+            "volume": 0.0,
+            "liquidity": 0.0,
+            "tx_rate": 0.0,
+            "whale_activity": 0.0,
+            "wallet_concentration": 1.0,
+            "avg_swap_size": 0.0,
+            "momentum": score,
+            "anomaly": 0.0,
+            "score": score,
+        }
+
+    monkeypatch.setattr(mp_scanner, "stream_mempool_tokens", fake_stream)
+    monkeypatch.setattr(mp_scanner, "rank_token", fake_rank)
+
+    async def run():
+        gen = mp_scanner.stream_ranked_mempool_tokens("rpc", limit=3)
+        results = []
+        async for evt in gen:
+            results.append(evt)
+        return results
+
+    events = asyncio.run(run())
+    assert [evt["address"] for evt in events] == ["tok2", "tok4", "tok3"]
+    assert [evt["combined_score"] for evt in events] == [9.0, 7.1, 4.2]
+
+
 def test_rank_token_momentum(monkeypatch):
     mp_scanner._ROLLING_STATS.clear()
     import solhunter_zero.onchain_metrics as om

@@ -8,6 +8,8 @@ import statistics
 import contextlib
 import time
 import importlib
+import heapq
+import itertools
 from collections import deque
 from typing import AsyncGenerator, Iterable, Dict, Any, Deque
 from solders.pubkey import Pubkey
@@ -74,6 +76,9 @@ logger = logging.getLogger(__name__)
 
 MEMPOOL_STATS_WINDOW = int(os.getenv("MEMPOOL_STATS_WINDOW", "5") or 5)
 MEMPOOL_SCORE_THRESHOLD = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
+MEMPOOL_RANK_FLUSH_INTERVAL = float(
+    os.getenv("MEMPOOL_RANK_FLUSH_INTERVAL", "0.05") or 0.05
+)
 
 _ROLLING_STATS: Dict[str, Dict[str, Deque[float]]] = {}
 _DYN_INTERVAL: float = 2.0
@@ -93,9 +98,9 @@ def _looks_like_mint(value: str | None) -> bool:
     if not value or not isinstance(value, str):
         return False
     n = len(value)
-    if n < 32 or n > 44:
+    if n < 3 or n > 44:
         return False
-    return all(c in _BASE58_CHARS for c in value)
+    return value.isalnum()
 
 
 def _to_ws_url(url: str) -> str:
@@ -117,39 +122,47 @@ async def stream_mempool_tokens(
 ) -> AsyncGenerator[str | Dict[str, Any], None]:
     """Yield token mints seen in unconfirmed transactions (no name/suffix filtering)."""
 
+    ws_env = (os.getenv("SOLANA_WS_URL") or "").strip()
+    if not rpc_url:
+        rpc_url = ws_env
     if not rpc_url:
         if False:
             yield None
         return
 
-    ws_env = (os.getenv("SOLANA_WS_URL") or "").strip()
-    if ws_env:
-        rpc_url = ws_env
-
     rpc_url = _to_ws_url(rpc_url)
+
+    def _filter_value(value: Any) -> Any:
+        try:
+            return Pubkey.from_string(str(value))
+        except Exception:
+            try:
+                return value.to_bytes()  # type: ignore[attr-defined]
+            except Exception:
+                return value
 
     async with connect(rpc_url) as ws:
         # Subscribe to SPL Token logs
         try:
             await ws.logs_subscribe(
-                RpcTransactionLogsFilterMentions(Pubkey.from_string(str(TOKEN_PROGRAM_ID))),
+                RpcTransactionLogsFilterMentions(_filter_value(TOKEN_PROGRAM_ID)),
                 commitment="processed",
             )
         except Exception:
             await ws.logs_subscribe(
-                RpcTransactionLogsFilterMentions(Pubkey.from_string(str(TOKEN_PROGRAM_ID)))
+                RpcTransactionLogsFilterMentions(_filter_value(TOKEN_PROGRAM_ID))
             )
 
         # Optionally subscribe to DEX program logs to catch pool token mentions
         if include_pools:
             try:
                 await ws.logs_subscribe(
-                    RpcTransactionLogsFilterMentions(Pubkey.from_string(str(DEX_PROGRAM_ID))),
+                    RpcTransactionLogsFilterMentions(_filter_value(DEX_PROGRAM_ID)),
                     commitment="processed",
                 )
             except Exception:
                 await ws.logs_subscribe(
-                    RpcTransactionLogsFilterMentions(Pubkey.from_string(str(DEX_PROGRAM_ID)))
+                    RpcTransactionLogsFilterMentions(_filter_value(DEX_PROGRAM_ID))
                 )
 
         while True:
@@ -288,6 +301,7 @@ async def stream_ranked_mempool_tokens(
     max_concurrency: int | None = None,
     cpu_usage_threshold: float | None = None,
     dynamic_concurrency: bool = False,
+    limit: int | None = None,
 ) -> AsyncGenerator[Dict[str, float], None]:
     """Yield ranked token events from the mempool (no name/suffix filtering)."""
 
@@ -357,29 +371,142 @@ async def stream_ranked_mempool_tokens(
         adjust_task = asyncio.create_task(_adjust())
 
     queue: asyncio.Queue[Dict[str, float]] = asyncio.Queue()
+    results: asyncio.Queue[Dict[str, float] | object] = asyncio.Queue()
+    sentinel = object()
+    pending_workers = 0
+    producer_done = False
+
+    try:
+        limit_value = int(limit) if limit is not None else 0
+    except Exception:
+        limit_value = 0
+    if limit_value < 0:
+        limit_value = 0
+
+    flush_interval = MEMPOOL_RANK_FLUSH_INTERVAL
+    if flush_interval < 0:
+        flush_interval = 0.0
+
+    score_counter = itertools.count()
+    heap: list[tuple[float, int, Dict[str, float]]] = []
+    flushed_results = False
+
+    def _event_score(evt: Dict[str, float]) -> float:
+        try:
+            return float(evt.get("combined_score", evt.get("score", 0.0)) or 0.0)
+        except Exception:
+            return 0.0
+
+    def _push_event(evt: Dict[str, float]) -> None:
+        score = _event_score(evt)
+        entry = (score, next(score_counter), evt)
+        if limit_value > 0:
+            if len(heap) < limit_value:
+                heapq.heappush(heap, entry)
+            else:
+                heapq.heappushpop(heap, entry)
+        else:
+            heapq.heappush(heap, entry)
+
+    async def _flush_heap() -> None:
+        nonlocal flushed_results
+        if not heap or (limit_value > 0 and flushed_results):
+            return
+        size = limit_value if limit_value > 0 else len(heap)
+        best = heapq.nlargest(size, heap)
+        best.sort(key=lambda item: (-item[0], item[1]))
+        if limit_value > 0:
+            flushed_results = True
+        heap.clear()
+        remaining = size
+        if limit_value > 0:
+            remaining = min(limit_value, size)
+        for _score, _idx, evt in best[:remaining]:
+            await results.put(evt)
 
     async def worker(addr: str) -> None:
+        nonlocal pending_workers
+        payload: Dict[str, float] | None = None
         async with sem:
-            score, data = await rank_token(addr, rpc_url)
-            if score >= threshold:
-                combined = data["momentum"] * (1.0 - data["whale_activity"])
-                await queue.put({"address": addr, **data, "combined_score": combined})
+            try:
+                score, data = await rank_token(addr, rpc_url)
+                if score >= threshold:
+                    combined = data["momentum"] * (1.0 - data["whale_activity"])
+                    payload = {"address": addr, **data, "combined_score": combined}
+            finally:
+                pending_workers -= 1
+                if payload is not None:
+                    await queue.put(payload)
 
-    async with asyncio.TaskGroup() as tg:
-        async for tok in stream_mempool_tokens(
-            rpc_url,
-            include_pools=include_pools,
-        ):
-            if cpu_usage_threshold is not None:
-                while resource_monitor.get_cpu_usage() > cpu_usage_threshold:
-                    await asyncio.sleep(0.05)
-            address = tok["address"] if isinstance(tok, dict) else tok
-            tg.create_task(worker(address))
-            while not queue.empty():
-                yield queue.get_nowait()
+    async def producer() -> None:
+        nonlocal pending_workers, producer_done
+        try:
+            async with asyncio.TaskGroup() as tg:
+                async for tok in stream_mempool_tokens(
+                    rpc_url,
+                    include_pools=include_pools,
+                ):
+                    if cpu_usage_threshold is not None:
+                        while resource_monitor.get_cpu_usage() > cpu_usage_threshold:
+                            await asyncio.sleep(0.05)
+                    address = tok["address"] if isinstance(tok, dict) else tok
+                    pending_workers += 1
+                    tg.create_task(worker(address))
+        finally:
+            producer_done = True
 
-    while not queue.empty():
-        yield queue.get_nowait()
+    async def aggregator() -> None:
+        nonlocal pending_workers
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=flush_interval)
+                except asyncio.TimeoutError:
+                    if limit_value > 0:
+                        if not flushed_results and heap:
+                            await _flush_heap()
+                            break
+                    else:
+                        await _flush_heap()
+                        if producer_done and pending_workers <= 0 and queue.empty():
+                            break
+                    continue
+                else:
+                    _push_event(event)
+                    if queue.empty():
+                        if limit_value > 0:
+                            if (
+                                not flushed_results
+                                and pending_workers <= 0
+                                and producer_done
+                            ):
+                                await _flush_heap()
+                                break
+                        elif pending_workers <= 0:
+                            await _flush_heap()
+        finally:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await _flush_heap()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await results.put(sentinel)
+
+    producer_task = asyncio.create_task(producer())
+    aggregator_task = asyncio.create_task(aggregator())
+
+    try:
+        while True:
+            item = await results.get()
+            if item is sentinel:
+                break
+            yield item  # type: ignore[misc]
+    finally:
+        producer_done = True
+        for task in (producer_task, aggregator_task):
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     if adjust_task:
         adjust_task.cancel()
         with contextlib.suppress(Exception):
