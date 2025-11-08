@@ -24,6 +24,7 @@ from ..config import (
     apply_env_overrides,
     get_active_config_name,
     get_broker_urls,
+    get_remote_event_bus_urls,
     load_config,
     set_env_from_config,
 )
@@ -614,6 +615,17 @@ class TradingRuntime:
         event_bus_url = f"ws://127.0.0.1:{ws_port}"
 
         local_ws_disabled = parse_bool_env("EVENT_BUS_DISABLE_LOCAL")
+        remote_ws_urls: List[str] = []
+
+        if local_ws_disabled:
+            remote_ws_urls = get_remote_event_bus_urls(self.cfg)
+            if remote_ws_urls:
+                event_bus_url = remote_ws_urls[0]
+                os.environ["EVENT_BUS_URL"] = remote_ws_urls[0]
+                os.environ["BROKER_WS_URLS"] = ",".join(remote_ws_urls)
+            else:
+                os.environ.pop("EVENT_BUS_URL", None)
+                os.environ.pop("BROKER_WS_URLS", None)
         start_attempts = 3
         start_delay = 0.25
         start_error: Optional[BaseException] = None
@@ -654,24 +666,24 @@ class TradingRuntime:
         server = None
         fallback_used = False
 
-        for idx, (stage, port_candidate) in enumerate(attempt_sequence, start=1):
-            try:
-                server = await start_ws_server("127.0.0.1", port_candidate)
-            except Exception as exc:
-                start_error = exc
-                log.exception(
-                    "Failed to start event bus websocket on attempt %s (port %s)",
-                    idx,
-                    port_candidate,
-                )
-            else:
-                if server is None and not local_ws_disabled:
-                    start_error = RuntimeError(
-                        "start_ws_server returned no server instance"
+        if not local_ws_disabled:
+            for idx, (stage, port_candidate) in enumerate(attempt_sequence, start=1):
+                try:
+                    server = await start_ws_server("127.0.0.1", port_candidate)
+                except Exception as exc:
+                    start_error = exc
+                    log.exception(
+                        "Failed to start event bus websocket on attempt %s (port %s)",
+                        idx,
+                        port_candidate,
                     )
                 else:
-                    self.bus_started = bool(server)
-                    if server is not None and not local_ws_disabled:
+                    if server is None:
+                        start_error = RuntimeError(
+                            "start_ws_server returned no server instance"
+                        )
+                    else:
+                        self.bus_started = True
                         bound_port = port_candidate
                         try:
                             sockets = getattr(server, "sockets", None)
@@ -687,23 +699,32 @@ class TradingRuntime:
                         event_bus_url = f"ws://127.0.0.1:{bound_port}"
                         os.environ["EVENT_BUS_URL"] = event_bus_url
                         os.environ["BROKER_WS_URLS"] = event_bus_url
-                    fallback_used = stage == "fallback"
-                    detail = (
-                        "local websocket disabled via EVENT_BUS_DISABLE_LOCAL"
-                        if local_ws_disabled
-                        else (
+                        fallback_used = stage == "fallback"
+                        detail = (
                             f"listening on {event_bus_url}"
                             if not fallback_used
                             else f"listening on {event_bus_url} (fallback)"
                         )
-                    )
-                    self.activity.add("event_bus", detail)
-                    start_error = None
-                    break
+                        self.activity.add("event_bus", detail)
+                        start_error = None
+                        break
 
-            if idx < total_attempts:
-                await asyncio.sleep(start_delay)
-                start_delay = min(start_delay * 2, 2.0)
+                if idx < total_attempts:
+                    await asyncio.sleep(start_delay)
+                    start_delay = min(start_delay * 2, 2.0)
+        else:
+            if remote_ws_urls:
+                detail = (
+                    "local websocket disabled via EVENT_BUS_DISABLE_LOCAL; "
+                    f"using remote broker(s): {', '.join(remote_ws_urls)}"
+                )
+                self.activity.add("event_bus", detail)
+            else:
+                detail = (
+                    "local websocket disabled via EVENT_BUS_DISABLE_LOCAL; "
+                    "no websocket broker configured"
+                )
+                self.activity.add("event_bus", detail, ok=False)
 
         if start_error is not None:
             message = (

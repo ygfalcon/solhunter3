@@ -715,6 +715,63 @@ def get_event_bus_peers(cfg: Mapping[str, Any] | None = None) -> list[str]:
     return peers
 
 
+def _is_local_ws_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    return host in {"127.0.0.1", "localhost", "0.0.0.0"}
+
+
+def _coerce_urls(value: Sequence[str] | str) -> list[str]:
+    if isinstance(value, str):
+        items = value.split(",")
+    else:
+        items = list(value)
+    result: list[str] = []
+    for raw in items:
+        url = str(raw).strip()
+        if url:
+            result.append(url)
+    return result
+
+
+def get_remote_event_bus_urls(cfg: Mapping[str, Any] | None = None) -> list[str]:
+    """Return configured non-local websocket broker URLs."""
+
+    cfg = cfg or _ACTIVE_CONFIG
+
+    urls: list[str] = []
+
+    env_urls = os.getenv("BROKER_WS_URLS")
+    if env_urls:
+        urls.extend(_coerce_urls(env_urls))
+
+    env_alias = os.getenv("EVENT_BUS_URL")
+    if env_alias:
+        urls.append(env_alias.strip())
+
+    cfg_primary = cfg.get("event_bus_url")
+    if cfg_primary:
+        urls.append(str(cfg_primary).strip())
+
+    for peer in get_event_bus_peers(cfg):
+        if peer:
+            urls.append(peer)
+
+    seen: list[str] = []
+    for url in urls:
+        if _is_local_ws_url(url):
+            continue
+        if url not in seen:
+            seen.append(url)
+
+    return seen
+
+
 def get_broker_url(cfg: Mapping[str, Any] | None = None) -> str | None:
     """Return message broker URL if configured (first of get_broker_urls)."""
     urls = get_broker_urls(cfg)
