@@ -64,6 +64,7 @@ class DiscoveryService:
         offline: bool = False,
         token_file: Optional[str] = None,
         startup_clones: Optional[int] = None,
+        startup_clone_timeout: Optional[float] = None,
     ) -> None:
         self.queue = queue
         self.interval = max(0.1, float(interval))
@@ -90,6 +91,33 @@ class DiscoveryService:
         if startup_clones is None:
             startup_clones = 5
         self.startup_clones = max(1, int(startup_clones))
+        timeout_override: Optional[float] = None
+        raw_timeout = os.getenv("DISCOVERY_STARTUP_CLONE_TIMEOUT")
+        if raw_timeout:
+            try:
+                timeout_override = float(raw_timeout)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_STARTUP_CLONE_TIMEOUT=%r; ignoring", raw_timeout
+                )
+        if startup_clone_timeout is None:
+            startup_clone_timeout = timeout_override
+        elif timeout_override is not None:
+            startup_clone_timeout = timeout_override
+        if startup_clone_timeout is not None:
+            try:
+                parsed_timeout = float(startup_clone_timeout)
+            except (TypeError, ValueError):
+                log.warning(
+                    "Invalid startup_clone_timeout=%r; ignoring", startup_clone_timeout
+                )
+                parsed_timeout = None
+            else:
+                if parsed_timeout <= 0.0:
+                    parsed_timeout = None
+            self.startup_clone_timeout = parsed_timeout
+        else:
+            self.startup_clone_timeout = None
         self._agent = DiscoveryAgent()
         self._settings_snapshot = self._capture_agent_settings()
         self._last_tokens: list[str] = []
@@ -557,17 +585,29 @@ class DiscoveryService:
         log.info(
             "DiscoveryService priming discovery with %d startup clone(s)", clones
         )
-        tasks: list[asyncio.Task] = []
+        timeout = self.startup_clone_timeout
+        scheduled: list[tuple[int, asyncio.Task]] = []
         for idx in range(clones):
-            tasks.append(
-                asyncio.create_task(
-                    self._clone_fetch(idx), name=f"discovery_prime_{idx}"
-                )
-            )
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+            clone_coro = self._clone_fetch(idx)
+            if timeout is not None:
+                clone_coro = asyncio.wait_for(clone_coro, timeout)
+            task = asyncio.create_task(clone_coro, name=f"discovery_prime_{idx}")
+            scheduled.append((idx, task))
+        results = await asyncio.gather(
+            *(task for _, task in scheduled), return_exceptions=True
+        )
         aggregated: list[str] = []
         aggregated_details: Dict[str, Dict[str, Any]] = {}
-        for idx, result in enumerate(results):
+        for (idx, task), result in zip(scheduled, results):
+            if isinstance(result, asyncio.TimeoutError):
+                log.warning(
+                    "DiscoveryService startup clone %d timed out after %.2fs",
+                    idx,
+                    timeout if timeout is not None else 0.0,
+                )
+                if not task.done():
+                    task.cancel()
+                continue
             if isinstance(result, Exception):
                 log.warning(
                     "DiscoveryService startup clone %d failed: %s", idx, result

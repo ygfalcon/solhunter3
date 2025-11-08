@@ -183,6 +183,52 @@ async def test_snapshot_reports_backoff_state(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_startup_clone_timeout(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(
+        queue,
+        interval=0.1,
+        cache_ttl=0.0,
+        startup_clones=2,
+        startup_clone_timeout=0.05,
+    )
+
+    emitted: list[list[str]] = []
+
+    async def fake_emit(self, tokens, *, fresh: bool) -> None:
+        emitted.append([str(tok) for tok in tokens])
+
+    monkeypatch.setattr(discovery_mod.DiscoveryService, "_emit_tokens", fake_emit)
+
+    cancelled = {"value": False}
+
+    async def fake_clone(self, idx: int) -> tuple[list[str], dict[str, dict[str, object]]]:
+        if idx == 0:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled["value"] = True
+                raise
+        return (["fast"], {"fast": {"source": "quick"}})
+
+    monkeypatch.setattr(discovery_mod.DiscoveryService, "_clone_fetch", fake_clone)
+
+    async def fake_run(self) -> None:
+        await self._stopped.wait()
+
+    monkeypatch.setattr(discovery_mod.DiscoveryService, "_run", fake_run)
+
+    await service.start()
+
+    assert service._primed is True
+    assert service._last_tokens == ["fast"]
+    assert emitted == [["fast"]]
+    assert cancelled["value"] is True
+
+    await service.stop()
+
+
+@pytest.mark.anyio
 async def test_emit_tokens_publishes_event(monkeypatch):
     queue: asyncio.Queue = asyncio.Queue()
     service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
