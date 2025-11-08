@@ -7,6 +7,7 @@ import time
 import types
 from typing import Dict, List
 
+import anyio
 import pytest
 
 
@@ -203,6 +204,48 @@ async def test_close_position_endpoint_uses_runtime_handler(monkeypatch):
 
     await executed.wait()
     assert recorded == {"mint": "SOL", "qty": 2.5}
+
+
+@pytest.mark.anyio("asyncio")
+async def test_ui_health_reports_websocket_channels_ok(monkeypatch):
+    pytest.importorskip("websockets")
+
+    monkeypatch.setenv("UI_ENABLED", "1")
+
+    runtime = TradingRuntime()
+
+    class _StubUIServer:
+        def __init__(self, state, host: str, port: int) -> None:
+            self.state = state
+            self.host = host
+            self.port = port
+            self._running = False
+
+        def start(self) -> None:
+            self._running = True
+
+        def stop(self) -> None:
+            self._running = False
+
+    monkeypatch.setattr(runtime_module, "UIServer", _StubUIServer)
+
+    try:
+        await runtime._start_ui()
+        assert runtime._ui_ws_threads, "expected websocket threads to be recorded"
+
+        def _invoke_health():
+            app = create_app(runtime.ui_state)
+            client = app.test_client()
+            return client.get("/ui/health")
+
+        response = await anyio.to_thread.run_sync(_invoke_health)
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["rl_ws"] == "ok"
+        assert payload["events_ws"] == "ok"
+        assert payload["logs_ws"] == "ok"
+    finally:
+        await runtime.stop()
 
 
 def test_collect_health_metrics(monkeypatch):

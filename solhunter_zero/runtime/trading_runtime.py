@@ -55,7 +55,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         resolve_momentum_flag,
     )
     from ..golden_pipeline.service import GoldenPipelineService
-from ..ui import UIState, UIServer
+from ..ui import UIState, UIServer, start_websockets, stop_websockets
 from ..util import parse_bool_env
 from .runtime_wiring import resolve_golden_enabled
 from .schema_adapters import read_golden, read_ohlcv
@@ -292,6 +292,8 @@ class TradingRuntime:
         self.trading_task: Optional[asyncio.Task] = None
         self.bus_started = False
         self.ui_server: Optional[UIServer] = None
+        self._ui_ws_threads: Optional[Dict[str, threading.Thread]] = None
+        self._ui_ws_started_here = False
         self.ui_state = UIState()
         self.activity = ActivityLog()
         self.status = RuntimeStatus()
@@ -445,6 +447,9 @@ class TradingRuntime:
         self.stop_event.set()
         self.activity.add("runtime", "stopping")
 
+        ui_ws_started = bool(self._ui_ws_started_here and self._ui_ws_threads)
+        self._ui_ws_started_here = False
+
         if self._golden_service is not None:
             with contextlib.suppress(Exception):
                 await self._golden_service.stop()
@@ -486,6 +491,10 @@ class TradingRuntime:
         if self.ui_server:
             self.ui_server.stop()
             self.ui_server = None
+
+        if ui_ws_started:
+            stop_websockets()
+        self._ui_ws_threads = None
 
         if self.rl_task is not None:
             if self.rl_task in tasks_to_cancel:
@@ -866,6 +875,9 @@ class TradingRuntime:
         self.ui_state.risk_provider = self._provide_risk_snapshot
         self.ui_state.close_position_handler = self._handle_close_request
 
+        self._ui_ws_threads = None
+        self._ui_ws_started_here = False
+
         if not self._ui_enabled:
             self.ui_server = None
             log.info("TradingRuntime: UI disabled via UI_ENABLED")
@@ -873,6 +885,9 @@ class TradingRuntime:
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
+        threads = start_websockets()
+        self._ui_ws_threads = threads
+        self._ui_ws_started_here = bool(threads)
         self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
 
     async def _start_agents(self) -> None:
