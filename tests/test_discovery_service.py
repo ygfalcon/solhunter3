@@ -259,6 +259,45 @@ async def test_emit_tokens_publishes_event(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_emit_tokens_dedupes_duplicate_tokens(monkeypatch):
+    queue: asyncio.Queue = asyncio.Queue()
+    service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)
+
+    events: list[dict[str, object]] = []
+
+    def fake_publish(topic, payload, *args, **kwargs):
+        if topic == "token_discovered":
+            events.append(dict(payload))
+
+    monkeypatch.setattr(
+        "solhunter_zero.pipeline.discovery_service.publish", fake_publish
+    )
+
+    duplicates = ["TokA", "TokA", "TokB", "TokA"]
+    discovery_mod.TRENDING_METADATA["TokA"] = {"liquidity": 10.0}
+    discovery_mod.TRENDING_METADATA["TokB"] = {"liquidity": 20.0}
+
+    try:
+        await service._emit_tokens(duplicates, fresh=True)
+        batch = await queue.get()
+
+        assert [candidate.token for candidate in batch] == ["TokA", "TokB"]
+        assert service._last_emitted == ["TokA", "TokB"]
+        assert list(service._last_metadata_snapshot) == ["TokA", "TokB"]
+
+        assert events == [
+            {
+                "tokens": ["TokA", "TokB"],
+                "metadata_refresh": False,
+                "changed_tokens": ["TokA", "TokB"],
+            }
+        ]
+    finally:
+        monkeypatch.delitem(discovery_mod.TRENDING_METADATA, "TokA", raising=False)
+        monkeypatch.delitem(discovery_mod.TRENDING_METADATA, "TokB", raising=False)
+
+
+@pytest.mark.anyio
 async def test_metadata_refresh_bypasses_duplicate_guard(monkeypatch):
     queue: asyncio.Queue = asyncio.Queue()
     service = discovery_mod.DiscoveryService(queue, interval=0.1, cache_ttl=0.0)

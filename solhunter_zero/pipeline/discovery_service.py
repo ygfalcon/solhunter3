@@ -452,6 +452,7 @@ class DiscoveryService:
         seq = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
         if not seq:
             return
+        seq = list(dict.fromkeys(seq))
         batch = self._build_candidates(seq)
         metadata_snapshot: Dict[str, Dict[str, Any]] = {}
         for candidate in batch:
