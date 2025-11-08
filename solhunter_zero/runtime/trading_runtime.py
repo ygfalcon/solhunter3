@@ -433,7 +433,13 @@ class TradingRuntime:
         self.status.depth_service = depth_running
 
         if self.cfg.get("birdeye_api_key"):
-            os.environ.setdefault("BIRDEYE_API_KEY", str(self.cfg["birdeye_api_key"]))
+            new_birdeye_key = str(self.cfg["birdeye_api_key"])
+            existing_birdeye_key = os.environ.get("BIRDEYE_API_KEY")
+            if existing_birdeye_key is not None and existing_birdeye_key != new_birdeye_key:
+                log.info(
+                    "Replacing existing BIRDEYE_API_KEY env var with value from config"
+                )
+            os.environ["BIRDEYE_API_KEY"] = new_birdeye_key
             try:
                 from .. import scanner_common
 
