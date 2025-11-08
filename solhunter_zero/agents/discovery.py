@@ -5,6 +5,7 @@ import contextlib
 import logging
 import os
 import time
+import urllib.parse
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from .. import config
@@ -59,7 +60,49 @@ except ImportError as exc:  # pragma: no cover - optional dependency guard
                 enriched.append(canonical)
         return enriched
 
-_CACHE: dict[str, object] = {"tokens": [], "ts": 0.0, "limit": 0, "method": ""}
+_CACHE: dict[str, object] = {
+    "tokens": [],
+    "ts": 0.0,
+    "limit": 0,
+    "method": "",
+    "rpc_identity": "",
+}
+
+
+def _rpc_identity(url: Optional[str]) -> str:
+    """Return a stable identity for the active RPC endpoint/cluster."""
+
+    if not url:
+        return ""
+    text = url.strip()
+    if not text:
+        return ""
+    lower_text = text.lower()
+    try:
+        parsed = urllib.parse.urlparse(text)
+    except Exception:  # pragma: no cover - extremely defensive
+        parsed = None
+
+    cluster = "mainnet-beta"
+    cluster_markers = ("devnet", "testnet", "mainnet-beta", "mainnet")
+    for marker in cluster_markers:
+        if marker in lower_text:
+            cluster = "mainnet-beta" if marker == "mainnet" else marker
+            break
+
+    if parsed and parsed.scheme and parsed.netloc:
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+        base = f"{scheme}://{netloc}"
+        path = parsed.path.rstrip("/")
+        if path:
+            base = f"{base}{path}"
+        else:
+            base = f"{base}/"
+    else:  # pragma: no cover - fallback for malformed URLs
+        base = lower_text
+
+    return f"{cluster}:{base}"
 _STATIC_FALLBACK = [
     "So11111111111111111111111111111111111111112",  # SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
@@ -240,6 +283,7 @@ class DiscoveryAgent:
                 )
         else:
             active_method = requested_method
+        current_rpc_identity = _rpc_identity(self.rpc_url)
         cached_tokens = (
             list(_CACHE.get("tokens", []))
             if isinstance(_CACHE.get("tokens"), list)
@@ -247,11 +291,23 @@ class DiscoveryAgent:
         )
         cache_limit = int(_CACHE.get("limit", 0))
         cached_method = (_CACHE.get("method") or "").lower()
+        cached_identity = str(_CACHE.get("rpc_identity") or "")
+        identity_matches = bool(
+            (not cached_identity and not current_rpc_identity)
+            or cached_identity == current_rpc_identity
+        )
+        if cached_tokens and not identity_matches:
+            logger.debug(
+                "DiscoveryAgent cache invalidated due to RPC change (cached=%s, current=%s)",
+                cached_identity,
+                current_rpc_identity,
+            )
         if (
             ttl > 0
             and cached_tokens
             and now - float(_CACHE.get("ts", 0.0)) < ttl
             and (not method_override or cached_method == active_method or not cached_method)
+            and identity_matches
         ):
             if cache_limit and cache_limit >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
@@ -307,6 +363,7 @@ class DiscoveryAgent:
             _CACHE["ts"] = now
             _CACHE["limit"] = self.limit
             _CACHE["method"] = active_method
+            _CACHE["rpc_identity"] = current_rpc_identity
 
         return tokens
 
