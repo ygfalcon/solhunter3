@@ -47,7 +47,7 @@ async def fetch_trending_tokens_async(limit: int | None = None) -> List[str]:
     """Return a deduplicated list of trending token addresses."""
 
     requested = int(limit) if limit is not None else _DEFAULT_LIMIT
-    size = max(1, min(requested, _DEFAULT_LIMIT))
+    size = max(1, requested)
     tokens = await scan_tokens_async(limit=size)
     try:
         enriched = await enrich_tokens_async(tokens)
@@ -259,7 +259,7 @@ async def merge_sources(
     """
 
     requested = int(limit) if limit is not None else _DEFAULT_LIMIT
-    size = max(1, min(requested, _DEFAULT_LIMIT))
+    size = max(1, requested)
     threshold = (
         float(mempool_threshold)
         if mempool_threshold is not None

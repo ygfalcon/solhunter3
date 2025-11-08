@@ -43,6 +43,7 @@ This document lists environment variables recognized by the project.
 | `DEX_METRIC_URLS` | `` | Configures dex metric urls |
 | `DISCORD_FEEDS` | `https://discord.com/api/guilds/613425648685547541/widget.json` | Configures discord feeds |
 | `DISCOVERY_METHOD` | `websocket` | Configures discovery method |
+| `DISCOVERY_MAX_TOKENS` | `50` | Fallback maximum tokens to request when callers omit a limit; explicit limits bypass this |
 | `DYNAMIC_CONCURRENCY_INTERVAL` | `` | Interval for dynamic concurrency |
 | `EDGE_CACHE_TTL` | `60` | TTL for edge cache cache |
 | `EVENT_BATCH_MS` | `` | Configures event batch ms |

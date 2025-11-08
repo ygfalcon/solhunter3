@@ -180,7 +180,7 @@ def test_merge_sources_retries_mempool(monkeypatch):
     assert captured["limit"] == 1
 
 
-def test_merge_sources_caps_limit(monkeypatch):
+def test_merge_sources_allows_limits_above_default(monkeypatch):
     tokens = [f"mint-{idx}" for idx in range(10)]
 
     captured_limit = {"value": None}
@@ -217,8 +217,8 @@ def test_merge_sources_caps_limit(monkeypatch):
     monkeypatch.setattr("solhunter_zero.discovery._DEFAULT_LIMIT", 5)
 
     result = asyncio.run(merge_sources("rpc", limit=10))
-    assert len(result) == 5
-    assert captured_limit["value"] == 5
+    assert len(result) == 10
+    assert captured_limit["value"] == 10
 
 
 def test_merge_sources_respects_metric_batch(monkeypatch):
@@ -268,3 +268,32 @@ def test_merge_sources_respects_metric_batch(monkeypatch):
     assert [entry["address"] for entry in result][: len(tokens)] == tokens
     assert volume_counter["max"] == 2
     assert liquidity_counter["max"] == 2
+
+
+def test_fetch_trending_tokens_async_allows_limits_above_default(monkeypatch):
+    tokens = [f"mint-{idx}" for idx in range(12)]
+
+    captured = {"limit": None}
+
+    async def fake_scan_tokens_async(limit=None):
+        captured["limit"] = limit
+        return tokens[: limit if limit is not None else len(tokens)]
+
+    async def fake_enrich_tokens_async(items):
+        return items
+
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.scan_tokens_async", fake_scan_tokens_async
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.enrich_tokens_async", fake_enrich_tokens_async
+    )
+    monkeypatch.setattr("solhunter_zero.discovery._DEFAULT_LIMIT", 5)
+
+    result = asyncio.run(
+        discovery_mod.fetch_trending_tokens_async(limit=12)
+    )
+
+    assert captured["limit"] == 12
+    assert len(result) == 12
+    assert result == tokens
