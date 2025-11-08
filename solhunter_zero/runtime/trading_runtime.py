@@ -839,6 +839,13 @@ class TradingRuntime:
         self.ui_port = self.ui_server.port
         activity_host = self.ui_server.resolved_host
         formatted_host = self.ui_server._format_host_for_url(activity_host)
+        if isinstance(self.cfg, dict):
+            try:
+                self.cfg["ui_port"] = self.ui_port
+                if activity_host:
+                    self.cfg["ui_host"] = activity_host
+            except Exception:  # pragma: no cover - defensive update
+                pass
         self.activity.add("ui", f"http://{formatted_host}:{self.ui_port}")
 
     async def _start_agents(self) -> None:
@@ -1370,6 +1377,12 @@ class TradingRuntime:
             if any(term in lower for term in ("key", "secret", "token", "pass", "auth")):
                 continue
             sanitized[str(key)] = _serialize(value)
+        resolved_host = None
+        if self.ui_server is not None:
+            resolved_host = getattr(self.ui_server, "resolved_host", None)
+        live_host = resolved_host or self.ui_host
+        sanitized["ui_host"] = _serialize(live_host)
+        sanitized["ui_port"] = _serialize(self.ui_port)
         env_summary: Dict[str, Optional[str]] = {}
         for env_key in (
             "SOLANA_RPC_URL",
@@ -1388,6 +1401,12 @@ class TradingRuntime:
             else []
         )
         iteration = self._collect_iteration()
+        ui_port = self.ui_port
+        formatted_host: Optional[str] = None
+        if self.ui_server is not None:
+            host_for_url = resolved_host or live_host
+            if host_for_url is not None:
+                formatted_host = self.ui_server._format_host_for_url(host_for_url)
         return {
             "config_path": self.config_path,
             "agents": agents,
@@ -1400,6 +1419,9 @@ class TradingRuntime:
             "env": env_summary,
             "iteration_count": self._iteration_count,
             "last_iteration_timestamp": iteration.get("timestamp"),
+            "ui_host": live_host,
+            "ui_port": ui_port,
+            "ui_url": f"http://{formatted_host}:{ui_port}" if formatted_host is not None and ui_port is not None else None,
             "sanitized_config": sanitized,
         }
 
