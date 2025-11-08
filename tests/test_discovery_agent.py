@@ -415,6 +415,38 @@ def test_discovery_agent_custom_limit_websocket(monkeypatch):
     assert tokens == [f"mint{i}" for i in range(5)]
 
 
+def test_discovery_agent_handles_publish_failure(monkeypatch):
+    import solhunter_zero.agents.discovery as discovery_mod
+
+    async def fake_discover_once(self, *, method, offline, token_file):
+        return ["MintZ11111111111111111111111111111111111111"], {}
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("publish failed")
+
+    monkeypatch.setattr(
+        discovery_mod,
+        "_CACHE",
+        {
+            "tokens": [],
+            "ts": 0.0,
+            "limit": 0,
+            "method": "",
+            "token_file": None,
+            "token_file_mtime": None,
+        },
+    )
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0")
+    monkeypatch.setattr(discovery_mod, "publish", boom)
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+
+    agent = DiscoveryAgent()
+
+    tokens = asyncio.run(agent.discover_tokens(use_cache=False))
+
+    assert tokens == ["MintZ11111111111111111111111111111111111111"]
+
+
 def test_collect_mempool_times_out(monkeypatch):
     import solhunter_zero.agents.discovery as discovery_mod
 
