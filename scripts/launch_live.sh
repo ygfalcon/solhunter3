@@ -751,7 +751,11 @@ register_child() {
 start_log_stream() {
   local log=$1
   local label=$2
-  touch "$log"
+  # Ensure the log starts empty so the stream only includes fresh entries.
+  # This mirrors ``: > file`` truncation behaviour that works on both GNU and
+  # BSD (macOS) ``tail`` implementations without relying on ``tail -n0``
+  # semantics.
+  : > "$log"
   local __last_line=""
   {
     tail -n +1 -F "$log" 2>/dev/null |
