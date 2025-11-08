@@ -269,6 +269,12 @@ class TradingRuntime:
         self.explicit_min_delay = min_delay
         self.explicit_max_delay = max_delay
 
+        if ui_host:
+            if not os.environ.get("UI_HOST"):
+                os.environ["UI_HOST"] = ui_host
+            if not os.environ.get("UI_WS_HOST"):
+                os.environ["UI_WS_HOST"] = ui_host
+
         self._ui_enabled = os.getenv("UI_ENABLED", "1").lower() not in {
             "0",
             "false",
