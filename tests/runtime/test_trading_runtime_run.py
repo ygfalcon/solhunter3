@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import socket
+import time
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -69,6 +71,9 @@ async def test_trading_runtime_run_cleans_up_on_start_failure(monkeypatch, caplo
 @pytest.mark.anyio("asyncio")
 async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch):
     runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
+    runtime.status.event_bus = True
+    runtime.status.trading_loop = True
+    runtime.status.heartbeat_ts = time.time()
 
     busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -109,6 +114,9 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
 @pytest.mark.anyio("asyncio")
 async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
     runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
+    runtime.status.event_bus = True
+    runtime.status.trading_loop = True
+    runtime.status.heartbeat_ts = time.time()
 
     busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     fallback_hint = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -157,6 +165,9 @@ async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
 @pytest.mark.anyio("asyncio")
 async def test_trading_runtime_start_ui_formats_unspecified_host():
     runtime = trading_runtime.TradingRuntime(ui_host="0.0.0.0")
+    runtime.status.event_bus = True
+    runtime.status.trading_loop = True
+    runtime.status.heartbeat_ts = time.time()
 
     await runtime._start_ui()
     try:
@@ -273,3 +284,40 @@ async def test_prepare_configuration_uses_saved_config_selection(monkeypatch, tm
     assert captured["dry_run"] is False
     assert captured["testnet"] is False
     assert captured["preloaded_config"] == {}
+
+
+@pytest.mark.anyio("asyncio")
+async def test_prepare_configuration_sets_pytorch_env(monkeypatch, tmp_path):
+    runtime = trading_runtime.TradingRuntime(
+        config_path=str(tmp_path / "config.toml")
+    )
+
+    config = {"some": "value"}
+
+    async def fake_startup(
+        config_path: str | None,
+        *,
+        offline: bool,
+        dry_run: bool,
+        testnet: bool,
+        preloaded_config: dict | None = None,
+    ) -> tuple[dict, object, None]:
+        return config, object(), None
+
+    monkeypatch.setattr(trading_runtime, "perform_startup_async", fake_startup)
+    monkeypatch.setattr(trading_runtime, "load_config", lambda path=None: config)
+    monkeypatch.setattr(trading_runtime, "apply_env_overrides", lambda cfg: cfg)
+
+    captured: dict[str, object] = {}
+
+    def fake_set_env(cfg):
+        captured["cfg"] = cfg
+
+    monkeypatch.setattr(trading_runtime, "set_env_from_config", fake_set_env)
+    monkeypatch.delenv("PYTORCH_ENABLE_MPS_FALLBACK", raising=False)
+
+    await runtime._prepare_configuration()
+
+    assert captured["cfg"] is config
+    assert runtime.cfg is config
+    assert os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") == "1"
