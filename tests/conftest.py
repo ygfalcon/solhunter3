@@ -37,6 +37,21 @@ if importlib.util.find_spec("aiohttp") is None:
     aiohttp_mod.ClientSession = object
     aiohttp_mod.TCPConnector = object
 
+    class ClientTimeout:
+        def __init__(self, total=None, sock_read=None, sock_connect=None):
+            self.total = total
+            self.sock_read = sock_read
+            self.sock_connect = sock_connect
+
+    aiohttp_mod.ClientTimeout = ClientTimeout
+
+    class ClientResponseError(Exception):
+        def __init__(self, *args, status=None, **kwargs):
+            super().__init__(*args)
+            self.status = status
+
+    aiohttp_mod.ClientResponseError = ClientResponseError
+
     web_mod = types.ModuleType("aiohttp.web")
     web_mod.__spec__ = importlib.machinery.ModuleSpec("aiohttp.web", None)
 
@@ -49,8 +64,32 @@ if importlib.util.find_spec("aiohttp") is None:
     web_mod.Application = Application
     web_mod.json_response = json_response
 
+    abc_mod = types.ModuleType("aiohttp.abc")
+    abc_mod.__spec__ = importlib.machinery.ModuleSpec("aiohttp.abc", None)
+
+    class AbstractResolver:
+        async def resolve(self, *args, **kwargs):  # pragma: no cover - stub
+            return []
+
+        async def close(self) -> None:  # pragma: no cover - stub
+            return None
+
+    abc_mod.AbstractResolver = AbstractResolver
+
+    aiohttp_mod.abc = abc_mod
     aiohttp_mod.web = web_mod
+    resolver_mod = types.ModuleType("aiohttp.resolver")
+    resolver_mod.__spec__ = importlib.machinery.ModuleSpec("aiohttp.resolver", None)
+
+    class DefaultResolver(AbstractResolver):
+        pass
+
+    resolver_mod.DefaultResolver = DefaultResolver
+
+    aiohttp_mod.resolver = resolver_mod
     sys.modules["aiohttp.web"] = web_mod
+    sys.modules["aiohttp.abc"] = abc_mod
+    sys.modules["aiohttp.resolver"] = resolver_mod
     sys.modules["aiohttp"] = aiohttp_mod
 
 # Stub other optional dependencies when unavailable
@@ -210,7 +249,18 @@ if importlib.util.find_spec("solders") is None:
         mod = types.ModuleType(f"solders.{name}")
         mod.__spec__ = importlib.machinery.ModuleSpec(f"solders.{name}", None)
         sys.modules.setdefault(f"solders.{name}", mod)
-    sys.modules["solders.pubkey"].Pubkey = object
+    class Pubkey:
+        def __init__(self, value: str = "") -> None:
+            self.value = value
+
+        @classmethod
+        def from_string(cls, value: str) -> "Pubkey":
+            return cls(value)
+
+        def __str__(self) -> str:
+            return self.value
+
+    sys.modules["solders.pubkey"].Pubkey = Pubkey
     sys.modules["solders.hash"].Hash = object
     sys.modules["solders.message"].MessageV0 = object
     sys.modules["solders.transaction"].VersionedTransaction = type("VersionedTransaction", (), {"populate": staticmethod(lambda *a, **k: object())})

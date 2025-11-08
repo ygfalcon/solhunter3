@@ -8,6 +8,7 @@ import time
 import importlib
 import importlib.machinery
 import os
+from typing import Any, Callable, Dict, List
 
 
 def stub_numpy() -> None:
@@ -479,11 +480,59 @@ def stub_flask() -> None:
     flask = types.ModuleType('flask')
     flask.__spec__ = importlib.machinery.ModuleSpec('flask', None)
 
-    request = types.SimpleNamespace(json=None, files={})
+    class Request:
+        json = None
+        files: Dict[str, Any] = {}
+        args: Dict[str, Any] = {}
+        form: Dict[str, Any] = {}
+        method: str = "GET"
+        is_json: bool = False
+
+        def get_json(self, silent: bool = False):
+            return self.json
+
+    request = Request()
+
+    def _parse_args(query: str) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if not query:
+            return params
+        for part in query.split("&"):
+            if not part:
+                continue
+            if "=" in part:
+                key, value = part.split("=", 1)
+            else:
+                key, value = part, ""
+            params.setdefault(key, []).append(value)
+        normalized: Dict[str, Any] = {}
+        for key, values in params.items():
+            if len(values) == 1:
+                normalized[key] = values[0]
+            else:
+                normalized[key] = values
+        return normalized
+
+    def _match_route(pattern: str, actual: str) -> Dict[str, str] | None:
+        pattern_parts = [part for part in pattern.strip('/').split('/') if part]
+        actual_parts = [part for part in actual.strip('/').split('/') if part]
+        if len(pattern_parts) != len(actual_parts):
+            return None
+        params: Dict[str, str] = {}
+        for pat, val in zip(pattern_parts, actual_parts):
+            if pat.startswith('<') and pat.endswith('>'):
+                name = pat[1:-1]
+                if ':' in name:
+                    name = name.split(':', 1)[1]
+                params[name] = val
+            elif pat != val:
+                return None
+        return params
 
     class Flask:
         def __init__(self, name, static_folder=None):
-            self.routes = {}
+            self.routes: List[tuple[str, tuple[str, ...], Callable[..., Any]]] = []
+            self._after_request = lambda resp: resp
 
         def route(self, path, methods=None):
             if methods is None:
@@ -491,56 +540,120 @@ def stub_flask() -> None:
             methods = tuple(m.upper() for m in methods)
 
             def decorator(func):
-                self.routes[(path, methods)] = func
+                self.routes.append((path, methods, func))
                 return func
 
             return decorator
+
+        def get(self, path):
+            return self.route(path, methods=['GET'])
+
+        def post(self, path):
+            return self.route(path, methods=['POST'])
 
         def test_client(self):
             app = self
 
             class Client:
-                def open(self, path, method='GET', json=None):
+                def open(self, path, method='GET', json=None, data=None):
+                    base_path, _, query = path.partition('?')
                     request.json = json
-                    for (p, m), func in app.routes.items():
-                        if p == path and method.upper() in m:
+                    request.method = method.upper()
+                    request.is_json = json is not None
+                    request.args = _parse_args(query)
+                    request.form = data or {}
+                    for route_path, verbs, func in app.routes:
+                        params = _match_route(route_path, base_path)
+                        if params is None or request.method not in verbs:
+                            continue
+                        try:
+                            data = func(**params)
+                        except TypeError:
                             data = func()
-                            if isinstance(data, tuple):
-                                return Response(data[0], data[1])
-                            return Response(data)
+                        if isinstance(data, Response):
+                            resp = data
+                        elif isinstance(data, tuple):
+                            body = data[0]
+                            status = data[1] if len(data) > 1 else 200
+                            if isinstance(body, Response):
+                                resp = body
+                                resp.status_code = status
+                            else:
+                                resp = Response(body, status)
+                        else:
+                            resp = Response(data)
+                        return app._after_request(resp)
                     return Response(None)
 
                 def get(self, path):
                     return self.open(path, 'GET')
 
-                def post(self, path, json=None):
-                    return self.open(path, 'POST', json=json)
+                def post(self, path, json=None, data=None):
+                    return self.open(path, 'POST', json=json, data=data)
 
             return Client()
 
         def register_blueprint(self, bp):
-            self.routes.update(getattr(bp, "routes", {}))
+            self.routes.extend(getattr(bp, "routes", []))
+
+        def after_request(self, func):
+            self._after_request = func
+            return func
 
     class Response:
         def __init__(self, data, status=200):
             self._data = data
             self.status_code = status
+            self.headers: Dict[str, Any] = {}
+            self.content_type = 'application/json' if isinstance(data, (dict, list)) else ''
 
         def get_json(self):
             return self._data
 
     def jsonify(obj=None):
-        return obj if obj is not None else {}
+        return Response(obj if obj is not None else {})
 
     def render_template_string(tpl):
         return tpl
+
+    def render_template(template_name, **context):  # pragma: no cover - stub
+        return template_name
 
     flask.Flask = Flask
     flask.Blueprint = Flask
     flask.jsonify = jsonify
     flask.request = request
+    flask.Request = Request
+    flask.Response = Response
+    flask.render_template = render_template
     flask.render_template_string = render_template_string
     sys.modules.setdefault('flask', flask)
+
+
+def stub_werkzeug() -> None:
+    if 'werkzeug' in sys.modules:
+        return
+    import importlib.util
+    if importlib.util.find_spec('werkzeug') is not None:
+        return
+    werkzeug = types.ModuleType('werkzeug')
+    werkzeug.__spec__ = importlib.machinery.ModuleSpec('werkzeug', None)
+
+    serving = types.ModuleType('werkzeug.serving')
+    serving.__spec__ = importlib.machinery.ModuleSpec('werkzeug.serving', None)
+
+    class BaseWSGIServer:  # pragma: no cover - stub
+        pass
+
+    def make_server(*args, **kwargs):  # pragma: no cover - stub
+        return BaseWSGIServer()
+
+    serving.BaseWSGIServer = BaseWSGIServer
+    serving.make_server = make_server
+
+    werkzeug.serving = serving
+    sys.modules.setdefault('werkzeug', werkzeug)
+    sys.modules.setdefault('werkzeug.serving', serving)
 
 
 def stub_requests() -> None:
@@ -562,6 +675,56 @@ def stub_requests() -> None:
     mod.post = lambda *a, **k: None
     sys.modules.setdefault('requests', mod)
     sys.modules.setdefault('requests.exceptions', exceptions)
+
+
+def stub_cryptography() -> None:
+    if 'cryptography' in sys.modules:
+        return
+    crypto = types.ModuleType('cryptography')
+    crypto.__spec__ = importlib.machinery.ModuleSpec('cryptography', None)
+    fernet = types.ModuleType('cryptography.fernet')
+    fernet.__spec__ = importlib.machinery.ModuleSpec('cryptography.fernet', None)
+
+    class InvalidToken(Exception):
+        pass
+
+    class Fernet:
+        def __init__(self, key: bytes) -> None:
+            self.key = key
+
+        @staticmethod
+        def generate_key() -> bytes:
+            return b'0' * 32
+
+        def encrypt(self, data: bytes) -> bytes:
+            return data
+
+        def decrypt(self, token: bytes) -> bytes:
+            return token
+
+    fernet.Fernet = Fernet
+    fernet.InvalidToken = InvalidToken
+    crypto.fernet = fernet
+    sys.modules.setdefault('cryptography', crypto)
+    sys.modules.setdefault('cryptography.fernet', fernet)
+
+
+def stub_rich() -> None:
+    if 'rich' in sys.modules:
+        return
+    rich = types.ModuleType('rich')
+    rich.__spec__ = importlib.machinery.ModuleSpec('rich', None)
+    console = types.ModuleType('rich.console')
+    console.__spec__ = importlib.machinery.ModuleSpec('rich.console', None)
+
+    class Console:
+        def print(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    console.Console = Console
+    rich.console = console
+    sys.modules.setdefault('rich', rich)
+    sys.modules.setdefault('rich.console', console)
 
 
 def stub_websockets() -> None:
@@ -1029,7 +1192,10 @@ def install_stubs() -> None:
     stub_watchfiles()
     stub_psutil()
     stub_flask()
+    stub_werkzeug()
     stub_requests()
+    stub_cryptography()
+    stub_rich()
     stub_aiofiles()
     stub_websockets()
     stub_torch()
