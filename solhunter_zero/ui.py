@@ -3195,7 +3195,7 @@ class UIServer:
         startup_probe: Optional[bool] = None,
     ) -> None:
         self.state = state
-        self.host = host
+        self.host = (host or "").strip()
         self.port = int(port)
         self._shutdown_token = shutdown_token or secrets.token_urlsafe(32)
         self.app = create_app(state, shutdown_token=self._shutdown_token)
@@ -3310,11 +3310,10 @@ class UIServer:
         self.port = int(server.server_port)
 
         resolved_host = self.resolved_host
-        requested_host = (self.host or "").strip()
 
         os.environ["UI_PORT"] = str(self.port)
         os.environ["PORT"] = str(self.port)
-        os.environ["UI_HOST"] = requested_host or resolved_host
+        os.environ["UI_HOST"] = self.environment_host
 
         startup_event = threading.Event()
         exception_queue: Queue[BaseException] = Queue(maxsize=1)
@@ -3428,6 +3427,24 @@ class UIServer:
 
         return self._resolve_shutdown_host()
 
+    @property
+    def exposed_host(self) -> str:
+        """Return the host value to surface in activity/config snapshots."""
+
+        host = self.host
+        if host and not self._host_is_loopback(host):
+            return host
+        return self.resolved_host
+
+    @property
+    def environment_host(self) -> str:
+        """Return the host value exported to helper environment variables."""
+
+        host = self.host
+        if host and not self._host_is_unspecified(host):
+            return host
+        return self.resolved_host
+
     @staticmethod
     def _format_host_for_url(host: str) -> str:
         if ":" in host and not host.startswith("["):
@@ -3435,6 +3452,26 @@ class UIServer:
                 host = host.replace("%", "%25")
             return f"[{host}]"
         return host
+
+    @staticmethod
+    def _host_is_loopback(host: str) -> bool:
+        if not host:
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return host.lower() == "localhost"
+        return ip.is_loopback
+
+    @staticmethod
+    def _host_is_unspecified(host: str) -> bool:
+        if not host:
+            return True
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        return ip.is_unspecified
 
     def _shutdown_directly(self) -> None:
         server = self._server

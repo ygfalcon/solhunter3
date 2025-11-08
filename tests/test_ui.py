@@ -719,15 +719,22 @@ def test_uiserver_start_probe_respects_config_and_env(monkeypatch):
     assert server._startup_probe_max_delay == pytest.approx(0.5)
 
 
-def test_uiserver_preserves_requested_host(monkeypatch):
+@pytest.mark.parametrize(
+    ("requested_host", "expected_env_host"),
+    [("127.0.0.1", "127.0.0.1"), ("0.0.0.0", "127.0.0.1")],
+)
+def test_uiserver_exports_reachable_host(monkeypatch, requested_host, expected_env_host):
     monkeypatch.setenv("UI_STARTUP_PROBE", "0")
     monkeypatch.setenv("UI_HOST", "placeholder")
 
     state = ui.UIState(status_provider=_healthy_status_snapshot)
-    server = ui.UIServer(state, host="0.0.0.0", port=0)
+    server = ui.UIServer(state, host=requested_host, port=0)
 
     try:
         server.start()
-        assert os.getenv("UI_HOST") == "0.0.0.0"
+        assert os.getenv("UI_HOST") == expected_env_host
+        assert server.environment_host == expected_env_host
+        assert server.host == requested_host.strip()
+        assert server.exposed_host == requested_host.strip()
     finally:
         server.stop()

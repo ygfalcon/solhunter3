@@ -882,7 +882,9 @@ class TradingRuntime:
             raise RuntimeError("UI server failed without an explicit error")
 
         self.ui_port = self.ui_server.port
-        activity_host = self.ui_server.resolved_host
+        activity_host = getattr(self.ui_server, "exposed_host", None)
+        if not activity_host:
+            activity_host = self.ui_server.resolved_host
         formatted_host = self.ui_server._format_host_for_url(activity_host)
         if isinstance(self.cfg, dict):
             try:
@@ -1428,13 +1430,15 @@ class TradingRuntime:
                 continue
             sanitized[str(key)] = _serialize(value)
         resolved_host = None
+        exposed_host = None
         if self.ui_server is not None:
             resolved_host = getattr(self.ui_server, "resolved_host", None)
+            exposed_host = getattr(self.ui_server, "exposed_host", None)
         bind_host = self.ui_host
         local_access_host = None
         if resolved_host and resolved_host != bind_host:
             local_access_host = resolved_host
-        live_host = resolved_host or bind_host
+        display_host = exposed_host or resolved_host or bind_host
         sanitized["ui_host"] = _serialize(bind_host)
         if local_access_host is not None:
             sanitized["local_access_host"] = _serialize(local_access_host)
@@ -1459,10 +1463,8 @@ class TradingRuntime:
         iteration = self._collect_iteration()
         ui_port = self.ui_port
         formatted_host: Optional[str] = None
-        if self.ui_server is not None:
-            host_for_url = resolved_host or live_host
-            if host_for_url is not None:
-                formatted_host = self.ui_server._format_host_for_url(host_for_url)
+        if self.ui_server is not None and display_host is not None:
+            formatted_host = self.ui_server._format_host_for_url(display_host)
         return {
             "config_path": self.config_path,
             "agents": agents,

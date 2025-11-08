@@ -136,8 +136,11 @@ async def test_start_agents_allows_concurrent_sleep(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio("asyncio")
-async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch):
-    runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
+@pytest.mark.parametrize("ui_host", ["127.0.0.1", "0.0.0.0"])
+async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(
+    monkeypatch, ui_host
+):
+    runtime = trading_runtime.TradingRuntime(ui_host=ui_host)
     runtime.status.event_bus = True
     runtime.status.trading_loop = True
     runtime.status.heartbeat_ts = time.time()
@@ -151,7 +154,8 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
 
     busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        busy_sock.bind(("127.0.0.1", 0))
+        bind_host = "" if ui_host == "0.0.0.0" else "127.0.0.1"
+        busy_sock.bind((bind_host, 0))
         busy_sock.listen(1)
         busy_port = busy_sock.getsockname()[1]
         runtime.ui_port = busy_port
@@ -168,20 +172,21 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
                 and "failed to bind" in entry["detail"]
                 for entry in entries
             )
+            expected_activity_host = runtime.ui_server.exposed_host
+            expected_detail = (
+                f"http://{runtime.ui_server._format_host_for_url(expected_activity_host)}"
+                f":{runtime.ui_port}"
+            )
             assert any(
                 entry["stage"] == "ui"
                 and entry["ok"] is True
-                and entry["detail"]
-                == (
-                    "http://"
-                    f"{runtime.ui_server._format_host_for_url(runtime.ui_server.resolved_host)}"
-                    f":{runtime.ui_port}"
-                )
+                and entry["detail"] == expected_detail
                 for entry in entries
             )
             assert os.getenv("UI_PORT") == str(runtime.ui_port)
             assert os.getenv("PORT") == str(runtime.ui_port)
-            assert os.getenv("UI_HOST") == runtime.ui_server.host
+            assert os.getenv("UI_HOST") == runtime.ui_server.environment_host
+            assert runtime.ui_server.host == ui_host
             assert runtime.cfg.get("ui_port") == runtime.ui_port
         finally:
             runtime.ui_server.stop()
@@ -190,14 +195,18 @@ async def test_trading_runtime_start_ui_falls_back_to_ephemeral_port(monkeypatch
 
 
 @pytest.mark.anyio("asyncio")
-async def test_trading_runtime_config_reports_live_port_after_fallback(monkeypatch):
-    runtime = trading_runtime.TradingRuntime(ui_host="127.0.0.1")
+@pytest.mark.parametrize("ui_host", ["127.0.0.1", "0.0.0.0"])
+async def test_trading_runtime_config_reports_live_port_after_fallback(
+    monkeypatch, ui_host
+):
+    runtime = trading_runtime.TradingRuntime(ui_host=ui_host)
 
     monkeypatch.setenv("UI_STARTUP_PROBE", "0")
 
     busy_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        busy_sock.bind(("127.0.0.1", 0))
+        bind_host = "" if ui_host == "0.0.0.0" else "127.0.0.1"
+        busy_sock.bind((bind_host, 0))
         busy_sock.listen(1)
         busy_port = busy_sock.getsockname()[1]
 
@@ -211,11 +220,30 @@ async def test_trading_runtime_config_reports_live_port_after_fallback(monkeypat
             config_snapshot = runtime.ui_state.snapshot_config()
 
             assert config_snapshot["ui_port"] == runtime.ui_port
-            assert config_snapshot["ui_host"] == runtime.ui_server.resolved_host
+            assert config_snapshot["ui_host"] == runtime.ui_host
+            assert config_snapshot["bind_host"] == runtime.ui_host
+
+            expected_local_access = (
+                runtime.ui_server.resolved_host
+                if runtime.ui_server.resolved_host != runtime.ui_host
+                else None
+            )
+            assert config_snapshot["local_access_host"] == expected_local_access
 
             sanitized = config_snapshot["sanitized_config"]
             assert sanitized["ui_port"] == runtime.ui_port
-            assert sanitized["ui_host"] == runtime.ui_server.resolved_host
+            assert sanitized["ui_host"] == runtime.ui_host
+            if expected_local_access is None:
+                assert "local_access_host" not in sanitized
+            else:
+                assert sanitized["local_access_host"] == expected_local_access
+
+            expected_url_host = runtime.ui_server._format_host_for_url(
+                runtime.ui_server.exposed_host
+            )
+            assert config_snapshot["ui_url"] == (
+                f"http://{expected_url_host}:{runtime.ui_port}"
+            )
         finally:
             runtime.ui_server.stop()
     finally:
@@ -260,15 +288,14 @@ async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
                 and "failed to bind" in entry["detail"]
                 for entry in entries
             )
+            expected_detail = (
+                f"http://{runtime.ui_server._format_host_for_url(runtime.ui_server.exposed_host)}"
+                f":{fallback_hint_port}"
+            )
             assert any(
                 entry["stage"] == "ui"
                 and entry["ok"] is True
-                and entry["detail"]
-                == (
-                    "http://"
-                    f"{runtime.ui_server._format_host_for_url(runtime.ui_server.resolved_host)}"
-                    f":{fallback_hint_port}"
-                )
+                and entry["detail"] == expected_detail
                 for entry in entries
             )
         finally:
@@ -278,8 +305,9 @@ async def test_trading_runtime_start_ui_uses_configured_port_range(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
-async def test_trading_runtime_start_ui_formats_unspecified_host(monkeypatch):
-    runtime = trading_runtime.TradingRuntime(ui_host="0.0.0.0")
+@pytest.mark.parametrize("ui_host", ["127.0.0.1", "0.0.0.0"])
+async def test_trading_runtime_start_ui_records_activity_host(monkeypatch, ui_host):
+    runtime = trading_runtime.TradingRuntime(ui_host=ui_host)
     runtime.status.event_bus = True
     runtime.status.trading_loop = True
     runtime.status.heartbeat_ts = time.time()
@@ -290,7 +318,12 @@ async def test_trading_runtime_start_ui_formats_unspecified_host(monkeypatch):
     try:
         assert runtime.ui_server is not None
         entries = runtime.activity.snapshot()
-        expected_detail = f"http://127.0.0.1:{runtime.ui_port}"
+        activity_host = runtime.ui_server.exposed_host
+        assert activity_host == ui_host
+        expected_detail = (
+            f"http://{runtime.ui_server._format_host_for_url(activity_host)}"
+            f":{runtime.ui_port}"
+        )
         assert any(
             entry["stage"] == "ui"
             and entry["ok"] is True
@@ -322,6 +355,10 @@ async def test_trading_runtime_config_preserves_requested_bind_host(monkeypatch)
         assert config_snapshot["ui_host"] == "0.0.0.0"
         assert config_snapshot["bind_host"] == "0.0.0.0"
         assert config_snapshot["local_access_host"] == resolved_host
+        expected_url_host = runtime.ui_server._format_host_for_url(
+            runtime.ui_server.exposed_host
+        )
+        assert config_snapshot["ui_url"] == f"http://{expected_url_host}:{runtime.ui_port}"
 
         sanitized = config_snapshot["sanitized_config"]
         assert sanitized["ui_host"] == "0.0.0.0"
