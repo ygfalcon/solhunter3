@@ -3200,6 +3200,11 @@ class UIServer:
         # Capture the final port so callers observe the actual binding.
         self.port = int(server.server_port)
 
+        resolved_host = self.resolved_host
+        os.environ["UI_PORT"] = str(self.port)
+        os.environ["PORT"] = str(self.port)
+        os.environ["UI_HOST"] = resolved_host
+
         startup_event = threading.Event()
         exception_queue: Queue[BaseException] = Queue(maxsize=1)
 
