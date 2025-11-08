@@ -75,6 +75,8 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
     offset = 0
     target_count = max(int(_MAX_TOKENS * _OVERFETCH_FACTOR), _PAGE_LIMIT)
     backoff = _BIRDEYE_BACKOFF
+    retry_attempts = 0
+    had_success = False
 
     # Build a per-request headers copy to avoid accidental mutation
     def _headers() -> dict:
@@ -99,7 +101,21 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
                             logger.info("BirdEye %s after %s tokens; using partial batch", resp.status, len(tokens))
                             break
                         text = await resp.text()
-                        logger.warning("BirdEye %s at offset %s: %s; backoff %.1fs", resp.status, offset, text[:200], backoff)
+                        logger.warning(
+                            "BirdEye %s at offset %s: %s; backoff %.1fs",
+                            resp.status,
+                            offset,
+                            text[:200],
+                            backoff,
+                        )
+                        retry_attempts += 1
+                        if retry_attempts >= max(_BIRDEYE_RETRIES, 1):
+                            logger.warning(
+                                "BirdEye %s retry limit reached after %s attempt(s); aborting fetch",
+                                resp.status,
+                                retry_attempts,
+                            )
+                            break
                         await asyncio.sleep(backoff)
                         backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
                         continue
@@ -113,16 +129,14 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
                     resp.raise_for_status()
                     payload = await resp.json()
                     backoff = _BIRDEYE_BACKOFF  # reset backoff on success
+                    retry_attempts = 0
+                    had_success = True
 
             except aiohttp.ClientResponseError as exc:
                 logger.warning("BirdEye token fetch failed at offset %s: %s", offset, exc)
-                if not tokens:
-                    _BIRDEYE_CACHE.set("tokens", [])
                 break
             except Exception as exc:
                 logger.warning("BirdEye token fetch failed at offset %s: %s", offset, exc)
-                if not tokens:
-                    _BIRDEYE_CACHE.set("tokens", [])
                 break
 
             data = payload.get("data", {})
@@ -185,8 +199,9 @@ async def _fetch_birdeye_tokens() -> List[Dict[str, float]]:
                 break
 
     result = list(tokens.values())
-    _BIRDEYE_CACHE.set("tokens", result)
-    if not result:
+    if had_success or result:
+        _BIRDEYE_CACHE.set("tokens", result)
+    if not result and had_success:
         logger.warning("Token discovery: BirdEye returned no items after filtering.")
     return result
 

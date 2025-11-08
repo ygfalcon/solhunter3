@@ -108,6 +108,92 @@ def test_discover_candidates_prioritises_scores(monkeypatch):
     assert len(fake_session.calls) == 1
 
 
+def test_birdeye_cache_recovers_after_transient_failure(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_BIRDEYE_RETRIES", 1)
+    monkeypatch.setattr(td, "_BIRDEYE_BACKOFF", 0.0)
+
+    statuses = [503, 200]
+    call_statuses: list[int] = []
+
+    payload = {
+        "data": {
+            "tokens": [
+                {
+                    "address": "bird-ok",
+                    "name": "Recovered",
+                    "symbol": "ROK",
+                    "v24hUSD": 100000,
+                    "liquidity": 120000,
+                    "price": 1.0,
+                    "v24hChangePercent": 2.5,
+                }
+            ],
+            "total": 1,
+        }
+    }
+
+    class FakeResp:
+        def __init__(self, status, payload=None):
+            self.status = status
+            self._payload = payload or {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def text(self):
+            return "rate limited"
+
+        async def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status >= 400:
+                raise RuntimeError(f"bad status {self.status}")
+            return None
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            status = statuses.pop(0)
+            call_statuses.append(status)
+            if status == 503:
+                return FakeResp(status)
+            return FakeResp(status, payload)
+
+    class FakeClientSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return FakeSession()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def immediate_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(td.aiohttp, "ClientSession", FakeClientSession)
+    monkeypatch.setattr(td.asyncio, "sleep", immediate_sleep)
+
+    first = asyncio.run(td._fetch_birdeye_tokens())
+    assert first == []
+    assert td._BIRDEYE_CACHE.get("tokens") is None
+
+    second = asyncio.run(td._fetch_birdeye_tokens())
+    assert [item["address"] for item in second] == ["bird-ok"]
+    assert call_statuses == [503, 200]
+
+
 def test_collect_mempool_signals_times_out(monkeypatch):
     async def silent_gen(*_args, **_kwargs):
         while True:
