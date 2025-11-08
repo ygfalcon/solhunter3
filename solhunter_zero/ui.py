@@ -2417,7 +2417,7 @@ def start_websockets() -> dict[str, threading.Thread]:
         "UI_LOGS_WS": logs_url,
     }
     for key, value in defaults.items():
-        os.environ.setdefault(key, value)
+        os.environ[key] = value
     log.info(
         "UI websockets listening on rl=%s events=%s logs=%s",
         _RL_WS_PORT,

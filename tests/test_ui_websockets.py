@@ -1,6 +1,7 @@
 import importlib
 import os
 import socket
+import threading
 import sys
 import time
 import types
@@ -88,6 +89,66 @@ def test_websocket_port_in_use():
             if loop is not None:
                 loop.call_soon_threadsafe(loop.stop)
         for t in threads.values() if 'threads' in locals() else []:
+            t.join(timeout=1)
+
+
+@pytest.mark.timeout(30)
+def test_websocket_env_updates_after_rebind(monkeypatch):
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+    pytest.importorskip("websockets")
+
+    importlib.import_module("websockets")  # ensure real implementation
+
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault(
+        "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet")
+    )
+
+    from solhunter_zero import ui
+    importlib.reload(ui)
+
+    stale_urls = {
+        "UI_WS_URL": "ws://stale/events",
+        "UI_EVENTS_WS_URL": "ws://stale/events",
+        "UI_EVENTS_WS": "ws://stale/events",
+        "UI_RL_WS_URL": "ws://stale/rl",
+        "UI_RL_WS": "ws://stale/rl",
+        "UI_LOG_WS_URL": "ws://stale/logs",
+        "UI_LOGS_WS": "ws://stale/logs",
+    }
+    for key, value in stale_urls.items():
+        monkeypatch.setenv(key, value)
+
+    sock = socket.socket()
+    sock.bind(("localhost", 8767))
+    sock.listen(1)
+    threads: dict[str, threading.Thread] = {}
+    try:
+        threads = ui.start_websockets()
+        assert ui._RL_WS_PORT != 8767
+
+        host = ui._WS_CHANNELS["events"].host or ui._resolve_host()
+        url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+
+        expected_events = f"ws://{url_host}:{ui._EVENT_WS_PORT}{ui._channel_path('events')}"
+        expected_rl = f"ws://{url_host}:{ui._RL_WS_PORT}{ui._channel_path('rl')}"
+        expected_logs = f"ws://{url_host}:{ui._LOG_WS_PORT}{ui._channel_path('logs')}"
+
+        assert os.environ["UI_WS_URL"] == expected_events
+        assert os.environ["UI_EVENTS_WS_URL"] == expected_events
+        assert os.environ["UI_EVENTS_WS"] == expected_events
+        assert os.environ["UI_RL_WS_URL"] == expected_rl
+        assert os.environ["UI_RL_WS"] == expected_rl
+        assert os.environ["UI_LOG_WS_URL"] == expected_logs
+        assert os.environ["UI_LOGS_WS"] == expected_logs
+    finally:
+        sock.close()
+        for loop in (ui.rl_ws_loop, ui.event_ws_loop, ui.log_ws_loop):
+            if loop is not None:
+                loop.call_soon_threadsafe(loop.stop)
+        for t in threads.values():
             t.join(timeout=1)
 
 
