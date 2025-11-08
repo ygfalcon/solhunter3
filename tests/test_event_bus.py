@@ -1,6 +1,8 @@
 import asyncio
 import json
+import logging
 import sys
+import time
 import types
 import importlib.util
 import websockets
@@ -714,6 +716,56 @@ async def test_websocket_compressed_batch(monkeypatch):
         assert set(values) == {3.0, 4.0}
     await ev.stop_ws_server()
     importlib.reload(ev)
+
+
+def test_websocket_queue_backpressure(monkeypatch, caplog):
+    import importlib
+    monkeypatch.setenv("EVENT_QUEUE_MAXSIZE", "1")
+    import solhunter_zero.event_bus as ev
+    ev = importlib.reload(ev)
+
+    try:
+        caplog.set_level(logging.WARNING, logger="solhunter_zero.event_bus")
+        ev._outgoing_queue = ev._create_outgoing_queue()
+        ev._outgoing_queue.put_nowait(b"first")
+        received: list[dict] = []
+
+        with ev.subscription("event_bus_backpressure", lambda payload: received.append(payload)):
+            ev._queue_outgoing_message(b"second")
+
+        stats = ev.get_backpressure_stats()
+        assert stats["dropped_batches"] >= 1
+        assert stats["queue_limit"] == 1
+        assert ev._outgoing_queue.qsize() == 1
+        assert received and received[-1]["dropped_batches"] >= 1
+        assert "queue full" in caplog.text.lower()
+    finally:
+        monkeypatch.delenv("EVENT_QUEUE_MAXSIZE", raising=False)
+        importlib.reload(ev)
+
+
+def test_publish_stays_responsive_when_queue_full(monkeypatch):
+    import importlib
+    monkeypatch.setenv("EVENT_QUEUE_MAXSIZE", "1")
+    import solhunter_zero.event_bus as ev
+    ev = importlib.reload(ev)
+
+    try:
+        async def _run() -> None:
+            ev._outgoing_queue = ev._create_outgoing_queue()
+            ev._outgoing_queue.put_nowait(b"seed")
+            start = time.monotonic()
+            ev.publish("weights_updated", {"weights": {"x": 1.0}})
+            duration = time.monotonic() - start
+            assert duration < 0.1
+            stats = ev.get_backpressure_stats()
+            assert stats["dropped_batches"] >= 1
+            assert ev._outgoing_queue.qsize() == 1
+
+        asyncio.run(_run())
+    finally:
+        monkeypatch.delenv("EVENT_QUEUE_MAXSIZE", raising=False)
+        importlib.reload(ev)
 
 
 @pytest.mark.asyncio
