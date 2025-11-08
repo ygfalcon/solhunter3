@@ -200,6 +200,11 @@ class DiscoveryService:
             "SOLANA_WS_URL",
             "BIRDEYE_API_KEY",
             "DISCOVERY_METHOD",
+            "DISCOVERY_LIMIT",
+            "DISCOVERY_CACHE_TTL",
+            "TOKEN_DISCOVERY_BACKOFF",
+            "TOKEN_DISCOVERY_RETRIES",
+            "MEMPOOL_SCORE_THRESHOLD",
         )
         snapshot: Dict[str, Optional[str]] = {key: os.getenv(key) for key in keys}
         try:
@@ -211,11 +216,7 @@ class DiscoveryService:
     def _sync_agent_settings(self) -> None:
         current = self._capture_agent_settings()
         if current != getattr(self, "_settings_snapshot", {}):
-            refresher = getattr(self._agent, "refresh_settings", None)
-            if callable(refresher):
-                refresher()
-            self._settings_snapshot = self._capture_agent_settings()
-            self._cooldown_until = 0.0
+            self.refresh()
 
     def _build_candidates(
         self,
