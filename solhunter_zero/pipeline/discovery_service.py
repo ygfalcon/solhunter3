@@ -96,6 +96,8 @@ class DiscoveryService:
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
         self._last_emitted: list[str] = []
+        self._last_emitted_set: frozenset[str] = frozenset()
+        self._last_emitted_size: int = 0
         self._last_fetch_fresh: bool = True
         self._primed = False
 
@@ -278,9 +280,19 @@ class DiscoveryService:
                     "DiscoveryService skipped %d invalid token candidate(s)", dropped
                 )
             return
-        if not fresh and seq == self._last_emitted:
+        seq_size = len(seq)
+        seq_set = frozenset(seq)
+        same_as_last = (
+            seq_size == self._last_emitted_size and seq_set == self._last_emitted_set
+        )
+        if same_as_last:
+            if fresh:
+                # Refresh cached ordering and metadata while avoiding duplicate emits.
+                self._last_emitted = list(seq)
+                self._last_emitted_set = seq_set
+                self._last_emitted_size = seq_size
             log.debug(
-                "DiscoveryService skipping cached emission (%d tokens)", len(seq)
+                "DiscoveryService skipping cached emission (%d tokens)", seq_size
             )
             return
         total_enqueued = 0
@@ -294,6 +306,8 @@ class DiscoveryService:
         if total_enqueued:
             log.info("DiscoveryService queued %d token(s) across %d chunk(s)", total_enqueued, max(1, (len(seq) + self._emit_batch_size - 1) // self._emit_batch_size))
         self._last_emitted = list(seq)
+        self._last_emitted_set = seq_set
+        self._last_emitted_size = seq_size
 
     def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
         payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
