@@ -1214,11 +1214,48 @@ class GoldenPipelineService:
             )
             if not candidate_sources and root_context is not None:
                 candidate_sources = ("discovery",)
+            def _first_value(*keys: str) -> Any:
+                for container in (entry, context, root_context):
+                    if isinstance(container, Mapping):
+                        for key in keys:
+                            if key in container:
+                                value = container.get(key)
+                                if value is not None:
+                                    return value
+                return None
+
+            ts_candidate = _first_value("ts", "timestamp", "discovered_at")
+            asof = _coerce_float(ts_candidate)
+            if asof is None:
+                asof = now
+
+            hints: Dict[str, Any] = {}
+            score_value = _coerce_float(_first_value("score", "confidence"))
+            if score_value is not None:
+                hints["score"] = score_value
+            tx_value = _first_value("tx", "signature")
+            if isinstance(tx_value, str) and tx_value:
+                hints["tx"] = tx_value
+            tags_value = _first_value("tags")
+            if isinstance(tags_value, (list, tuple, set)):
+                tags = [str(tag) for tag in tags_value if str(tag)]
+                if tags:
+                    hints["tags"] = tags
+            interface_value = _first_value("interface")
+            if isinstance(interface_value, str) and interface_value:
+                hints["interface"] = interface_value
+            discovery_value = _first_value("discovery")
+            if isinstance(discovery_value, Mapping):
+                hints["discovery"] = dict(discovery_value)
+            attributes_value = _first_value("attributes")
+            if isinstance(attributes_value, Mapping):
+                hints["attributes"] = dict(attributes_value)
             candidate = DiscoveryCandidate(
                 mint=mint,
-                asof=now,
+                asof=asof,
                 source=candidate_sources[0] if candidate_sources else None,
                 sources=candidate_sources,
+                hints=hints,
             )
             self._spawn(self.pipeline.submit_discovery(candidate))
             if self._momentum_agent and mint:

@@ -1,4 +1,6 @@
 import asyncio
+from typing import Any, Mapping, Sequence
+
 from solhunter_zero import dex_scanner, token_scanner as scanner, scanner_common
 from solhunter_zero.event_bus import subscribe
 
@@ -55,7 +57,7 @@ def test_scanner_method_pools(monkeypatch):
     tokens = asyncio.run(scanner.scan_tokens(method="pools"))
     unsub()
     assert tokens == ["tokbonk"]
-    assert events == [tokens]
+    assert _event_mints(events) == [tokens]
 
 
 def test_scanner_async_method_pools(monkeypatch):
@@ -80,3 +82,26 @@ def test_scanner_async_method_pools(monkeypatch):
     unsub()
     assert result == ["tokbonk"]
     assert events == [result]
+
+
+def _event_mints(events: Sequence[Sequence[Any]]) -> list[list[str]]:
+    batches: list[list[str]] = []
+    for batch in events:
+        row: list[str] = []
+        for item in batch:
+            if isinstance(item, Mapping):
+                for key in ("mint", "token", "address"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value:
+                        row.append(value)
+                        break
+                else:
+                    raw = item.get("mint")
+                    if isinstance(raw, str) and raw:
+                        row.append(raw)
+            else:
+                text = str(item)
+                if text:
+                    row.append(text)
+        batches.append(row)
+    return batches

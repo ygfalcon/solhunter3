@@ -10,6 +10,7 @@ import os
 import signal
 import socket
 import sys
+import time
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -766,7 +767,13 @@ class RuntimeOrchestrator:
                 try:
                     tokens = await agent.discover_tokens(method=method, offline=False)
                     if tokens:
-                        event_bus.publish("token_discovered", list(tokens))
+                        now_ts = time.time()
+                        source = str(method or "runtime")
+                        entries = [
+                            {"mint": str(token), "source": source, "ts": now_ts}
+                            for token in tokens
+                        ]
+                        event_bus.publish("token_discovered", entries)
                 except Exception:
                     pass
                 await asyncio.sleep(max(5, min(60, loop_delay)))

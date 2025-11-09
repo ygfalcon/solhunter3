@@ -1,13 +1,38 @@
 import asyncio
-from solhunter_zero import token_scanner as scanner
-from solhunter_zero import token_discovery as td
+from typing import Any, Mapping, Sequence
+
 from solhunter_zero import dynamic_limit
-from solhunter_zero import scanner_common
 from solhunter_zero import resource_monitor as rm
+from solhunter_zero import scanner_common
+from solhunter_zero import token_discovery as td
+from solhunter_zero import token_scanner as scanner
 from solhunter_zero.event_bus import subscribe
 from solhunter_zero import event_bus
 
 data = {"data": [{"address": "abc"}, {"address": "other"}]}
+
+
+def _event_mints(events: Sequence[Sequence[Any]]) -> list[list[str]]:
+    batches: list[list[str]] = []
+    for batch in events:
+        row: list[str] = []
+        for item in batch:
+            if isinstance(item, Mapping):
+                for key in ("mint", "token", "address"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value:
+                        row.append(value)
+                        break
+                else:
+                    raw = item.get("mint")
+                    if isinstance(raw, str) and raw:
+                        row.append(raw)
+            else:
+                text = str(item)
+                if text:
+                    row.append(text)
+        batches.append(row)
+    return batches
 
 class FakeResponse:
     def __init__(self, data, status_code=200):
@@ -78,7 +103,7 @@ def test_scan_tokens_websocket(monkeypatch):
     unsub()
     assert tokens == ['abc', 'xyz', 'ray', 'orca']
     assert captured['headers'] == scanner.HEADERS
-    assert events == [tokens]
+    assert _event_mints(events) == [tokens]
 
 
 
@@ -104,7 +129,7 @@ def test_scan_tokens_offline(monkeypatch):
     unsub()
     assert tokens == scanner.OFFLINE_TOKENS
     assert 'called' not in called
-    assert events == [tokens]
+    assert _event_mints(events) == [tokens]
 
 
 def test_scan_tokens_onchain(monkeypatch):
@@ -136,7 +161,7 @@ def test_scan_tokens_onchain(monkeypatch):
     unsub()
     assert tokens == ['tok', 't2']
     assert captured['url'] == 'http://node'
-    assert events == [tokens]
+    assert _event_mints(events) == [tokens]
 
 
 from solhunter_zero.token_scanner import scan_tokens_async as async_scan
@@ -193,7 +218,7 @@ def test_scan_tokens_async(monkeypatch):
     tokens = asyncio.run(async_scan())
     unsub()
     assert tokens == ["abc", "zxy", "ray", "orca"]
-    assert events == [tokens]
+    assert _event_mints(events) == [tokens]
 
 
 def test_scan_tokens_from_file(monkeypatch, tmp_path):
@@ -218,7 +243,7 @@ def test_scan_tokens_from_file(monkeypatch, tmp_path):
     tokens = asyncio.run(scanner.scan_tokens(token_file=str(path)))
     unsub()
     assert tokens == ["tok1", "tok2"]
-    assert events == [tokens]
+    assert _event_mints(events) == [tokens]
 
 
 def test_scan_tokens_async_from_file(monkeypatch, tmp_path):
@@ -241,7 +266,7 @@ def test_scan_tokens_async_from_file(monkeypatch, tmp_path):
     tokens = asyncio.run(async_scan(token_file=str(path)))
     unsub()
     assert tokens == ["a", "b"]
-    assert events == [tokens]
+    assert _event_mints(events) == [tokens]
 
 
 def test_scan_tokens_mempool(monkeypatch):
@@ -261,7 +286,7 @@ def test_scan_tokens_mempool(monkeypatch):
     tokens = asyncio.run(scanner.scan_tokens(method="mempool"))
     unsub()
     assert tokens == ["memtok"]
-    assert events == [tokens]
+    assert _event_mints(events) == [tokens]
 
 
 def test_scan_tokens_async_mempool(monkeypatch):
@@ -282,7 +307,7 @@ def test_scan_tokens_async_mempool(monkeypatch):
     result = asyncio.run(async_scan(method="mempool"))
     unsub()
     assert result == ["memtok"]
-    assert events == [result]
+    assert _event_mints(events) == [result]
 
 
 def test_scan_tokens_async_concurrency(monkeypatch):
