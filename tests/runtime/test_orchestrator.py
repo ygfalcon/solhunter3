@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import types
 
 import pytest
@@ -149,3 +150,55 @@ async def test_orchestrator_starts_golden_pipeline_by_default(monkeypatch):
     assert any(stage == "golden:start" and ok and "providers=" in detail for stage, ok, detail in published)
 
     await orch.stop_all()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_discovery_loop_reports_failures(monkeypatch, caplog):
+    events: list[tuple[str, bool, str]] = []
+
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        events.append((stage, ok, detail))
+
+    class BrokenAgent:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.calls = 0
+
+        async def discover_tokens(self, *_, **__):
+            self.calls += 1
+            raise RuntimeError("boom")
+
+    sleep_calls = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls >= 2:
+            raise asyncio.CancelledError
+        return None
+
+    caplog.set_level(logging.WARNING, logger="solhunter_zero.runtime.orchestrator")
+    monkeypatch.setenv("DISCOVERY_FAILURE_THRESHOLD", "2")
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.DiscoveryAgent",
+        BrokenAgent,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.asyncio.sleep",
+        fake_sleep,
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+
+    with pytest.raises(asyncio.CancelledError):
+        await orch._run_discovery_loop(method="stub", loop_delay=1.0)
+
+    assert any("iteration failed" in record.message for record in caplog.records)
+    assert any(
+        stage == "agents:discovery" and not ok and "consecutive=1" in detail
+        for stage, ok, detail in events
+    )
+    assert any(
+        stage == "agents:discovery:fatal" and not ok and "consecutively" in detail
+        for stage, ok, detail in events
+    )

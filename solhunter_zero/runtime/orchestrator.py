@@ -396,6 +396,68 @@ class RuntimeOrchestrator:
         except Exception:
             log.debug("UI forwarder flush failed", exc_info=True)
 
+    async def _run_discovery_loop(self, method: str | None, loop_delay: float) -> None:
+        """Run the live discovery loop with failure accounting and staging."""
+
+        try:
+            from ..agents.discovery import DiscoveryAgent
+        except Exception as exc:  # pragma: no cover - defensive import guard
+            detail = f"discovery agent unavailable: {exc}"
+            log.error("Discovery loop unavailable: %s", exc)
+            await self._publish_stage("agents:discovery:fatal", False, detail)
+            return
+
+        agent = DiscoveryAgent()
+        interval = max(5.0, min(60.0, float(loop_delay)))
+        failure_count = 0
+        fatal_published = False
+        try:
+            failure_threshold = max(1, int(os.getenv("DISCOVERY_FAILURE_THRESHOLD", "3")))
+        except ValueError:
+            failure_threshold = 3
+
+        while True:
+            try:
+                tokens = await agent.discover_tokens(method=method, offline=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failure_count += 1
+                detail = (
+                    f"discovery failure (consecutive={failure_count}): {exc}"
+                )
+                log.warning(
+                    "Discovery agent iteration failed (%s/%s): %s",
+                    failure_count,
+                    failure_threshold,
+                    exc,
+                    exc_info=True,
+                )
+                await self._publish_stage("agents:discovery", False, detail)
+                if failure_count >= failure_threshold and not fatal_published:
+                    fatal_detail = (
+                        f"discovery failed {failure_count} times consecutively; last error: {exc}"
+                    )
+                    log.error("Discovery failure threshold reached: %s", fatal_detail)
+                    await self._publish_stage(
+                        "agents:discovery:fatal",
+                        False,
+                        fatal_detail,
+                    )
+                    fatal_published = True
+            else:
+                if tokens:
+                    event_bus.publish("token_discovered", list(tokens))
+                if failure_count:
+                    recovery_detail = (
+                        f"discovery recovered after {failure_count} failure(s)"
+                    )
+                    await self._publish_stage("agents:discovery", True, recovery_detail)
+                    failure_count = 0
+                    fatal_published = False
+
+            await asyncio.sleep(interval)
+
     async def start_bus(self) -> None:
         await self._publish_stage("bus:init", True)
         # Choose event-bus WS port early and export URLs so init sees them
@@ -748,7 +810,6 @@ class RuntimeOrchestrator:
         # Event-driven mode: start agent runtime, swarm coordinator and executor
         from ..agents.runtime import AgentRuntime
         from ..exec_service import TradeExecutor
-        from ..agents.discovery import DiscoveryAgent
         from ..loop import _init_rl_training as _init_rl_training  # type: ignore
 
         aruntime = AgentRuntime(agent_manager or AgentManager.from_default(), portfolio)
@@ -759,17 +820,12 @@ class RuntimeOrchestrator:
         self.handles.agent_runtime = aruntime
         self.handles.trade_executor = execu
 
-        async def _discovery_loop():
-            agent = DiscoveryAgent()
-            method = discovery_method
-            while True:
-                try:
-                    tokens = await agent.discover_tokens(method=method, offline=False)
-                    if tokens:
-                        event_bus.publish("token_discovered", list(tokens))
-                except Exception:
-                    pass
-                await asyncio.sleep(max(5, min(60, loop_delay)))
+        self._register_task(
+            asyncio.create_task(
+                self._run_discovery_loop(discovery_method, loop_delay),
+                name="discovery_loop",
+            )
+        )
 
         async def _evolve_loop():
             # Evolve/mutate/cull continually based on success metrics
@@ -798,7 +854,6 @@ class RuntimeOrchestrator:
         if use_bundles and (not os.getenv("JITO_RPC_URL") or not os.getenv("JITO_AUTH")):
             await self._publish_stage("mev:warn", False, "MEV bundles enabled but JITO credentials missing")
 
-        self._register_task(asyncio.create_task(_discovery_loop(), name="discovery_loop"))
         self._register_task(asyncio.create_task(_evolve_loop(), name="evolve_loop"))
         await self._publish_stage("agents:event_runtime", True)
 
