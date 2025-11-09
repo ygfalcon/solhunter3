@@ -1,4 +1,6 @@
 import asyncio
+from typing import Any, Mapping, Sequence
+
 import json
 import aiohttp
 
@@ -12,6 +14,29 @@ class FakeMsg:
     def __init__(self, data):
         self.type = aiohttp.WSMsgType.TEXT
         self.data = json.dumps(data)
+
+
+def _event_mints(events: Sequence[Sequence[Any]]) -> list[list[str]]:
+    batches: list[list[str]] = []
+    for batch in events:
+        row: list[str] = []
+        for item in batch:
+            if isinstance(item, Mapping):
+                for key in ("mint", "token", "address"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value:
+                        row.append(value)
+                        break
+                else:
+                    raw = item.get("mint")
+                    if isinstance(raw, str) and raw:
+                        row.append(raw)
+            else:
+                text = str(item)
+                if text:
+                    row.append(text)
+        batches.append(row)
+    return batches
 
     def json(self):
         return json.loads(self.data)
@@ -120,4 +145,4 @@ def test_scan_tokens_async_includes_dex_ws(monkeypatch):
     tokens = asyncio.run(async_scanner.scan_tokens_async())
     unsub()
     assert tokens == ["abcbonk", "dexws"]
-    assert events == [tokens]
+    assert _event_mints(events) == [tokens]

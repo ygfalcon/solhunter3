@@ -42,7 +42,7 @@ except Exception:  # pragma: no cover - optional dependency
     _ZSTD_DECOMPRESSOR = None
 from contextlib import contextmanager
 from collections import defaultdict, deque
-from typing import Any, Awaitable, Callable, Dict, Generator, Iterable, List, Set, Sequence, cast
+from typing import Any, Awaitable, Callable, Dict, Generator, Iterable, List, Mapping, Set, Sequence, cast
 
 try:
     import msgpack
@@ -161,11 +161,217 @@ from .schemas import validate_message, to_dict
 from . import event_pb2 as _pb
 
 try:
+    from google.protobuf import struct_pb2 as _struct_pb2
     from google.protobuf.message import DecodeError as _ProtoDecodeError
 except Exception:  # pragma: no cover - protobuf optional dependency guard
+    _struct_pb2 = None
     _ProtoDecodeError = Exception
 
 pb = cast(Any, _pb)
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        return float(text)
+    except Exception:
+        return None
+
+
+def _normalize_tags(value: Any) -> list[str]:
+    if value is None:
+        return []
+    result: list[str] = []
+    if isinstance(value, (list, tuple, set)):
+        candidates = value
+    else:
+        candidates = [value]
+    for item in candidates:
+        if isinstance(item, str):
+            text = item.strip()
+        else:
+            text = str(item).strip()
+        if text:
+            if text not in result:
+                result.append(text)
+    return result
+
+
+def _sanitize_struct_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Mapping):
+        sanitized: Dict[str, Any] = {}
+        for key, val in value.items():
+            if not isinstance(key, str):
+                key = str(key)
+            sanitized[key] = _sanitize_struct_value(val)
+        return sanitized
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_sanitize_struct_value(item) for item in value]
+    return str(value)
+
+
+def _struct_from_mapping(data: Mapping[str, Any]) -> Any:
+    if _struct_pb2 is None:
+        return None
+    struct = _struct_pb2.Struct()
+    sanitized: Dict[str, Any] = {}
+    for key, value in data.items():
+        if not isinstance(key, str):
+            key = str(key)
+        sanitized[key] = _sanitize_struct_value(value)
+    struct.update(sanitized)
+    return struct
+
+
+def _struct_to_python(message: Any) -> Dict[str, Any]:
+    if _struct_pb2 is None or message is None:
+        return {}
+    if isinstance(message, _struct_pb2.Struct):
+        return {key: _struct_to_python(value) for key, value in message.items()}
+    if isinstance(message, _struct_pb2.ListValue):
+        return [_struct_to_python(item) for item in message]
+    if hasattr(_struct_pb2, "Value") and isinstance(message, _struct_pb2.Value):
+        kind = message.WhichOneof("kind")
+        if kind == "struct_value":
+            return _struct_to_python(message.struct_value)
+        if kind == "list_value":
+            return _struct_to_python(message.list_value)
+        return getattr(message, kind)
+    return message
+
+
+def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    root_context = payload if isinstance(payload, Mapping) else None
+
+    def _iter_entries() -> Iterable[tuple[Any, Mapping[str, Any] | None]]:
+        if isinstance(payload, Mapping):
+            tokens = payload.get("tokens")
+            if isinstance(tokens, Sequence) and not isinstance(tokens, (str, bytes, bytearray)):
+                for entry in tokens:
+                    yield entry, payload
+                return
+            entries_value = payload.get("entries")
+            if isinstance(entries_value, Sequence) and not isinstance(entries_value, (str, bytes, bytearray)):
+                for entry in entries_value:
+                    yield entry, payload
+                return
+            yield payload, None
+            return
+        if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+            for entry in payload:
+                yield entry, None
+            return
+        yield payload, None
+
+    def _merge(source: Mapping[str, Any], dest: dict[str, Any], extra: dict[str, Any]) -> None:
+        for key, value in source.items():
+            if key in {"topic", "tokens", "entries"}:
+                continue
+            if key in {"mint", "token", "address"}:
+                if not dest.get("mint") and isinstance(value, str) and value.strip():
+                    dest["mint"] = value.strip()
+                continue
+            if key == "source":
+                if isinstance(value, str) and value.strip():
+                    dest.setdefault("source", value.strip())
+                continue
+            if key == "score":
+                if "score" not in dest:
+                    number = _coerce_float(value)
+                    if number is not None:
+                        dest["score"] = number
+                    else:
+                        extra.setdefault("score", value)
+                continue
+            if key == "tx":
+                if value is not None and "tx" not in dest:
+                    dest["tx"] = str(value)
+                continue
+            if key in {"ts", "timestamp", "discovered_at"}:
+                if "ts" not in dest:
+                    number = _coerce_float(value)
+                    if number is not None:
+                        dest["ts"] = number
+                    else:
+                        extra.setdefault("ts", value)
+                continue
+            if key == "tags":
+                tags = _normalize_tags(value)
+                if tags:
+                    existing = dest.get("tags") or []
+                    combined = list(dict.fromkeys(list(existing) + tags))
+                    dest["tags"] = combined
+                continue
+            if key == "interface":
+                if value is not None and "interface" not in dest:
+                    dest["interface"] = str(value)
+                continue
+            if key == "discovery" and isinstance(value, Mapping):
+                existing = dest.get("discovery")
+                merged = dict(existing) if isinstance(existing, Mapping) else {}
+                merged.update(value)
+                dest["discovery"] = merged
+                continue
+            if key == "attributes" and isinstance(value, Mapping):
+                attrs = extra.setdefault("attributes", {})
+                if isinstance(attrs, dict):
+                    attrs.update(value)
+                continue
+            extra.setdefault(key, value)
+
+    for entry, context in _iter_entries():
+        data: dict[str, Any] = {}
+        extra: dict[str, Any] = {}
+        if root_context and root_context is not context:
+            _merge(root_context, data, extra)
+        if isinstance(context, Mapping):
+            _merge(context, data, extra)
+        if isinstance(entry, Mapping):
+            _merge(entry, data, extra)
+        elif isinstance(entry, str):
+            if entry.strip():
+                data.setdefault("mint", entry.strip())
+        elif entry is not None:
+            data.setdefault("mint", str(entry))
+        mint = data.get("mint")
+        if not mint:
+            continue
+        data["mint"] = str(mint)
+        source = data.get("source")
+        if isinstance(source, str):
+            data["source"] = source.strip()
+        if "tags" in data:
+            tags = _normalize_tags(data.get("tags"))
+            if tags:
+                data["tags"] = tags
+            else:
+                data.pop("tags", None)
+        discovery = data.get("discovery")
+        if isinstance(discovery, Mapping):
+            data["discovery"] = dict(discovery)
+        else:
+            data.pop("discovery", None)
+        if extra:
+            attrs = extra.get("attributes")
+            remaining = {k: v for k, v in extra.items() if k != "attributes"}
+            merged_attrs: dict[str, Any] = {}
+            if isinstance(attrs, Mapping):
+                merged_attrs.update(attrs)
+            if remaining:
+                merged_attrs.update(remaining)
+            if merged_attrs:
+                data["attributes"] = merged_attrs
+        entries.append(data)
+    return entries
 
 _PB_MAP = {
     "action_executed": getattr(pb, "ActionExecuted", None),
@@ -1118,12 +1324,49 @@ def _encode_event(topic: str, payload: Any, dedupe_key: str | None = None) -> An
             ),
         )
     elif topic == "token_discovered":
-        data = payload
-        if not isinstance(data, (list, tuple)):
-            data = to_dict(data)
+        entries = _normalize_discovery_entries(payload)
+        pb_entries: list[Any] = []
+        for item in entries:
+            mint = item.get("mint")
+            if not mint:
+                continue
+            discovery_entry = pb.TokenDiscovery(mint=str(mint))
+            source = item.get("source")
+            if source:
+                discovery_entry.source = str(source)
+            if "score" in item:
+                try:
+                    discovery_entry.score = float(item.get("score") or 0.0)
+                except Exception:
+                    pass
+            tx = item.get("tx")
+            if tx:
+                discovery_entry.tx = str(tx)
+            if "ts" in item:
+                try:
+                    discovery_entry.ts = float(item.get("ts") or 0.0)
+                except Exception:
+                    pass
+            tags = item.get("tags")
+            if isinstance(tags, Sequence) and not isinstance(tags, (str, bytes, bytearray)):
+                discovery_entry.tags.extend(str(tag) for tag in tags if str(tag))
+            interface = item.get("interface")
+            if interface:
+                discovery_entry.interface = str(interface)
+            discovery = item.get("discovery")
+            if isinstance(discovery, Mapping):
+                struct = _struct_from_mapping(discovery)
+                if struct is not None:
+                    discovery_entry.discovery.CopyFrom(struct)
+            attributes = item.get("attributes")
+            if isinstance(attributes, Mapping):
+                struct = _struct_from_mapping(attributes)
+                if struct is not None:
+                    discovery_entry.attributes.CopyFrom(struct)
+            pb_entries.append(discovery_entry)
         event = pb.Event(
             topic=topic,
-            token_discovered=pb.TokenDiscovered(tokens=[str(t) for t in data]),
+            token_discovered=pb.TokenDiscovered(entries=pb_entries),
         )
     elif topic == "memory_sync_request":
         data = to_dict(payload)
@@ -1255,7 +1498,31 @@ def _decode_payload(ev: Any) -> Any:
     if field == "system_metrics_combined":
         return {"cpu": msg.cpu, "memory": msg.memory, "iter_ms": msg.iter_ms}
     if field == "token_discovered":
-        return list(msg.tokens)
+        entries: list[dict[str, Any]] = []
+        for entry in msg.entries:
+            data: dict[str, Any] = {"mint": entry.mint}
+            if entry.source:
+                data["source"] = entry.source
+            if entry.HasField("score"):
+                data["score"] = entry.score
+            if entry.tx:
+                data["tx"] = entry.tx
+            if entry.HasField("ts"):
+                data["ts"] = entry.ts
+            if entry.tags:
+                data["tags"] = list(entry.tags)
+            if entry.interface:
+                data["interface"] = entry.interface
+            if entry.HasField("discovery"):
+                discovery = _struct_to_python(entry.discovery)
+                if discovery:
+                    data["discovery"] = discovery
+            if entry.HasField("attributes"):
+                attributes = _struct_to_python(entry.attributes)
+                if attributes:
+                    data["attributes"] = attributes
+            entries.append(data)
+        return entries
     if field == "memory_sync_request":
         return {"last_id": msg.last_id}
     if field == "memory_sync_response":

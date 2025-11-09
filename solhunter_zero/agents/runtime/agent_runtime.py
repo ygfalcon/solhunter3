@@ -11,7 +11,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 from ... import event_bus
 from ...agent_manager import AgentManager
@@ -75,13 +75,32 @@ class AgentRuntime:
     def _on_tokens(self, payload: Any) -> None:
         if not self._running:
             return
-        tokens = payload if isinstance(payload, (list, tuple)) else []
-        for token in tokens:
+        if isinstance(payload, Mapping):
+            entries: Sequence[Any] = [payload]
+        elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+            entries = payload
+        else:
+            entries = [payload]
+        for entry in entries:
+            raw_token: Any = None
+            if isinstance(entry, Mapping):
+                for key in ("mint", "token", "address"):
+                    candidate = entry.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        raw_token = candidate.strip()
+                        break
+                if raw_token is None and entry:
+                    raw_token = entry.get("mint")
+            else:
+                raw_token = entry
+            if not raw_token:
+                continue
+            token = str(raw_token)
             try:
-                self._tokens.add(str(token))
+                self._tokens.add(token)
             except Exception:
                 pass
-            task = asyncio.create_task(self._evaluate_and_publish(str(token)))
+            task = asyncio.create_task(self._evaluate_and_publish(token))
             self._tasks.append(task)
             task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
 

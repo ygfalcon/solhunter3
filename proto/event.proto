@@ -1,6 +1,8 @@
 syntax = "proto3";
 package solhunter_zero;
 
+import "google/protobuf/struct.proto";
+
 message ActionExecuted {
   string action_json = 1;
   string result_json = 2;
@@ -145,8 +147,20 @@ message SystemMetricsCombined {
   double iter_ms = 3;
 }
 
+message TokenDiscovery {
+  string mint = 1;
+  string source = 2;
+  optional double score = 3;
+  string tx = 4;
+  optional double ts = 5;
+  repeated string tags = 6;
+  string interface = 7;
+  google.protobuf.Struct discovery = 8;
+  google.protobuf.Struct attributes = 9;
+}
+
 message TokenDiscovered {
-  repeated string tokens = 1;
+  repeated TokenDiscovery entries = 1;
 }
 
 message MemorySyncRequest {
