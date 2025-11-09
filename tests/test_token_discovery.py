@@ -226,6 +226,36 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
     assert lab_entry["name"] == "DexLab Token"
 
 
+@pytest.mark.asyncio
+async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch, caplog):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", False)
+    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
+    monkeypatch.setattr(td, "_ENABLE_METEORA", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
+    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+    monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "")
+    monkeypatch.setenv("DISCOVERY_ENABLE_MEMPOOL", "0")
+    monkeypatch.setenv("BIRDEYE_API_KEY", "")
+
+    batches: list[list[dict]] = []
+    with caplog.at_level("WARNING"):
+        async for batch in td.discover_candidates("https://rpc", limit=3):
+            batches.append(batch)
+            break
+
+    assert batches, "expected fallback batch"
+    final = batches[-1]
+    assert final, "fallback batch should contain entries"
+    addresses = {item["address"] for item in final}
+    assert "So11111111111111111111111111111111111111112" in addresses
+    assert "BirdEye discovery disabled" in caplog.text
+    assert "Discovery candidates using fallback set" in caplog.text
+
+
 def test_warm_cache_skips_without_birdeye_key(monkeypatch):
     # Ensure environment does not provide a BirdEye key and guard short-circuits.
     monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)

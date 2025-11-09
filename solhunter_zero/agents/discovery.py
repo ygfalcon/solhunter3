@@ -201,6 +201,8 @@ class DiscoveryAgent:
         self.news_feeds = self._split_env_list("NEWS_FEEDS")
         self.twitter_feeds = self._split_env_list("TWITTER_FEEDS")
         self.discord_feeds = self._split_env_list("DISCORD_FEEDS")
+        self._config_error_warned = False
+        self._config_error_event_reported = False
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -310,6 +312,20 @@ class DiscoveryAgent:
         details: Dict[str, Dict[str, Any]] = {}
         tokens: List[str] = []
 
+        mempool_flag = os.getenv("DISCOVERY_ENABLE_MEMPOOL")
+        mempool_enabled = True
+        if mempool_flag is not None:
+            mempool_enabled = mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
+        config_error = not (self.birdeye_api_key or "").strip() and not mempool_enabled
+        fallback_used = False
+        self._config_error_active = config_error
+
+        if config_error and not self._config_error_warned:
+            logger.warning(
+                "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled; discovery will rely on cached/static seeds",
+            )
+            self._config_error_warned = True
+
         for attempt in range(attempts):
             tokens, details = await self._discover_once(
                 method=active_method,
@@ -334,6 +350,7 @@ class DiscoveryAgent:
         if not tokens:
             tokens = self._fallback_tokens()
             details = {}
+            fallback_used = True
 
         self.last_tokens = tokens
         self.last_details = details
@@ -349,6 +366,22 @@ class DiscoveryAgent:
         logger.info(
             "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
         )
+
+        if config_error and not self._config_error_event_reported:
+            warning_detail = "config_error=birdeye_missing_mempool_disabled"
+            publish(
+                "runtime.log",
+                RuntimeLog(
+                    stage="discovery",
+                    detail=warning_detail,
+                    level="WARN",
+                ),
+            )
+            if fallback_used:
+                logger.warning(
+                    "DiscoveryAgent using fallback tokens because BirdEye API key is missing and DISCOVERY_ENABLE_MEMPOOL is disabled"
+                )
+            self._config_error_event_reported = True
 
         if ttl > 0 and tokens:
             _CACHE["tokens"] = list(tokens)

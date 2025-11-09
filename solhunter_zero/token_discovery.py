@@ -121,6 +121,22 @@ _ORCA_CATALOG_TTL = float(os.getenv("ORCA_CATALOG_TTL", "600") or 600.0)
 
 TokenEntry = Dict[str, Any]
 
+
+class DiscoveryConfigurationError(RuntimeError):
+    """Raised when discovery prerequisites are misconfigured."""
+
+    def __init__(self, source: str, message: str, *, remediation: str | None = None):
+        super().__init__(message)
+        self.source = source
+        self.remediation = remediation
+
+    def __str__(self) -> str:  # pragma: no cover - repr helper
+        base = super().__str__()
+        if self.remediation:
+            return f"{base} (source={self.source}, remediation={self.remediation})"
+        return f"{base} (source={self.source})"
+
+
 _BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
 _CACHE_LOCK = Lock()
 _BIRDEYE_DISABLED_INFO = False
@@ -197,6 +213,29 @@ _ETAG_HOSTS = {
     "api.dexlab.space",
 }
 
+_STATIC_CANDIDATE_SEEDS: Sequence[tuple[str, str, str]] = (
+    (
+        "So11111111111111111111111111111111111111112",
+        "SOL",
+        "Solana",
+    ),
+    (
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "USDC",
+        "USD Coin",
+    ),
+    (
+        "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "BONK",
+        "Bonk",
+    ),
+    (
+        "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        "JUP",
+        "Jupiter",
+    ),
+)
+
 
 @dataclass(slots=True)
 class _CachedJSON:
@@ -247,6 +286,58 @@ def _cache_set(key: str, value: List[TokenEntry]) -> None:
         _BIRDEYE_CACHE.set(key, value)
 
 
+def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
+    """Return cached BirdEye tokens or static seeds for configuration fallbacks."""
+
+    seen: set[str] = set()
+    fallback: List[TokenEntry] = []
+
+    cache_key = _current_cache_key()
+    cached = _cache_get(cache_key) or []
+    for item in cached:
+        if not isinstance(item, Mapping):
+            continue
+        address = str(item.get("address") or "").strip()
+        if not address or address in seen:
+            continue
+        entry = dict(item)
+        sources = entry.get("sources")
+        if isinstance(sources, set):
+            entry_sources = set(sources)
+        elif isinstance(sources, (list, tuple)):
+            entry_sources = {str(src) for src in sources if isinstance(src, str) and src}
+        elif isinstance(sources, str) and sources:
+            entry_sources = {sources}
+        else:
+            entry_sources = set()
+        entry_sources.add("cache")
+        entry["sources"] = entry_sources
+        entry.setdefault("score", 0.0)
+        entry.setdefault("_stage_b_eligible", False)
+        fallback.append(entry)
+        seen.add(address)
+        if len(fallback) >= limit:
+            return fallback
+
+    for address, symbol, name in _STATIC_CANDIDATE_SEEDS:
+        if address in seen:
+            continue
+        entry: TokenEntry = {
+            "address": address,
+            "symbol": symbol,
+            "name": name,
+            "sources": {"static"},
+            "score": 0.0,
+            "_stage_b_eligible": False,
+        }
+        fallback.append(entry)
+        seen.add(address)
+        if len(fallback) >= limit:
+            break
+
+    return fallback
+
+
 async def _load_orca_catalog(
     *, session: aiohttp.ClientSession | None = None
 ) -> Dict[str, List[Dict[str, Any]]]:
@@ -254,6 +345,7 @@ async def _load_orca_catalog(
         return {}
     ttl = max(60.0, float(_ORCA_CATALOG_TTL))
     async with _ORCA_CATALOG_LOCK:
+        global _ORCA_CATALOG_CACHE
         expires, cached = _ORCA_CATALOG_CACHE
         now = time.monotonic()
         if cached and expires > now:
@@ -281,7 +373,6 @@ async def _load_orca_catalog(
                     if pool_entries:
                         normalized[mint] = pool_entries
         if normalized:
-            global _ORCA_CATALOG_CACHE
             _ORCA_CATALOG_CACHE = (time.monotonic() + ttl, normalized)
             return normalized
         return cached if cached else {}
@@ -705,12 +796,22 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
     api_key = _resolve_birdeye_api_key()
     global _BIRDEYE_DISABLED_INFO
     if not api_key:
-        if not _BIRDEYE_DISABLED_INFO and not _ENABLE_MEMPOOL:
-            logger.info(
-                "Discovery sources disabled: set BIRDEYE_API_KEY or enable DISCOVERY_ENABLE_MEMPOOL to restore BirdEye/mempool inputs.",
+        if not _BIRDEYE_DISABLED_INFO:
+            message = (
+                "Discovery sources disabled: set BIRDEYE_API_KEY or enable DISCOVERY_ENABLE_MEMPOOL to restore BirdEye/mempool inputs."
             )
+            if _ENABLE_MEMPOOL:
+                logger.info(message)
+            else:
+                logger.warning(message)
             _BIRDEYE_DISABLED_INFO = True
         logger.debug("BirdEye API key missing; skipping BirdEye discovery")
+        if not _ENABLE_MEMPOOL:
+            raise DiscoveryConfigurationError(
+                "birdeye",
+                "BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled",
+                remediation="Set BIRDEYE_API_KEY or enable DISCOVERY_ENABLE_MEMPOOL",
+            )
         return []
 
     cache_key = _current_cache_key()
@@ -1674,15 +1775,24 @@ def discover_candidates(
                 overall_timeout = 0.0
 
             completed: set[asyncio.Task[Any]] = set()
+            config_error: DiscoveryConfigurationError | None = None
 
             async def _merge_result(label: str, result: Any) -> bool:
                 nonlocal mempool, bird_tokens, dexscreener_tokens, raydium_tokens
                 nonlocal meteora_tokens, dexlab_tokens
+                nonlocal config_error
                 lock = merge_locks[label]
                 async with lock:
                     changed = False
                     if label == "bird":
                         if isinstance(result, Exception):
+                            if isinstance(result, DiscoveryConfigurationError):
+                                config_error = result
+                                logger.warning(
+                                    "BirdEye discovery disabled due to configuration: %s",
+                                    result,
+                                )
+                                return False
                             logger.warning("BirdEye discovery failed: %s", result)
                             return False
                         bird_tokens = list(result or [])
@@ -1792,25 +1902,40 @@ def discover_candidates(
             task_list = list(task_map.keys())
 
             try:
-                iterator = asyncio.as_completed(
-                    task_list,
-                    timeout=overall_timeout if overall_timeout > 0 else None,
-                )
-                for fut in iterator:
-                    label = task_map[fut]
-                    try:
-                        result = await fut
-                    except Exception as exc:
-                        result = exc
-                    completed.add(fut)
-                    changed = await _merge_result(label, result)
-                    if not candidates or not changed:
-                        continue
-                    _score_candidates(candidates, mempool)
-                    snapshot = _snapshot(candidates, limit=limit)
-                    last_snapshot = snapshot
-                    emitted = True
-                    yield snapshot
+                pending: set[asyncio.Task[Any]] = set(task_list)
+                start_time = time.monotonic()
+                while pending:
+                    wait_timeout: float | None = None
+                    if overall_timeout > 0:
+                        elapsed = time.monotonic() - start_time
+                        remaining = overall_timeout - elapsed
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError
+                        wait_timeout = remaining
+                    done, pending = await asyncio.wait(
+                        pending,
+                        timeout=wait_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not done:
+                        raise asyncio.TimeoutError
+                    for fut in done:
+                        label = task_map.get(fut)
+                        try:
+                            result = await fut
+                        except Exception as exc:
+                            result = exc
+                        completed.add(fut)
+                        if label is None:
+                            continue
+                        changed = await _merge_result(label, result)
+                        if not candidates or not changed:
+                            continue
+                        _score_candidates(candidates, mempool)
+                        snapshot = _snapshot(candidates, limit=limit)
+                        last_snapshot = snapshot
+                        emitted = True
+                        yield snapshot
             except asyncio.TimeoutError:
                 logger.warning(
                     "Discovery overall timeout after %.2fs; pending_tasks=%s",
@@ -1853,7 +1978,49 @@ def discover_candidates(
             )
 
             if not emitted or final != last_snapshot:
-                yield final
+                if final:
+                    yield final
+                elif config_error is not None:
+                    fallback_entries = _fallback_candidate_tokens(limit)
+                    if fallback_entries:
+                        fallback_candidates: Dict[str, Dict[str, Any]] = {}
+                        for entry in fallback_entries:
+                            if not isinstance(entry, Mapping):
+                                continue
+                            address = str(entry.get("address") or "").strip()
+                            if not address:
+                                continue
+                            entry_copy = dict(entry)
+                            sources = entry_copy.get("sources")
+                            if isinstance(sources, set):
+                                source_set = set(sources)
+                            elif isinstance(sources, (list, tuple)):
+                                source_set = {
+                                    str(src)
+                                    for src in sources
+                                    if isinstance(src, str) and src
+                                }
+                            elif isinstance(sources, str) and sources:
+                                source_set = {sources}
+                            else:
+                                source_set = set()
+                            source_set.add("fallback")
+                            entry_copy["sources"] = source_set
+                            entry_copy.setdefault("score", 0.0)
+                            entry_copy.setdefault("_stage_b_eligible", False)
+                            fallback_candidates[address] = entry_copy
+                        if fallback_candidates:
+                            logger.warning(
+                                "Discovery candidates using fallback set (%d) due to configuration error: %s",
+                                len(fallback_candidates),
+                                config_error,
+                            )
+                            fallback_final = _snapshot(fallback_candidates, limit=limit)
+                            if fallback_final:
+                                yield fallback_final
+                                return
+                else:
+                    yield final
 
         if shared_session_obj is not None:
             async with shared_session_obj as shared_session:

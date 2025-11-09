@@ -214,6 +214,54 @@ def test_discover_tokens_recovers_from_merge_exception(monkeypatch, caplog):
     assert "Websocket merge yielded no tokens" in caplog.text
 
 
+def test_discover_tokens_uses_fallback_when_config_invalid(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("BIRDEYE_API_KEY", "")
+    monkeypatch.setenv("DISCOVERY_ENABLE_MEMPOOL", "0")
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
+
+    async def fake_scan(*_, **__):
+        return []
+
+    async def passthrough_enrich(tokens, rpc_url=None):
+        return list(tokens)
+
+    publish_calls: list[tuple[str, object]] = []
+
+    def fake_publish(topic, payload):
+        publish_calls.append((topic, payload))
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.scan_tokens_async", fake_scan
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.enrich_tokens_async", passthrough_enrich
+    )
+    monkeypatch.setattr("solhunter_zero.agents.discovery.publish", fake_publish)
+
+    agent = DiscoveryAgent()
+    agent.birdeye_api_key = ""
+    agent._config_error_warned = False
+
+    async def run():
+        with caplog.at_level("WARNING"):
+            return await agent.discover_tokens()
+
+    tokens = asyncio.run(run())
+    assert tokens, "fallback tokens expected"
+    assert tokens[0] == "So11111111111111111111111111111111111111112"
+    assert (
+        "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled"
+        in caplog.text
+    )
+    assert any(
+        topic == "runtime.log"
+        and getattr(payload, "detail", "")
+        == "config_error=birdeye_missing_mempool_disabled"
+        for topic, payload in publish_calls
+    )
+
+
 def test_collect_social_mentions(monkeypatch):
     _reset_cache()
     agent = DiscoveryAgent()
