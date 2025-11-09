@@ -305,24 +305,44 @@ if existing:
         data = json.loads(existing.decode("utf-8"))
     except Exception:
         data = {"raw": existing.decode("utf-8", "ignore")}
-    pid = data.get("pid")
-    alive = False
-    if isinstance(pid, int):
-        try:
-            os.kill(pid, 0)
-        except Exception:
-            alive = False
-        else:
-            alive = True
-    if alive:
-        print(
-            "Another runtime is already using this channel (" + _describe(data) + ").",
-            file=sys.stderr,
+
+    local_host = socket.gethostname()
+    host_mismatch = False
+    if isinstance(data, dict):
+        stored_host = data.get("host")
+        host_mismatch = isinstance(stored_host, str) and stored_host != local_host
+    else:
+        stored_host = None
+
+    if host_mismatch:
+        stale_msg = (
+            f"Found runtime lock from host {stored_host!r}; local host is {local_host!r}. "
+            "Treating as stale."
         )
-        sys.exit(1)
-    # Attempt best-effort cleanup of stale lock
-    client.delete(key)
-    time.sleep(0.2)
+        if isinstance(data, dict) and data.get("ts"):
+            stale_msg += f" ts={data.get('ts')}"
+        print(stale_msg, file=sys.stderr)
+        client.delete(key)
+        time.sleep(0.2)
+    else:
+        pid = data.get("pid") if isinstance(data, dict) else None
+        alive = False
+        if isinstance(pid, int):
+            try:
+                os.kill(pid, 0)
+            except Exception:
+                alive = False
+            else:
+                alive = True
+        if alive:
+            print(
+                "Another runtime is already using this channel (" + _describe(data) + ").",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Attempt best-effort cleanup of stale lock
+        client.delete(key)
+        time.sleep(0.2)
 
 if not client.set(key, json.dumps(payload), nx=True):
     existing = client.get(key)
