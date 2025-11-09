@@ -3304,6 +3304,13 @@ class UIServer:
 
         server.daemon_threads = True
         self._server = server
+        # When binding to port 0 the server chooses an available port. Capture the
+        # resolved value so callers can read it after ``start`` returns.
+        try:
+            bound_port = int(getattr(server, "server_port", self.port))
+        except (TypeError, ValueError):  # pragma: no cover - defensive guard
+            bound_port = self.port
+        self.port = bound_port
 
         def _serve() -> None:
             try:
