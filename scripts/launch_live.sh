@@ -558,6 +558,13 @@ if [[ ! -f $ENV_FILE ]]; then
   exit $EXIT_KEYS
 fi
 
+if [[ -n $CONFIG_PATH ]]; then
+  if [[ ! -e $CONFIG_PATH || ! -r $CONFIG_PATH ]]; then
+    echo "Config file $CONFIG_PATH must exist and be readable" >&2
+    exit $EXIT_KEYS
+  fi
+fi
+
 if [[ $CANARY_MODE -eq 1 ]]; then
   if [[ -z $CANARY_BUDGET || -z $CANARY_RISK ]]; then
     echo "--canary requires --budget and --risk" >&2
