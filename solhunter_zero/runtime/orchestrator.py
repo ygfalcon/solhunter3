@@ -400,6 +400,8 @@ class RuntimeOrchestrator:
         await self._publish_stage("bus:init", True)
         # Choose event-bus WS port early and export URLs so init sees them
         ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
+        existing_event_bus_url = os.environ.get("EVENT_BUS_URL")
+        existing_broker_ws_urls = os.environ.get("BROKER_WS_URLS")
         os.environ.setdefault("EVENT_BUS_URL", f"ws://127.0.0.1:{ws_port}")
         os.environ.setdefault("BROKER_WS_URLS", f"ws://127.0.0.1:{ws_port}")
         # Load config early so event bus has proper env/urls
@@ -430,9 +432,26 @@ class RuntimeOrchestrator:
             await self._publish_stage("bus:ws", True, f"port={ws_port}")
         except Exception as exc:
             await self._publish_stage("bus:ws", False, f"{exc}")
-        # Ensure peers point to the local WS
-        os.environ["BROKER_WS_URLS"] = f"ws://127.0.0.1:{ws_port}"
-        os.environ["EVENT_BUS_URL"] = f"ws://127.0.0.1:{ws_port}"
+            log.warning(
+                "Local event bus websocket unavailable (%s); remote peers must be configured explicitly",
+                exc,
+            )
+        override_url = f"ws://127.0.0.1:{ws_port}"
+        if self.handles.bus_started:
+            os.environ["BROKER_WS_URLS"] = override_url
+            os.environ["EVENT_BUS_URL"] = override_url
+            override_detail = f"applied url={override_url}"
+        else:
+            if existing_broker_ws_urls is not None:
+                os.environ["BROKER_WS_URLS"] = existing_broker_ws_urls
+            else:
+                os.environ.pop("BROKER_WS_URLS", None)
+            if existing_event_bus_url is not None:
+                os.environ["EVENT_BUS_URL"] = existing_event_bus_url
+            else:
+                os.environ.pop("EVENT_BUS_URL", None)
+            override_detail = "skipped - local websocket unavailable; existing configuration preserved"
+        await self._publish_stage("bus:override", self.handles.bus_started, override_detail)
         ok = await event_bus.verify_broker_connection(timeout=5.0)
         if not ok:
             await self._publish_stage("bus:verify", False, "broker roundtrip failed")
