@@ -57,7 +57,7 @@ The helper wraps the dependency checks and keypair/setup logic used by
    your API keys, RPC URL and DEX endpoints:
 
    ```yaml
-birdeye_api_key: b1e60d72780940d1bd929b9b2e9225e6
+birdeye_api_key: "<your-birdeye-api-key>"
 solana_rpc_url: https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
 dex_base_url: https://swap.helius.dev
 dex_testnet_url: https://quote-api.jup.ag

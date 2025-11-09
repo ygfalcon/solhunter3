@@ -361,6 +361,14 @@ import solhunter_zero.event_bus as event_bus
 
 
 @pytest.fixture(autouse=True)
+def _ensure_birdeye_api_key(monkeypatch):
+    """Provide a deterministic BirdEye API key for tests by default."""
+
+    monkeypatch.setenv("BIRDEYE_API_KEY", "test-birdeye-api-key")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_event_bus():
     """Ensure a clean event bus for each test."""
     event_bus.reset()

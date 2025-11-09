@@ -22,7 +22,7 @@ import aiohttp
 
 from .http import HostCircuitOpenError, host_request, host_retry_config
 from .http import get_session as _shared_http_session
-from .scanner_common import DEFAULT_BIRDEYE_API_KEY
+from . import config
 from .providers import orca as orca_provider
 from .providers import raydium as raydium_provider
 from .lru import TTLCache
@@ -227,14 +227,20 @@ async def _get_cache_lock() -> asyncio.Lock:
     return _JSON_CACHE_LOCK
 
 
-def _resolve_birdeye_api_key() -> str:
-    """Return the configured BirdEye API key (env var or default)."""
+def _resolve_birdeye_api_key(*, required: bool = False) -> str | None:
+    """Return the configured BirdEye API key or ``None`` when unavailable."""
 
-    api_key = (os.getenv("BIRDEYE_API_KEY") or "").strip()
-    if not api_key:
-        default_key = (DEFAULT_BIRDEYE_API_KEY or "").strip()
-        api_key = default_key
-    return api_key
+    api_key = config.get_birdeye_api_key()
+    if api_key:
+        return api_key
+
+    if required:
+        raise RuntimeError(
+            "BirdEye API key missing; set BIRDEYE_API_KEY or configure "
+            "birdeye_api_key in your active config."
+        )
+
+    return None
 
 
 def _cache_get(key: str) -> List[TokenEntry] | None:
@@ -252,6 +258,7 @@ async def _load_orca_catalog(
 ) -> Dict[str, List[Dict[str, Any]]]:
     if not _ENABLE_ORCA:
         return {}
+    global _ORCA_CATALOG_CACHE
     ttl = max(60.0, float(_ORCA_CATALOG_TTL))
     async with _ORCA_CATALOG_LOCK:
         expires, cached = _ORCA_CATALOG_CACHE
@@ -281,7 +288,6 @@ async def _load_orca_catalog(
                     if pool_entries:
                         normalized[mint] = pool_entries
         if normalized:
-            global _ORCA_CATALOG_CACHE
             _ORCA_CATALOG_CACHE = (time.monotonic() + ttl, normalized)
             return normalized
         return cached if cached else {}

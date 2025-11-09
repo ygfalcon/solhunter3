@@ -229,7 +229,7 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
 def test_warm_cache_skips_without_birdeye_key(monkeypatch):
     # Ensure environment does not provide a BirdEye key and guard short-circuits.
     monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
-    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "")
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: None)
 
     thread_called = {"created": False, "started": False}
 

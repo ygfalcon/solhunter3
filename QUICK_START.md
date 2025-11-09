@@ -3,7 +3,10 @@
 ## Canonical runtime launch
 
 1. Copy `etc/solhunter/env.production` and fill in the three required API keys.
-   The file is wired for the shared event bus (`ws://127.0.0.1:8779`), Redis
+   Use your personal BirdEye API token in `BIRDEYE_API_KEY`; the bundled
+   placeholder is no longer accepted and BirdEye-backed discovery remains
+   disabled until a real key is provided. The file is wired for the shared event
+   bus (`ws://127.0.0.1:8779`), Redis
    (`redis://localhost:6379/1`), and the production Solana providers.  Seed
    tokens (SOL, USDC, USDT) are preloaded with their Pyth price IDs so depth and
    prices hydrate immediately.

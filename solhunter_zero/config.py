@@ -869,6 +869,22 @@ def _update_active(cfg: Mapping[str, Any] | None) -> None:
     set_env_from_config(_ACTIVE_CONFIG)
 
 
+def get_birdeye_api_key() -> str | None:
+    """Return the active BirdEye API key from environment or config."""
+
+    env_key = (os.getenv("BIRDEYE_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+
+    cfg_key = _ACTIVE_CONFIG.get("birdeye_api_key") if isinstance(_ACTIVE_CONFIG, dict) else None
+    if isinstance(cfg_key, str):
+        cfg_key = cfg_key.strip()
+        if cfg_key:
+            return cfg_key
+
+    return None
+
+
 def reload_active_config() -> dict:
     """Reload current config and broadcast an update event."""
     cfg = load_selected_config()

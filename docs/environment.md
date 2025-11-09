@@ -17,7 +17,7 @@ files unless the loader is invoked with `overwrite=True`.
 | `ARBITRAGE_THRESHOLD` | `0` | Threshold for arbitrage |
 | `ARBITRAGE_TOKENS` | `` | Configures arbitrage tokens |
 | `AUTO_SELECT_KEYPAIR` | `` | Configures auto select keypair |
-| `BIRDEYE_API_KEY` | `b1e60d72780940d1bd929b9b2e9225e6` | Configures birdeye api key |
+| `BIRDEYE_API_KEY` | *(required)* | Personal BirdEye API key used for discovery |
 | `BROKER_CHANNEL` | `solhunter-events-v3` | Configures broker channel |
 | `BROKER_HEARTBEAT_INTERVAL` | `30` | Interval for broker heartbeat |
 | `BROKER_RETRY_LIMIT` | `3` | Configures broker retry limit |

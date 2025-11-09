@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
+from . import config
 from . import prices
 from .discovery.mint_resolver import normalize_candidate
 from .logging_utils import warn_once_per
@@ -68,6 +69,9 @@ def _extract_helius_key() -> str:
     return ""
 
 logger = logging.getLogger(__name__)
+
+
+_BIRDEYE_KEY_WARNING_EMITTED = False
 
 def _env_token_list(name: str) -> tuple[str, ...]:
     tokens: list[str] = []
@@ -173,8 +177,23 @@ _TRENDING_MIN_VOLUME = float(os.getenv("TRENDING_MIN_VOLUME_USD", "20000") or 20
 _MAX_DAS_CHUNK = max(1, int(os.getenv("DAS_TRENDING_CHUNK", "10") or 10))
 
 def _resolve_birdeye_key(candidate: str | None = None) -> str | None:
-    key = (candidate or os.getenv("BIRDEYE_API_KEY") or "").strip()
-    return key or None
+    key = (candidate or "").strip() if isinstance(candidate, str) else ""
+    if key:
+        return key
+
+    resolved = config.get_birdeye_api_key()
+    if resolved:
+        return resolved
+
+    global _BIRDEYE_KEY_WARNING_EMITTED
+    if not _BIRDEYE_KEY_WARNING_EMITTED and candidate is None:
+        logger.warning(
+            "BirdEye API key missing; BirdEye-backed token scanning is disabled. "
+            "Set BIRDEYE_API_KEY or configure birdeye_api_key to enable it."
+        )
+        _BIRDEYE_KEY_WARNING_EMITTED = True
+
+    return None
 
 
 def _birdeye_enabled(candidate: str | None = None) -> bool:

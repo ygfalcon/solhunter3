@@ -9,7 +9,7 @@ environment.
 from __future__ import annotations
 
 DEFAULTS: dict[str, str] = {
-    "BIRDEYE_API_KEY": "b1e60d72780940d1bd929b9b2e9225e6",
+    "BIRDEYE_API_KEY": "",
     "BIRDEYE_ENABLED": "1",
     "HELIUS_API_KEY": "af30888b-b79f-4b12-b3fd-c5375d5bad2d",
     "USE_DAS_DISCOVERY": "1",

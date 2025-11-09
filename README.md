@@ -304,14 +304,12 @@ profit calculation so routes are ranked based on the borrowed size.
    ```
 
 4. **Configure API access**
-   The scanner uses the BirdEye API when `BIRDEYE_API_KEY` is set.  If the key
-   is missing, it will fall back to scanning the blockchain directly using the
-   RPC endpoint specified by `SOLANA_RPC_URL` and will query on-chain volume
-   and liquidity metrics for discovered tokens.
-   To use BirdEye, export the API key:
+   The scanner requires a personal BirdEye API key to stream curated discovery
+   data. Without a key the BirdEye-backed discovery paths are disabled and only
+   on-chain heuristics remain available. Export your key before launching:
 
    ```bash
-   export BIRDEYE_API_KEY=b1e60d72780940d1bd929b9b2e9225e6
+   export BIRDEYE_API_KEY="<your-birdeye-api-key>"
    ```
    If this variable is unset, the bot logs a warning and automatically falls back
    to on-chain scanning.

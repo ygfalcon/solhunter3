@@ -167,13 +167,11 @@ class DiscoveryAgent:
         ws_resolved = self._as_websocket_url(ws_env) or DEFAULT_SOLANA_WS
         os.environ.setdefault("SOLANA_WS_URL", ws_resolved)
         self.ws_url = ws_resolved
-        self.birdeye_api_key = os.getenv(
-            "BIRDEYE_API_KEY",
-            "b1e60d72780940d1bd929b9b2e9225e6",
-        )
+        self.birdeye_api_key = config.get_birdeye_api_key()
         if not self.birdeye_api_key:
             logger.warning(
-                "BIRDEYE_API_KEY missing; discovery will fall back to static tokens"
+                "BirdEye API key missing; BirdEye-backed discovery sources are disabled. "
+                "Set BIRDEYE_API_KEY or configure birdeye_api_key to enable them."
             )
         self.limit = int(os.getenv("DISCOVERY_LIMIT", "60") or 60)
         self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))

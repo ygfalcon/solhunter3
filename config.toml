@@ -39,7 +39,8 @@ metrics_base_url = "https://api.coingecko.com/api/v3"
 news_feeds = "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml,https://www.coindesk.com/arc/outboundfeeds/rss/"
 twitter_feeds = "https://nitter.net/solana/rss"
 discord_feeds = "https://discord.com/api/guilds/613425648685547541/widget.json"
-birdeye_api_key = "b1e60d72780940d1bd929b9b2e9225e6"
+# Provide your personal BirdEye API key before enabling discovery.
+birdeye_api_key = ""
 strategy_selection = true
 vote_threshold = 0.05
 use_rl_weights = true

@@ -68,8 +68,6 @@ def refresh_runtime_values() -> None:
     METEORA_WS_URL = os.getenv("METEORA_WS_URL", SOLANA_WS_URL)
 
     api_key = (os.getenv("BIRDEYE_API_KEY") or "").strip()
-    if not api_key:
-        api_key = DEFAULT_BIRDEYE_API_KEY
     BIRDEYE_API_KEY = api_key
 
     headers: MutableMapping[str, str]
@@ -81,10 +79,13 @@ def refresh_runtime_values() -> None:
     headers.update(
         {
             "accept": "application/json",
-            "X-API-KEY": BIRDEYE_API_KEY,
             "x-chain": os.getenv("BIRDEYE_CHAIN", "solana"),
         }
     )
+    if BIRDEYE_API_KEY:
+        headers["X-API-KEY"] = BIRDEYE_API_KEY
+    elif "X-API-KEY" in headers:
+        headers.pop("X-API-KEY", None)
     globals()["HEADERS"] = headers
 
 
