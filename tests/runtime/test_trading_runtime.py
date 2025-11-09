@@ -505,12 +505,15 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
 
     monkeypatch.setenv("UI_PUBLIC_HOST", "public.runtime.test")
 
-    captured: Dict[str, str | None] = {}
+    captured_calls: list[Dict[str, str | None]] = []
 
     def _fake_start_websockets() -> dict[str, threading.Thread]:
-        captured["ui_host_env"] = os.getenv("UI_HOST")
-        captured["ui_ws_host_env"] = os.getenv("UI_WS_HOST")
-        base_host = captured["ui_host_env"] or "127.0.0.1"
+        snapshot: Dict[str, str | None] = {
+            "ui_host_env": os.getenv("UI_HOST"),
+            "ui_ws_host_env": os.getenv("UI_WS_HOST"),
+        }
+        captured_calls.append(snapshot)
+        base_host = snapshot["ui_host_env"] or "127.0.0.1"
         os.environ["UI_EVENTS_WS_URL"] = f"ws://{base_host}:9100{ui_module._channel_path('events')}"
         os.environ["UI_RL_WS_URL"] = f"ws://{base_host}:9101{ui_module._channel_path('rl')}"
         os.environ["UI_LOG_WS_URL"] = f"ws://{base_host}:9102{ui_module._channel_path('logs')}"
@@ -532,16 +535,20 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
 
     monkeypatch.setattr(runtime_module, "UIServer", _DummyUIServer)
 
+    monkeypatch.setenv("UI_HOST", "placeholder-host")
+
     runtime = TradingRuntime(ui_host="0.0.0.0", ui_port=6200)
     assert os.getenv("UI_HOST") == "0.0.0.0"
     assert os.getenv("UI_WS_HOST") == "0.0.0.0"
 
+    os.environ["UI_HOST"] = "mutated-host"
+
     await runtime._start_ui()
 
-    ui_module.start_websockets()
-
-    assert captured["ui_host_env"] == "0.0.0.0"
-    assert captured["ui_ws_host_env"] == "0.0.0.0"
+    assert os.getenv("UI_HOST") == "0.0.0.0"
+    assert captured_calls
+    assert captured_calls[-1]["ui_host_env"] == "0.0.0.0"
+    assert captured_calls[-1]["ui_ws_host_env"] == "0.0.0.0"
 
     manifest = ui_module.build_ui_manifest(None)
     assert manifest["events_ws"] == "ws://public.runtime.test:9100/ws/events"
