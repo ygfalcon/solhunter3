@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import time
@@ -10,6 +11,13 @@ from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
 from ..token_aliases import canonical_mint, validate_mint
 from .types import TokenCandidate
+
+_TRENDING_FINGERPRINT_KEYS: tuple[str, ...] = (
+    "rank",
+    "score",
+    "mempool_score",
+    "helius_score",
+)
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +106,7 @@ class DiscoveryService:
         self._last_emitted: list[str] = []
         self._last_emitted_set: frozenset[str] = frozenset()
         self._last_emitted_size: int = 0
+        self._last_emitted_fingerprint: Optional[str] = None
         self._last_fetch_fresh: bool = True
         self._primed = False
 
@@ -282,15 +291,18 @@ class DiscoveryService:
             return
         seq_size = len(seq)
         seq_set = frozenset(seq)
+        fingerprint = self._metadata_fingerprint(seq)
         same_as_last = (
             seq_size == self._last_emitted_size and seq_set == self._last_emitted_set
         )
-        if same_as_last:
+        fingerprint_changed = fresh and fingerprint != self._last_emitted_fingerprint
+        if same_as_last and not fingerprint_changed:
             if fresh:
                 # Refresh cached ordering and metadata while avoiding duplicate emits.
                 self._last_emitted = list(seq)
                 self._last_emitted_set = seq_set
                 self._last_emitted_size = seq_size
+                self._last_emitted_fingerprint = fingerprint
             log.debug(
                 "DiscoveryService skipping cached emission (%d tokens)", seq_size
             )
@@ -308,6 +320,7 @@ class DiscoveryService:
         self._last_emitted = list(seq)
         self._last_emitted_set = seq_set
         self._last_emitted_size = seq_size
+        self._last_emitted_fingerprint = fingerprint
 
     def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
         payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
@@ -351,6 +364,21 @@ class DiscoveryService:
             self._cooldown_until = fetch_ts
 
         self._last_fetch_fresh = True
+
+    def _metadata_fingerprint(self, tokens: Iterable[str]) -> str:
+        """Return a hash of key trending metadata for ``tokens``."""
+
+        payload: list[tuple[str, tuple[Any, ...]]] = []
+        for token in sorted(tokens):
+            entry: tuple[Any, ...]
+            meta = TRENDING_METADATA.get(token)
+            if isinstance(meta, dict):
+                entry = tuple(meta.get(field) for field in _TRENDING_FINGERPRINT_KEYS)
+            else:
+                entry = tuple()
+            payload.append((token, entry))
+        data = repr(tuple(payload)).encode("utf-8")
+        return hashlib.sha1(data).hexdigest()
 
     async def _prime_startup_clones(self) -> None:
         clones = max(1, int(self.startup_clones))
