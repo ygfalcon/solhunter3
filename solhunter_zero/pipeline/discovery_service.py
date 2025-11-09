@@ -352,13 +352,36 @@ class DiscoveryService:
             )
         results = await asyncio.gather(*tasks, return_exceptions=True)
         aggregated: list[str] = []
+        aggregated_details: dict[str, dict[str, Any]] = {}
         for idx, result in enumerate(results):
             if isinstance(result, Exception):
                 log.warning(
                     "DiscoveryService startup clone %d failed: %s", idx, result
                 )
                 continue
-            aggregated.extend(result)
+            if not isinstance(result, tuple) or len(result) != 2:
+                log.warning(
+                    "DiscoveryService startup clone %d returned unexpected payload: %r",
+                    idx,
+                    result,
+                )
+                continue
+            tokens, details = result
+            aggregated.extend(tokens)
+            if isinstance(details, dict):
+                for token, detail in details.items():
+                    key = str(token).strip()
+                    if not key:
+                        continue
+                    if isinstance(detail, dict):
+                        aggregated_details[key] = dict(detail)
+
+        if aggregated_details:
+            existing = getattr(self._agent, "last_details", None)
+            if isinstance(existing, dict):
+                existing.update(aggregated_details)
+            else:
+                setattr(self._agent, "last_details", dict(aggregated_details))
 
         unique: list[str] = []
         seen: set[str] = set()
@@ -380,7 +403,7 @@ class DiscoveryService:
         else:
             log.info("DiscoveryService startup clones produced no tokens")
 
-    async def _clone_fetch(self, idx: int) -> list[str]:
+    async def _clone_fetch(self, idx: int) -> tuple[list[str], dict[str, dict[str, Any]]]:
         agent = DiscoveryAgent()
         try:
             tokens = await agent.discover_tokens(
@@ -392,12 +415,24 @@ class DiscoveryService:
             log.debug(
                 "DiscoveryService startup clone %d fetched %d tokens", idx, len(tokens)
             )
-            return [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+            clean_tokens = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
+            raw_details = getattr(agent, "last_details", {})
+            detail_map: dict[str, dict[str, Any]] = {}
+            if isinstance(raw_details, dict):
+                for key, value in raw_details.items():
+                    if not isinstance(key, str):
+                        continue
+                    normalized = key.strip()
+                    if not normalized:
+                        continue
+                    if isinstance(value, dict):
+                        detail_map[normalized] = dict(value)
+            return clean_tokens, detail_map
         except asyncio.CancelledError:
             raise
         except Exception:  # pragma: no cover - defensive logging
             log.exception("DiscoveryService startup clone %d failed", idx)
-            return []
+            return [], {}
 
     @staticmethod
     def _iter_chunks(tokens: Iterable[str], size: int) -> Iterable[list[str]]:
