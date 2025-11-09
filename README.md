@@ -64,6 +64,7 @@ This repo now has a single, obvious entry for the new, event‑driven runtime.
 
 - Observability (key topics/endpoints):
   - Bus topics: `runtime.stage_changed`, `action_decision`, `decision_summary`, `decision_metrics`, `rl_weights`, `trade_logged`
+    - New stage: `wallet:balance` confirms the live keypair balance before agents launch.
   - UI endpoints: `/runtime/stages`, `/decisions/recent`, `/metrics/decision`, `/status`
   - Verbose stages: `ORCH_VERBOSE=1` or `--verbose-stages`
 
