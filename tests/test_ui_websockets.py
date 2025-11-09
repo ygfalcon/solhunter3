@@ -120,6 +120,7 @@ def test_websocket_env_updates_after_rebind(monkeypatch):
     }
     for key, value in stale_urls.items():
         monkeypatch.setenv(key, value)
+        ui._AUTO_WS_ENV_VALUES[key] = value
 
     sock = socket.socket()
     sock.bind(("localhost", 8767))
@@ -145,6 +146,38 @@ def test_websocket_env_updates_after_rebind(monkeypatch):
         assert os.environ["UI_LOGS_WS"] == expected_logs
     finally:
         sock.close()
+        for loop in (ui.rl_ws_loop, ui.event_ws_loop, ui.log_ws_loop):
+            if loop is not None:
+                loop.call_soon_threadsafe(loop.stop)
+        for t in threads.values():
+            t.join(timeout=1)
+
+
+@pytest.mark.timeout(30)
+def test_websocket_env_preserves_preconfigured_url(monkeypatch):
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+    pytest.importorskip("websockets")
+
+    importlib.import_module("websockets")  # ensure real implementation
+
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault(
+        "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet")
+    )
+
+    from solhunter_zero import ui
+    importlib.reload(ui)
+
+    custom_url = "wss://example.com/custom"
+    monkeypatch.setenv("UI_WS_URL", custom_url)
+
+    threads: dict[str, threading.Thread] = {}
+    try:
+        threads = ui.start_websockets()
+        assert os.environ["UI_WS_URL"] == custom_url
+    finally:
         for loop in (ui.rl_ws_loop, ui.event_ws_loop, ui.log_ws_loop):
             if loop is not None:
                 loop.call_soon_threadsafe(loop.stop)
