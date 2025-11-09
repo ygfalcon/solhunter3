@@ -450,7 +450,9 @@ def _prepare_runtime_log() -> Path:
 
 def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
     ui_port = str(args.ui_port)
+    ui_host = str(args.ui_host)
     os.environ["UI_PORT"] = ui_port
+    os.environ["UI_HOST"] = ui_host
     cmd = [
         sys.executable,
         "-m",
@@ -471,6 +473,7 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
     log.info("Runtime stdout/stderr redirected to %s", log_path)
     env = os.environ.copy()
     env["UI_PORT"] = ui_port
+    env["UI_HOST"] = ui_host
     with log_path.open("ab", buffering=0) as log_file:
         proc = subprocess.Popen(
             cmd,
@@ -492,6 +495,7 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
 def launch_foreground(args: argparse.Namespace, cfg_path: str) -> int:
     log.info("Starting TradingRuntime in foreground mode")
     os.environ["UI_PORT"] = str(args.ui_port)
+    os.environ["UI_HOST"] = str(args.ui_host)
     runtime = TradingRuntime(
         config_path=cfg_path,
         ui_host=args.ui_host,
