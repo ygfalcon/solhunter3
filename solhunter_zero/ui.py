@@ -3284,14 +3284,15 @@ class UIServer:
     ) -> None:
         self.state = state
         self.host = host
+        self._requested_port = int(port)
         self.port = int(port)
         self.app = create_app(state)
         self._thread: Optional[threading.Thread] = None
         self._server: Optional[BaseWSGIServer] = None
 
-    def start(self) -> None:
+    def start(self) -> int:
         if self._thread and self._thread.is_alive():
-            return
+            return self.port
 
         try:
             server = make_server(self.host, self.port, self.app)
@@ -3304,6 +3305,10 @@ class UIServer:
 
         server.daemon_threads = True
         self._server = server
+        bound_port = int(getattr(server, "server_port", self.port))
+        self.port = bound_port
+        if self._requested_port == 0 and os.environ.get("UI_PORT") == "0":
+            os.environ["UI_PORT"] = str(bound_port)
 
         def _serve() -> None:
             try:
@@ -3315,6 +3320,8 @@ class UIServer:
 
         self._thread = threading.Thread(target=_serve, daemon=True)
         self._thread.start()
+
+        return bound_port
 
     def stop(self) -> None:
         server = self._server
@@ -3461,8 +3468,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     _seed_state_from_snapshots(state, args.snapshot_dir)
 
     server = UIServer(state, host=args.host, port=args.port)
-    server.start()
-    url = f"http://{args.host}:{args.port}"
+    bound_port = server.start()
+    url = f"http://{args.host}:{bound_port}"
     print(f"Solsniper Zero UI listening on {url}", flush=True)
     if args.snapshot_dir:
         print(f"Seeded UI state from {args.snapshot_dir}", flush=True)

@@ -25,10 +25,13 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
     state = UIState()
     server = UIServer(state, host="127.0.0.1", port=0)
 
-    server.start()
+    allocated_port = server.start()
     try:
         assert server._server is not None
         assert server._thread is not None
         assert server._thread.is_alive()
+        assert allocated_port == server.port
+        assert allocated_port != 0
+        assert server._server.server_port == server.port
     finally:
         server.stop()

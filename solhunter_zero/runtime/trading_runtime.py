@@ -891,7 +891,10 @@ class TradingRuntime:
             return
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
-        self.ui_server.start()
+        bound_port = self.ui_server.start()
+        if bound_port != self.ui_port:
+            self.ui_port = bound_port
+            os.environ["UI_PORT"] = str(bound_port)
 
         threads = ui.start_websockets()
         self.ui_ws_threads = threads
