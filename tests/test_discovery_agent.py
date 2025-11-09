@@ -72,11 +72,12 @@ def test_collect_mempool_times_out(monkeypatch, caplog):
     )
     monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT", 0.01)
     monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT_RETRIES", 1)
+    monkeypatch.setenv("TOKEN_DISCOVERY_BACKOFF", "0.05")
 
     agent = DiscoveryAgent()
 
     async def run():
-        with caplog.at_level("DEBUG"):
+        with caplog.at_level("WARNING"):
             return await agent._collect_mempool()
 
     start = time.perf_counter()
@@ -86,7 +87,7 @@ def test_collect_mempool_times_out(monkeypatch, caplog):
     assert tokens == []
     assert details == {}
     assert elapsed < 0.5
-    assert "Mempool stream timed out" in caplog.text
+    assert "Mempool stream yielded no events" in caplog.text
 
 
 def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):

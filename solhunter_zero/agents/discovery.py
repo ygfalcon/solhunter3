@@ -517,17 +517,43 @@ class DiscoveryAgent:
         details: Dict[str, Dict[str, Any]] = {}
         timeout = max(float(_MEMPOOL_TIMEOUT), 0.1)
         retries = max(1, int(_MEMPOOL_TIMEOUT_RETRIES))
+        max_wait = max(self.backoff, 0.0)
+        deadline: float | None
+        if max_wait:
+            deadline = time.perf_counter() + max_wait
+        else:
+            deadline = None
         timeouts = 0
+        timed_out = False
+        deadline_triggered = False
         try:
             while len(tokens) < self.limit:
+                remaining: float | None = None
+                if deadline is not None:
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        deadline_triggered = True
+                        timed_out = True
+                        break
+                    wait_for_timeout = min(timeout, remaining)
+                else:
+                    wait_for_timeout = timeout
+
+                # ``asyncio.wait_for`` does not allow a negative timeout; guard against
+                # floating point drift by clamping to zero which forces an immediate
+                # timeout when no item is ready.
+                wait_for_timeout = max(wait_for_timeout, 0.0)
+
                 try:
-                    item = await asyncio.wait_for(anext(gen), timeout=timeout)
+                    item = await asyncio.wait_for(anext(gen), timeout=wait_for_timeout)
                 except asyncio.TimeoutError:
                     timeouts += 1
+                    if deadline is not None and (deadline - time.perf_counter()) <= 0:
+                        deadline_triggered = True
+                        timed_out = True
+                        break
                     if timeouts >= retries:
-                        logger.debug(
-                            "Mempool stream timed out after %d attempts", timeouts
-                        )
+                        timed_out = True
                         break
                     continue
                 except StopAsyncIteration:
@@ -552,6 +578,15 @@ class DiscoveryAgent:
             if hasattr(gen, "aclose"):
                 with contextlib.suppress(Exception):
                     await gen.aclose()  # type: ignore[attr-defined]
+        if timed_out and not tokens:
+            if deadline_triggered and max_wait:
+                wait_window = max_wait
+            else:
+                wait_window = timeout * retries
+            logger.warning(
+                "Mempool stream yielded no events within %.2fs; continuing with fallback",
+                wait_window,
+            )
         return tokens, details
 
     async def _fallback_after_merge_failure(
