@@ -27,6 +27,7 @@ from ..config import (
     load_config,
     load_selected_config,
 )
+from ..feature_flags import get_feature_flags
 from ..main import perform_startup_async
 from ..main_state import TradingState
 from ..memory import Memory
@@ -35,6 +36,7 @@ from ..strategy_manager import StrategyManager
 from ..agent_manager import AgentManager
 from ..loop import ResourceBudgetExceeded, trading_loop as _trading_loop
 from .. import ui as _ui_module
+from scripts.start_all import verify_live_account
 from .runtime_wiring import RuntimeWiring, initialise_runtime_wiring, resolve_golden_enabled
 
 if hasattr(_ui_module, "create_app"):
@@ -582,8 +584,45 @@ class RuntimeOrchestrator:
     async def start_agents(self) -> None:
         # Use existing startup path to ensure consistent connectivity + depth_service
         await self._publish_stage("agents:startup", True)
-        cfg, runtime_cfg, proc = await perform_startup_async(self.config_path, offline=False, dry_run=False)
+        cfg, runtime_cfg, proc = await perform_startup_async(
+            self.config_path, offline=False, dry_run=False
+        )
         self.handles.depth_proc = proc
+
+        flags = get_feature_flags()
+        if flags.mode == "paper":
+            await self._publish_stage("wallet:balance", True, "mode=paper skipped")
+        else:
+            try:
+                verification = await asyncio.to_thread(verify_live_account)
+            except SystemExit as exc:
+                detail = str(exc) or "wallet verification failed"
+                await self._publish_stage("wallet:balance", False, detail)
+                raise RuntimeError(detail) from exc
+            except Exception as exc:
+                detail = str(exc) or exc.__class__.__name__
+                await self._publish_stage("wallet:balance", False, detail)
+                raise
+            else:
+                if isinstance(verification, dict) and verification.get("skipped"):
+                    detail = "verification skipped"
+                else:
+                    balance = verification.get("balance_sol") if isinstance(verification, dict) else None
+                    min_required = (
+                        verification.get("min_required_sol") if isinstance(verification, dict) else None
+                    )
+                    blockhash = (
+                        verification.get("blockhash") if isinstance(verification, dict) else None
+                    )
+                    detail_parts: list[str] = []
+                    if isinstance(balance, (int, float)):
+                        detail_parts.append(f"balance={balance:.6f}")
+                    if isinstance(min_required, (int, float)):
+                        detail_parts.append(f"required={min_required:.6f}")
+                    if isinstance(blockhash, str) and blockhash:
+                        detail_parts.append(f"blockhash={blockhash}")
+                    detail = " ".join(detail_parts) or "verification complete"
+                await self._publish_stage("wallet:balance", True, detail)
 
         await self._ensure_ui_forwarder()
 

@@ -31,6 +31,7 @@
 
    - `UI_READY url=http://127.0.0.1:XXXX …`
    - `Event bus: connected redis broker redis://localhost:6379/1 channel=solhunter-events-v3`
+   - `runtime.stage_changed stage=wallet:balance ok=true …` (live wallet verified before trading)
    - `GOLDEN_READY topic=x:mint.golden providers=<n>`
    - `RUNTIME_READY mode=paper` / `RUNTIME_READY mode=live`
 
