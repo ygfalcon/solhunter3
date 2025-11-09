@@ -263,8 +263,6 @@ class DiscoveryAgent:
         ttl = self.cache_ttl
         method_override = method is not None
         requested_method = resolve_discovery_method(method)
-        if requested_method is None and offline and not method_override:
-            requested_method = "helius"
         if requested_method is None:
             active_method = self.default_method or DEFAULT_DISCOVERY_METHOD
             if method_override and isinstance(method, str) and method.strip():
@@ -288,6 +286,49 @@ class DiscoveryAgent:
             (not cached_identity and not current_rpc_identity)
             or cached_identity == current_rpc_identity
         )
+        if offline and not method_override:
+            offline_source = "fallback"
+            if token_file:
+                try:
+                    tokens = scan_tokens_from_file(token_file, limit=self.limit)
+                    offline_source = "file"
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Failed to read token_file %s: %s", token_file, exc)
+                    tokens = []
+                details: Dict[str, Dict[str, Any]] = {}
+            elif cached_tokens and identity_matches:
+                tokens = list(cached_tokens)
+                offline_source = "cache"
+                details = {}
+            else:
+                if cached_tokens and not identity_matches:
+                    logger.debug(
+                        "DiscoveryAgent offline cache ignored due to RPC mismatch (cached=%s, current=%s)",
+                        cached_identity,
+                        current_rpc_identity,
+                    )
+                tokens = self._fallback_tokens()
+                details = {}
+            tokens = self._normalise(tokens)
+            tokens, details = await self._apply_social_mentions(
+                tokens, details, offline=True
+            )
+            if self.limit:
+                tokens = tokens[: self.limit]
+            self.last_tokens = tokens
+            self.last_details = details
+            self.last_method = "offline"
+            detail = f"yield={len(tokens)}"
+            if self.limit:
+                detail = f"{detail}/{self.limit}"
+            detail = f"{detail} method=offline source={offline_source}"
+            publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
+            logger.info(
+                "DiscoveryAgent offline mode active (source=%s, count=%d)",
+                offline_source,
+                len(tokens),
+            )
+            return tokens
         if cached_tokens and not identity_matches:
             logger.debug(
                 "DiscoveryAgent cache invalidated due to RPC change (cached=%s, current=%s)",

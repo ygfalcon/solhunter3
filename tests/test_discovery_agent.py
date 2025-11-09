@@ -139,7 +139,7 @@ def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
 
     async def run():
         with caplog.at_level("WARNING"):
-            return await agent.discover_tokens(offline=True)
+            return await agent.discover_tokens()
 
     tokens = asyncio.run(run())
     assert tokens == [VALID_MINT]
@@ -360,21 +360,60 @@ def test_discovery_cache_is_scoped_per_rpc(monkeypatch):
 def test_offline_discovery_skips_social_mentions(monkeypatch, caplog):
     _reset_cache()
 
-    async def fake_discover_once(self, *, method, offline, token_file):
-        assert offline is True
-        return [VALID_MINT], {}
-
     async def fail_collect_social(self):
         raise AssertionError("social mentions should not be collected offline")
 
-    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
     monkeypatch.setattr(DiscoveryAgent, "_collect_social_mentions", fail_collect_social)
+
+    async def fail_scan_tokens_async(*_a, **_k):
+        raise AssertionError("scan_tokens_async should not be called offline")
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.scan_tokens_async",
+        fail_scan_tokens_async,
+    )
 
     agent = DiscoveryAgent()
     agent.news_feeds = ["https://example.com/feed"]
+    cached_identity = discovery_mod._rpc_identity(agent.rpc_url)
+    discovery_mod._CACHE.update(
+        {
+            "tokens": [VALID_MINT],
+            "ts": time.time(),
+            "limit": agent.limit,
+            "method": "",
+            "rpc_identity": cached_identity,
+        }
+    )
 
     with caplog.at_level("INFO"):
         tokens = asyncio.run(agent.discover_tokens(offline=True))
 
     assert tokens == [VALID_MINT]
+    assert "offline mode active" in caplog.text
     assert "skipping social mentions" in caplog.text
+
+
+def test_offline_discovery_returns_static_fallback(monkeypatch, caplog):
+    _reset_cache()
+
+    async def fail_scan_tokens_async(*_a, **_k):
+        raise AssertionError("scan_tokens_async should not be called offline")
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.scan_tokens_async",
+        fail_scan_tokens_async,
+    )
+
+    agent = DiscoveryAgent()
+
+    with caplog.at_level("INFO"):
+        tokens = asyncio.run(agent.discover_tokens(offline=True))
+
+    expected = [
+        discovery_mod.canonical_mint(tok)
+        for tok in discovery_mod._STATIC_FALLBACK
+        if discovery_mod.validate_mint(discovery_mod.canonical_mint(tok))
+    ][: agent.limit]
+    assert tokens == expected
+    assert "offline mode active" in caplog.text
