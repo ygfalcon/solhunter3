@@ -182,6 +182,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _apply_ui_cli_overrides(args: argparse.Namespace) -> dict[str, str]:
+    """Ensure CLI-provided UI overrides propagate through the environment."""
+
+    host = str(getattr(args, "ui_host", "") or "127.0.0.1")
+    port = str(getattr(args, "ui_port", "") or os.getenv("UI_PORT", "5001"))
+    os.environ["UI_HOST"] = host
+    os.environ["UI_PORT"] = port
+    return {"UI_HOST": host, "UI_PORT": port}
+
+
 def kill_lingering_processes() -> None:
     patterns = [
         "solhunter_zero.primary_entry_point",
@@ -543,7 +553,7 @@ PRODUCTION_PROVIDERS: list[Provider] = [
     Provider("Solana", ("SOLANA_RPC_URL", "SOLANA_WS_URL")),
     Provider("Helius", ("HELIUS_API_KEY",)),
     Provider("Redis", ("REDIS_URL",), optional=True),
-    Provider("UI", ("UI_WS_URL",), optional=True),
+    Provider("UI", ("UI_WS_URL", "UI_HOST", "UI_PORT"), optional=True),
     Provider("Helius-DAS", ("DAS_BASE_URL",), optional=True),
 ]
 
@@ -669,6 +679,7 @@ def _connectivity_soak() -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    _apply_ui_cli_overrides(args)
     configure_runtime_logging(force=True)
     logging.getLogger(__name__).info("Runtime logging configured")
 
@@ -693,6 +704,11 @@ def main(argv: list[str] | None = None) -> int:
             run_stage(
                 "apply-prod-defaults",
                 lambda: apply_production_defaults(env.get("config")),
+                stage_results,
+            )
+            run_stage(
+                "apply-ui-cli-overrides",
+                lambda: _apply_ui_cli_overrides(args),
                 stage_results,
             )
             run_stage("validate-keys", _validate_keys, stage_results)
