@@ -133,6 +133,86 @@ def _serialize(value: Any) -> Any:
     return str(value)
 
 
+def _format_fill_record(payload: Mapping[str, Any], *, source: str) -> Dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {"source": source}
+
+    record: Dict[str, Any] = {"source": source}
+    consumed: set[str] = {"_received", "ts", "timestamp"}
+
+    mint = payload.get("mint")
+    if mint is not None:
+        record["mint"] = str(mint)
+    side = payload.get("side")
+    if isinstance(side, str):
+        normalized = side.strip().lower()
+        if normalized:
+            record["side"] = normalized
+    consumed.add("side")
+
+    numeric_fields = {
+        "qty_base",
+        "qty_quote",
+        "price_usd",
+        "fees_usd",
+        "slippage_bps",
+        "latency_ms",
+        "realized_usd",
+        "unrealized_usd",
+        "turnover_usd",
+        "notional_usd",
+    }
+    for field in numeric_fields:
+        value = _maybe_float(payload.get(field))
+        if value is not None:
+            record[field] = value
+        consumed.add(field)
+
+    ts_value = payload.get("ts")
+    if ts_value is None:
+        ts_value = payload.get("timestamp")
+    timestamp = _maybe_float(ts_value)
+    if timestamp is not None:
+        record["timestamp"] = timestamp
+    received = _maybe_float(payload.get("_received"))
+    if received is not None:
+        record["received_at"] = received
+
+    meta = payload.get("meta")
+    if meta is not None:
+        record["meta"] = _serialize(meta)
+    consumed.add("meta")
+
+    passthrough_fields = (
+        "order_id",
+        "route",
+        "venue",
+        "strategy",
+        "reason",
+        "status",
+        "txid",
+        "client_id",
+        "snapshot_hash",
+        "exchange",
+    )
+    for field in passthrough_fields:
+        if field in payload:
+            value = payload.get(field)
+            if value is not None:
+                record[field] = _serialize(value)
+            consumed.add(field)
+
+    extras: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if key in consumed:
+            continue
+        extras[str(key)] = _serialize(value)
+    if extras:
+        record["extra"] = extras
+
+    return {k: v for k, v in record.items() if v is not None}
+
+
 def _maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     if value in (None, "", "null"):
         return default
@@ -1750,6 +1830,45 @@ class RuntimeEventCollectors:
             decisions_copy.append(dict(decision))
         return {"windows": windows[:200], "decisions": decisions_copy}
 
+    def fills_snapshot(self, limit: int) -> List[Dict[str, Any]]:
+        try:
+            limit_value = max(int(limit), 0)
+        except Exception:
+            limit_value = 0
+
+        with self._swarm_lock:
+            virtual = list(self._virtual_fills)
+            live = list(self._live_fills)
+
+        entries: List[Dict[str, Any]] = []
+        for payload in virtual:
+            record = _format_fill_record(payload, source="virtual")
+            if record:
+                entries.append(record)
+        for payload in live:
+            record = _format_fill_record(payload, source="live")
+            if record:
+                entries.append(record)
+
+        for record in entries:
+            timestamp = record.get("timestamp")
+            received = record.get("received_at")
+            record["_sort_key"] = (
+                timestamp
+                if isinstance(timestamp, (int, float))
+                else received
+                if isinstance(received, (int, float))
+                else 0.0
+            )
+
+        entries.sort(key=lambda item: item.get("_sort_key", 0.0), reverse=True)
+        for record in entries:
+            record.pop("_sort_key", None)
+
+        if limit_value:
+            return entries[:limit_value]
+        return entries
+
     def shadow_snapshot(self) -> Dict[str, Any]:
         with self._swarm_lock:
             virtual = list(self._virtual_fills)
@@ -1774,6 +1893,7 @@ class RuntimeWiring:
         ui_state.suggestions_provider = self.collectors.suggestions_snapshot
         ui_state.vote_windows_provider = self.collectors.vote_snapshot
         ui_state.shadow_provider = self.collectors.shadow_snapshot
+        ui_state.fills_provider = self.collectors.fills_snapshot
         ui_state.exit_provider = self.collectors.exit_snapshot
         ui_state.token_facts_provider = self.collectors.token_facts_snapshot
         ui_state.summary_provider = self.collectors.summary_snapshot
