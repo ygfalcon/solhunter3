@@ -1,4 +1,6 @@
 import asyncio
+from typing import Any, Mapping, Sequence
+
 from solhunter_zero import token_scanner as scanner
 from solhunter_zero import dynamic_limit
 from solhunter_zero import scanner_common
@@ -7,6 +9,22 @@ from solhunter_zero.event_bus import subscribe
 from solhunter_zero import event_bus
 
 data = {"data": [{"address": "abcbonk"}, {"address": "otherbonk"}]}
+
+
+def _normalize_tokens(payload: Any) -> list[str]:
+    if isinstance(payload, Mapping):
+        tokens = payload.get("tokens")
+        if tokens is None:
+            data = payload.get("data")
+            if isinstance(data, Mapping):
+                tokens = data.get("tokens")
+        if isinstance(tokens, Sequence) and not isinstance(tokens, (str, bytes)):
+            return [str(token) for token in tokens]
+        if tokens is not None:
+            return [str(tokens)]
+    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
+        return [str(token) for token in payload]
+    return [str(payload)]
 
 class FakeResponse:
     def __init__(self, data, status_code=200):
@@ -63,7 +81,9 @@ def test_scan_tokens_websocket(monkeypatch):
     scanner_common.HEADERS.clear()
     scanner_common.HEADERS["X-API-KEY"] = "test"
     events = []
-    unsub = subscribe("token_discovered", lambda p: events.append(p))
+    unsub = subscribe(
+        "token_discovered", lambda p: events.append(_normalize_tokens(p))
+    )
     tokens = asyncio.run(scanner.scan_tokens())
     unsub()
     assert tokens == ['abcbonk', 'xyzBONK', 'trend', 'ray', 'orca']
@@ -89,7 +109,9 @@ def test_scan_tokens_offline(monkeypatch):
         raise AssertionError('trending')
     monkeypatch.setattr(scanner, 'fetch_trending_tokens_async', fail)
     events = []
-    unsub = subscribe("token_discovered", lambda p: events.append(p))
+    unsub = subscribe(
+        "token_discovered", lambda p: events.append(_normalize_tokens(p))
+    )
     tokens = asyncio.run(scanner.scan_tokens(offline=True))
     unsub()
     assert tokens == scanner.OFFLINE_TOKENS
@@ -121,7 +143,9 @@ def test_scan_tokens_onchain(monkeypatch):
 
     scanner_common.SOLANA_RPC_URL = 'http://node'
     events = []
-    unsub = subscribe("token_discovered", lambda p: events.append(p))
+    unsub = subscribe(
+        "token_discovered", lambda p: events.append(_normalize_tokens(p))
+    )
     tokens = asyncio.run(scanner.scan_tokens(method="onchain"))
     unsub()
     assert tokens == ['tok', 't2']
@@ -171,7 +195,9 @@ def test_scan_tokens_async(monkeypatch):
     monkeypatch.setattr(async_scanner_mod, 'fetch_raydium_listings_async', fr_func)
     monkeypatch.setattr(async_scanner_mod, 'fetch_orca_listings_async', fo_func)
     events = []
-    unsub = subscribe("token_discovered", lambda p: events.append(p))
+    unsub = subscribe(
+        "token_discovered", lambda p: events.append(_normalize_tokens(p))
+    )
     tokens = asyncio.run(async_scan())
     unsub()
     assert tokens == ["abcbonk", "otherbonk", "trend", "ray", "orca"]
@@ -196,7 +222,9 @@ def test_scan_tokens_from_file(monkeypatch, tmp_path):
     )
 
     events = []
-    unsub = subscribe("token_discovered", lambda p: events.append(p))
+    unsub = subscribe(
+        "token_discovered", lambda p: events.append(_normalize_tokens(p))
+    )
     tokens = asyncio.run(scanner.scan_tokens(token_file=str(path)))
     unsub()
     assert tokens == ["tok1", "tok2"]
@@ -219,7 +247,9 @@ def test_scan_tokens_async_from_file(monkeypatch, tmp_path):
     monkeypatch.setattr(async_scanner_mod, "fetch_trending_tokens_async", fail)
 
     events = []
-    unsub = subscribe("token_discovered", lambda p: events.append(p))
+    unsub = subscribe(
+        "token_discovered", lambda p: events.append(_normalize_tokens(p))
+    )
     tokens = asyncio.run(async_scan(token_file=str(path)))
     unsub()
     assert tokens == ["a", "b"]
@@ -239,7 +269,9 @@ def test_scan_tokens_mempool(monkeypatch):
     monkeypatch.setattr(scanner, "fetch_raydium_listings_async", fr)
     monkeypatch.setattr(scanner, "fetch_orca_listings_async", fr)
     events = []
-    unsub = subscribe("token_discovered", lambda p: events.append(p))
+    unsub = subscribe(
+        "token_discovered", lambda p: events.append(_normalize_tokens(p))
+    )
     tokens = asyncio.run(scanner.scan_tokens(method="mempool"))
     unsub()
     assert tokens == ["memtok"]

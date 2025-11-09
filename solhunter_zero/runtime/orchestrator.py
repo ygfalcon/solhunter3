@@ -10,6 +10,7 @@ import os
 import signal
 import socket
 import sys
+import time
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -762,11 +763,26 @@ class RuntimeOrchestrator:
         async def _discovery_loop():
             agent = DiscoveryAgent()
             method = discovery_method
+            try:
+                event_bus.publish(
+                    "telemetry.discovery_method",
+                    {"component": "discovery", "method": method},
+                )
+            except Exception:
+                pass
             while True:
                 try:
                     tokens = await agent.discover_tokens(method=method, offline=False)
                     if tokens:
-                        event_bus.publish("token_discovered", list(tokens))
+                        payload: dict[str, Any] = {
+                            "tokens": list(tokens),
+                            "method": getattr(agent, "last_method", None) or method,
+                            "ts": time.time(),
+                        }
+                        details = getattr(agent, "last_details", None)
+                        if isinstance(details, dict) and details:
+                            payload["details"] = details
+                        event_bus.publish("token_discovered", payload)
                 except Exception:
                     pass
                 await asyncio.sleep(max(5, min(60, loop_delay)))

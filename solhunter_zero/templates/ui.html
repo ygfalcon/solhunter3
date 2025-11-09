@@ -957,6 +957,59 @@
     }
     return [raw];
   }
+  function isObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+  }
+  function expandDiscoveryFrame(frame) {
+    if (!isObject(frame)) return [frame];
+    if (!Array.isArray(frame.tokens)) return [frame];
+    const details = isObject(frame.details) ? frame.details : {};
+    const method = frame.method;
+    const stamp = frame.ts || frame.timestamp || frame.time;
+    return frame.tokens.map((token) => {
+      let entry = isObject(token) ? {...token} : {};
+      if (!isObject(token)) {
+        const text = typeof token === 'string' ? token : String(token);
+        if (!entry.mint) entry.mint = text;
+      }
+      const mint = entry.mint || entry.token || entry.address || entry.id;
+      if (mint && isObject(details[mint])) {
+        entry = {...details[mint], ...entry};
+      }
+      if (method && !entry.method) entry.method = method;
+      if (stamp && !entry.ts) entry.ts = stamp;
+      const providers = Array.isArray(entry.sources)
+        ? entry.sources
+        : Array.isArray(entry.providers)
+          ? entry.providers
+          : null;
+      if (!entry.source) {
+        if (providers && providers.length) {
+          entry.source = providers.join(', ');
+        } else if (typeof entry.provider === 'string') {
+          entry.source = entry.provider;
+        } else if (typeof entry.origin === 'string') {
+          entry.source = entry.origin;
+        } else if (method) {
+          entry.source = method;
+        }
+      }
+      if (!entry.routes && providers && providers.length) {
+        entry.routes = providers;
+      }
+      return entry;
+    });
+  }
+  function flattenDiscoveryPayload(payload) {
+    if (payload === undefined || payload === null) return [];
+    const frames = Array.isArray(payload) ? payload : [payload];
+    const expanded = [];
+    frames.forEach((frame) => {
+      if (frame === undefined || frame === null) return;
+      expandDiscoveryFrame(frame).forEach((entry) => expanded.push(entry));
+    });
+    return expanded;
+  }
   function persistSort(key, value) {
     try {
       localStorage.setItem(key, JSON.stringify(value));
@@ -1171,19 +1224,34 @@ function setupRunHeader() {
 }
 function normalizeDiscoveryEvent(raw, tokenMetaCache) {
   if (!raw) return null;
-  const mint = raw.mint || raw.token || raw.id;
+  const mint = raw.mint || raw.token || raw.address || raw.id;
   if (!mint) return null;
   const ts = toMillis(raw.ts || raw.timestamp || raw.time);
   const meta = tokenMetaCache.get(mint) || {};
+  const providerList = Array.isArray(raw.sources)
+    ? raw.sources
+    : Array.isArray(raw.providers)
+      ? raw.providers
+      : null;
+  let source = raw.source || raw.kind || raw.method;
+  if (!source && typeof raw.provider === 'string') {
+    source = raw.provider;
+  } else if (!source && typeof raw.origin === 'string') {
+    source = raw.origin;
+  } else if (!source && providerList && providerList.length) {
+    source = providerList.join(', ');
+  }
+  const routesRaw = raw.routes !== undefined ? raw.routes : (raw.route !== undefined ? raw.route : providerList);
+  const qualityRaw = raw.quality_score ?? raw.score ?? raw.quality;
   return {
     mint,
     ts,
     local: formatTimestamp(ts),
-    source: raw.source || raw.kind || 'unknown',
+    source: source || 'unknown',
     symbol: raw.symbol || meta.symbol || raw.ticker || '—',
     name: raw.name || meta.name || '—',
-    routes: Array.isArray(raw.routes) ? raw.routes.join(', ') : (raw.route || '—'),
-    quality: Number(raw.quality_score || raw.score || 0)
+    routes: Array.isArray(routesRaw) ? routesRaw.join(', ') : (routesRaw || '—'),
+    quality: Number(qualityRaw || 0)
   };
 }
 function setupDiscoveryPanel() {
@@ -1252,8 +1320,7 @@ function setupDiscoveryPanel() {
     }
   }
   function ingest(rows) {
-    const items = Array.isArray(rows) ? rows : [rows];
-    items.forEach((row) => {
+    flattenDiscoveryPayload(rows).forEach((row) => {
       const normalized = normalizeDiscoveryEvent(row, tokenMetaCache);
       if (!normalized) return;
       hydrateMeta(normalized.mint);
@@ -1267,8 +1334,9 @@ function setupDiscoveryPanel() {
     statusNode.textContent = 'Loading snapshot…';
     try {
       const snapshot = await safeFetchJson(ENDPOINTS.discoverySnapshot, 'discovery', errorNode, {headers: {Accept: 'application/json'}});
-      if (Array.isArray(snapshot)) {
-        state.discoveryEvents = snapshot.map((row) => normalizeDiscoveryEvent(row, tokenMetaCache)).filter(Boolean);
+      const flattened = flattenDiscoveryPayload(snapshot);
+      if (flattened.length) {
+        state.discoveryEvents = flattened.map((row) => normalizeDiscoveryEvent(row, tokenMetaCache)).filter(Boolean);
         state.discoveryEvents.sort((a, b) => b.ts - a.ts);
         hydration.discovery = true;
         render();

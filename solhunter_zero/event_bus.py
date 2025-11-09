@@ -1119,11 +1119,32 @@ def _encode_event(topic: str, payload: Any, dedupe_key: str | None = None) -> An
         )
     elif topic == "token_discovered":
         data = payload
-        if not isinstance(data, (list, tuple)):
-            data = to_dict(data)
+        tokens_raw: list[Any] = []
+        if isinstance(data, dict):
+            tokens_field = data.get("tokens")
+            if isinstance(tokens_field, (list, tuple, set)):
+                tokens_raw = list(tokens_field)
+            elif tokens_field is not None:
+                tokens_raw = [tokens_field]
+            else:
+                tokens_raw = list(data)
+        elif isinstance(data, (list, tuple, set)):
+            tokens_raw = list(data)
+        else:
+            data_dict = to_dict(data)
+            if isinstance(data_dict, dict):
+                tokens_field = data_dict.get("tokens")
+                if isinstance(tokens_field, (list, tuple, set)):
+                    tokens_raw = list(tokens_field)
+                elif tokens_field is not None:
+                    tokens_raw = [tokens_field]
+                else:
+                    tokens_raw = list(data_dict)
+            else:
+                tokens_raw = [data]
         event = pb.Event(
             topic=topic,
-            token_discovered=pb.TokenDiscovered(tokens=[str(t) for t in data]),
+            token_discovered=pb.TokenDiscovered(tokens=[str(t) for t in tokens_raw]),
         )
     elif topic == "memory_sync_request":
         data = to_dict(payload)

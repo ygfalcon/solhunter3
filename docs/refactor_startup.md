@@ -108,6 +108,9 @@ Phase 4 — Evolution loop & MEV service
 
 Existing topics continue to be used: `token_discovered`, `price_update`, `rl_weights`, `risk_updated`, `trade_logged`, `rl_metrics`, `heartbeat`.
 
+- `token_discovered` now carries structured payloads such as `{ "tokens": [...], "method": "helius", "details": {...} }` so subscribers can reason about discovery provenance while still accepting legacy plain lists.
+- Emit lightweight telemetry on `telemetry.discovery_method` capturing the active discovery method selected during startup.
+
 ## Migration & Rollout Plan
 
 1) Land orchestrator + CLI behind `NEW_RUNTIME=1` (read‑only integration).
