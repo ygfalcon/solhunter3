@@ -1,9 +1,9 @@
 import asyncio
+import socket
 import types
+from contextlib import closing
 
 import pytest
-
-import tests.runtime.test_trading_runtime  # ensure optional deps stubbed
 
 from solhunter_zero.loop import ResourceBudgetExceeded
 from solhunter_zero.runtime.orchestrator import RuntimeOrchestrator
@@ -149,3 +149,46 @@ async def test_orchestrator_starts_golden_pipeline_by_default(monkeypatch):
     assert any(stage == "golden:start" and ok and "providers=" in detail for stage, ok, detail in published)
 
     await orch.stop_all()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_ui_port_reusable_after_shutdown(monkeypatch):
+    host = "127.0.0.1"
+
+    class DummyUIState:
+        pass
+
+    def fake_create_app(_state):
+        def app(environ, start_response):
+            start_response("200 OK", [("Content-Type", "text/plain")])
+            return [b"ok"]
+
+        return app
+
+    dummy_ui_module = types.SimpleNamespace(
+        UIState=DummyUIState,
+        start_websockets=lambda: {},
+        get_ws_urls=lambda: {},
+    )
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator._ui_module", dummy_ui_module)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator._create_ui_app", fake_create_app)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator._start_ui_ws", lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
+        probe.bind((host, 0))
+        port = probe.getsockname()[1]
+
+    monkeypatch.setenv("UI_HOST", host)
+    monkeypatch.setenv("UI_PORT", str(port))
+    monkeypatch.delenv("UI_DISABLE_HTTP_SERVER", raising=False)
+
+    orch = RuntimeOrchestrator(run_http=True)
+    await orch.start_ui()
+    await orch.stop_all()
+
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as reuse:
+        reuse.bind((host, port))

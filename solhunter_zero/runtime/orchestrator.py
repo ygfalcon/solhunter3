@@ -10,6 +10,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -179,6 +180,7 @@ class RuntimeHandles:
     ui_app: Any | None = None
     ui_threads: dict[str, Any] | None = None
     ui_server: Any | None = None
+    ui_shutdown: threading.Event | None = None
     bus_started: bool = False
     tasks: list[asyncio.Task] = field(default_factory=list)
     ui_state: Any | None = None
@@ -488,6 +490,7 @@ class RuntimeOrchestrator:
                         continue
                     for key in keys:
                         os.environ.setdefault(key, url)
+        threads = dict(threads or {})
         self.handles.ui_app = app
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
@@ -517,7 +520,7 @@ class RuntimeOrchestrator:
                     sock.bind((host, 0))
                     return sock.getsockname()[1], True
 
-            def _serve(port_queue: Queue[Any]) -> None:
+            def _serve(port_queue: Queue[Any], shutdown: threading.Event) -> None:
                 server = None
                 try:
                     host = os.getenv("UI_HOST", "127.0.0.1")
@@ -543,22 +546,37 @@ class RuntimeOrchestrator:
                         self._emit_ui_ready(host, port)
                     except Exception:
                         log.exception("Failed to emit UI readiness signal")
-                    server.serve_forever()
+                    server.timeout = 0.2
+                    while not shutdown.is_set():
+                        try:
+                            server.handle_request()
+                        except OSError:
+                            if shutdown.is_set():
+                                break
+                            raise
+                    shutdown.set()
                 except Exception:
                     with suppress(Exception):
                         port_queue.put(sys.exc_info()[1] or RuntimeError("ui serve failed"))
                     log.exception("UI HTTP server failed")
                 finally:
+                    shutdown.set()
                     self.handles.ui_server = None
                     if server is not None:
-                        with suppress(Exception):
-                            server.shutdown()
                         with suppress(Exception):
                             server.server_close()
 
             port_queue: Queue[Any] = Queue(maxsize=1)
-            t = threading.Thread(target=_serve, args=(port_queue,), daemon=True)
+            shutdown_event = threading.Event()
+            self.handles.ui_shutdown = shutdown_event
+            t = threading.Thread(
+                target=_serve,
+                args=(port_queue, shutdown_event),
+                daemon=True,
+                name="ui-http",
+            )
             t.start()
+            threads["http"] = t
             actual_port: str | None = None
             try:
                 result = port_queue.get(timeout=5)
@@ -854,6 +872,16 @@ class RuntimeOrchestrator:
                 pass
         self._ui_forwarder = None
         self.handles.ui_forwarder = None
+        shutdown_event = self.handles.ui_shutdown
+        if shutdown_event is not None:
+            shutdown_event.set()
+        server = self.handles.ui_server
+        if server is not None:
+            with suppress(Exception):
+                server.shutdown()
+        http_thread = None
+        if self.handles.ui_threads:
+            http_thread = self.handles.ui_threads.pop("http", None)
         for unsub in list(self.handles.bus_subscriptions):
             try:
                 unsub()
@@ -898,6 +926,14 @@ class RuntimeOrchestrator:
                 m.stop()
         except Exception:
             pass
+        if isinstance(http_thread, threading.Thread):
+            with suppress(Exception):
+                http_thread.join(timeout=5)
+        if server is not None:
+            with suppress(Exception):
+                server.server_close()
+        self.handles.ui_server = None
+        self.handles.ui_shutdown = None
         # Stop risk controller
         try:
             rc = getattr(self, "_risk_ctl", None)
