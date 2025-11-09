@@ -311,6 +311,77 @@ def _dumps_text(obj: Any) -> str:
     return data
 
 
+def _normalize_token_discovered_payload(payload: Any) -> list[str]:
+    """Extract token mint strings from ``payload`` for token_discovered events."""
+
+    def _clean_mint(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                value = value.decode("utf-8")
+            except Exception:
+                value = bytes(value).decode("utf-8", "ignore")
+        try:
+            text = str(value)
+        except Exception:
+            return None
+        text = text.strip()
+        return text or None
+
+    def _coerce_tokens(values: Any) -> list[str]:
+        tokens: list[str] = []
+        if values is None:
+            return tokens
+        if isinstance(values, dict):
+            for item in values.values():
+                tokens.extend(_coerce_tokens(item))
+            return tokens
+        if isinstance(values, (list, tuple, set)):
+            for item in values:
+                tokens.extend(_coerce_tokens(item))
+            return tokens
+        if isinstance(values, Iterable) and not isinstance(values, (str, bytes, bytearray)):
+            for item in values:
+                tokens.extend(_coerce_tokens(item))
+            return tokens
+        cleaned = _clean_mint(values)
+        if cleaned:
+            tokens.append(cleaned)
+        return tokens
+
+    def _dedupe_preserve(seq: list[str]) -> list[str]:
+        seen: set[str] = set()
+        unique: list[str] = []
+        for item in seq:
+            if item in seen:
+                continue
+            seen.add(item)
+            unique.append(item)
+        return unique
+
+    if isinstance(payload, dict):
+        for key in ("tokens", "mints"):
+            if key in payload:
+                result = _dedupe_preserve(_coerce_tokens(payload.get(key)))
+                if result:
+                    return result
+        if "mint" in payload:
+            cleaned = _clean_mint(payload.get("mint"))
+            if cleaned:
+                return [cleaned]
+        nested: list[str] = []
+        for value in payload.values():
+            if isinstance(value, (list, tuple, set)):
+                nested.extend(_coerce_tokens(value))
+        if nested:
+            return _dedupe_preserve(nested)
+        return _dedupe_preserve(_coerce_tokens(list(payload.keys())))
+
+    tokens = _coerce_tokens(payload)
+    return _dedupe_preserve(tokens)
+
+
 def _json_loads(data: Any) -> Any:
     """Deserialize ``data`` using JSON regardless of the backend in use."""
     if isinstance(data, memoryview):
@@ -1118,12 +1189,10 @@ def _encode_event(topic: str, payload: Any, dedupe_key: str | None = None) -> An
             ),
         )
     elif topic == "token_discovered":
-        data = payload
-        if not isinstance(data, (list, tuple)):
-            data = to_dict(data)
+        tokens = _normalize_token_discovered_payload(payload)
         event = pb.Event(
             topic=topic,
-            token_discovered=pb.TokenDiscovered(tokens=[str(t) for t in data]),
+            token_discovered=pb.TokenDiscovered(tokens=tokens),
         )
     elif topic == "memory_sync_request":
         data = to_dict(payload)

@@ -1036,3 +1036,48 @@ def test_redis_broker_connection_error_falls_back(monkeypatch):
     ev.publish("local", {"x": 1})
     unsub()
     assert events == [{"x": 1}]
+
+
+def _publish_and_capture_event(topic, payload, monkeypatch):
+    import solhunter_zero.event_bus as ev
+
+    ev.reset()
+    captured = []
+    real_encode = ev._encode_event
+
+    def capture(topic, payload, dedupe_key=None):
+        data = real_encode(topic, payload, dedupe_key)
+        captured.append(data)
+        return data
+
+    async def dummy_broadcast(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(ev, "_encode_event", capture)
+    monkeypatch.setattr(ev, "broadcast_ws", dummy_broadcast)
+    monkeypatch.setattr(ev, "websockets", object())
+
+    try:
+        ev.publish(topic, payload)
+    finally:
+        ev.reset()
+
+    assert captured, "publish did not emit an encoded event"
+    frame = ev._maybe_decompress(captured[-1])
+    event = ev.pb.Event()
+    event.ParseFromString(frame)
+    return event
+
+
+def test_publish_token_discovered_with_dict_tokens(monkeypatch):
+    ev_msg = _publish_and_capture_event(
+        "token_discovered", {"tokens": ["SOL", "USDC"]}, monkeypatch
+    )
+    assert list(ev_msg.token_discovered.tokens) == ["SOL", "USDC"]
+
+
+def test_publish_token_discovered_with_dict_mint(monkeypatch):
+    ev_msg = _publish_and_capture_event(
+        "token_discovered", {"mint": "SOL"}, monkeypatch
+    )
+    assert list(ev_msg.token_discovered.tokens) == ["SOL"]
