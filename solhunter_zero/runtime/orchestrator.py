@@ -67,6 +67,14 @@ install_uvloop()
 log = logging.getLogger(__name__)
 
 
+def _discovery_sleep_interval(loop_delay: float | int) -> float:
+    """Return the sleep interval for the discovery loop."""
+
+    # The discovery loop enforces a minimum cadence of five seconds while
+    # otherwise honouring the configured delay so high values remain effective.
+    return float(max(5, loop_delay))
+
+
 _UI_TOPIC_DEFAULTS: dict[str, str] = {
     "discovery": "x:discovery.candidates",
     "token_facts": "x:token.snap",
@@ -674,6 +682,7 @@ class RuntimeOrchestrator:
 
         # Trading loop task (classic mode: reuses adaptive loop with evolve/cull)
         loop_delay = int(cfg.get("loop_delay", int(os.getenv("LOOP_DELAY", "60") or 60)))
+        # Discovery loop sleeps use a 5s floor but otherwise keep the configured delay.
         min_delay = int(cfg.get("min_delay", 1))
         max_delay = int(cfg.get("max_delay", loop_delay))
         cpu_low_threshold = float(cfg.get("cpu_low_threshold", 20.0))
@@ -769,7 +778,7 @@ class RuntimeOrchestrator:
                         event_bus.publish("token_discovered", list(tokens))
                 except Exception:
                     pass
-                await asyncio.sleep(max(5, min(60, loop_delay)))
+                await asyncio.sleep(_discovery_sleep_interval(loop_delay))
 
         async def _evolve_loop():
             # Evolve/mutate/cull continually based on success metrics

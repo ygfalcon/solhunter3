@@ -6,7 +6,10 @@ import pytest
 import tests.runtime.test_trading_runtime  # ensure optional deps stubbed
 
 from solhunter_zero.loop import ResourceBudgetExceeded
-from solhunter_zero.runtime.orchestrator import RuntimeOrchestrator
+from solhunter_zero.runtime.orchestrator import (
+    RuntimeOrchestrator,
+    _discovery_sleep_interval,
+)
 
 
 @pytest.fixture
@@ -149,3 +152,7 @@ async def test_orchestrator_starts_golden_pipeline_by_default(monkeypatch):
     assert any(stage == "golden:start" and ok and "providers=" in detail for stage, ok, detail in published)
 
     await orch.stop_all()
+
+
+def test_discovery_sleep_interval_honours_large_delays() -> None:
+    assert _discovery_sleep_interval(300) == pytest.approx(300.0)
