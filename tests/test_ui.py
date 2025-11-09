@@ -1,11 +1,13 @@
 import json
 import os
+import asyncio
 from typing import Any, Dict, Iterable
 
 import pytest
 from flask import Flask
 
 import solhunter_zero.ui as ui
+from solhunter_zero.runtime import runtime_wiring
 from solhunter_zero.runtime_defaults import DEFAULT_UI_PORT
 
 
@@ -175,10 +177,44 @@ def test_provider_status_endpoint(monkeypatch, client):
 
 def test_health_endpoint(monkeypatch, client):
     state = _active_state()
-    monkeypatch.setattr(state, "health_provider", lambda: {"status": "ok"})
-    resp = client.get("/api/health")
-    assert resp.status_code == 200
-    assert resp.get_json() == {"status": "ok"}
+
+    handlers: dict[str, list] = {}
+
+    def fake_subscribe(topic, handler):
+        handlers.setdefault(topic, []).append(handler)
+        return lambda: None
+
+    monkeypatch.setattr(runtime_wiring, "subscribe", fake_subscribe)
+
+    collectors = runtime_wiring.RuntimeEventCollectors()
+    collectors.start()
+
+    monkeypatch.setattr(state, "health_provider", collectors.health_snapshot)
+
+    async def emit(topic: str, payload):
+        for handler in handlers.get(topic, []):
+            await handler(payload)
+
+    async def drive():
+        await emit("runtime.stage_changed", {"stage": "bus:verify", "ok": True})
+        await emit("runtime.stage_changed", {"stage": "agents:loop", "ok": True})
+        await emit("heartbeat", {"service": "trading_loop"})
+        await emit("runtime.stage_changed", {"stage": "runtime:stopping", "ok": True})
+
+    try:
+        asyncio.run(drive())
+
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["event_bus"] is True
+        assert payload["trading_loop"] is False
+        assert payload["last_stage"] == "runtime:stopping"
+        assert payload["last_stage_ok"] is True
+        assert payload["heartbeat_ts"]
+        assert payload["last_stage_ts"]
+    finally:
+        collectors.stop()
 
 
 def test_logs_tail_endpoint(monkeypatch, client):

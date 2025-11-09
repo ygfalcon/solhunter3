@@ -1185,6 +1185,28 @@ class RuntimeEventCollectors:
             "rl_mode": control.get("rl_mode", "shadow"),
         }
 
+    def health_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._status_lock:
+            info = dict(self._status_info)
+        heartbeat_ts = info.get("heartbeat_ts")
+        heartbeat_latency_ms: Optional[float] = None
+        if heartbeat_ts is not None:
+            try:
+                heartbeat_latency_ms = max(0.0, (now - float(heartbeat_ts)) * 1000.0)
+            except Exception:
+                heartbeat_latency_ms = None
+        return {
+            "event_bus": bool(info.get("event_bus")),
+            "trading_loop": bool(info.get("trading_loop")),
+            "heartbeat_ts": heartbeat_ts,
+            "heartbeat_latency_ms": heartbeat_latency_ms,
+            "last_stage": info.get("last_stage"),
+            "last_stage_ok": info.get("last_stage_ok"),
+            "last_stage_detail": info.get("last_stage_detail"),
+            "last_stage_ts": info.get("last_stage_ts"),
+        }
+
     # Public provider accessors ------------------------------------------------
 
     def discovery_snapshot(self) -> Dict[str, Any]:
@@ -1758,6 +1780,7 @@ class RuntimeWiring:
         ui_state.rl_provider = self.collectors.rl_snapshot
         ui_state.rl_status_provider = self.collectors.rl_status_snapshot
         ui_state.settings_provider = self.collectors.settings_snapshot
+        ui_state.health_provider = self.collectors.health_snapshot
 
     def close(self) -> None:
         self.collectors.stop()
