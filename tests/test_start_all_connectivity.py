@@ -30,7 +30,7 @@ def test_main_passes_cli_ui_overrides_to_connectivity(monkeypatch, tmp_path):
     monkeypatch.setattr(start_all, "apply_production_defaults", lambda cfg: {})
     monkeypatch.setattr(start_all, "_validate_keys", lambda: "ok")
     monkeypatch.setattr(start_all, "verify_live_account", lambda: {"skipped": True})
-    monkeypatch.setattr(start_all, "rl_health_gate", lambda: None)
+    monkeypatch.setattr(start_all, "rl_health_gate", lambda **_: None)
 
     manifest_calls: list[dict[str, str]] = []
 

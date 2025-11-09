@@ -39,7 +39,6 @@ from solhunter_zero.config import (
 )
 from solhunter_zero.redis_util import ensure_local_redis_if_needed
 from solhunter_zero.logging_utils import configure_runtime_logging
-from solhunter_zero.feature_flags import FeatureFlags, get_feature_flags
 from solhunter_zero.production import (
     Provider,
     load_production_env,
@@ -53,11 +52,7 @@ from solhunter_zero.production.keypair import (
     verify_onchain_funds,
 )
 from solhunter_zero.cache_paths import RUNTIME_LOCK_PATH
-from solhunter_zero.health_runtime import (
-    http_ok,
-    resolve_rl_health_url,
-    wait_for,
-)
+from solhunter_zero.rl_gate import rl_health_gate
 
 
 log = logging.getLogger(__name__)
@@ -68,9 +63,6 @@ RUNTIME_LOG_DIR = Path("artifacts/logs")
 RUNTIME_LOG_NAME = "runtime.log"
 RUNTIME_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB
 RUNTIME_LOG_BACKUP_COUNT = 3
-
-
-_PIPELINE_CONFIG: Mapping[str, object] | None = None
 
 
 def _process_alive(pid: int) -> bool:
@@ -187,6 +179,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-delay", type=float, default=None, help="Minimum inter-iteration delay")
     parser.add_argument("--max-delay", type=float, default=None, help="Maximum inter-iteration delay")
     parser.add_argument("--skip-clean", action="store_true", help="Skip process cleanup")
+    parser.add_argument(
+        "--skip-rl-gate",
+        action="store_true",
+        help="Bypass RL health gate (sets RL_HEALTH_BYPASS=1)",
+    )
     return parser.parse_args(argv)
 
 
@@ -370,67 +367,6 @@ def _parse_float_env(name: str, default: float) -> float:
         log.warning("Invalid %s=%r; using default %.2f", name, raw, default)
         return default
     return max(0.1, value)
-
-
-def _rl_health_gate_skip_reason(flags: FeatureFlags | None, config: Mapping[str, object] | None) -> str | None:
-    """Return the reason to skip the RL gate when RL is disabled."""
-
-    if flags is not None:
-        mode = (flags.mode or "").lower()
-        if mode != "live":
-            return f"MODE={mode}" if mode else "mode unset"
-
-        if getattr(flags, "rl_weights_disabled", False):
-            return "RL_WEIGHTS_DISABLED=1"
-
-    if isinstance(config, Mapping):
-        use_rl = config.get("use_rl_weights")
-        if use_rl is not None and not bool(use_rl):
-            return "config.use_rl_weights disabled"
-
-    return None
-
-
-def _resolve_rl_health_url_for_gate() -> str | None:
-    try:
-        flags = get_feature_flags()
-    except Exception:  # pragma: no cover - defensive guard
-        flags = None
-
-    reason = _rl_health_gate_skip_reason(flags, _PIPELINE_CONFIG)
-    if reason is not None:
-        log.info("Skipping RL health gate: %s", reason)
-        return None
-
-    try:
-        url = resolve_rl_health_url(require_health_file=True)
-    except Exception as exc:
-        raise RuntimeError(f"RL daemon gate failed: {exc}") from exc
-    os.environ["RL_HEALTH_URL"] = url
-    return url
-
-
-def rl_health_gate() -> str | None:
-    """Block startup until the external RL daemon reports healthy."""
-
-    url = _resolve_rl_health_url_for_gate()
-    if not url:
-        return None
-    retries = _parse_int_env("RL_HEALTH_RETRIES", 30)
-    interval = _parse_float_env("RL_HEALTH_INTERVAL", 1.0)
-    log.info(
-        "Waiting for RL daemon health endpoint %s (retries=%s, interval=%.2fs)",
-        url,
-        retries,
-        interval,
-    )
-
-    ok, msg = wait_for(lambda: http_ok(url), retries=retries, sleep=interval)
-    if not ok:
-        raise RuntimeError(f"RL daemon gate failed: {msg}")
-
-    log.info("RL daemon health confirmed: %s — %s", url, msg)
-    return url
 
 
 def _rotate_runtime_log(log_path: Path) -> None:
@@ -784,6 +720,8 @@ def _connectivity_soak() -> dict[str, object]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if getattr(args, "skip_rl_gate", False):
+        os.environ["RL_HEALTH_BYPASS"] = "1"
     _apply_ui_cli_overrides(args)
     configure_runtime_logging(force=True)
     logging.getLogger(__name__).info("Runtime logging configured")
@@ -796,8 +734,6 @@ def main(argv: list[str] | None = None) -> int:
             if not args.skip_clean:
                 run_stage("process-cleanup", kill_lingering_processes, stage_results)
             env = run_stage("ensure-environment", lambda: ensure_environment(args.config), stage_results)
-            global _PIPELINE_CONFIG
-            _PIPELINE_CONFIG = env.get("config") if isinstance(env, dict) else None
             keypair_info = run_stage(
                 "resolve-live-keypair",
                 lambda: ensure_live_keypair(env.get("config")),
@@ -821,7 +757,11 @@ def main(argv: list[str] | None = None) -> int:
             run_stage("verify-onchain-account", verify_live_account, stage_results)
             run_stage("connectivity-check", _connectivity_check, stage_results)
             run_stage("connectivity-soak", _connectivity_soak, stage_results)
-            run_stage("rl-health-gate", rl_health_gate, stage_results)
+            run_stage(
+                "rl-health-gate",
+                lambda: rl_health_gate(config=env.get("config")),
+                stage_results,
+            )
 
             if args.foreground:
                 run_stage("launch-foreground", lambda: launch_foreground(args, cfg_path), stage_results)

@@ -35,6 +35,7 @@ from ..strategy_manager import StrategyManager
 from ..agent_manager import AgentManager
 from ..loop import ResourceBudgetExceeded, trading_loop as _trading_loop
 from .. import ui as _ui_module
+from ..rl_gate import rl_health_gate
 from .runtime_wiring import RuntimeWiring, initialise_runtime_wiring, resolve_golden_enabled
 
 if hasattr(_ui_module, "create_app"):
@@ -610,6 +611,22 @@ class RuntimeOrchestrator:
         else:
             agent_manager = AgentManager.from_default()
             strategy_manager = None if agent_manager is not None else StrategyManager(strategies)
+
+        try:
+            gate_result = rl_health_gate(config=cfg)
+        except Exception as exc:
+            await self._publish_stage("rl:health", False, str(exc))
+            raise
+        else:
+            if gate_result.skipped:
+                detail = f"skipped={gate_result.skip_reason}"
+            elif gate_result.url:
+                detail = f"url={gate_result.url}"
+                if gate_result.status:
+                    detail = f"{detail} status={gate_result.status}"
+            else:
+                detail = ""
+            await self._publish_stage("rl:health", True, detail)
 
         # Golden pipeline service wiring
         golden_enabled = resolve_golden_enabled(cfg)
