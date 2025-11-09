@@ -1280,6 +1280,98 @@ class SwarmPipeline:
                 self.state.last_tokens = list(stage.tokens)
             except Exception:
                 self.state.last_tokens = list(stage.tokens)
+
+        discovered_tokens: set[str] = set()
+        for tok in stage.discovered:
+            if not isinstance(tok, str):
+                continue
+            canonical = canonical_mint(tok)
+            if canonical:
+                discovered_tokens.add(canonical)
+
+        agent_details: Dict[str, Dict[str, Any]] = {}
+        if self._discovery_agent is not None and hasattr(
+            self._discovery_agent, "last_details"
+        ):
+            raw_details = getattr(self._discovery_agent, "last_details", {})
+
+            def _normalise_detail_value(value: Any) -> Any:
+                if value is None:
+                    return None
+                if isinstance(value, dict):
+                    normalised_dict: Dict[str, Any] = {}
+                    for key, item in value.items():
+                        normalised_item = _normalise_detail_value(item)
+                        if normalised_item is not None:
+                            normalised_dict[str(key)] = normalised_item
+                    return normalised_dict
+                if isinstance(value, set):
+                    normalised_items = [
+                        item
+                        for item in (
+                            _normalise_detail_value(sub_item) for sub_item in value
+                        )
+                        if item is not None
+                    ]
+                    try:
+                        return sorted(normalised_items)
+                    except TypeError:
+                        return sorted(normalised_items, key=lambda entry: repr(entry))
+                if isinstance(value, (list, tuple)):
+                    return [
+                        item
+                        for item in (
+                            _normalise_detail_value(sub_item) for sub_item in value
+                        )
+                        if item is not None
+                    ]
+                if isinstance(value, (str, bool, float, int)):
+                    return value
+                return str(value)
+
+            if isinstance(raw_details, dict):
+                for mint, payload in raw_details.items():
+                    canonical = canonical_mint(mint) if isinstance(mint, str) else ""
+                    if not canonical or not isinstance(payload, dict):
+                        continue
+                    normalised_payload = {
+                        key: value
+                        for key, value in (
+                            (k, _normalise_detail_value(v)) for k, v in payload.items()
+                        )
+                        if value is not None
+                    }
+                    if normalised_payload:
+                        agent_details[canonical] = normalised_payload
+
+        now_ts = time.time()
+        for idx, token in enumerate(stage.tokens, start=1):
+            payload: Dict[str, Any] = {
+                "mint": token,
+                "asof": now_ts,
+                "v": "1.0",
+                "rank": idx,
+                "fallback_used": stage.fallback_used,
+                "cache_hit": cache_hit,
+            }
+            score = stage.scores.get(token)
+            if score is not None:
+                try:
+                    payload["score"] = float(score)
+                except Exception:
+                    payload["score"] = score
+            if token in discovered_tokens:
+                payload["discovered"] = True
+
+            detail = agent_details.get(token)
+            if detail:
+                payload.update(detail)
+                sources = detail.get("sources")
+                if isinstance(sources, list):
+                    payload["sources"] = sources
+
+            publish("x:discovery.candidates", payload)
+
         return stage
 
     async def _run_evaluation_stream(

@@ -4,6 +4,7 @@ import sys
 import time
 import types
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -363,6 +364,69 @@ def test_discovery_refreshes_cache(monkeypatch):
     assert "TokC" in stage.tokens
     assert pipeline._discovery_cache_tokens[0] == "TokC"
     assert pipeline._discovery_cache_expiry > time.time()
+
+
+def test_discovery_publishes_candidates(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
+
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def _capture(topic, payload):
+        events.append((topic, payload))
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", _capture)
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline._score_token",
+        lambda token, pf: float(len(token)),
+    )
+
+    pipeline = SwarmPipeline(_DummyAgentManager([]), Portfolio(path=None), dry_run=True)
+
+    class _StubAgent:
+        def __init__(self) -> None:
+            self.last_details: dict[str, dict[str, Any]] = {}
+
+        async def discover_tokens(self, **kwargs):
+            self.last_details = {
+                "TokA": {
+                    "source": "mempool",
+                    "sources": {"pump", "mempool"},
+                    "social_mentions": 3,
+                },
+                "TokB": {
+                    "sources": ["social"],
+                    "extra": {"nested": "value"},
+                },
+            }
+            return ["TokB", "TokA", "TokB"]
+
+    pipeline._discovery_agent = _StubAgent()
+
+    stage = asyncio.run(pipeline._run_discovery())
+
+    candidate_payloads = [
+        payload for topic, payload in events if topic == "x:discovery.candidates"
+    ]
+
+    assert candidate_payloads
+    assert len(candidate_payloads) == len(stage.tokens)
+    assert {payload["mint"] for payload in candidate_payloads} == set(stage.tokens)
+
+    for payload in candidate_payloads:
+        assert isinstance(payload.get("asof"), float)
+        assert payload.get("v") == "1.0"
+        assert "rank" in payload
+        assert payload.get("score") == pytest.approx(stage.scores[payload["mint"]])
+        assert payload.get("fallback_used") == stage.fallback_used
+
+    detail_payload = next(p for p in candidate_payloads if p["mint"] == "TokA")
+    assert detail_payload["source"] == "mempool"
+    assert detail_payload["sources"] == ["mempool", "pump"]
+    assert detail_payload["social_mentions"] == 3
+
+    detail_payload_b = next(p for p in candidate_payloads if p["mint"] == "TokB")
+    assert detail_payload_b["sources"] == ["social"]
+    assert detail_payload_b["extra"] == {"nested": "value"}
 
 
 def test_execution_skips_missing_price(monkeypatch, caplog):
