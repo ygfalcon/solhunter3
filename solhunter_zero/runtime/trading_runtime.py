@@ -55,7 +55,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         resolve_momentum_flag,
     )
     from ..golden_pipeline.service import GoldenPipelineService
-from ..ui import UIState, UIServer, start_websockets, stop_websockets
+from .. import ui
+from ..ui import UIState, UIServer
 from ..util import parse_bool_env
 from .runtime_wiring import resolve_golden_enabled
 from .schema_adapters import read_golden, read_ohlcv
@@ -488,13 +489,24 @@ class TradingRuntime:
             self.bus_started = False
             self.status.event_bus = False
 
+        threads_to_join = list(self._ui_ws_threads.values()) if self._ui_ws_threads else []
+
         if self.ui_server:
             self.ui_server.stop()
             self.ui_server = None
 
         if ui_ws_started:
-            stop_websockets()
+            with contextlib.suppress(Exception):
+                ui.stop_websockets()
+
+        for thread in threads_to_join:
+            if thread is not None:
+                with contextlib.suppress(Exception):
+                    thread.join(timeout=2)
+
         self._ui_ws_threads = None
+        if self._ui_enabled:
+            self.activity.add("ui", "disabled", ok=False)
 
         if self.rl_task is not None:
             if self.rl_task in tasks_to_cancel:
@@ -887,7 +899,7 @@ class TradingRuntime:
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
 
-        threads = start_websockets()
+        threads = ui.start_websockets()
         self._ui_ws_threads = threads
         self._ui_ws_started_here = bool(threads)
         if threads:

@@ -288,10 +288,18 @@ async def test_stop_tears_down_websockets_started_by_runtime(monkeypatch):
 
     started_threads: dict[str, threading.Thread] = {}
 
+    join_counts = {"count": 0}
+
+    class _RecordingThread(threading.Thread):
+        def join(self, timeout=None):  # type: ignore[override]
+            join_counts["count"] += 1
+            super().join(timeout=timeout)
+
     def _fake_start_websockets() -> dict[str, threading.Thread]:
         if started_threads:
             return started_threads
-        dummy_thread = threading.Thread(target=lambda: None, name="ui-ws-dummy")
+        dummy_thread = _RecordingThread(target=lambda: None, name="ui-ws-dummy", daemon=True)
+        dummy_thread.start()
         started_threads.update({"events": dummy_thread})
         return started_threads
 
@@ -309,7 +317,13 @@ async def test_stop_tears_down_websockets_started_by_runtime(monkeypatch):
 
     await runtime.stop()
     assert stop_calls["count"] == 1
+    assert join_counts["count"] >= 1
     assert runtime._ui_ws_threads is None
+    assert runtime._ui_ws_started_here is False
+    ui_entries = [entry for entry in runtime.activity.snapshot() if entry["stage"] == "ui"]
+    assert ui_entries, "expected ui activity entries"
+    assert ui_entries[-1]["detail"] == "disabled"
+    assert ui_entries[-1]["ok"] is False
 
 
 def test_collect_health_metrics(monkeypatch):
