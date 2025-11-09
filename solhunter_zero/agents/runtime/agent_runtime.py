@@ -75,13 +75,73 @@ class AgentRuntime:
     def _on_tokens(self, payload: Any) -> None:
         if not self._running:
             return
-        tokens = payload if isinstance(payload, (list, tuple)) else []
-        for token in tokens:
+
+        def _iter_tokens(candidate: Any) -> list[str]:
+            tokens: list[str] = []
+
+            def _append(value: Any) -> None:
+                if isinstance(value, str):
+                    if value:
+                        tokens.append(value)
+                    return
+                if isinstance(value, dict):
+                    for key in ("mint", "token"):
+                        mint = value.get(key)
+                        if isinstance(mint, str) and mint:
+                            tokens.append(mint)
+                            return
+                    for key, nested in value.items():
+                        if isinstance(key, str) and key:
+                            tokens.append(key)
+                        elif isinstance(nested, str) and nested:
+                            tokens.append(nested)
+                    return
+                if isinstance(value, (list, tuple, set)):
+                    for item in value:
+                        _append(item)
+                    return
+                if value is not None:
+                    try:
+                        text = str(value)
+                    except Exception:
+                        return
+                    if text:
+                        tokens.append(text)
+
+            _append(candidate)
+            return tokens
+
+        try:
+            if isinstance(payload, dict):
+                if "tokens" in payload:
+                    raw = payload.get("tokens")
+                elif "mint" in payload:
+                    raw = payload.get("mint")
+                elif "token" in payload:
+                    raw = payload.get("token")
+                else:
+                    raw = payload
+            else:
+                raw = payload
+
+            extracted = _iter_tokens(raw)
+        except Exception:
+            log.exception("token_discovered payload normalisation failed")
+            return
+
+        if not extracted:
+            log.debug(
+                "token_discovered payload missing tokens", extra={"payload_type": type(payload).__name__}
+            )
+            return
+
+        for token in dict.fromkeys(extracted):
+            mint = str(token)
             try:
-                self._tokens.add(str(token))
+                self._tokens.add(mint)
             except Exception:
-                pass
-            task = asyncio.create_task(self._evaluate_and_publish(str(token)))
+                log.debug("failed to record token", exc_info=True)
+            task = asyncio.create_task(self._evaluate_and_publish(mint))
             self._tasks.append(task)
             task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
 
