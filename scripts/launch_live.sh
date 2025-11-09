@@ -413,14 +413,18 @@ PY
 check_ui_health() {
   local log=$1
   local url=""
-  RUNTIME_LOG_PATH="$log" url=$(extract_ui_url)
+  url=$(RUNTIME_LOG_PATH="$log" extract_ui_url)
   if [[ -z $url ]]; then
     log_warn "UI readiness URL not yet available for health check"
     return 1
   fi
   local target="${url%/}/ui/meta"
-  log_info "UI health check GET $target"
-  if UI_HEALTH_URL="$target" "$PYTHON_BIN" - <<'PY'
+  local max_attempts=5
+  local base_delay=3
+  local attempt
+  for attempt in $(seq 1 "$max_attempts"); do
+    log_info "UI health check GET $target (attempt $attempt/$max_attempts)"
+    if UI_HEALTH_URL="$target" "$PYTHON_BIN" - <<'PY'
 import os
 import sys
 import urllib.request
@@ -435,13 +439,19 @@ with urllib.request.urlopen(req, timeout=5) as resp:
         sys.exit(1)
 sys.exit(0)
 PY
-  then
-    log_info "UI health endpoint responded successfully"
-    return 0
-  else
-    log_warn "UI health endpoint check failed"
-    return 1
-  fi
+    then
+      log_info "UI health endpoint responded successfully"
+      return 0
+    fi
+    if (( attempt < max_attempts )); then
+      local sleep_seconds=$((base_delay * attempt))
+      log_warn "UI health endpoint check failed (attempt $attempt/$max_attempts); retrying in ${sleep_seconds}s"
+      sleep "$sleep_seconds"
+    else
+      log_warn "UI health endpoint check failed after $max_attempts attempts"
+    fi
+  done
+  return 1
 }
 
 usage() {
