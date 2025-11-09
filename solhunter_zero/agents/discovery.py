@@ -317,7 +317,9 @@ class DiscoveryAgent:
                 token_file=token_file,
             )
             tokens = self._normalise(tokens)
-            tokens, details = await self._apply_social_mentions(tokens, details)
+            tokens, details = await self._apply_social_mentions(
+                tokens, details, offline=offline
+            )
             if tokens:
                 break
             if attempt < attempts - 1:
@@ -696,7 +698,12 @@ class DiscoveryAgent:
         self,
         tokens: List[str],
         details: Dict[str, Dict[str, Any]] | None,
+        *,
+        offline: bool = False,
     ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
+        if offline:
+            logger.info("DiscoveryAgent skipping social mentions during offline run")
+            return tokens, details or {}
         social_details = await self._collect_social_mentions()
         if not social_details:
             return tokens, details or {}
