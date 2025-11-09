@@ -197,6 +197,7 @@ files unless the loader is invoked with `overwrite=True`.
 | `USE_FLASH_LOANS` | `0` | Enable flash loans |
 | `USE_GNN_ROUTING` | `0` | Enable gnn routing |
 | `USE_GPU_SIM` | `` | Enable gpu sim |
+| `UI_PUBLIC_HOST` | `` | Hostname advertised to UI clients when the server binds to `0.0.0.0`/`::`; set when fronting the UI with a proxy |
 | `USE_MEV_BUNDLES` | `false` | Enable mev bundles |
 | `USE_NUMBA_ROUTE` | `0` | Enable numba route |
 | `USE_PRICE_STREAMS` | `0` | Enable price streams |
@@ -213,6 +214,23 @@ files unless the loader is invoked with `overwrite=True`.
 | `VOLUME_THRESHOLD` | `0` | Threshold for volume |
 | `WS_PING_INTERVAL` | `20` | Interval for ws ping |
 | `WS_PING_TIMEOUT` | `20` | Configures ws ping timeout |
+
+## UI networking and reverse proxies
+
+Operators exposing the UI beyond localhost should bind the runtime to all
+interfaces and publish the externally reachable host separately:
+
+1. Set `UI_WS_HOST=0.0.0.0` (or `UI_HOST=0.0.0.0`) so the runtime listens on
+   every interface.
+2. Configure `UI_PUBLIC_HOST` with the hostname clients should use—for example
+   `ops.example.com`. The runtime will also honour `PUBLIC_URL_HOST` for
+   compatibility with older deployments.
+3. Terminate TLS and route `/ws/{events,rl,logs}` plus the REST API through your
+   reverse proxy (Nginx, HAProxy, etc.) to the bound runtime ports.
+
+With this split configuration, health endpoints and WebSocket URLs in the REST
+manifest reflect the proxy address instead of defaulting to `127.0.0.1`, so SPA
+clients can connect without hard-coded overrides.
 
 ## PyTorch Metal versions
 

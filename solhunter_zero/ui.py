@@ -1427,6 +1427,31 @@ def _resolve_host() -> str:
     return "127.0.0.1"
 
 
+def _resolve_public_host(bind_host: str | None = None) -> str:
+    """Determine the hostname exposed to UI clients."""
+
+    def _clean(value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
+    override = _clean(os.getenv("UI_PUBLIC_HOST"))
+    if override is None:
+        override = _clean(os.getenv("PUBLIC_URL_HOST"))
+    if override is None:
+        override = _clean(os.getenv("UI_EXTERNAL_HOST"))
+
+    if override is not None:
+        return override
+
+    bind = _clean(bind_host)
+    if bind and bind not in {"0.0.0.0", "::"}:
+        return bind
+
+    return "127.0.0.1"
+
+
 def _parse_port(value: str | None, default: int) -> int:
     if value is None or value == "":
         return default
@@ -1868,7 +1893,7 @@ def get_ws_urls() -> dict[str, str | None]:
         if not resolved:
             state = _WS_CHANNELS.get(channel)
             host = state.host if state and state.host else _resolve_host()
-            url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+            url_host = _resolve_public_host(host)
             if channel == "rl":
                 port = state.port or _RL_WS_PORT
             elif channel == "events":
@@ -1888,7 +1913,11 @@ def get_ws_urls() -> dict[str, str | None]:
 def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
     urls = get_ws_urls()
     scheme_hint = _infer_ws_scheme(getattr(req, "scheme", None))
-    public_host_env = os.getenv("UI_PUBLIC_HOST") or os.getenv("UI_EXTERNAL_HOST")
+    public_host_env = (
+        os.getenv("UI_PUBLIC_HOST")
+        or os.getenv("PUBLIC_URL_HOST")
+        or os.getenv("UI_EXTERNAL_HOST")
+    )
     public_host, _ = _split_netloc(public_host_env)
     request_host, _ = _split_netloc(getattr(req, "host", None))
 
@@ -2366,7 +2395,7 @@ def start_websockets() -> dict[str, threading.Thread]:
     queue_size = _parse_positive_int(os.getenv("UI_WS_QUEUE_SIZE"), _WS_QUEUE_DEFAULT)
     ping_interval = float(os.getenv("UI_WS_PING_INTERVAL", os.getenv("WS_PING_INTERVAL", "20")))
     ping_timeout = float(os.getenv("UI_WS_PING_TIMEOUT", os.getenv("WS_PING_TIMEOUT", "20")))
-    url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url_host = _resolve_public_host(host)
     scheme = _infer_ws_scheme()
 
     rl_port = _resolve_port("UI_RL_WS_PORT", "RL_WS_PORT", default=_RL_WS_PORT_DEFAULT)
