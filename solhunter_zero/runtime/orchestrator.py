@@ -473,7 +473,74 @@ class RuntimeOrchestrator:
             except Exception:
                 log.exception("Failed to initialise runtime wiring for UI state")
         app = _create_ui_app(state_obj)
-        threads = _start_ui_ws() if callable(_start_ui_ws) else {}
+        ws_optional = parse_bool_env("UI_WS_OPTIONAL", False)
+        threads: dict[str, Any] = {}
+        ws_messages: list[str] = []
+        ws_error: str | None = None
+        if callable(_start_ui_ws):
+            class _WsCaptureHandler(logging.Handler):
+                def __init__(self) -> None:
+                    super().__init__(level=logging.NOTSET)
+                    self.messages: list[str] = []
+
+                def emit(self, record: logging.LogRecord) -> None:  # type: ignore[override]
+                    try:
+                        message = self.format(record)
+                    except Exception:
+                        message = record.getMessage()
+                    self.messages.append(message)
+
+            capture_handler = _WsCaptureHandler()
+            capture_loggers: list[logging.Logger] = []
+            capture_names = {__name__}
+            ui_logger_name = getattr(_ui_module, "__name__", "")
+            if ui_logger_name:
+                capture_names.add(ui_logger_name)
+            ws_logger_name = getattr(_start_ui_ws, "__module__", "")
+            if ws_logger_name:
+                capture_names.add(ws_logger_name)
+            for name in capture_names:
+                logger_obj = logging.getLogger(name)
+                logger_obj.addHandler(capture_handler)
+                capture_loggers.append(logger_obj)
+            try:
+                try:
+                    result = _start_ui_ws()
+                except Exception as exc:
+                    ws_error = str(exc)
+                    log.exception("Failed to start UI websockets")
+                    result = {}
+                threads = result or {}
+            finally:
+                for logger_obj in capture_loggers:
+                    with suppress(Exception):
+                        logger_obj.removeHandler(capture_handler)
+            ws_messages.extend(capture_handler.messages)
+        if not threads:
+            details = []
+            if ws_error:
+                details.append(ws_error)
+            details.extend(ws_messages)
+            detail_text_parts: list[str] = []
+            for message in details:
+                text = (message or "").strip()
+                if text and text not in detail_text_parts:
+                    detail_text_parts.append(text)
+            failure_detail = "; ".join(detail_text_parts) or "websocket startup returned no threads"
+            if ws_optional:
+                ws_detail = f"degraded: {failure_detail}"
+                ws_ok = True
+            else:
+                ws_detail = failure_detail
+                ws_ok = False
+        else:
+            detail_text_parts = []
+            for message in ws_messages:
+                text = (message or "").strip()
+                if text and text not in detail_text_parts:
+                    detail_text_parts.append(text)
+            ws_detail = "; ".join(detail_text_parts)
+            ws_ok = True
         if hasattr(_ui_module, "get_ws_urls"):
             try:
                 ws_urls = _ui_module.get_ws_urls()  # type: ignore[attr-defined]
@@ -494,7 +561,7 @@ class RuntimeOrchestrator:
         self.handles.ui_app = app
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
-        await self._publish_stage("ui:ws", True)
+        await self._publish_stage("ui:ws", ws_ok, ws_detail)
         if self.run_http and str(os.getenv("UI_DISABLE_HTTP_SERVER", "")).lower() not in {"1", "true", "yes"}:
             # Start Flask server in a background thread using werkzeug only if available.
             import threading
