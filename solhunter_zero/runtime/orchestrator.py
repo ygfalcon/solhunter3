@@ -9,6 +9,7 @@ import logging
 import os
 import signal
 import socket
+import subprocess
 import sys
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
@@ -579,11 +580,111 @@ class RuntimeOrchestrator:
                         f"host={os.getenv('UI_HOST','127.0.0.1')} port={actual_port}",
                     )
 
+    @staticmethod
+    def _format_process_snippet(value: str | bytes | None, *, limit: int = 400) -> str:
+        if not value:
+            return ""
+        if isinstance(value, bytes):
+            text = value.decode("utf-8", errors="replace")
+        else:
+            text = str(value)
+        text = " ".join(text.strip().split())
+        if not text:
+            return ""
+        if len(text) > limit:
+            return text[:limit] + "…"
+        return text
+
+    @classmethod
+    def _collect_process_snippets(
+        cls, proc: subprocess.Popen[Any], *, limit: int = 400
+    ) -> dict[str, str]:
+        snippets: dict[str, str] = {}
+        try:
+            out, err = proc.communicate(timeout=0)
+        except subprocess.TimeoutExpired:
+            return snippets
+        except ValueError:
+            return snippets
+        except Exception:
+            log.debug("Failed to collect process output", exc_info=True)
+            return snippets
+
+        stdout_snippet = cls._format_process_snippet(out, limit=limit)
+        stderr_snippet = cls._format_process_snippet(err, limit=limit)
+        if stdout_snippet:
+            snippets["stdout"] = stdout_snippet
+        if stderr_snippet:
+            snippets["stderr"] = stderr_snippet
+        return snippets
+
     async def start_agents(self) -> None:
         # Use existing startup path to ensure consistent connectivity + depth_service
         await self._publish_stage("agents:startup", True)
         cfg, runtime_cfg, proc = await perform_startup_async(self.config_path, offline=False, dry_run=False)
         self.handles.depth_proc = proc
+
+        def _coerce_bool(value: Any | None, default: bool) -> bool:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"1", "true", "yes", "on"}:
+                    return True
+                if lowered in {"0", "false", "no", "off"}:
+                    return False
+            return bool(value)
+
+        depth_enabled_cfg = cfg.get("depth_service")
+        depth_optional_cfg = cfg.get("depth_service_optional")
+        depth_enabled = _coerce_bool(
+            depth_enabled_cfg, parse_bool_env("DEPTH_SERVICE", True)
+        )
+        depth_optional = _coerce_bool(depth_optional_cfg, False)
+        if parse_bool_env("DEPTH_SERVICE_OPTIONAL", False):
+            depth_optional = True
+        if parse_bool_env("LIVE_DRILL", False):
+            depth_optional = True
+        depth_expected = depth_enabled and not depth_optional
+
+        if depth_expected:
+            if proc is None:
+                detail = "depth_service process missing after startup"
+                await self._publish_stage("depth:start", False, detail)
+                log.error(detail)
+                raise RuntimeError(detail)
+
+            return_code = proc.poll()
+            if return_code is not None:
+                snippets = self._collect_process_snippets(proc)
+                parts = [f"exit-code={return_code}"]
+                if snippets:
+                    parts.extend(f"{stream}={snippet}" for stream, snippet in snippets.items())
+                summary = "; ".join(parts)
+                detail = f"depth_service exited during startup: {summary}"
+                await self._publish_stage("depth:start", False, detail)
+                extra_payload: dict[str, str] = {"detail": detail}
+                extra_payload.update(snippets)
+                log.error(
+                    "Depth service failed during startup: %s",
+                    summary,
+                    extra=extra_payload,
+                )
+                self.handles.depth_proc = None
+                raise RuntimeError(detail)
+
+            await self._publish_stage("depth:start", True, f"pid={proc.pid}")
+        else:
+            if proc is not None and proc.poll() is None:
+                detail = f"pid={proc.pid} optional"
+                await self._publish_stage("depth:start", True, detail)
+            else:
+                detail = "optional" if depth_optional else "disabled"
+                await self._publish_stage("depth:start", True, detail)
 
         await self._ensure_ui_forwarder()
 
