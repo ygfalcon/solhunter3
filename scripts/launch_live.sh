@@ -221,6 +221,21 @@ print(manifest_line)
 PY
 }
 
+ensure_redis() {
+  "$PYTHON_BIN" - <<'PY'
+import os
+from solhunter_zero.redis_util import ensure_local_redis_if_needed
+urls = []
+for key in ("REDIS_URL", "BROKER_URL", "BROKER_URLS"):
+    raw = os.getenv(key)
+    if not raw:
+        continue
+    parts = [p.strip() for p in raw.split(',') if p.strip()]
+    urls.extend(parts)
+ensure_local_redis_if_needed(urls)
+PY
+}
+
 wait_for_socket_release() {
   "$PYTHON_BIN" - <<'PY'
 import os
@@ -677,6 +692,10 @@ else
   log_info "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} ready"
 fi
 
+log_info "Ensuring Redis availability"
+ensure_redis
+log_info "Redis helper completed"
+
 acquire_runtime_lock
 
 ORIG_SOLHUNTER_MODE=${SOLHUNTER_MODE-}
@@ -694,25 +713,6 @@ if [[ -n ${ORIG_MODE:-} ]]; then
 else
   unset MODE
 fi
-
-ensure_redis() {
-  "$PYTHON_BIN" - <<'PY'
-import os
-from solhunter_zero.redis_util import ensure_local_redis_if_needed
-urls = []
-for key in ("REDIS_URL", "BROKER_URL", "BROKER_URLS"):
-    raw = os.getenv(key)
-    if not raw:
-        continue
-    parts = [p.strip() for p in raw.split(',') if p.strip()]
-    urls.extend(parts)
-ensure_local_redis_if_needed(urls)
-PY
-}
-
-log_info "Ensuring Redis availability"
-ensure_redis
-log_info "Redis helper completed"
 
 redis_health() {
   if [[ -z ${REDIS_URL:-} ]]; then
