@@ -69,6 +69,7 @@ RUNTIME_LOG_BACKUP_COUNT = 3
 
 
 _PIPELINE_CONFIG: Mapping[str, object] | None = None
+_SKIP_CONNECTIVITY_SOAK = False
 
 
 def _process_alive(pid: int) -> bool:
@@ -179,6 +180,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-delay", type=float, default=None, help="Minimum inter-iteration delay")
     parser.add_argument("--max-delay", type=float, default=None, help="Maximum inter-iteration delay")
     parser.add_argument("--skip-clean", action="store_true", help="Skip process cleanup")
+    parser.add_argument(
+        "--skip-connectivity-soak",
+        "--skip-soak",
+        dest="skip_connectivity_soak",
+        action="store_true",
+        help="Skip the long-running connectivity soak stage",
+    )
     return parser.parse_args(argv)
 
 
@@ -641,7 +649,30 @@ def _connectivity_check() -> list[dict[str, object]]:
     return asyncio.run(_run())
 
 
+def _truthy_env(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _should_skip_connectivity_soak() -> tuple[bool, str | None]:
+    if _SKIP_CONNECTIVITY_SOAK:
+        return True, "requested via CLI flag"
+    env_value = os.getenv("SKIP_CONNECTIVITY_SOAK")
+    if _truthy_env(env_value):
+        reason = "environment override"
+        if env_value is not None:
+            reason = f"{reason} (SKIP_CONNECTIVITY_SOAK={env_value})"
+        return True, reason
+    return False, None
+
+
 def _connectivity_soak() -> dict[str, object]:
+    should_skip, skip_reason = _should_skip_connectivity_soak()
+    if should_skip:
+        log.info("Connectivity soak skipped: %s", skip_reason)
+        return {"skipped": True, "reason": skip_reason}
+
     duration = float(os.getenv("CONNECTIVITY_SOAK_DURATION", "180"))
     if duration <= 0:
         log.info("Connectivity soak disabled (duration <= 0)")
@@ -671,6 +702,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_runtime_logging(force=True)
     logging.getLogger(__name__).info("Runtime logging configured")
+
+    global _SKIP_CONNECTIVITY_SOAK
+    _SKIP_CONNECTIVITY_SOAK = args.skip_connectivity_soak
 
     stage_results: list[StageResult] = []
     exit_code = 0

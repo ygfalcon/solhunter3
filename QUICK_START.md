@@ -46,6 +46,16 @@ The UI will display **Event Bus: connected**, **Trading Loop: running**, and the
 lag metrics as soon as the pipeline warms up.  Golden snapshots begin with the
 seed tokens and expand as discovery finds new candidates.
 
+### Connectivity soak controls
+
+- Pass `--skip-connectivity-soak` (or the shorter `--skip-soak`) to
+  `python scripts/start_all.py` when you want to bypass the long-running
+  connectivity soak gate during local iteration.
+- Set `SKIP_CONNECTIVITY_SOAK=1` in the environment for the same effect without
+  changing existing launch scripts.
+- Setting `CONNECTIVITY_SOAK_DURATION=0` disables the soak entirely and is
+  useful for CI pipelines that still need the earlier connectivity probes.
+
 ## Investor Demo
 
 For an instant teaser covering all strategies, double-click `demo.command` (or

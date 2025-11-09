@@ -42,6 +42,15 @@ succinct checklist (OK/FAIL with timing). Re-running the command reuses the
 prepared context, and `SOLHUNTER_OFFLINE=1` keeps the pipeline paper-safe while
 still exercising every gate.
 
+### Connectivity soak controls
+
+The startup pipeline performs a long-running connectivity soak after the
+initial probe succeeds. When iterating locally you can bypass the soak stage
+with `python scripts/start_all.py --skip-connectivity-soak` (alias:
+`--skip-soak`). Setting the environment variable `SKIP_CONNECTIVITY_SOAK=1`
+achieves the same result for wrapper scripts, while
+`CONNECTIVITY_SOAK_DURATION=0` disables the soak entirely.
+
 ## Primary Entry Point (New Runtime)
 
 This repo now has a single, obvious entry for the new, event‑driven runtime.
