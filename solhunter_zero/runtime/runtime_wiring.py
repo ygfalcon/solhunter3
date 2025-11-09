@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -130,6 +130,11 @@ def _serialize(value: Any) -> Any:
         return {str(k): _serialize(v) for k, v in value._asdict().items()}
     if hasattr(value, "__dict__"):
         return {str(k): _serialize(v) for k, v in value.__dict__.items()}
+    if is_dataclass(value):
+        try:
+            return {str(k): _serialize(v) for k, v in asdict(value).items()}
+        except Exception:
+            return str(value)
     return str(value)
 
 
@@ -436,6 +441,10 @@ class RuntimeEventCollectors:
         self._vote_decisions: Deque[Dict[str, Any]] = deque(
             maxlen=_int_env("UI_VOTE_LIMIT", 400)
         )
+        trades_limit = _int_env("UI_TRADES_LIMIT", 200)
+        self._recent_trades: Deque[Dict[str, Any]] = deque(maxlen=trades_limit)
+        logs_limit = _int_env("UI_LOGS_LIMIT", 200)
+        self._runtime_logs: Deque[Dict[str, Any]] = deque(maxlen=logs_limit)
         self._decision_counts: Dict[str, int] = {}
         self._decision_recent: Deque[Tuple[str, float]] = deque()
         self._decision_first_seen: Dict[str, float] = {}
@@ -456,6 +465,8 @@ class RuntimeEventCollectors:
         pnl_limit = _int_env("UI_VIRTUAL_PNL_LIMIT", 400)
         self._virtual_pnls: Deque[Dict[str, Any]] = deque(maxlen=pnl_limit)
         self._status_lock = threading.Lock()
+        self._trades_lock = threading.Lock()
+        self._logs_lock = threading.Lock()
         self._status_info: Dict[str, Any] = {
             "event_bus": False,
             "trading_loop": False,
@@ -764,6 +775,44 @@ class RuntimeEventCollectors:
             unsub = subscribe(topic, _wrapped)
             self._subscriptions.append(unsub)
 
+        async def _on_action(event: Any) -> None:
+            payload = getattr(event, "action", None)
+            result = getattr(event, "result", None)
+            if payload is None:
+                payload = getattr(event, "payload", {})
+            entry = {
+                "action": _serialize(payload),
+                "result": _serialize(result),
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            with self._trades_lock:
+                self._recent_trades.append(entry)
+
+        async def _on_runtime_log(event: Any) -> None:
+            entry = {
+                "topic": str(getattr(event, "topic", "runtime.log")),
+                "payload": _serialize(getattr(event, "payload", event)),
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            with self._logs_lock:
+                self._runtime_logs.append(entry)
+
+        for topic in ("action_executed",):
+            async def _wrapped_action(event: Any, _handler: Callable[[Any], Awaitable[None]] = _on_action, _topic: str = topic) -> None:
+                self._record_topic(_topic)
+                await _handler(event)
+
+            unsub = subscribe(topic, _wrapped_action)
+            self._subscriptions.append(unsub)
+
+        for topic in ("runtime.log", "runtime_log"):
+            async def _wrapped_log(event: Any, _handler: Callable[[Any], Awaitable[None]] = _on_runtime_log, _topic: str = topic) -> None:
+                self._record_topic(_topic)
+                await _handler(event)
+
+            unsub = subscribe(topic, _wrapped_log)
+            self._subscriptions.append(unsub)
+
     def stop(self) -> None:
         for unsub in self._subscriptions:
             try:
@@ -789,6 +838,14 @@ class RuntimeEventCollectors:
                 while len(self._recent_tokens) > self._recent_tokens_limit:
                     removed = self._recent_tokens.pop()
                     self._discovery_seen.discard(removed)
+
+    def trades_snapshot(self) -> List[Dict[str, Any]]:
+        with self._trades_lock:
+            return list(self._recent_trades)
+
+    def logs_snapshot(self) -> List[Dict[str, Any]]:
+        with self._logs_lock:
+            return list(self._runtime_logs)
 
     def _set_exit_summary(self, payload: Optional[Mapping[str, Any]]) -> None:
         sanitized = _sanitize_exit_payload(payload)
@@ -1738,6 +1795,123 @@ class RuntimeEventCollectors:
             "live_fills": live[:200],
         }
 
+    def _format_fill_record(self, payload: Mapping[str, Any], *, source: str) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {"source": source}
+
+        record: Dict[str, Any] = {"source": source}
+        consumed: set[str] = {"_received", "ts", "timestamp"}
+
+        mint = payload.get("mint")
+        if mint is not None:
+            record["mint"] = str(mint)
+        side = payload.get("side")
+        if isinstance(side, str):
+            normalized = side.strip().lower()
+            if normalized:
+                record["side"] = normalized
+        consumed.add("side")
+
+        numeric_fields = {
+            "qty_base",
+            "qty_quote",
+            "price_usd",
+            "fees_usd",
+            "slippage_bps",
+            "latency_ms",
+            "realized_usd",
+            "unrealized_usd",
+            "turnover_usd",
+            "notional_usd",
+        }
+        for field in numeric_fields:
+            value = _maybe_float(payload.get(field))
+            if value is not None:
+                record[field] = value
+            consumed.add(field)
+
+        ts_value = payload.get("ts")
+        if ts_value is None:
+            ts_value = payload.get("timestamp")
+        timestamp = _maybe_float(ts_value)
+        if timestamp is not None:
+            record["timestamp"] = timestamp
+        received = _maybe_float(payload.get("_received"))
+        if received is not None:
+            record["received_at"] = received
+
+        meta = payload.get("meta")
+        if meta is not None:
+            record["meta"] = _serialize(meta)
+        consumed.add("meta")
+
+        passthrough_fields = (
+            "order_id",
+            "route",
+            "venue",
+            "strategy",
+            "reason",
+            "status",
+            "txid",
+            "client_id",
+            "snapshot_hash",
+            "exchange",
+        )
+        for field in passthrough_fields:
+            if field in payload:
+                value = payload.get(field)
+                if value is not None:
+                    record[field] = _serialize(value)
+                consumed.add(field)
+
+        extras: Dict[str, Any] = {}
+        for key, value in payload.items():
+            if key in consumed:
+                continue
+            extras[str(key)] = _serialize(value)
+        if extras:
+            record["extra"] = extras
+
+        return {k: v for k, v in record.items() if v is not None}
+
+    def fills_snapshot(self, limit: int) -> List[Dict[str, Any]]:
+        try:
+            limit_value = max(int(limit), 0)
+        except Exception:
+            limit_value = 0
+        with self._swarm_lock:
+            virtual_fills = list(self._virtual_fills)
+            live_fills = list(self._live_fills)
+
+        entries: List[Dict[str, Any]] = []
+        for payload in virtual_fills:
+            record = self._format_fill_record(payload, source="virtual")
+            if record:
+                entries.append(record)
+        for payload in live_fills:
+            record = self._format_fill_record(payload, source="live")
+            if record:
+                entries.append(record)
+
+        for record in entries:
+            timestamp = record.get("timestamp")
+            received = record.get("received_at")
+            record["_sort_key"] = (
+                timestamp
+                if isinstance(timestamp, (int, float))
+                else received
+                if isinstance(received, (int, float))
+                else 0.0
+            )
+
+        entries.sort(key=lambda item: item.get("_sort_key", 0.0), reverse=True)
+        for record in entries:
+            record.pop("_sort_key", None)
+
+        if limit_value:
+            return entries[:limit_value]
+        return entries
+
 
 @dataclass
 class RuntimeWiring:
@@ -1758,6 +1932,9 @@ class RuntimeWiring:
         ui_state.rl_provider = self.collectors.rl_snapshot
         ui_state.rl_status_provider = self.collectors.rl_status_snapshot
         ui_state.settings_provider = self.collectors.settings_snapshot
+        ui_state.trades_provider = self.collectors.trades_snapshot
+        ui_state.logs_provider = self.collectors.logs_snapshot
+        ui_state.fills_provider = self.collectors.fills_snapshot
 
     def close(self) -> None:
         self.collectors.stop()

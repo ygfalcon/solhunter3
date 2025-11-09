@@ -1,12 +1,15 @@
 import json
 import os
+import time
 from typing import Any, Dict, Iterable
 
 import pytest
 from flask import Flask
 
 import solhunter_zero.ui as ui
+from solhunter_zero import event_bus
 from solhunter_zero.runtime_defaults import DEFAULT_UI_PORT
+from solhunter_zero.runtime.runtime_wiring import RuntimeEventCollectors
 
 
 @pytest.fixture(scope="module")
@@ -197,6 +200,25 @@ def test_logs_tail_endpoint_zero_lines(monkeypatch, client):
     assert resp.get_json() == []
 
 
+def test_logs_tail_endpoint_collects_runtime_events(client):
+    state = _active_state()
+    collectors = RuntimeEventCollectors()
+    collectors.start()
+    original_provider = state.logs_provider
+    state.logs_provider = collectors.logs_snapshot
+    try:
+        event_bus.publish("runtime.log", {"stage": "execute", "detail": "order-submitted"})
+        resp = client.get("/api/logs/tail?lines=5")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload
+        last_entry = payload[-1]
+        assert last_entry["payload"]["detail"] == "order-submitted"
+    finally:
+        state.logs_provider = original_provider
+        collectors.stop()
+
+
 def test_token_depth_endpoint(monkeypatch, client):
     state = _active_state()
     monkeypatch.setattr(state, "token_depth_provider", lambda mint: {"mint": mint, "bids": []})
@@ -224,3 +246,34 @@ def test_discovery_recent_default(client):
     resp = client.get("/api/discovery/recent")
     assert resp.status_code == 200
     assert isinstance(resp.get_json(), list)
+
+
+def test_execution_fills_endpoint_returns_recent_entries(client):
+    state = _active_state()
+    collectors = RuntimeEventCollectors()
+    collectors.start()
+    original_provider = state.fills_provider
+    state.fills_provider = collectors.fills_snapshot
+    try:
+        now = time.time()
+        event_bus.publish(
+            "x:virt.fills",
+            {
+                "mint": "mint-fill",
+                "qty_base": 1.5,
+                "price_usd": 2.75,
+                "ts": now,
+            },
+        )
+        resp = client.get("/api/execution/fills?limit=5")
+        assert resp.status_code == 200
+        entries = resp.get_json()
+        assert entries
+        first = entries[0]
+        assert first["source"] == "virtual"
+        assert first["mint"] == "mint-fill"
+        assert first["qty_base"] == pytest.approx(1.5)
+        assert first["price_usd"] == pytest.approx(2.75)
+    finally:
+        state.fills_provider = original_provider
+        collectors.stop()
