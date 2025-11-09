@@ -624,6 +624,48 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_trading_runtime_ui_port_conflict_raises_friendly_error(monkeypatch):
+    captured_instances: list[object] = []
+
+    class _FailingUIServer:
+        def __init__(self, state, *, host: str, port: int) -> None:  # noqa: ANN001
+            self.state = state
+            self.host = host
+            self.port = port
+            self.stopped = False
+            captured_instances.append(self)
+
+        def start(self) -> None:
+            raise OSError("[Errno 98] Address already in use")
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    def _fail_if_called() -> None:
+        raise AssertionError("start_websockets should not be called when UI fails")
+
+    monkeypatch.setattr(runtime_module, "UIServer", _FailingUIServer)
+    monkeypatch.setattr(ui_module, "start_websockets", _fail_if_called)
+
+    runtime = TradingRuntime(ui_host="127.0.0.1", ui_port=7654)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await runtime._start_ui()
+
+    message = str(excinfo.value)
+    assert "Unable to start UI server" in message
+    assert "7654" in message
+
+    assert captured_instances, "UIServer should have been constructed"
+    server = captured_instances[-1]
+    assert getattr(server, "stopped", False), "UIServer.stop() should be called on failure"
+
+    assert runtime.ui_server is None
+    assert runtime.ui_ws_threads is None
+    assert not runtime._ui_ws_started_here
+
+
+@pytest.mark.anyio("asyncio")
 async def test_trading_runtime_starts_golden_pipeline_by_default(monkeypatch):
     runtime = TradingRuntime()
     runtime.config_path = "dummy-config.toml"

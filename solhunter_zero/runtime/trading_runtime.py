@@ -952,7 +952,20 @@ class TradingRuntime:
             return
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
-        self.ui_server.start()
+        try:
+            self.ui_server.start()
+        except Exception as exc:
+            try:
+                if self.ui_server:
+                    self.ui_server.stop()
+            finally:
+                self.ui_server = None
+                self.ui_ws_threads = None
+            conflict_message = (
+                f"Unable to start UI server on {self.ui_host}:{self.ui_port}. "
+                "Another process may already be using the port."
+            )
+            raise RuntimeError(conflict_message) from exc
 
         resolved_port = getattr(self.ui_server, "port", None)
         if resolved_port is not None:
