@@ -852,7 +852,6 @@ class TradingRuntime:
             os.environ["UI_HOST"] = self.ui_host
             if not os.environ.get("UI_WS_HOST"):
                 os.environ["UI_WS_HOST"] = self.ui_host
-        os.environ["UI_PORT"] = str(self.ui_port)
         self.ui_state.status_provider = self._collect_status
         self.ui_state.activity_provider = self.activity.snapshot
         self.ui_state.trades_provider = lambda: list(self._trades)
@@ -893,6 +892,22 @@ class TradingRuntime:
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
 
+        resolved_port = getattr(self.ui_server, "port", None)
+        if resolved_port is not None:
+            try:
+                self.ui_port = int(resolved_port)
+            except (TypeError, ValueError):  # pragma: no cover - defensive guard
+                pass
+        os.environ["UI_PORT"] = str(self.ui_port)
+        resolved_host = (
+            getattr(self.ui_server, "host", None)
+            or self.ui_host
+            or os.getenv("UI_HOST")
+            or "127.0.0.1"
+        )
+        http_url = f"http://{resolved_host}:{self.ui_port}"
+        os.environ["UI_HTTP_URL"] = http_url
+
         threads = ui.start_websockets()
         self.ui_ws_threads = threads
         self._ui_ws_started_here = bool(threads)
@@ -916,7 +931,7 @@ class TradingRuntime:
                         f"{channel}={url}" for channel, url in sorted(resolved_ws_urls.items())
                     ),
                 )
-        self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
+        self.activity.add("ui", http_url)
 
     async def _start_agents(self) -> None:
         memory_path = self.cfg.get("memory_path", "sqlite:///memory.db")

@@ -30,5 +30,7 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         assert server._server is not None
         assert server._thread is not None
         assert server._thread.is_alive()
+        assert server.port == server._server.server_port
+        assert server.port != 0
     finally:
         server.stop()

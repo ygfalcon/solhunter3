@@ -528,6 +528,8 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
             self.started = False
 
         def start(self) -> None:
+            if self.port == 0:
+                self.port = 7123
             self.started = True
 
         def stop(self) -> None:
@@ -537,7 +539,7 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
 
     monkeypatch.setenv("UI_HOST", "placeholder-host")
 
-    runtime = TradingRuntime(ui_host="0.0.0.0", ui_port=6200)
+    runtime = TradingRuntime(ui_host="0.0.0.0", ui_port=0)
     assert os.getenv("UI_HOST") == "0.0.0.0"
     assert os.getenv("UI_WS_HOST") == "0.0.0.0"
 
@@ -549,13 +551,26 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
     assert captured_calls
     assert captured_calls[-1]["ui_host_env"] == "0.0.0.0"
     assert captured_calls[-1]["ui_ws_host_env"] == "0.0.0.0"
+    assert runtime.ui_port == 7123
+    assert os.getenv("UI_PORT") == "7123"
+    assert os.getenv("UI_HTTP_URL") == "http://0.0.0.0:7123"
+
+    ui_activity = [entry for entry in runtime.activity.snapshot() if entry["stage"] == "ui"]
+    assert ui_activity
+    assert ui_activity[-1]["detail"] == "http://0.0.0.0:7123"
 
     manifest = ui_module.build_ui_manifest(None)
     assert manifest["events_ws"] == "ws://public.runtime.test:9100/ws/events"
     assert manifest["rl_ws"] == "ws://public.runtime.test:9101/ws/rl"
     assert manifest["logs_ws"] == "ws://public.runtime.test:9102/ws/logs"
 
-    for key in ("UI_WS_URL", "UI_EVENTS_WS_URL", "UI_RL_WS_URL", "UI_LOG_WS_URL"):
+    for key in (
+        "UI_WS_URL",
+        "UI_EVENTS_WS_URL",
+        "UI_RL_WS_URL",
+        "UI_LOG_WS_URL",
+        "UI_HTTP_URL",
+    ):
         monkeypatch.delenv(key, raising=False)
 
     if runtime.ui_server is not None:
