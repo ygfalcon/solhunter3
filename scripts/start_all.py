@@ -13,7 +13,6 @@ It delegates all heavy lifting to :class:`solhunter_zero.runtime.trading_runtime
 from __future__ import annotations
 
 import argparse
-import asyncio
 import contextlib
 import errno
 import logging
@@ -40,14 +39,8 @@ from solhunter_zero.config import (
 from solhunter_zero.redis_util import ensure_local_redis_if_needed
 from solhunter_zero.logging_utils import configure_runtime_logging
 from solhunter_zero.feature_flags import FeatureFlags, get_feature_flags
-from solhunter_zero.production import (
-    Provider,
-    load_production_env,
-    assert_providers_ok,
-    format_configured_providers,
-    write_env_manifest,
-    ConnectivityChecker,
-)
+from solhunter_zero.production import ConnectivityChecker as _ConnectivityChecker
+from solhunter_zero.production import write_env_manifest
 from solhunter_zero.production.keypair import (
     resolve_live_keypair,
     verify_onchain_funds,
@@ -58,6 +51,17 @@ from solhunter_zero.health_runtime import (
     resolve_rl_health_url,
     wait_for,
 )
+from solhunter_zero.runtime.orchestrator import (
+    PRODUCTION_PROVIDERS,
+    apply_production_defaults as runtime_apply_production_defaults,
+    connectivity_check as runtime_connectivity_check,
+    connectivity_soak as runtime_connectivity_soak,
+    load_production_environment as runtime_load_production_environment,
+    validate_production_keys as runtime_validate_production_keys,
+)
+
+# Backwards compatibility for tests patching ConnectivityChecker
+ConnectivityChecker = _ConnectivityChecker
 
 
 log = logging.getLogger(__name__)
@@ -649,50 +653,12 @@ def summarize_stages(stage_results: list[StageResult]) -> None:
         log.info("  [%s] %s (%.2fs)%s", status, result.name, result.duration, extra)
 
 
-# ---------------------------------------------------------------------------
-# Production helpers
-# ---------------------------------------------------------------------------
-
-
-PRODUCTION_PROVIDERS: list[Provider] = [
-    Provider("Solana", ("SOLANA_RPC_URL", "SOLANA_WS_URL")),
-    Provider("Helius", ("HELIUS_API_KEY",)),
-    Provider("Redis", ("REDIS_URL",), optional=True),
-    Provider("UI", ("UI_WS_URL", "UI_HOST", "UI_PORT"), optional=True),
-    Provider("Helius-DAS", ("DAS_BASE_URL",), optional=True),
-]
-
-
-_PROVIDER_OPTIONALITY: dict[str, bool] = {provider.name: provider.optional for provider in PRODUCTION_PROVIDERS}
-
-_PROBE_PROVIDER_MAP: dict[str, str] = {
-    "solana-rpc": "Solana",
-    "solana-ws": "Solana",
-    "helius-rest": "Helius",
-    "helius-das": "Helius-DAS",
-    "redis": "Redis",
-    "ui-ws": "UI",
-    "ui-http": "UI",
-    "ws-gateway": "UI",
-}
-
-
-def _probe_required(name: str) -> bool:
-    provider = _PROBE_PROVIDER_MAP.get(name)
-    if provider is None:
-        return True
-    return not _PROVIDER_OPTIONALITY.get(provider, False)
-
-
 def _load_production_environment() -> dict[str, str]:
-    return load_production_env(overwrite=True)
+    return runtime_load_production_environment()
 
 
 def _validate_keys() -> str:
-    assert_providers_ok(PRODUCTION_PROVIDERS)
-    message = format_configured_providers(PRODUCTION_PROVIDERS)
-    log.info(message)
-    return message
+    return runtime_validate_production_keys()
 
 
 def _write_manifest(loaded_env: Mapping[str, str]) -> Path:
@@ -703,83 +669,12 @@ def _write_manifest(loaded_env: Mapping[str, str]) -> Path:
 
 def _connectivity_check() -> list[dict[str, object]]:
     checker = ConnectivityChecker()
-
-    async def _run() -> list[dict[str, object]]:
-        results = await checker.check_all()
-        formatted: list[dict[str, object]] = []
-        fatal: tuple[str, str, str] | None = None
-        event_bus_error: str | None = None
-        for result in results:
-            required = _probe_required(result.name)
-            status = "OK" if result.ok else f"FAIL ({result.error or result.status})"
-            log.info(
-                "Connectivity %s → %s (%.2f ms)",
-                result.name,
-                status,
-                result.latency_ms or -1.0,
-            )
-            formatted.append(
-                {
-                    "name": result.name,
-                    "target": result.target,
-                    "ok": result.ok,
-                    "required": required,
-                    "latency_ms": result.latency_ms,
-                    "status": result.status,
-                    "status_code": result.status_code,
-                    "error": result.error,
-                }
-            )
-            if required and not result.ok and fatal is None:
-                reason = result.error or result.status or "unavailable"
-                fatal = (result.name, reason, result.target)
-            if (
-                result.name == "ui-http"
-                and not result.ok
-                and result.error
-                and "event bus" in result.error.lower()
-            ):
-                event_bus_error = (
-                    "Event bus unavailable: "
-                    f"{result.error} ({result.target})"
-                )
-        if event_bus_error:
-            raise SystemExit(event_bus_error)
-        if fatal:
-            name, reason, target = fatal
-            raise SystemExit(
-                "Connectivity requirement failed: "
-                f"{name} — {reason} ({target})"
-            )
-        return formatted
-
-    return asyncio.run(_run())
+    return runtime_connectivity_check(checker=checker)
 
 
 def _connectivity_soak() -> dict[str, object]:
-    duration = float(os.getenv("CONNECTIVITY_SOAK_DURATION", "180"))
-    if duration <= 0:
-        log.info("Connectivity soak disabled (duration <= 0)")
-        return {"disabled": True, "duration": duration}
-
     checker = ConnectivityChecker()
-    output_path = Path("artifacts/prelaunch/connectivity_report.json")
-
-    async def _run() -> dict[str, object]:
-        summary = await checker.run_soak(duration=duration, output_path=output_path)
-        log.info(
-            "Connectivity soak completed in %.1fs (reconnects=%d)",
-            summary.duration,
-            summary.reconnect_count,
-        )
-        return {
-            "duration": summary.duration,
-            "metrics": summary.metrics,
-            "reconnect_count": summary.reconnect_count,
-            "report": str(output_path),
-        }
-
-    return asyncio.run(_run())
+    return runtime_connectivity_soak(checker=checker)
 
 
 def main(argv: list[str] | None = None) -> int:

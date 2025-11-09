@@ -24,6 +24,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--canary-budget", dest="canary_budget", default=None, help="Optional canary bankroll cap")
     parser.add_argument("--canary-risk", dest="canary_risk", default=None, help="Optional canary risk cap")
     parser.add_argument("--no-http", action="store_true", help="Disable UI HTTP server")
+    parser.add_argument("--skip-clean", action="store_true", help="Skip legacy process cleanup stage")
+    parser.add_argument("--skip-load-production-env", action="store_true", help="Skip loading production environment files")
+    parser.add_argument("--skip-apply-prod-defaults", action="store_true", help="Skip applying production default environment overrides")
+    parser.add_argument("--skip-validate-keys", action="store_true", help="Skip provider key validation")
+    parser.add_argument("--skip-connectivity-check", action="store_true", help="Skip runtime connectivity probes")
+    parser.add_argument("--skip-connectivity-soak", action="store_true", help="Skip extended connectivity soak test")
     return parser.parse_args(argv)
 
 
@@ -147,7 +153,23 @@ async def _run_controller(args: argparse.Namespace) -> int:
     _set_runtime_env(args)
     _validate_environment()
     _emit_runtime_manifest()
-    orch = RuntimeOrchestrator(config_path=args.config, run_http=not args.no_http)
+    skip_stages = {
+        name
+        for flag, name in [
+            (args.skip_clean, "process-cleanup"),
+            (args.skip_load_production_env, "load-production-env"),
+            (args.skip_apply_prod_defaults, "apply-prod-defaults"),
+            (args.skip_validate_keys, "validate-keys"),
+            (args.skip_connectivity_check, "connectivity-check"),
+            (args.skip_connectivity_soak, "connectivity-soak"),
+        ]
+        if flag
+    }
+    orch = RuntimeOrchestrator(
+        config_path=args.config,
+        run_http=not args.no_http,
+        skip_stages=skip_stages,
+    )
 
     stop_event = asyncio.Event()
 

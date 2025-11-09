@@ -10,11 +10,12 @@ import os
 import signal
 import socket
 import sys
+from collections.abc import Mapping, Sequence
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from werkzeug.serving import make_server
 
@@ -36,6 +37,13 @@ from ..agent_manager import AgentManager
 from ..loop import ResourceBudgetExceeded, trading_loop as _trading_loop
 from .. import ui as _ui_module
 from .runtime_wiring import RuntimeWiring, initialise_runtime_wiring, resolve_golden_enabled
+from ..production import (
+    Provider,
+    assert_providers_ok,
+    format_configured_providers,
+    load_production_env,
+    ConnectivityChecker,
+)
 
 if hasattr(_ui_module, "create_app"):
     _create_ui_app = _ui_module.create_app  # type: ignore[attr-defined]
@@ -171,7 +179,210 @@ def _publish_ui_url_to_redis(ui_url: str) -> None:
         client.set("solhunter:ui:url", ui_url)
         client.setex("solhunter:ui:url:latest", 600, ui_url)
     except Exception as exc:  # pragma: no cover - redis connectivity issues
-        log.warning("Failed to publish UI URL to redis at %s: %s", redis_url, exc)
+            log.warning("Failed to publish UI URL to redis at %s: %s", redis_url, exc)
+
+
+PRODUCTION_PROVIDERS: list[Provider] = [
+    Provider("Solana", ("SOLANA_RPC_URL", "SOLANA_WS_URL")),
+    Provider("Helius", ("HELIUS_API_KEY",)),
+    Provider("Redis", ("REDIS_URL",), optional=True),
+    Provider("UI", ("UI_WS_URL", "UI_HOST", "UI_PORT"), optional=True),
+    Provider("Helius-DAS", ("DAS_BASE_URL",), optional=True),
+]
+
+
+_PROVIDER_OPTIONALITY: dict[str, bool] = {
+    provider.name: provider.optional for provider in PRODUCTION_PROVIDERS
+}
+
+_PROBE_PROVIDER_MAP: dict[str, str] = {
+    "solana-rpc": "Solana",
+    "solana-ws": "Solana",
+    "helius-rest": "Helius",
+    "helius-das": "Helius-DAS",
+    "redis": "Redis",
+    "ui-ws": "UI",
+    "ui-http": "UI",
+    "ws-gateway": "UI",
+}
+
+
+def _probe_required(name: str) -> bool:
+    provider = _PROBE_PROVIDER_MAP.get(name)
+    if provider is None:
+        return True
+    return not _PROVIDER_OPTIONALITY.get(provider, False)
+
+
+def load_production_environment(*, overwrite: bool = True) -> dict[str, str]:
+    return load_production_env(overwrite=overwrite)
+
+
+def _config_has_broker(cfg: Mapping[str, object] | None) -> bool:
+    if not cfg:
+        return False
+    raw = cfg.get("broker_urls")
+    if isinstance(raw, str):
+        if raw.strip():
+            return True
+    elif isinstance(raw, Sequence):
+        for item in raw:
+            if str(item).strip():
+                return True
+    raw_single = cfg.get("broker_url")
+    if isinstance(raw_single, str) and raw_single.strip():
+        return True
+    return False
+
+
+def _config_has_event_bus(cfg: Mapping[str, object] | None) -> bool:
+    if not cfg:
+        return False
+    raw = cfg.get("event_bus_url")
+    if isinstance(raw, str) and raw.strip():
+        return True
+    return False
+
+
+def _config_mode(cfg: Mapping[str, object] | None) -> str | None:
+    if not cfg:
+        return None
+    raw = cfg.get("mode")
+    if isinstance(raw, str):
+        cleaned = raw.strip()
+        if cleaned:
+            return cleaned
+    return None
+
+
+def apply_production_defaults(cfg: Mapping[str, object] | None = None) -> dict[str, str]:
+    applied: dict[str, str] = {}
+
+    mode = _config_mode(cfg) or "live"
+    for key in ("SOLHUNTER_MODE", "MODE"):
+        if key not in os.environ:
+            os.environ.setdefault(key, mode)
+            applied[key] = os.environ[key]
+
+    broker_env_configured = any(
+        os.getenv(name) for name in ("BROKER_WS_URLS", "BROKER_URLS", "BROKER_URL")
+    )
+    if not broker_env_configured and _config_has_broker(cfg):
+        broker_env_configured = True
+    if not broker_env_configured and "BROKER_WS_URLS" not in os.environ:
+        os.environ.setdefault("BROKER_WS_URLS", "ws://127.0.0.1:8769")
+        applied["BROKER_WS_URLS"] = os.environ["BROKER_WS_URLS"]
+
+    event_bus_configured = bool(os.getenv("EVENT_BUS_URL"))
+    if not event_bus_configured and _config_has_event_bus(cfg):
+        event_bus_configured = True
+    if not event_bus_configured and "EVENT_BUS_URL" not in os.environ:
+        os.environ.setdefault("EVENT_BUS_URL", "ws://127.0.0.1:8779")
+        applied["EVENT_BUS_URL"] = os.environ["EVENT_BUS_URL"]
+
+    return applied
+
+
+def validate_production_keys() -> str:
+    assert_providers_ok(PRODUCTION_PROVIDERS)
+    message = format_configured_providers(PRODUCTION_PROVIDERS)
+    log.info(message)
+    return message
+
+
+async def connectivity_check_async(
+    checker: ConnectivityChecker | None = None,
+) -> list[dict[str, object]]:
+    checker = checker or ConnectivityChecker()
+
+    results = await checker.check_all()
+    formatted: list[dict[str, object]] = []
+    fatal: tuple[str, str, str] | None = None
+    event_bus_error: str | None = None
+    for result in results:
+        required = _probe_required(result.name)
+        status = "OK" if result.ok else f"FAIL ({result.error or result.status})"
+        log.info(
+            "Connectivity %s → %s (%.2f ms)",
+            result.name,
+            status,
+            result.latency_ms or -1.0,
+        )
+        formatted.append(
+            {
+                "name": result.name,
+                "target": result.target,
+                "ok": result.ok,
+                "required": required,
+                "latency_ms": result.latency_ms,
+                "status": result.status,
+                "status_code": result.status_code,
+                "error": result.error,
+            }
+        )
+        if required and not result.ok and fatal is None:
+            reason = result.error or result.status or "unavailable"
+            fatal = (result.name, reason, result.target)
+        if (
+            result.name == "ui-http"
+            and not result.ok
+            and result.error
+            and "event bus" in result.error.lower()
+        ):
+            event_bus_error = (
+                "Event bus unavailable: "
+                f"{result.error} ({result.target})"
+            )
+    if event_bus_error:
+        raise SystemExit(event_bus_error)
+    if fatal:
+        name, reason, target = fatal
+        raise SystemExit(
+            "Connectivity requirement failed: "
+            f"{name} — {reason} ({target})"
+        )
+    return formatted
+
+
+async def connectivity_soak_async(
+    checker: ConnectivityChecker | None = None,
+) -> dict[str, object]:
+    duration = float(os.getenv("CONNECTIVITY_SOAK_DURATION", "180"))
+    if duration <= 0:
+        log.info("Connectivity soak disabled (duration <= 0)")
+        return {"disabled": True, "duration": duration}
+
+    checker = checker or ConnectivityChecker()
+    output_path = Path("artifacts/prelaunch/connectivity_report.json")
+
+    summary = await checker.run_soak(duration=duration, output_path=output_path)
+    log.info(
+        "Connectivity soak completed in %.1fs (reconnects=%d)",
+        summary.duration,
+        summary.reconnect_count,
+    )
+    return {
+        "duration": summary.duration,
+        "metrics": summary.metrics,
+        "reconnect_count": summary.reconnect_count,
+        "report": str(output_path),
+    }
+
+
+def connectivity_check(
+    checker: ConnectivityChecker | None = None,
+) -> list[dict[str, object]]:
+    if checker is not None:
+        return asyncio.run(connectivity_check_async(checker=checker))
+    return asyncio.run(connectivity_check_async())
+
+
+def connectivity_soak(
+    checker: ConnectivityChecker | None = None,
+) -> dict[str, object]:
+    if checker is not None:
+        return asyncio.run(connectivity_soak_async(checker=checker))
+    return asyncio.run(connectivity_soak_async())
 
 
 @dataclass
@@ -202,7 +413,13 @@ class RuntimeOrchestrator:
     This runs only when NEW_RUNTIME=1 to preserve the current behavior by default.
     """
 
-    def __init__(self, *, config_path: str | None = None, run_http: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        config_path: str | None = None,
+        run_http: bool = True,
+        skip_stages: Iterable[str] | None = None,
+    ) -> None:
         self.config_path = config_path
         self.run_http = run_http
         self.handles = RuntimeHandles()
@@ -211,6 +428,14 @@ class RuntimeOrchestrator:
         self._golden_enabled: bool = False
         self._ui_forwarder: _UIPanelForwarder | None = None
         self._stop_reason: str | None = None
+        self._pending_stage_events: list[tuple[str, bool, str]] = []
+        normalized_skips: set[str] = set()
+        if skip_stages:
+            for stage in skip_stages:
+                if not stage:
+                    continue
+                normalized_skips.add(str(stage).replace("_", "-").strip())
+        self._skip_stages = normalized_skips
 
     @property
     def stop_reason(self) -> str | None:
@@ -297,13 +522,35 @@ class RuntimeOrchestrator:
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("Error publishing UI URL to redis: %s", exc)
 
-    async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    def _is_stage_skipped(self, stage: str) -> bool:
+        return stage in self._skip_stages
+
+    def _emit_stage_event(self, stage: str, ok: bool, detail: str) -> None:
         try:
-            event_bus.publish("runtime.stage_changed", {"stage": stage, "ok": ok, "detail": detail})
+            event_bus.publish(
+                "runtime.stage_changed",
+                {"stage": stage, "ok": ok, "detail": detail},
+            )
         except Exception:
             pass
         if os.getenv("ORCH_VERBOSE", "").lower() in {"1", "true", "yes"}:
             log.info("stage=%s ok=%s detail=%s", stage, ok, detail)
+
+    def _flush_pending_stage_events(self) -> None:
+        if not self.handles.bus_started or not self._pending_stage_events:
+            return
+        pending = list(self._pending_stage_events)
+        self._pending_stage_events.clear()
+        for stage, ok, detail in pending:
+            self._emit_stage_event(stage, ok, detail)
+
+    async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        if self.handles.bus_started:
+            self._emit_stage_event(stage, ok, detail)
+        else:
+            self._pending_stage_events.append((stage, ok, detail))
+            if os.getenv("ORCH_VERBOSE", "").lower() in {"1", "true", "yes"}:
+                log.info("stage=%s ok=%s detail=%s (queued)", stage, ok, detail)
 
     async def _ensure_ui_forwarder(self) -> None:
         if self._ui_forwarder is not None:
@@ -396,6 +643,136 @@ class RuntimeOrchestrator:
         except Exception:
             log.debug("UI forwarder flush failed", exc_info=True)
 
+    async def _run_stage_callable(
+        self,
+        stage: str,
+        func: Callable[[], Any],
+        detail_formatter: Callable[[Any], str] | None = None,
+    ) -> Any:
+        if self._is_stage_skipped(stage):
+            await self._publish_stage(stage, True, "skipped")
+            return None
+
+        try:
+            result = func()
+            if inspect.isawaitable(result):
+                result = await result
+        except SystemExit as exc:
+            detail = str(exc)
+            await self._publish_stage(stage, False, detail)
+            raise
+        except Exception as exc:
+            await self._publish_stage(stage, False, str(exc))
+            raise
+        else:
+            detail = ""
+            if detail_formatter is not None:
+                try:
+                    detail = detail_formatter(result)
+                except Exception:
+                    log.debug("Failed to format stage detail for %s", stage, exc_info=True)
+                    detail = ""
+            await self._publish_stage(stage, True, detail)
+            return result
+
+    def _format_connectivity_detail(self, result: Any) -> str:
+        try:
+            records = list(result or [])
+        except TypeError:
+            return ""
+        failures = [str(item.get("name")) for item in records if not item.get("ok")]
+        if failures:
+            preview = ",".join(failures[:5])
+            if len(failures) > 5:
+                preview = f"{preview},..."
+            return f"failures={preview}"
+        return f"targets={len(records)}"
+
+    def _format_connectivity_soak_detail(self, result: Any) -> str:
+        if not isinstance(result, Mapping):
+            return ""
+        if result.get("disabled"):
+            return "disabled"
+        detail_parts: list[str] = []
+        duration = result.get("duration")
+        reconnects = result.get("reconnect_count")
+        if isinstance(duration, (int, float)):
+            detail_parts.append(f"duration={duration:.1f}s")
+        elif duration is not None:
+            detail_parts.append(f"duration={duration}")
+        if reconnects is not None:
+            detail_parts.append(f"reconnects={reconnects}")
+        return " ".join(detail_parts)
+
+    async def _run_prelaunch_checks(self) -> None:
+        cfg_cache: Mapping[str, object] | None = None
+
+        def _load_env() -> dict[str, str]:
+            return load_production_environment()
+
+        def _format_env_detail(env: Any) -> str:
+            try:
+                count = len(env)
+            except Exception:
+                count = 0
+            return f"count={count}"
+
+        await self._run_stage_callable(
+            "load-production-env",
+            _load_env,
+            _format_env_detail,
+        )
+
+        def _apply_defaults() -> dict[str, str]:
+            nonlocal cfg_cache
+            selected_cfg: Mapping[str, object] | None
+            try:
+                selected_cfg = load_selected_config()
+            except Exception:
+                selected_cfg = None
+            base_cfg: Mapping[str, object] | None
+            if selected_cfg:
+                base_cfg = selected_cfg
+            else:
+                base_cfg = load_config(self.config_path)
+            cfg_cache = apply_env_overrides(base_cfg)
+            return apply_production_defaults(cfg_cache)
+
+        def _format_defaults_detail(applied: Any) -> str:
+            if not isinstance(applied, Mapping):
+                return "applied=0"
+            keys = sorted(str(k) for k in applied.keys())
+            if not keys:
+                return "applied=0"
+            preview = ",".join(keys[:5])
+            if len(keys) > 5:
+                preview = f"{preview},..."
+            return f"applied={preview}"
+
+        await self._run_stage_callable(
+            "apply-prod-defaults",
+            _apply_defaults,
+            _format_defaults_detail,
+        )
+
+        await self._run_stage_callable(
+            "validate-keys",
+            validate_production_keys,
+            lambda msg: str(msg or ""),
+        )
+
+        await self._run_stage_callable(
+            "connectivity-check",
+            connectivity_check_async,
+            self._format_connectivity_detail,
+        )
+
+        await self._run_stage_callable(
+            "connectivity-soak",
+            connectivity_soak_async,
+            self._format_connectivity_soak_detail,
+        )
+
     async def start_bus(self) -> None:
         await self._publish_stage("bus:init", True)
         # Choose event-bus WS port early and export URLs so init sees them
@@ -427,6 +804,7 @@ class RuntimeOrchestrator:
         try:
             await event_bus.start_ws_server("localhost", ws_port)
             self.handles.bus_started = True
+            self._flush_pending_stage_events()
             await self._publish_stage("bus:ws", True, f"port={ws_port}")
         except Exception as exc:
             await self._publish_stage("bus:ws", False, f"{exc}")
@@ -580,6 +958,7 @@ class RuntimeOrchestrator:
                     )
 
     async def start_agents(self) -> None:
+        await self._run_prelaunch_checks()
         # Use existing startup path to ensure consistent connectivity + depth_service
         await self._publish_stage("agents:startup", True)
         cfg, runtime_cfg, proc = await perform_startup_async(self.config_path, offline=False, dry_run=False)
@@ -811,6 +1190,14 @@ class RuntimeOrchestrator:
 
         unsub = event_bus.subscribe("control", _ctl)
         self.handles.bus_subscriptions.append(unsub)
+
+        # Prime production environment so UI and bus pick up overrides even if
+        # the full prelaunch pipeline runs later.
+        try:
+            load_production_environment()
+            apply_production_defaults()
+        except Exception:
+            log.debug("Initial production environment load failed", exc_info=True)
 
         # 1) UI, 2) Bus, 3) Agents
         await self.start_ui()
