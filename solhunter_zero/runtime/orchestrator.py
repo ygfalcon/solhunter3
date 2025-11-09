@@ -550,7 +550,7 @@ class RuntimeOrchestrator:
                 ws_detail = f"degraded: {failure_detail}"
                 ws_ok = True
             else:
-                ws_detail = failure_detail
+                ws_detail = f"fatal: {failure_detail}"
                 ws_ok = False
         else:
             detail_text_parts = []
@@ -581,6 +581,9 @@ class RuntimeOrchestrator:
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
         await self._publish_stage("ui:ws", ws_ok, ws_detail)
+        if not ws_optional and not ws_ok:
+            log.error("UI websocket startup failed: %s", ws_detail)
+            raise RuntimeError(f"UI websocket startup failed: {ws_detail}")
         if self.run_http and str(os.getenv("UI_DISABLE_HTTP_SERVER", "")).lower() not in {"1", "true", "yes"}:
             # Start Flask server in a background thread using werkzeug only if available.
             import threading

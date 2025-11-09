@@ -51,13 +51,16 @@ async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
     )
 
     orch = RuntimeOrchestrator(run_http=False)
-    await orch.start_ui()
+    with pytest.raises(RuntimeError) as excinfo:
+        await orch.start_ui()
 
     ws_events = [event for event in events if event.get("stage") == "ui:ws"]
     assert ws_events, "expected ui:ws stage emission"
     ui_stage = ws_events[-1]
     assert ui_stage.get("ok") is False
     assert "boom" in str(ui_stage.get("detail"))
+    assert str(ui_stage.get("detail")).startswith("fatal:")
+    assert "boom" in str(excinfo.value)
 
 
 def test_orchestrator_stops_on_resource_budget(monkeypatch):
