@@ -90,6 +90,61 @@ def test_collect_mempool_times_out(monkeypatch, caplog):
     assert "Mempool stream yielded no events" in caplog.text
 
 
+def test_collect_mempool_waits_for_slow_stream(monkeypatch, caplog):
+    _reset_cache()
+
+    class SlowYield:
+        def __init__(self):
+            self._released = False
+            self._start: float | None = None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._released:
+                raise StopAsyncIteration
+            if self._start is None:
+                self._start = time.perf_counter()
+            try:
+                while time.perf_counter() - self._start < 0.045:
+                    await asyncio.sleep(0.005)
+            except asyncio.CancelledError:
+                raise
+            self._released = True
+            return {"address": VALID_MINT, "score": 9.5}
+
+        async def aclose(self):
+            return None
+
+    def slow_stream(*_args, **_kwargs):
+        return SlowYield()
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.stream_ranked_mempool_tokens_with_depth",
+        slow_stream,
+    )
+    monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT", 0.01)
+    monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT_RETRIES", 1)
+    monkeypatch.setenv("DISCOVERY_MEMPOOL_MAX_WAIT", "0.2")
+    monkeypatch.setenv("TOKEN_DISCOVERY_BACKOFF", "0.0")
+
+    agent = DiscoveryAgent()
+
+    async def run():
+        with caplog.at_level("DEBUG", logger="solhunter_zero.agents.discovery"):
+            return await agent._collect_mempool()
+
+    start = time.perf_counter()
+    tokens, details = asyncio.run(run())
+    elapsed = time.perf_counter() - start
+
+    assert tokens == [VALID_MINT]
+    assert details[VALID_MINT]["address"] == VALID_MINT
+    assert elapsed >= 0.045
+    assert "waiting for events" in caplog.text
+
+
 def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
     _reset_cache()
     calls = []
