@@ -489,6 +489,52 @@ async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_trading_runtime_preserves_configured_secure_bus_url(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "0")
+    monkeypatch.setenv("EVENT_BUS_HEALTH_DISABLE", "1")
+
+    configured_url = "wss://bus.runtime.test:9999/path?topic=1"
+    monkeypatch.setenv("EVENT_BUS_URL", configured_url)
+    monkeypatch.setenv("BROKER_WS_URLS", configured_url)
+
+    runtime = TradingRuntime()
+
+    ensure_calls: Dict[str, int] = {"count": 0}
+
+    def _fake_ensure(*_a, **_k):
+        ensure_calls["count"] += 1
+
+    monkeypatch.setattr(runtime_module, "ensure_local_redis_if_needed", _fake_ensure)
+    monkeypatch.setattr(resource_monitor, "start_monitor", lambda: None)
+
+    captured: Dict[str, object] = {}
+
+    async def _fake_start_ws(host: str, port: int):
+        captured["host"] = host
+        captured["port"] = port
+
+    def _fake_get_ws_address() -> tuple[str, int]:
+        host = captured.get("host", "bus.runtime.test")
+        port = captured.get("port", 9999)
+        return str(host), int(port)
+
+    async def _fake_verify(*_a, **_k) -> bool:
+        return True
+
+    monkeypatch.setattr(runtime_module, "start_ws_server", _fake_start_ws)
+    monkeypatch.setattr(runtime_module, "get_ws_address", _fake_get_ws_address)
+    monkeypatch.setattr(runtime_module, "verify_broker_connection", _fake_verify)
+
+    await asyncio.shield(runtime._start_event_bus())
+
+    assert captured["host"] == "bus.runtime.test"
+    assert captured["port"] == 9999
+    assert os.environ["EVENT_BUS_URL"] == configured_url
+    assert os.environ["BROKER_WS_URLS"] == configured_url
+    assert ensure_calls["count"] == 1
+
+
+@pytest.mark.anyio("asyncio")
 async def test_runtime_websockets_use_public_host(monkeypatch):
     for key in (
         "UI_HOST",
