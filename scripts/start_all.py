@@ -25,8 +25,8 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Mapping, Sequence
-from typing import Callable, TypeVar
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Callable, IO, TypeVar
 
 from solhunter_zero.runtime.trading_runtime import TradingRuntime
 from solhunter_zero.config import (
@@ -440,12 +440,27 @@ def _rotate_runtime_log(log_path: Path) -> None:
     log_path.rename(log_path.with_name(f"{log_path.name}.1"))
 
 
-def _prepare_runtime_log() -> Path:
-    log_dir = RUNTIME_LOG_DIR
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / RUNTIME_LOG_NAME
-    _rotate_runtime_log(log_path)
-    return log_path
+@contextlib.contextmanager
+def _runtime_stdio_sink() -> Iterator[tuple[IO[bytes] | None, Path | None]]:
+    target = RUNTIME_LOG_DIR / RUNTIME_LOG_NAME
+    stack = contextlib.ExitStack()
+    try:
+        try:
+            log_dir = RUNTIME_LOG_DIR
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _rotate_runtime_log(target)
+            log_file = stack.enter_context(target.open("ab", buffering=0))
+        except OSError as exc:
+            log.warning(
+                "Failed to prepare runtime log at %s: %s; stdout/stderr will be inherited",
+                target,
+                exc,
+            )
+            yield None, None
+            return
+        yield log_file, target
+    finally:
+        stack.close()
 
 
 def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
@@ -466,26 +481,36 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
     if args.max_delay is not None:
         cmd.append(f"--max-delay={args.max_delay}")
 
-    log_path = _prepare_runtime_log()
     log.info("Launching runtime in detached mode: %s", " ".join(cmd))
-    log.info("Runtime stdout/stderr redirected to %s", log_path)
     env = os.environ.copy()
     env["UI_PORT"] = ui_port
-    with log_path.open("ab", buffering=0) as log_file:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
+    with _runtime_stdio_sink() as (log_file, log_path):
+        popen_kwargs: dict[str, object] = {"env": env}
+        if log_file is not None and log_path is not None:
+            log.info("Runtime stdout/stderr redirected to %s", log_path)
+            popen_kwargs.update({
+                "stdout": log_file,
+                "stderr": subprocess.STDOUT,
+            })
+        else:
+            log.info("Runtime stdout/stderr inherited from parent process")
+
+        proc = subprocess.Popen(cmd, **popen_kwargs)
         time.sleep(0.5)
         if proc.poll() is not None:
-            log_file.flush()
+            if log_file is not None:
+                log_file.flush()
+            detail = (
+                f" Check logs at {log_path} for more details."
+                if log_path is not None
+                else ""
+            )
             raise RuntimeError(
                 "Runtime process exited immediately with code"
-                f" {proc.returncode}. Check logs at {log_path} for more details."
+                f" {proc.returncode}.{detail}"
             )
-    log.info("Launched runtime pid=%s", proc.pid)
+        pid = proc.pid
+    log.info("Launched runtime pid=%s", pid)
     return 0
 
 

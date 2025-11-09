@@ -1,3 +1,4 @@
+import logging
 import runpy
 import sys
 import os
@@ -107,3 +108,87 @@ def test_ensure_venv_skips_when_active(monkeypatch, tmp_path):
     assert not execv_called
     assert not (tmp_path / ".venv").exists()
     assert str(bu.ROOT) in sys.path
+
+
+def test_launch_detached_redirects_stdio(monkeypatch, tmp_path):
+    import scripts.start_all as start_module
+
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(start_module, "RUNTIME_LOG_DIR", log_dir)
+    monkeypatch.setattr(start_module.time, "sleep", lambda _delay: None)
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured.update(kwargs)
+
+        class Proc:
+            pid = 42
+            returncode = None
+
+            def poll(self):
+                return None
+
+        return Proc()
+
+    monkeypatch.setattr(start_module.subprocess, "Popen", fake_popen)
+
+    args = types.SimpleNamespace(
+        ui_port=9999,
+        ui_host="127.0.0.1",
+        loop_delay=None,
+        min_delay=None,
+        max_delay=None,
+    )
+
+    result = start_module.launch_detached(args, "/tmp/config.toml")
+    assert result == 0
+    assert captured.get("stdout") is not None
+    assert captured.get("stderr") is start_module.subprocess.STDOUT
+    assert isinstance(captured.get("env"), dict)
+
+
+def test_launch_detached_inherits_stdio_on_log_failure(monkeypatch, tmp_path, caplog):
+    import scripts.start_all as start_module
+
+    monkeypatch.setattr(start_module, "RUNTIME_LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(start_module.time, "sleep", lambda _delay: None)
+
+    caplog.set_level(logging.INFO)
+
+    def boom(_path):
+        raise OSError("nope")
+
+    monkeypatch.setattr(start_module, "_rotate_runtime_log", boom)
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured.update(kwargs)
+
+        class Proc:
+            pid = 99
+            returncode = None
+
+            def poll(self):
+                return None
+
+        return Proc()
+
+    monkeypatch.setattr(start_module.subprocess, "Popen", fake_popen)
+
+    args = types.SimpleNamespace(
+        ui_port=8888,
+        ui_host="127.0.0.1",
+        loop_delay=None,
+        min_delay=None,
+        max_delay=None,
+    )
+
+    result = start_module.launch_detached(args, "/tmp/config.toml")
+    assert result == 0
+    assert "stdout" not in captured
+    assert "stderr" not in captured
+    assert isinstance(captured.get("env"), dict)
+
+    assert any("inherited" in rec for rec in caplog.messages)
