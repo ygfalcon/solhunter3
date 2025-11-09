@@ -13,8 +13,10 @@ if "base58" not in sys.modules:
 
     sys.modules["base58"] = types.SimpleNamespace(b58decode=_fake_b58decode)
 
+import pytest
+
 from solhunter_zero.agents import discovery as discovery_mod
-from solhunter_zero.agents.discovery import DiscoveryAgent
+from solhunter_zero.agents.discovery import DiscoveryAgent, DiscoveryConfigurationError
 
 
 VALID_MINT = "So11111111111111111111111111111111111111112"
@@ -269,7 +271,7 @@ def test_discover_tokens_recovers_from_merge_exception(monkeypatch, caplog):
     assert "Websocket merge yielded no tokens" in caplog.text
 
 
-def test_discover_tokens_uses_fallback_when_config_invalid(monkeypatch, caplog):
+def test_discover_tokens_raises_when_config_invalid(monkeypatch, caplog):
     _reset_cache()
     monkeypatch.setenv("BIRDEYE_API_KEY", "")
     monkeypatch.setenv("DISCOVERY_ENABLE_MEMPOOL", "0")
@@ -297,24 +299,27 @@ def test_discover_tokens_uses_fallback_when_config_invalid(monkeypatch, caplog):
     agent = DiscoveryAgent()
     agent.birdeye_api_key = ""
     agent._config_error_warned = False
+    agent._config_error_event_reported = False
+    agent._config_error_critical_reported = False
 
     async def run():
         with caplog.at_level("WARNING"):
             return await agent.discover_tokens()
 
-    tokens = asyncio.run(run())
-    assert tokens, "fallback tokens expected"
-    assert tokens[0] == "So11111111111111111111111111111111111111112"
+    with pytest.raises(DiscoveryConfigurationError) as excinfo:
+        asyncio.run(run())
+    assert "BirdEye API key missing" in str(excinfo.value)
     assert (
         "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled"
         in caplog.text
     )
-    assert any(
-        topic == "runtime.log"
-        and getattr(payload, "detail", "")
-        == "config_error=birdeye_missing_mempool_disabled"
+    details = [
+        getattr(payload, "detail", "")
         for topic, payload in publish_calls
-    )
+        if topic == "runtime.log"
+    ]
+    assert "config_error=birdeye_missing_mempool_disabled" in details
+    assert "config_error=birdeye_missing_mempool_disabled fallback_used" in details
 
 
 def test_collect_social_mentions(monkeypatch):

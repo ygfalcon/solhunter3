@@ -6,10 +6,12 @@ import os
 import time
 from typing import Any, Dict, Iterable, Optional
 
-from ..agents.discovery import DiscoveryAgent
+from ..agents.discovery import DiscoveryAgent, DiscoveryConfigurationError
 from ..token_scanner import TRENDING_METADATA
 from ..token_aliases import canonical_mint, validate_mint
 from .types import TokenCandidate
+from ..event_bus import publish
+from ..schemas import RuntimeLog
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +127,19 @@ class DiscoveryService:
                 fresh = self._last_fetch_fresh
                 await self._emit_tokens(tokens, fresh=fresh)
             except asyncio.CancelledError:
+                raise
+            except DiscoveryConfigurationError as exc:
+                detail = f"discovery_config_error:{exc}"
+                log.critical("DiscoveryService aborting due to configuration error: %s", exc)
+                publish(
+                    "runtime.log",
+                    RuntimeLog(
+                        stage="discovery",
+                        detail=detail,
+                        level="CRITICAL",
+                    ),
+                )
+                self._stopped.set()
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 log.exception("DiscoveryService failure: %s", exc)

@@ -130,6 +130,11 @@ DISCOVERY_METHODS: frozenset[str] = frozenset(
     {"helius", "websocket", "mempool", "onchain", "file"}
 )
 
+
+class DiscoveryConfigurationError(RuntimeError):
+    """Raised when discovery cannot proceed due to an invalid configuration."""
+
+
 # Tokens that must never be filtered out even if they match a generic rule
 _FILTER_WHITELIST = {
     "So11111111111111111111111111111111111111112",  # SOL
@@ -219,6 +224,8 @@ class DiscoveryAgent:
         self.discord_feeds = self._split_env_list("DISCORD_FEEDS")
         self._config_error_warned = False
         self._config_error_event_reported = False
+        self._config_error_critical_reported = False
+        self._fallback_invoked = False
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -376,6 +383,7 @@ class DiscoveryAgent:
         config_error = not (self.birdeye_api_key or "").strip() and not mempool_enabled
         fallback_used = False
         self._config_error_active = config_error
+        self._fallback_invoked = False
 
         if config_error and not self._config_error_warned:
             logger.warning(
@@ -389,6 +397,8 @@ class DiscoveryAgent:
                 offline=offline,
                 token_file=token_file,
             )
+            if self._fallback_invoked:
+                fallback_used = True
             tokens = self._normalise(tokens)
             tokens, details = await self._apply_social_mentions(
                 tokens, details, offline=offline
@@ -439,6 +449,25 @@ class DiscoveryAgent:
                     "DiscoveryAgent using fallback tokens because BirdEye API key is missing and DISCOVERY_ENABLE_MEMPOOL is disabled"
                 )
             self._config_error_event_reported = True
+
+        if config_error and fallback_used:
+            critical_detail = "config_error=birdeye_missing_mempool_disabled fallback_used"
+            if not self._config_error_critical_reported:
+                publish(
+                    "runtime.log",
+                    RuntimeLog(
+                        stage="discovery",
+                        detail=critical_detail,
+                        level="CRITICAL",
+                    ),
+                )
+                logger.critical(
+                    "DiscoveryAgent aborting: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled"
+                )
+                self._config_error_critical_reported = True
+            raise DiscoveryConfigurationError(
+                "BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled"
+            )
 
         if ttl > 0 and tokens:
             _CACHE["tokens"] = list(tokens)
@@ -700,6 +729,7 @@ class DiscoveryAgent:
         logger.warning("Websocket merge yielded no tokens; trying mempool fallback")
         mem_tokens, mem_details = await self._collect_mempool()
         if mem_tokens:
+            self._fallback_invoked = True
             return mem_tokens, mem_details
 
         logger.warning("All discovery sources empty; returning static fallback")
@@ -729,6 +759,7 @@ class DiscoveryAgent:
         cached = list(_CACHE.get("tokens", [])) if isinstance(_CACHE.get("tokens"), list) else []
         if cached:
             logger.warning("DiscoveryAgent falling back to cached tokens (%d)", len(cached))
+            self._fallback_invoked = True
             result: List[str] = []
             for tok in cached[: self.limit]:
                 canonical = canonical_mint(tok)
@@ -736,6 +767,7 @@ class DiscoveryAgent:
                     result.append(canonical)
             return result
         logger.warning("DiscoveryAgent using static discovery fallback")
+        self._fallback_invoked = True
         result: List[str] = []
         for tok in _STATIC_FALLBACK[: self.limit]:
             canonical = canonical_mint(tok)
@@ -919,6 +951,7 @@ __all__ = [
     "DISCOVERY_METHODS",
     "DEFAULT_DISCOVERY_METHOD",
     "DiscoveryAgent",
+    "DiscoveryConfigurationError",
     "merge_sources",
     "resolve_discovery_method",
 ]
