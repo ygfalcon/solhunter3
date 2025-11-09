@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import errno
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -26,7 +27,8 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping, Sequence
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
+from urllib.parse import urlunparse
 
 from solhunter_zero.runtime.trading_runtime import TradingRuntime
 from solhunter_zero.config import (
@@ -448,6 +450,43 @@ def _prepare_runtime_log() -> Path:
     return log_path
 
 
+def _resolve_runtime_ready_url(args: argparse.Namespace) -> str:
+    """Return the readiness probe URL for the launched runtime."""
+
+    override = (os.getenv("START_ALL_READY_URL") or "").strip()
+    if override:
+        if override.lower() == "rl":
+            return resolve_rl_health_url(require_health_file=False)
+        return override
+
+    scheme = (os.getenv("START_ALL_READY_SCHEME") or "http").strip() or "http"
+    host = (os.getenv("START_ALL_READY_HOST") or str(args.ui_host)).strip()
+    port = (os.getenv("START_ALL_READY_PORT") or str(args.ui_port)).strip()
+    path = (os.getenv("START_ALL_READY_PATH") or "/health").strip() or "/health"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    netloc = host
+    if port:
+        netloc = f"{host}:{port}"
+    return urlunparse((scheme, netloc, path, "", "", ""))
+
+
+def _terminate_process(proc: subprocess.Popen[Any]) -> None:
+    """Best-effort termination of a spawned subprocess."""
+
+    if proc.poll() is not None:
+        return
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(Exception):
+            proc.kill()
+    except Exception:
+        pass
+
+
 def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
     ui_port = str(args.ui_port)
     os.environ["UI_PORT"] = ui_port
@@ -486,6 +525,62 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
                 f" {proc.returncode}. Check logs at {log_path} for more details."
             )
     log.info("Launched runtime pid=%s", proc.pid)
+
+    ready_url = _resolve_runtime_ready_url(args)
+    retries = _parse_int_env("START_ALL_READY_RETRIES", 60)
+    interval = _parse_float_env("START_ALL_READY_INTERVAL", 1.0)
+    timeout_override = os.getenv("START_ALL_READY_TIMEOUT")
+    if timeout_override is not None and timeout_override.strip():
+        try:
+            total_timeout = float(timeout_override)
+        except Exception:
+            log.warning(
+                "Invalid START_ALL_READY_TIMEOUT=%r; using retries=%s interval=%.2fs",
+                timeout_override,
+                retries,
+                interval,
+            )
+        else:
+            if total_timeout <= 0:
+                log.warning(
+                    "START_ALL_READY_TIMEOUT=%r must be positive; using retries=%s interval=%.2fs",
+                    timeout_override,
+                    retries,
+                    interval,
+                )
+            else:
+                retries = max(1, math.ceil(total_timeout / interval))
+
+    log.info(
+        "Waiting for runtime readiness at %s (retries=%s, interval=%.2fs)",
+        ready_url,
+        retries,
+        interval,
+    )
+
+    last_msg = "not attempted"
+    for attempt in range(retries):
+        ok, last_msg = http_ok(ready_url)
+        if ok:
+            log.info("Runtime readiness confirmed: %s — %s", ready_url, last_msg)
+            break
+        if proc.poll() is not None:
+            raise RuntimeError(
+                "Runtime process exited before readiness succeeded"
+                f" (code {proc.returncode}). Check logs at {log_path} for more details."
+            )
+        log.debug(
+            "Runtime readiness probe %d/%d failed: %s", attempt + 1, retries, last_msg
+        )
+        if attempt < retries - 1:
+            time.sleep(interval)
+    else:
+        _terminate_process(proc)
+        raise RuntimeError(
+            "Runtime readiness check timed out after "
+            f"{retries} attempts (~{retries * interval:.1f}s): {last_msg}"
+        )
+
     return 0
 
 

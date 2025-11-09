@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -75,6 +77,12 @@ def test_start_all_blocks_when_rl_unhealthy(monkeypatch, chaos_remediator):
     monkeypatch.setattr(start_module, "_write_manifest", lambda *_: Path("/tmp/manifest.json"))
     monkeypatch.setattr(start_module, "_connectivity_check", lambda: [])
     monkeypatch.setattr(start_module, "_connectivity_soak", lambda: {"disabled": True})
+    def _fake_live_keypair(_cfg):
+        os.environ["KEYPAIR_PATH"] = "/tmp/key.json"
+        os.environ["SOLANA_KEYPAIR"] = "/tmp/key.json"
+        return {"keypair_path": "/tmp/key.json", "keypair_pubkey": "pub"}
+
+    monkeypatch.setattr(start_module, "ensure_live_keypair", _fake_live_keypair)
 
     failure = RuntimeError("RL daemon gate failed: rl health down")
     with patch("scripts.start_all.launch_detached", side_effect=failure):
@@ -161,4 +169,121 @@ def test_launch_detached_writes_runtime_log(tmp_path, monkeypatch):
     assert "Check logs at" in str(excinfo.value)
     assert str(log_path) in str(excinfo.value)
     assert "boom" in log_path.read_text()
+
+
+def test_launch_detached_waits_for_readiness_success(monkeypatch, tmp_path):
+    import scripts.start_all as start_module
+
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(start_module, "RUNTIME_LOG_DIR", log_dir)
+    monkeypatch.setattr(start_module.time, "sleep", lambda _delay: None)
+
+    class Proc:
+        pid = 4242
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            raise AssertionError("terminate should not be called")
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            raise AssertionError("kill should not be called")
+
+    created: list[Proc] = []
+
+    def fake_popen(cmd, stdout, stderr, env):
+        assert stderr is start_module.subprocess.STDOUT
+        proc = Proc()
+        created.append(proc)
+        return proc
+
+    monkeypatch.setattr(start_module.subprocess, "Popen", fake_popen)
+
+    calls: list[str] = []
+
+    def fake_http_ok(url):
+        calls.append(url)
+        return True, "http 200"
+
+    monkeypatch.setattr(start_module, "http_ok", fake_http_ok)
+    monkeypatch.setenv("START_ALL_READY_URL", "http://ready.local/health")
+
+    args = SimpleNamespace(
+        ui_port=9999,
+        ui_host="127.0.0.1",
+        loop_delay=None,
+        min_delay=None,
+        max_delay=None,
+    )
+
+    assert start_module.launch_detached(args, "/tmp/config.toml") == 0
+    assert calls == ["http://ready.local/health"]
+    assert created and created[0].poll() is None
+
+
+def test_launch_detached_times_out_waiting_for_readiness(monkeypatch, tmp_path):
+    import scripts.start_all as start_module
+
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(start_module, "RUNTIME_LOG_DIR", log_dir)
+    monkeypatch.setattr(start_module.time, "sleep", lambda _delay: None)
+
+    class Proc:
+        def __init__(self):
+            self.pid = 4242
+            self.returncode = None
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=["runtime"], timeout=timeout or 0)
+
+        def kill(self):
+            self.killed = True
+
+    proc = Proc()
+
+    def fake_popen(cmd, stdout, stderr, env):
+        assert stderr is start_module.subprocess.STDOUT
+        return proc
+
+    monkeypatch.setattr(start_module.subprocess, "Popen", fake_popen)
+
+    calls: list[str] = []
+
+    def fake_http_ok(url):
+        calls.append(url)
+        return False, "unreachable"
+
+    monkeypatch.setattr(start_module, "http_ok", fake_http_ok)
+    monkeypatch.setenv("START_ALL_READY_URL", "http://ready.local/health")
+    monkeypatch.setenv("START_ALL_READY_RETRIES", "3")
+    monkeypatch.setenv("START_ALL_READY_INTERVAL", "0.01")
+
+    args = SimpleNamespace(
+        ui_port=9999,
+        ui_host="127.0.0.1",
+        loop_delay=None,
+        min_delay=None,
+        max_delay=None,
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        start_module.launch_detached(args, "/tmp/config.toml")
+
+    assert "Runtime readiness check timed out" in str(excinfo.value)
+    assert calls == ["http://ready.local/health"] * 3
+    assert proc.terminated
+    assert proc.killed
 
