@@ -15,6 +15,7 @@ from .scoring_service import ScoringService
 from .portfolio_management_service import PortfolioManagementService
 from .types import ActionBundle, EvaluationResult, ExecutionReceipt, ScoredToken, TokenCandidate
 from .feedback_service import FeedbackService
+from ..agents.discovery import resolve_discovery_limit
 
 log = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ class PipelineCoordinator:
             self._discovery_queue,
             interval=self.discovery_interval,
             cache_ttl=self.discovery_cache_ttl,
-            limit=int(os.getenv("DISCOVERY_LIMIT", "0") or 0) or None,
+            limit=resolve_discovery_limit(default=0) or None,
             emit_batch_size=1 if fast_mode else None,
         )
         self._scoring_service = ScoringService(

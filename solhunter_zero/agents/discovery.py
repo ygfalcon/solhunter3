@@ -29,6 +29,32 @@ from ..url_helpers import as_websocket_url
 
 logger = logging.getLogger(__name__)
 
+
+def resolve_discovery_limit(*, default: int = 60) -> int:
+    """Return a validated discovery limit from the environment."""
+
+    raw_value = os.getenv("DISCOVERY_LIMIT")
+    if raw_value is None:
+        return default
+
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+    else:
+        text = str(raw_value).strip()
+
+    if not text:
+        return default
+
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid DISCOVERY_LIMIT=%r; defaulting to %d",
+            raw_value,
+            default,
+        )
+        return default
+
 try:
     from ..token_scanner import enrich_tokens_async, scan_tokens_async
 except ImportError as exc:  # pragma: no cover - optional dependency guard
@@ -175,7 +201,7 @@ class DiscoveryAgent:
             logger.warning(
                 "BIRDEYE_API_KEY missing; discovery will fall back to static tokens"
             )
-        self.limit = int(os.getenv("DISCOVERY_LIMIT", "60") or 60)
+        self.limit = resolve_discovery_limit(default=60)
         self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
         mempool_max_wait_env = os.getenv("DISCOVERY_MEMPOOL_MAX_WAIT")
