@@ -489,6 +489,61 @@ async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_start_event_bus_raises_on_verification_failure(monkeypatch):
+    runtime = TradingRuntime()
+    runtime.cfg = {}
+
+    ensure_calls = {"count": 0}
+
+    def _fake_ensure(*_a, **_k) -> None:
+        ensure_calls["count"] += 1
+
+    monkeypatch.setattr(runtime_module, "ensure_local_redis_if_needed", _fake_ensure)
+
+    start_calls: list[tuple[str, int]] = []
+    stop_calls = {"count": 0}
+
+    async def _fake_start_ws_server(host: str, port: int) -> None:
+        start_calls.append((host, port))
+
+    async def _fake_stop_ws_server() -> None:
+        stop_calls["count"] += 1
+
+    async def _fake_verify(*_args, **_kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(runtime_module, "start_ws_server", _fake_start_ws_server)
+    monkeypatch.setattr(runtime_module, "stop_ws_server", _fake_stop_ws_server)
+    monkeypatch.setattr(runtime_module, "verify_broker_connection", _fake_verify)
+
+    with pytest.raises(RuntimeError, match="Event bus verification failed"):
+        await runtime._start_event_bus()
+
+    assert ensure_calls["count"] == 1
+    assert start_calls
+    assert stop_calls["count"] == 1
+    assert runtime.bus_started is False
+    assert runtime.status.event_bus is False
+
+    event_entries = [
+        entry for entry in runtime.activity.snapshot() if entry["stage"] == "event_bus"
+    ]
+    assert event_entries
+    assert event_entries[-1]["ok"] is False
+    assert (
+        event_entries[-1]["detail"]
+        == "stopped due to broker verification failure"
+    )
+
+    broker_entries = [
+        entry for entry in runtime.activity.snapshot() if entry["stage"] == "broker"
+    ]
+    assert broker_entries
+    assert broker_entries[-1]["ok"] is False
+    assert broker_entries[-1]["detail"] == "verification failed"
+
+
+@pytest.mark.anyio("asyncio")
 async def test_runtime_websockets_use_public_host(monkeypatch):
     for key in (
         "UI_HOST",

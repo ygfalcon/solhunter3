@@ -608,17 +608,33 @@ class TradingRuntime:
             os.environ["BROKER_WS_URLS"] = event_bus_url
             self.activity.add("event_bus", f"listening on {event_bus_url}")
         except Exception as exc:
+            self.bus_started = False
+            self.status.event_bus = False
             self.activity.add("event_bus", f"failed: {exc}", ok=False)
-            log.warning(
-                "Failed to start event bus websocket; running in degraded mode",
+            with contextlib.suppress(Exception):
+                await stop_ws_server()
+            log.error(
+                "Failed to start event bus websocket; aborting runtime startup",
                 exc_info=True,
             )
+            raise RuntimeError("Event bus websocket failed to start") from exc
 
         ok = await verify_broker_connection(timeout=2.0)
         self.status.event_bus = bool(ok and self.bus_started)
-        if not ok or not self.bus_started:
+        if not self.status.event_bus:
+            if self.bus_started:
+                with contextlib.suppress(Exception):
+                    await stop_ws_server()
+                self.bus_started = False
+            self.status.event_bus = False
+            self.activity.add(
+                "event_bus",
+                "stopped due to broker verification failure",
+                ok=False,
+            )
             self.activity.add("broker", "verification failed", ok=False)
-            log.warning("Event bus verification failed; continuing without bus")
+            log.error("Event bus verification failed; aborting runtime startup")
+            raise RuntimeError("Event bus verification failed")
         else:
             self.activity.add("broker", "verified")
 
