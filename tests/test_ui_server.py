@@ -32,3 +32,15 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         assert server._thread.is_alive()
     finally:
         server.stop()
+
+
+def test_ui_server_start_blocks_until_port_reachable() -> None:
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    server.start()
+    try:
+        with socket.create_connection((server.host, server.port), timeout=1):
+            pass
+    finally:
+        server.stop()

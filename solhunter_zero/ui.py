@@ -3304,9 +3304,16 @@ class UIServer:
 
         server.daemon_threads = True
         self._server = server
+        # Update the externally visible port in case 0 (ephemeral) was requested.
+        self.port = int(server.server_port)
+
+        ready = threading.Event()
 
         def _serve() -> None:
             try:
+                # Signal that the server is about to enter the serving loop so callers
+                # know the HTTP endpoint is ready to accept connections.
+                ready.set()
                 server.serve_forever()
             except Exception:  # pragma: no cover - best effort logging
                 log.exception("UI server crashed")
@@ -3315,6 +3322,12 @@ class UIServer:
 
         self._thread = threading.Thread(target=_serve, daemon=True)
         self._thread.start()
+
+        if not ready.wait(timeout=5):
+            self.stop()
+            raise RuntimeError(
+                f"UI server at {self.host}:{self.port} failed to start within 5 seconds"
+            )
 
     def stop(self) -> None:
         server = self._server
