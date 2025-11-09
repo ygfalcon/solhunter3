@@ -278,7 +278,7 @@ def test_discovery_cache_is_scoped_per_rpc(monkeypatch):
         call_count["value"] += 1
         return [VALID_MINT], {}
 
-    async def passthrough_social(self, tokens, details):
+    async def passthrough_social(self, tokens, details, *, offline=False):
         return tokens, details or {}
 
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
@@ -306,3 +306,26 @@ def test_discovery_cache_is_scoped_per_rpc(monkeypatch):
     tokens_devnet_cached = asyncio.run(agent_devnet.discover_tokens())
     assert tokens_devnet_cached == [VALID_MINT]
     assert call_count["value"] == 2
+
+
+def test_offline_discovery_skips_social_mentions(monkeypatch, caplog):
+    _reset_cache()
+
+    async def fake_discover_once(self, *, method, offline, token_file):
+        assert offline is True
+        return [VALID_MINT], {}
+
+    async def fail_collect_social(self):
+        raise AssertionError("social mentions should not be collected offline")
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+    monkeypatch.setattr(DiscoveryAgent, "_collect_social_mentions", fail_collect_social)
+
+    agent = DiscoveryAgent()
+    agent.news_feeds = ["https://example.com/feed"]
+
+    with caplog.at_level("INFO"):
+        tokens = asyncio.run(agent.discover_tokens(offline=True))
+
+    assert tokens == [VALID_MINT]
+    assert "skipping social mentions" in caplog.text
