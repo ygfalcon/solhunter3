@@ -170,7 +170,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", help="Path to config file", default=None)
     parser.add_argument("--ui-host", default="127.0.0.1", help="UI bind host")
     default_ui_port = os.getenv("UI_PORT", "5001")
-    parser.add_argument("--ui-port", default=default_ui_port, help="UI bind port")
+    parser.add_argument(
+        "--ui-port",
+        default=default_ui_port,
+        type=int,
+        metavar="PORT",
+        help="UI bind port",
+    )
     parser.add_argument("--foreground", action="store_true", help="Run in foreground")
     parser.add_argument(
         "--non-interactive",

@@ -1,8 +1,11 @@
+import importlib
 import runpy
 import sys
 import os
 from pathlib import Path
 import types
+
+import pytest
 
 
 def test_start_all_imports(monkeypatch):
@@ -107,3 +110,10 @@ def test_ensure_venv_skips_when_active(monkeypatch, tmp_path):
     assert not execv_called
     assert not (tmp_path / ".venv").exists()
     assert str(bu.ROOT) in sys.path
+
+
+def test_parse_args_rejects_non_numeric_port(monkeypatch):
+    monkeypatch.delenv("UI_PORT", raising=False)
+    start_all = importlib.reload(importlib.import_module("scripts.start_all"))
+    with pytest.raises(SystemExit):
+        start_all.parse_args(["--ui-port", "invalid"])
