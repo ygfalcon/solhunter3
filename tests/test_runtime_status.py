@@ -44,6 +44,14 @@ def test_collectors_status_snapshot_updates(monkeypatch):
     assert "environment" in status
     assert status["workflow"] == runtime_wiring.DEFAULT_RUNTIME_WORKFLOW
 
+    health = collectors.health_snapshot()
+    assert health["event_bus"] is True
+    assert health["trading_loop"] is False
+    assert health["last_stage"] == "runtime:stopping"
+    assert health["last_stage_ok"] is True
+    assert health["heartbeat_ts"] == status["heartbeat"]
+    assert health["last_stage_ts"] == status["last_stage_ts"]
+
     collectors.stop()
 
 
@@ -66,6 +74,11 @@ def test_wire_ui_state_sets_status_provider(monkeypatch):
     assert callable(provider)
     assert getattr(provider, "__self__", None) is collectors
     assert provider() == collectors.status_snapshot()
+
+    health_provider = ui_state.health_provider
+    assert callable(health_provider)
+    assert getattr(health_provider, "__self__", None) is collectors
+    assert health_provider() == collectors.health_snapshot()
 
     collectors.stop()
 
