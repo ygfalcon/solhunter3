@@ -249,6 +249,11 @@ async def test_ui_health_reports_websocket_channels_ok(monkeypatch):
 
     monkeypatch.setattr(runtime_module, "UIServer", _StubUIServer)
 
+    async def _fake_wait(self, *_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runtime_module.TradingRuntime, "_wait_for_ui_health", _fake_wait)
+
     try:
         await runtime._start_ui()
         assert runtime._ui_ws_threads, "expected websocket threads to be recorded"
@@ -286,6 +291,11 @@ async def test_stop_tears_down_websockets_started_by_runtime(monkeypatch):
 
     monkeypatch.setattr(runtime_module, "UIServer", _StubUIServer)
 
+    async def _fake_wait(self, *_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(runtime_module.TradingRuntime, "_wait_for_ui_health", _fake_wait)
+
     started_threads: dict[str, threading.Thread] = {}
 
     def _fake_start_websockets() -> dict[str, threading.Thread]:
@@ -310,6 +320,55 @@ async def test_stop_tears_down_websockets_started_by_runtime(monkeypatch):
     await runtime.stop()
     assert stop_calls["count"] == 1
     assert runtime._ui_ws_threads is None
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_ui_aborts_when_health_check_fails(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "1")
+    monkeypatch.setattr(runtime_module, "_UI_HEALTH_ATTEMPTS", 2)
+    monkeypatch.setattr(runtime_module, "_UI_HEALTH_DELAY", 0.01)
+
+    runtime = TradingRuntime()
+
+    created: List[object] = []
+
+    class _StubUIServer:
+        def __init__(self, state, host: str, port: int) -> None:
+            self.state = state
+            self.host = host
+            self.port = port
+            self.stopped = False
+            self._server = types.SimpleNamespace(server_port=port)
+            created.append(self)
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr(runtime_module, "UIServer", _StubUIServer)
+
+    def _failing_probe(self, url: str, *, timeout: float) -> int:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(
+        runtime_module.TradingRuntime,
+        "_probe_ui_health_once",
+        _failing_probe,
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await runtime._start_ui()
+
+    assert "UI health check failed" in str(excinfo.value)
+    assert created and created[0].stopped is True
+    assert runtime.ui_server is None
+    assert runtime._ui_ws_threads is None
+    assert runtime._ui_ws_started_here is False
+    assert all(entry["stage"] != "ui" for entry in runtime.activity.snapshot())
+
+    await runtime.stop()
 
 
 def test_collect_health_metrics(monkeypatch):

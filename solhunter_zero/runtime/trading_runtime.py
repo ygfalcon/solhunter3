@@ -82,6 +82,9 @@ log = logging.getLogger(__name__)
 _RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
 _RL_HEALTH_INITIAL_INTERVAL = 5.0
 _RL_HEALTH_MAX_INTERVAL = 60.0
+_UI_HEALTH_ATTEMPTS = 20
+_UI_HEALTH_DELAY = 0.25
+_UI_HEALTH_TIMEOUT = 0.5
 
 
 def _int_env(name: str, default: int) -> int:
@@ -846,6 +849,49 @@ class TradingRuntime:
             self._subscriptions.append((topic, handler))
             subscribe(topic, handler)
 
+    def _probe_ui_health_once(self, url: str, *, timeout: float) -> int:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            status = getattr(response, "status", None)
+            if status is None and hasattr(response, "getcode"):
+                try:
+                    status = response.getcode()
+                except Exception:
+                    status = None
+            return 200 if status is None else int(status)
+
+    async def _wait_for_ui_health(
+        self,
+        url: str,
+        *,
+        attempts: int = _UI_HEALTH_ATTEMPTS,
+        delay: float = _UI_HEALTH_DELAY,
+        timeout: float = _UI_HEALTH_TIMEOUT,
+    ) -> None:
+        remaining = max(1, int(attempts))
+        last_error: str | None = None
+        while remaining > 0:
+            try:
+                status = await asyncio.to_thread(
+                    self._probe_ui_health_once, url, timeout=timeout
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+            else:
+                if int(status) == 200:
+                    return
+                last_error = f"unexpected status {status}"
+            remaining -= 1
+            if remaining <= 0:
+                break
+            await asyncio.sleep(delay)
+
+        message = f"UI health check failed for {url}"
+        if last_error:
+            message = f"{message}: {last_error}"
+        raise RuntimeError(message)
+
     async def _start_ui(self) -> None:
         self.ui_state.status_provider = self._collect_status
         self.ui_state.activity_provider = self.activity.snapshot
@@ -887,6 +933,26 @@ class TradingRuntime:
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
 
+        server = getattr(self.ui_server, "_server", None)
+        if server is not None:
+            with contextlib.suppress(Exception):
+                actual_port = getattr(server, "server_port", None)
+                if actual_port:
+                    self.ui_port = int(actual_port)
+
+        base_url = f"http://{self.ui_host}:{self.ui_port}"
+        health_url = f"{base_url}/health"
+
+        try:
+            await self._wait_for_ui_health(health_url)
+        except Exception:
+            server_instance = self.ui_server
+            if server_instance is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(server_instance.stop)
+            self.ui_server = None
+            raise
+
         threads = start_websockets()
         self._ui_ws_threads = threads
         self._ui_ws_started_here = bool(threads)
@@ -895,7 +961,8 @@ class TradingRuntime:
                 "TradingRuntime: UI websockets started (channels=%s)",
                 ", ".join(sorted(threads)),
             )
-        self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
+        log.info("TradingRuntime: UI listening on %s", base_url)
+        self.activity.add("ui", base_url)
 
     async def _start_agents(self) -> None:
         memory_path = self.cfg.get("memory_path", "sqlite:///memory.db")
