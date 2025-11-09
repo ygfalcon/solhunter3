@@ -1,4 +1,7 @@
 import asyncio
+import builtins
+import importlib.machinery
+import json
 import os
 import re
 import sys
@@ -81,6 +84,121 @@ def _install_jsonschema_stub() -> None:
 
 
 _install_jsonschema_stub()
+
+
+def _install_solana_stub() -> None:
+    if "solana" in sys.modules:
+        return
+
+    try:
+        import importlib
+
+        spec = importlib.util.find_spec("solana")
+    except Exception:
+        spec = None
+    if spec is not None:
+        module = importlib.import_module("solana")
+        sys.modules.setdefault("solana", module)
+        return
+
+    solana_module = types.ModuleType("solana")
+    solana_module.__path__ = []  # type: ignore[attr-defined]
+    solana_module.__package__ = "solana"
+    solana_spec = importlib.machinery.ModuleSpec("solana", loader=None, is_package=True)
+    solana_spec.submodule_search_locations = []  # type: ignore[assignment]
+    solana_module.__spec__ = solana_spec
+
+    rpc_module = types.ModuleType("solana.rpc")
+    rpc_module.__path__ = []  # type: ignore[attr-defined]
+    rpc_module.__package__ = "solana.rpc"
+    rpc_spec = importlib.machinery.ModuleSpec("solana.rpc", loader=None, is_package=True)
+    rpc_spec.submodule_search_locations = []  # type: ignore[assignment]
+    rpc_module.__spec__ = rpc_spec
+    api_module = types.ModuleType("solana.rpc.api")
+    async_module = types.ModuleType("solana.rpc.async_api")
+    core_module = types.ModuleType("solana.rpc.core")
+
+    class _RPCException(Exception):
+        pass
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.endpoint = _kwargs.get("endpoint")
+
+        def __getattr__(self, _name):
+            raise NotImplementedError
+
+    class _AsyncClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.endpoint = _kwargs.get("endpoint")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    api_module.Client = _Client
+    async_module.AsyncClient = _AsyncClient
+    core_module.RPCException = _RPCException
+
+    solana_module.rpc = rpc_module
+    rpc_module.api = api_module
+    rpc_module.async_api = async_module
+    rpc_module.core = core_module
+
+    sys.modules["solana"] = solana_module
+    sys.modules["solana.rpc"] = rpc_module
+    sys.modules["solana.rpc.api"] = api_module
+    sys.modules["solana.rpc.async_api"] = async_module
+    sys.modules["solana.rpc.core"] = core_module
+
+
+def _install_solders_stub() -> None:
+    if "solders" in sys.modules:
+        return
+
+    try:
+        import importlib
+
+        spec = importlib.util.find_spec("solders.pubkey")
+    except Exception:
+        spec = None
+    if spec is not None:
+        module = importlib.import_module("solders.pubkey")
+        sys.modules.setdefault("solders.pubkey", module)
+        parent = importlib.import_module("solders")
+        sys.modules.setdefault("solders", parent)
+        return
+
+    solders_module = types.ModuleType("solders")
+    pubkey_module = types.ModuleType("solders.pubkey")
+
+    class _Pubkey:
+        def __init__(self, value: str | bytes = "") -> None:
+            self._value = value
+
+        @classmethod
+        def from_string(cls, value: str) -> "_Pubkey":
+            return cls(value)
+
+        def __str__(self) -> str:
+            if isinstance(self._value, bytes):
+                return self._value.decode("utf-8", errors="ignore")
+            return str(self._value)
+
+    pubkey_module.Pubkey = _Pubkey
+    solders_module.pubkey = pubkey_module
+
+    sys.modules["solders"] = solders_module
+    sys.modules["solders.pubkey"] = pubkey_module
+
+
+_install_solana_stub()
+_install_solders_stub()
 
 
 @pytest.fixture
@@ -310,6 +428,96 @@ async def test_stop_tears_down_websockets_started_by_runtime(monkeypatch):
     await runtime.stop()
     assert stop_calls["count"] == 1
     assert runtime._ui_ws_threads is None
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_ui_publishes_urls_to_redis(monkeypatch, tmp_path):
+    monkeypatch.setenv("UI_ENABLED", "1")
+    monkeypatch.setenv("UI_REDIS_PUBLISH", "1")
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6379/15")
+    monkeypatch.setenv("RUNTIME_ARTIFACT_ROOT", str(tmp_path))
+
+    runtime = TradingRuntime()
+
+    class _StubUIServer:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.started = False
+
+    monkeypatch.setattr(runtime_module, "UIServer", _StubUIServer)
+    monkeypatch.setattr(runtime_module, "start_websockets", lambda: {})
+
+    ws_urls = {"rl": "ws://rl", "events": None, "logs": "ws://logs"}
+    monkeypatch.setattr(runtime_module, "get_ws_urls", lambda: ws_urls)
+
+    class _FakeRedisClient:
+        def __init__(self) -> None:
+            self.data: Dict[str, str] = {}
+            self.set_calls: List[tuple[str, str]] = []
+            self.setex_calls: List[tuple[str, int, str]] = []
+            self.url: str | None = None
+            self.socket_timeout: float | None = None
+
+        def set(self, key: str, value: str) -> None:
+            self.data[key] = value
+            self.set_calls.append((key, value))
+
+        def setex(self, key: str, ttl: int, value: str) -> None:
+            self.data[key] = value
+            self.setex_calls.append((key, ttl, value))
+
+    fake_client = _FakeRedisClient()
+
+    class _FakeRedisClass:
+        @classmethod
+        def from_url(cls, url: str, socket_timeout: float | None = None):
+            fake_client.url = url
+            fake_client.socket_timeout = socket_timeout
+            return fake_client
+
+    monkeypatch.setitem(sys.modules, "redis", types.SimpleNamespace(Redis=_FakeRedisClass))
+
+    try:
+        await runtime._start_ui()
+        expected_http = "http://127.0.0.1:5000"
+        assert fake_client.data["solhunter:ui:url"] == expected_http
+        assert ("solhunter:ui:url:latest", 600, expected_http) in fake_client.setex_calls
+
+        meta = json.loads(fake_client.data["solhunter:ui:meta"])
+        assert meta["http"] == expected_http
+        assert meta["ws"] == {"rl": "ws://rl", "logs": "ws://logs"}
+        latest_meta_call = (
+            "solhunter:ui:meta:latest",
+            600,
+            fake_client.data["solhunter:ui:meta"],
+        )
+        assert latest_meta_call in fake_client.setex_calls
+    finally:
+        await runtime.stop()
+
+
+def test_publish_ui_metadata_skips_when_disabled(monkeypatch):
+    monkeypatch.setenv("UI_REDIS_PUBLISH", "0")
+    monkeypatch.delitem(sys.modules, "redis", raising=False)
+
+    original_import = builtins.__import__
+    import_attempts = {"redis": 0}
+
+    def _guarded_import(name, *args, **kwargs):
+        if name == "redis":
+            import_attempts["redis"] += 1
+            raise AssertionError("redis import attempted while disabled")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _guarded_import)
+
+    runtime_module._publish_ui_metadata_to_redis("http://127.0.0.1:5000", {})
+    assert import_attempts["redis"] == 0
 
 
 def test_collect_health_metrics(monkeypatch):

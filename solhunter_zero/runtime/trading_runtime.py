@@ -55,7 +55,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         resolve_momentum_flag,
     )
     from ..golden_pipeline.service import GoldenPipelineService
-from ..ui import UIState, UIServer, start_websockets, stop_websockets
+from ..ui import UIState, UIServer, get_ws_urls, start_websockets, stop_websockets
 from ..util import parse_bool_env
 from .runtime_wiring import resolve_golden_enabled
 from .schema_adapters import read_golden, read_ohlcv
@@ -216,6 +216,61 @@ def _sanitize_exit_payload(data: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     for key in _EXIT_PANEL_KEYS:
         sanitized.setdefault(key, [])
     return sanitized
+
+
+def _runtime_artifact_dir() -> Path:
+    """Return the directory where runtime artifacts should be written."""
+
+    root = Path(os.getenv("RUNTIME_ARTIFACT_ROOT", "artifacts"))
+    run_id_raw = (
+        os.getenv("RUNTIME_RUN_ID")
+        or os.getenv("RUN_ID")
+        or os.getenv("MODE")
+        or "prelaunch"
+    )
+    run_id_norm = run_id_raw.replace("\\", "/").strip()
+    parts = [part for part in run_id_norm.split("/") if part and part not in {".", ".."}]
+    if not parts:
+        parts = ["prelaunch"]
+    artifact_dir = root.joinpath(*parts)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir
+
+
+def _publish_ui_metadata_to_redis(ui_url: str, ws_urls: Mapping[str, Optional[str]]) -> None:
+    """Publish UI connection metadata to Redis when enabled."""
+
+    if not parse_bool_env("UI_REDIS_PUBLISH", True):
+        log.debug("UI redis publish disabled via UI_REDIS_PUBLISH")
+        return
+
+    redis_url = os.getenv("REDIS_URL") or "redis://127.0.0.1:6379/1"
+    if not redis_url:
+        return
+
+    try:
+        import redis  # type: ignore[import-not-found]
+    except Exception:  # pragma: no cover - redis optional
+        log.debug("Redis client unavailable; skipping UI metadata publish")
+        return
+
+    try:
+        client = redis.Redis.from_url(redis_url, socket_timeout=1.0)  # type: ignore[attr-defined]
+    except Exception as exc:  # pragma: no cover - redis client construction issues
+        log.warning("Failed to create redis client at %s: %s", redis_url, exc)
+        return
+
+    ws_payload = {key: value for key, value in ws_urls.items() if value}
+    payload = {"http": ui_url, "ws": ws_payload}
+    payload_json = json.dumps(payload, sort_keys=True)
+
+    try:
+        client.set("solhunter:ui:url", ui_url)
+        client.setex("solhunter:ui:url:latest", 600, ui_url)
+        client.set("solhunter:ui:meta", payload_json)
+        client.setex("solhunter:ui:meta:latest", 600, payload_json)
+    except Exception as exc:  # pragma: no cover - redis connectivity issues
+        log.warning("Failed to publish UI metadata to redis at %s: %s", redis_url, exc)
 
 
 @dataclass
@@ -895,7 +950,46 @@ class TradingRuntime:
                 "TradingRuntime: UI websockets started (channels=%s)",
                 ", ".join(sorted(threads)),
             )
-        self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
+        scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
+        url_host = "127.0.0.1" if self.ui_host in {"0.0.0.0", "::"} else self.ui_host
+        ui_url = f"{scheme}://{url_host}:{self.ui_port}"
+        try:
+            ws_urls = get_ws_urls()
+        except Exception:
+            log.debug("TradingRuntime: failed to resolve websocket URLs", exc_info=True)
+            ws_urls = {}
+        self.activity.add("ui", ui_url)
+        self._emit_ui_ready(ui_url, ws_urls)
+
+    def _emit_ui_ready(self, ui_url: str, ws_urls: Mapping[str, Optional[str]]) -> None:
+        rl_url = ws_urls.get("rl") or "-"
+        events_url = ws_urls.get("events") or "-"
+        logs_url = ws_urls.get("logs") or "-"
+        readiness_line = (
+            "UI_READY "
+            f"url={ui_url} "
+            f"rl_ws={rl_url} "
+            f"events_ws={events_url} "
+            f"logs_ws={logs_url}"
+        )
+        log.info(readiness_line)
+
+        artifact_dir: Optional[Path]
+        try:
+            artifact_dir = _runtime_artifact_dir()
+        except Exception as exc:  # pragma: no cover - filesystem issues
+            log.warning("Failed to prepare UI artifact directory: %s", exc)
+            artifact_dir = None
+        if artifact_dir is not None:
+            try:
+                (artifact_dir / "ui_url.txt").write_text(ui_url, encoding="utf-8")
+            except Exception as exc:  # pragma: no cover - filesystem issues
+                log.warning("Failed to write UI URL artifact: %s", exc)
+
+        try:
+            _publish_ui_metadata_to_redis(ui_url, ws_urls)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("Error publishing UI metadata to redis: %s", exc)
 
     async def _start_agents(self) -> None:
         memory_path = self.cfg.get("memory_path", "sqlite:///memory.db")
