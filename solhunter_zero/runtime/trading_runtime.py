@@ -295,6 +295,7 @@ class TradingRuntime:
         self.ui_server: Optional[UIServer] = None
         self.ui_ws_threads: Optional[Dict[str, threading.Thread]] = None
         self._ui_ws_started_here = False
+        self._ui_ws_available = False
         self.ui_state = UIState()
         self.activity = ActivityLog()
         self.status = RuntimeStatus()
@@ -427,7 +428,10 @@ class TradingRuntime:
         self.activity.add("bus", detail, ok=bus_ok)
         log.log(logging.INFO if bus_ok else logging.WARNING, "TradingRuntime: event bus %s", detail)
         await self._start_ui()
-        ui_detail = "enabled" if self.ui_server else "disabled"
+        if self.ui_server:
+            ui_detail = "websocket-enabled" if self._ui_ws_available else "http-only"
+        else:
+            ui_detail = "disabled"
         self.activity.add("ui", ui_detail, ok=bool(self.ui_server))
         log.info("TradingRuntime: UI %s", ui_detail)
         await self._start_agents()
@@ -450,6 +454,7 @@ class TradingRuntime:
 
         ui_ws_started = bool(self._ui_ws_started_here and self.ui_ws_threads)
         self._ui_ws_started_here = False
+        self._ui_ws_available = False
 
         if self._golden_service is not None:
             with contextlib.suppress(Exception):
@@ -492,6 +497,7 @@ class TradingRuntime:
         if self.ui_server:
             self.ui_server.stop()
             self.ui_server = None
+            self._ui_ws_available = False
 
         if ui_ws_started:
             stop_websockets()
@@ -884,6 +890,7 @@ class TradingRuntime:
 
         self.ui_ws_threads = None
         self._ui_ws_started_here = False
+        self._ui_ws_available = False
 
         if not self._ui_enabled:
             self.ui_server = None
@@ -893,9 +900,19 @@ class TradingRuntime:
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)
         self.ui_server.start()
 
-        threads = ui.start_websockets()
+        try:
+            threads = ui.start_websockets()
+        except Exception as exc:
+            if self.ui_server is not None:
+                with contextlib.suppress(Exception):
+                    self.ui_server.stop()
+            self.ui_server = None
+            self._ui_ws_started_here = False
+            self._ui_ws_available = False
+            raise RuntimeError("Failed to start UI websockets") from exc
         self.ui_ws_threads = threads
         self._ui_ws_started_here = bool(threads)
+        self._ui_ws_available = bool(threads)
         if threads:
             log.info(
                 "TradingRuntime: UI websockets started (channels=%s)",
@@ -916,7 +933,12 @@ class TradingRuntime:
                         f"{channel}={url}" for channel, url in sorted(resolved_ws_urls.items())
                     ),
                 )
-        self.activity.add("ui", f"http://{self.ui_host}:{self.ui_port}")
+        detail = f"http://{self.ui_host}:{self.ui_port}"
+        if self._ui_ws_available:
+            detail += " (websocket-enabled)"
+        else:
+            detail += " (http-only)"
+        self.activity.add("ui", detail)
 
     async def _start_agents(self) -> None:
         memory_path = self.cfg.get("memory_path", "sqlite:///memory.db")

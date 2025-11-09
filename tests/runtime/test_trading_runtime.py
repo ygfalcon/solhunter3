@@ -197,6 +197,44 @@ async def test_market_panel_renders_pipeline_keys(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_start_ui_stops_http_server_when_websockets_fail(monkeypatch):
+    monkeypatch.delenv("UI_ENABLED", raising=False)
+
+    stop_calls: List[str] = []
+
+    class DummyUIServer:
+        def __init__(self, state, host, port):
+            self.state = state
+            self.host = host
+            self.port = port
+            self.started = False
+            self.stopped = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.started = False
+            self.stopped = True
+            stop_calls.append("stop")
+
+    def failing_start_channel(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(runtime_module, "UIServer", DummyUIServer)
+    monkeypatch.setattr(ui_module, "_start_channel", failing_start_channel)
+
+    runtime = TradingRuntime()
+
+    with pytest.raises(RuntimeError, match="Failed to start UI websockets"):
+        await runtime._start_ui()
+
+    assert stop_calls, "expected UIServer.stop to be called on failure"
+    assert runtime.ui_server is None
+    assert not runtime._ui_ws_available
+
+
+@pytest.mark.anyio("asyncio")
 async def test_close_position_endpoint_uses_runtime_handler(monkeypatch):
     monkeypatch.setenv("UI_ENABLED", "0")
     runtime = TradingRuntime()
