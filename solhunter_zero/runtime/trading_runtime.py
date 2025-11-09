@@ -32,6 +32,7 @@ from ..event_bus import (
     verify_broker_connection,
     get_ws_address,
 )
+from .. import event_bus as event_bus_module
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, resolve_discovery_method
 from ..loop import (
     FirstTradeTimeoutError,
@@ -594,6 +595,13 @@ class TradingRuntime:
             except Exception:
                 log.exception("Failed to ensure Redis broker")
 
+        previous_event_bus_url = os.environ.get("EVENT_BUS_URL")
+        previous_broker_env = {
+            "BROKER_URLS": os.environ.get("BROKER_URLS"),
+            "BROKER_URL": os.environ.get("BROKER_URL"),
+        }
+        default_ws_before_start = event_bus_module.DEFAULT_WS_URL
+
         ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
         event_bus_url = f"ws://127.0.0.1:{ws_port}"
         os.environ["EVENT_BUS_URL"] = event_bus_url
@@ -606,6 +614,24 @@ class TradingRuntime:
             event_bus_url = f"ws://{listen_host}:{listen_port}"
             os.environ["EVENT_BUS_URL"] = event_bus_url
             os.environ["BROKER_WS_URLS"] = event_bus_url
+            old_addresses = {
+                addr
+                for addr in (
+                    previous_event_bus_url,
+                    default_ws_before_start,
+                    f"ws://127.0.0.1:{ws_port}",
+                )
+                if addr
+            }
+            for key in ("BROKER_URLS", "BROKER_URL"):
+                current_value = os.environ.get(key)
+                previous_value = previous_broker_env.get(key)
+                if (
+                    not current_value
+                    or current_value in old_addresses
+                    or (previous_value is not None and previous_value in old_addresses)
+                ):
+                    os.environ[key] = event_bus_url
             self.activity.add("event_bus", f"listening on {event_bus_url}")
         except Exception as exc:
             self.activity.add("event_bus", f"failed: {exc}", ok=False)

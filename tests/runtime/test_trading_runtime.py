@@ -439,8 +439,13 @@ async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
 
     prev_event_bus_url = os.environ.get("EVENT_BUS_URL")
     prev_broker_ws_urls = os.environ.get("BROKER_WS_URLS")
+    prev_broker_urls = os.environ.get("BROKER_URLS")
+    prev_broker_url = os.environ.get("BROKER_URL")
     original_url = event_bus.DEFAULT_WS_URL
     original_host, original_port = event_bus.get_ws_address()
+
+    os.environ["BROKER_URLS"] = original_url
+    os.environ["BROKER_URL"] = original_url
 
     try:
         await asyncio.shield(runtime._start_event_bus())
@@ -451,6 +456,8 @@ async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
         expected_url = f"ws://{listen_host}:{listen_port}"
         assert os.environ["EVENT_BUS_URL"] == expected_url
         assert os.environ["BROKER_WS_URLS"] == expected_url
+        assert os.environ["BROKER_URLS"] == expected_url
+        assert os.environ["BROKER_URL"] == expected_url
 
         entries = [e for e in runtime.activity.snapshot() if e["stage"] == "event_bus"]
         assert entries, "expected event bus activity entry"
@@ -486,6 +493,16 @@ async def test_trading_runtime_updates_event_bus_url_for_auto_port(monkeypatch):
             os.environ.pop("BROKER_WS_URLS", None)
         else:
             os.environ["BROKER_WS_URLS"] = prev_broker_ws_urls
+
+        if prev_broker_urls is None:
+            os.environ.pop("BROKER_URLS", None)
+        else:
+            os.environ["BROKER_URLS"] = prev_broker_urls
+
+        if prev_broker_url is None:
+            os.environ.pop("BROKER_URL", None)
+        else:
+            os.environ["BROKER_URL"] = prev_broker_url
 
 
 @pytest.mark.anyio("asyncio")
