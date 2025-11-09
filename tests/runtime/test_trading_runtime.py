@@ -251,7 +251,7 @@ async def test_ui_health_reports_websocket_channels_ok(monkeypatch):
 
     try:
         await runtime._start_ui()
-        assert runtime._ui_ws_threads, "expected websocket threads to be recorded"
+        assert runtime.ui_ws_threads, "expected websocket threads to be recorded"
 
         def _invoke_health():
             app = create_app(runtime.ui_state)
@@ -287,8 +287,10 @@ async def test_stop_tears_down_websockets_started_by_runtime(monkeypatch):
     monkeypatch.setattr(runtime_module, "UIServer", _StubUIServer)
 
     started_threads: dict[str, threading.Thread] = {}
+    start_calls = {"count": 0}
 
     def _fake_start_websockets() -> dict[str, threading.Thread]:
+        start_calls["count"] += 1
         if started_threads:
             return started_threads
         dummy_thread = threading.Thread(target=lambda: None, name="ui-ws-dummy")
@@ -301,15 +303,18 @@ async def test_stop_tears_down_websockets_started_by_runtime(monkeypatch):
         stop_calls["count"] += 1
 
     monkeypatch.setattr(ui_module, "start_websockets", _fake_start_websockets)
+    monkeypatch.setattr(runtime_module.ui, "start_websockets", _fake_start_websockets)
     monkeypatch.setattr(ui_module, "stop_websockets", _fake_stop_websockets)
+    monkeypatch.setattr(runtime_module, "stop_websockets", _fake_stop_websockets)
 
     await runtime._start_ui()
-    assert runtime._ui_ws_threads == started_threads
+    assert start_calls["count"] == 1
+    assert runtime.ui_ws_threads == started_threads
     assert runtime._ui_ws_started_here is True
 
     await runtime.stop()
     assert stop_calls["count"] == 1
-    assert runtime._ui_ws_threads is None
+    assert runtime.ui_ws_threads is None
 
 
 def test_collect_health_metrics(monkeypatch):
