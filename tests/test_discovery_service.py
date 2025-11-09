@@ -1,4 +1,5 @@
 import asyncio
+import os
 import types
 
 from solhunter_zero.pipeline.discovery_service import DiscoveryService
@@ -29,5 +30,62 @@ def test_emit_tokens_skips_reordered_batches():
         assert service._last_emitted == list(reversed(tokens))
         assert service._last_emitted_set == frozenset(tokens)
         assert service._last_emitted_size == len(tokens)
+
+    asyncio.run(runner())
+
+
+def test_empty_fetch_backoff_is_capped():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        service = DiscoveryService(
+            queue,
+            empty_cache_ttl=2.5,
+            backoff_factor=2.0,
+            max_backoff=5.0,
+        )
+
+        base_ts = 1000.0
+        cooldowns: list[float] = []
+        for idx in range(4):
+            ts = base_ts + idx
+            service._apply_fetch_stats([], ts)
+            cooldown = service._cooldown_until - ts
+            cooldowns.append(cooldown)
+
+        assert cooldowns[0] == 2.5
+        assert cooldowns[1] == 5.0
+        assert cooldowns[2] == 5.0
+        assert cooldowns[3] == 5.0
+        assert service._current_backoff == 5.0
+
+    asyncio.run(runner())
+
+
+def test_env_override_for_max_backoff():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        previous = os.environ.get("DISCOVERY_MAX_BACKOFF")
+        os.environ["DISCOVERY_MAX_BACKOFF"] = "4.5"
+        try:
+            service = DiscoveryService(
+                queue,
+                empty_cache_ttl=2.0,
+                backoff_factor=2.0,
+                max_backoff=15.0,
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("DISCOVERY_MAX_BACKOFF", None)
+            else:
+                os.environ["DISCOVERY_MAX_BACKOFF"] = previous
+
+        assert service.max_backoff == 4.5
+
+        service._apply_fetch_stats([], 0.0)
+        assert service._current_backoff == 2.0
+        service._apply_fetch_stats([], 1.0)
+        assert service._current_backoff == 4.0
+        service._apply_fetch_stats([], 2.0)
+        assert service._current_backoff == 4.5
 
     asyncio.run(runner())
