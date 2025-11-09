@@ -6,15 +6,17 @@ import errno
 import importlib
 import inspect
 import logging
+import math
 import os
 import signal
 import socket
 import sys
+import time
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from werkzeug.serving import make_server
 
@@ -188,6 +190,7 @@ class RuntimeHandles:
     agent_runtime: Any | None = None
     trade_executor: Any | None = None
     ui_forwarder: Any | None = None
+    portfolio: Portfolio | None = None
 
 
 async def maybe_await(result: Any) -> Any:
@@ -211,6 +214,7 @@ class RuntimeOrchestrator:
         self._golden_enabled: bool = False
         self._ui_forwarder: _UIPanelForwarder | None = None
         self._stop_reason: str | None = None
+        self._portfolio: Portfolio | None = None
 
     @property
     def stop_reason(self) -> str | None:
@@ -395,6 +399,140 @@ class RuntimeOrchestrator:
             await maybe_await(forwarder.flush())
         except Exception:
             log.debug("UI forwarder flush failed", exc_info=True)
+
+    def _wire_portfolio_to_ui(self, portfolio: Portfolio | None) -> None:
+        ui_state = self.handles.ui_state
+        if ui_state is None:
+            return
+        if hasattr(ui_state, "positions_provider"):
+            ui_state.positions_provider = self.portfolio_snapshot_positions
+        if hasattr(ui_state, "pnl_provider"):
+            ui_state.pnl_provider = self.portfolio_snapshot_pnl
+
+    def _current_portfolio(self) -> Portfolio | None:
+        return self.handles.portfolio or self._portfolio
+
+    @staticmethod
+    def _maybe_float(value: Any) -> float | None:
+        if value in (None, "", "null"):
+            return None
+        try:
+            number = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(number):
+            return None
+        return number
+
+    @staticmethod
+    def _serialize(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, Mapping):
+            return {str(k): RuntimeOrchestrator._serialize(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [RuntimeOrchestrator._serialize(v) for v in value]
+        if hasattr(value, "_asdict"):
+            try:
+                return {
+                    str(k): RuntimeOrchestrator._serialize(v)
+                    for k, v in value._asdict().items()
+                }
+            except Exception:
+                return str(value)
+        if hasattr(value, "__dict__"):
+            try:
+                return {
+                    str(k): RuntimeOrchestrator._serialize(v)
+                    for k, v in value.__dict__.items()
+                }
+            except Exception:
+                return str(value)
+        return str(value)
+
+    def _format_position_record(self, mint: str, position: Any) -> dict[str, Any]:
+        record: dict[str, Any] = {"mint": mint}
+
+        qty = self._maybe_float(getattr(position, "amount", None))
+        if qty is not None:
+            record["qty_base"] = qty
+            record["side"] = "long" if qty >= 0 else "short"
+
+        entry_price = self._maybe_float(getattr(position, "entry_price", None))
+        if entry_price is not None:
+            record["entry_price"] = entry_price
+
+        last_mark = self._maybe_float(getattr(position, "last_mark", None))
+        if last_mark is None:
+            last_mark = entry_price
+        if last_mark is not None:
+            record["last_mark"] = last_mark
+
+        if qty is not None and last_mark is not None:
+            record["notional_usd"] = qty * last_mark
+
+        breakeven = self._maybe_float(getattr(position, "breakeven_price", None))
+        if breakeven is not None:
+            record["breakeven_price"] = breakeven
+
+        breakeven_bps = self._maybe_float(getattr(position, "breakeven_bps", None))
+        if breakeven_bps is not None:
+            record["breakeven_bps"] = breakeven_bps
+
+        realized = self._maybe_float(getattr(position, "realized_pnl", None))
+        if realized is not None:
+            record["realized_usd"] = realized
+
+        unrealized = self._maybe_float(getattr(position, "unrealized_pnl", None))
+        if unrealized is not None:
+            record["unrealized_usd"] = unrealized
+
+        lifecycle = getattr(position, "lifecycle", None)
+        if lifecycle:
+            record["lifecycle"] = str(lifecycle)
+
+        attribution = getattr(position, "attribution", None)
+        if attribution:
+            record["attribution"] = self._serialize(attribution)
+
+        return {k: v for k, v in record.items() if v is not None}
+
+    def portfolio_snapshot_positions(self) -> list[dict[str, Any]]:
+        portfolio = self._current_portfolio()
+        if portfolio is None:
+            return []
+        balances = getattr(portfolio, "balances", None)
+        if not isinstance(balances, Mapping):
+            return []
+
+        entries: list[dict[str, Any]] = []
+        for mint, position in list(balances.items()):
+            snapshot = self._format_position_record(str(mint), position)
+            if snapshot:
+                entries.append(snapshot)
+
+        entries.sort(key=lambda entry: abs(self._maybe_float(entry.get("notional_usd")) or 0.0), reverse=True)
+        return entries
+
+    def portfolio_snapshot_pnl(self, window: str) -> dict[str, Any]:
+        positions = self.portfolio_snapshot_positions()
+        realized_total = 0.0
+        unrealized_total = 0.0
+        for position in positions:
+            realized_total += float(position.get("realized_usd") or 0.0)
+            unrealized_total += float(position.get("unrealized_usd") or 0.0)
+
+        return {
+            "window": str(window),
+            "realized_usd": realized_total,
+            "unrealized_usd": unrealized_total,
+            "total_usd": realized_total + unrealized_total,
+            "positions": len(positions),
+            "details": positions,
+            "updated_at": time.time(),
+        }
 
     async def start_bus(self) -> None:
         await self._publish_stage("bus:init", True)
@@ -593,6 +731,9 @@ class RuntimeOrchestrator:
         memory = Memory(memory_path)
         memory.start_writer()
         portfolio = Portfolio(path=portfolio_path)
+        self._portfolio = portfolio
+        self.handles.portfolio = portfolio
+        self._wire_portfolio_to_ui(portfolio)
         state = TradingState()
 
         # Strategy/agents selection mirrors main.main
@@ -898,6 +1039,8 @@ class RuntimeOrchestrator:
                 m.stop()
         except Exception:
             pass
+        self.handles.portfolio = None
+        self._portfolio = None
         # Stop risk controller
         try:
             rc = getattr(self, "_risk_ctl", None)

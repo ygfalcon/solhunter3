@@ -5,7 +5,9 @@ import pytest
 
 import tests.runtime.test_trading_runtime  # ensure optional deps stubbed
 
+from solhunter_zero import ui
 from solhunter_zero.loop import ResourceBudgetExceeded
+from solhunter_zero.portfolio import Portfolio as RealPortfolio, Position
 from solhunter_zero.runtime.orchestrator import RuntimeOrchestrator
 
 
@@ -147,5 +149,132 @@ async def test_orchestrator_starts_golden_pipeline_by_default(monkeypatch):
     assert "start" in golden_events
     assert orch._golden_service is not None
     assert any(stage == "golden:start" and ok and "providers=" in detail for stage, ok, detail in published)
+
+    await orch.stop_all()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_exposes_portfolio_snapshots_via_http(monkeypatch):
+    monkeypatch.setenv("EVENT_DRIVEN", "0")
+
+    seeded_portfolio = RealPortfolio(path=None)
+    seeded_portfolio.balances = {
+        "MINT_LONG": Position(
+            token="MINT_LONG",
+            amount=2.5,
+            entry_price=1.1,
+            last_mark=1.6,
+            realized_pnl=3.0,
+            unrealized_pnl=1.25,
+            breakeven_price=1.05,
+            breakeven_bps=45.0,
+            lifecycle="open",
+            attribution={"entries": ["seed"], "exits": []},
+        ),
+        "MINT_SHORT": Position(
+            token="MINT_SHORT",
+            amount=-1.2,
+            entry_price=0.9,
+            last_mark=0.75,
+            realized_pnl=-1.5,
+            unrealized_pnl=0.4,
+            breakeven_price=0.82,
+            breakeven_bps=30.0,
+            lifecycle="open",
+            attribution={"entries": ["hedge"], "exits": []},
+        ),
+    }
+
+    async def fake_publish_stage(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def fake_startup(*_args, **_kwargs):
+        cfg = {
+            "strategies": [],
+            "agents": [],
+            "loop_delay": 10,
+            "min_delay": 5,
+            "max_delay": 10,
+            "cpu_low_threshold": 10.0,
+            "cpu_high_threshold": 90.0,
+            "depth_freq_low": 1.0,
+            "depth_freq_high": 5.0,
+            "depth_rate_limit": 0.1,
+            "rl_auto_train": False,
+            "rl_interval": 3600.0,
+            "use_mev_bundles": False,
+        }
+        depth_proc = types.SimpleNamespace(poll=lambda: None)
+        return cfg, {}, depth_proc
+
+    async def fake_trading_loop(*_args, **_kwargs):
+        return None
+
+    class DummyMemory:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.started = False
+
+        def start_writer(self) -> None:
+            self.started = True
+
+    class DummyAgentManager:
+        def __init__(self) -> None:
+            self.agents: list[str] = []
+
+        @classmethod
+        def from_config(cls, *_args, **_kwargs):
+            return cls()
+
+        @classmethod
+        def from_default(cls, *_args, **_kwargs):
+            return cls()
+
+        def set_rl_disabled(self, *_args, **_kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(RuntimeOrchestrator, "_ensure_ui_forwarder", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(RuntimeOrchestrator, "_register_task", lambda self, task: None)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.perform_startup_async", fake_startup)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.Memory", DummyMemory)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.Portfolio", lambda *args, **kwargs: seeded_portfolio)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.AgentManager", DummyAgentManager)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator._trading_loop", fake_trading_loop)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.resolve_golden_enabled", lambda _cfg: False)
+
+    orch = RuntimeOrchestrator(run_http=False)
+    orch.handles.ui_state = ui.UIState()
+
+    await orch.start_agents()
+
+    positions = orch.handles.ui_state.snapshot_positions()
+    assert {entry["mint"] for entry in positions} == {"MINT_LONG", "MINT_SHORT"}
+    long_entry = next(entry for entry in positions if entry["mint"] == "MINT_LONG")
+    assert long_entry["side"] == "long"
+    assert pytest.approx(long_entry["notional_usd"], rel=1e-6) == 2.5 * 1.6
+
+    pnl = orch.handles.ui_state.snapshot_pnl("6h")
+    assert pnl["window"] == "6h"
+    assert pnl["positions"] == 2
+    expected_realized = 3.0 - 1.5
+    expected_unrealized = 1.25 + 0.4
+    assert pytest.approx(pnl["realized_usd"], rel=1e-6) == expected_realized
+    assert pytest.approx(pnl["unrealized_usd"], rel=1e-6) == expected_unrealized
+    assert pytest.approx(pnl["total_usd"], rel=1e-6) == expected_realized + expected_unrealized
+
+    app = ui.create_app(state=orch.handles.ui_state)
+    client = app.test_client()
+
+    positions_resp = client.get("/api/portfolio/positions")
+    assert positions_resp.status_code == 200
+    payload = positions_resp.get_json()
+    assert {entry["mint"] for entry in payload} == {"MINT_LONG", "MINT_SHORT"}
+
+    pnl_resp = client.get("/api/portfolio/pnl?window=12h")
+    assert pnl_resp.status_code == 200
+    pnl_payload = pnl_resp.get_json()
+    assert pnl_payload["window"] == "12h"
+    assert pytest.approx(pnl_payload["realized_usd"], rel=1e-6) == expected_realized
+    assert pytest.approx(pnl_payload["unrealized_usd"], rel=1e-6) == expected_unrealized
 
     await orch.stop_all()
