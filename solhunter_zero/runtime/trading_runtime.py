@@ -13,6 +13,7 @@ import signal
 import threading
 import time
 import urllib.request
+from urllib.parse import urlparse, urlunparse
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -594,19 +595,80 @@ class TradingRuntime:
             except Exception:
                 log.exception("Failed to ensure Redis broker")
 
-        ws_port = int(os.getenv("EVENT_BUS_WS_PORT", "8779") or 8779)
-        event_bus_url = f"ws://127.0.0.1:{ws_port}"
-        os.environ["EVENT_BUS_URL"] = event_bus_url
-        os.environ["BROKER_WS_URLS"] = event_bus_url
+        ws_port_env = os.getenv("EVENT_BUS_WS_PORT", "8779") or "8779"
+        try:
+            ws_port = int(ws_port_env)
+        except ValueError:
+            ws_port = 8779
+
+        configured_url = os.getenv("EVENT_BUS_URL", "").strip()
+        if not configured_url:
+            broker_ws_urls = os.getenv("BROKER_WS_URLS", "")
+            for candidate in broker_ws_urls.split(","):
+                candidate = candidate.strip()
+                if candidate:
+                    configured_url = candidate
+                    break
+        if not configured_url and self.cfg:
+            configured_url = str(self.cfg.get("event_bus_url", "") or "").strip()
+
+        parsed = urlparse(configured_url) if configured_url else None
+        allowed_schemes = {"ws", "wss", "http", "https"}
+        explicit_components = bool(
+            parsed
+            and parsed.scheme
+            and parsed.hostname
+            and parsed.scheme.lower() in allowed_schemes
+        )
+
+        scheme = (parsed.scheme if parsed and parsed.scheme else "ws").lower()
+        if scheme not in allowed_schemes:
+            scheme = "ws"
+
+        configured_host = parsed.hostname if explicit_components else None
+        configured_port = parsed.port if explicit_components else None
+        path_component = parsed.path if explicit_components else ""
+        query_component = parsed.query if explicit_components else ""
+        fragment_component = parsed.fragment if explicit_components else ""
+
+        listen_host = configured_host or "127.0.0.1"
+        listen_port = configured_port if configured_port is not None else ws_port
+
+        def _format_netloc(host: str, port: int | None) -> str:
+            if ":" in host and not host.startswith("[") and "]" not in host:
+                host_formatted = f"[{host}]"
+            else:
+                host_formatted = host
+            if port is None:
+                return host_formatted
+            return f"{host_formatted}:{port}"
+
+        def _build_url(host: str, port: int | None) -> str:
+            netloc = _format_netloc(host, port)
+            return urlunparse(
+                (
+                    scheme,
+                    netloc,
+                    path_component,
+                    "",
+                    query_component,
+                    fragment_component,
+                )
+            )
+
+        initial_url = configured_url or _build_url(listen_host, listen_port)
+        os.environ["EVENT_BUS_URL"] = initial_url
+        os.environ["BROKER_WS_URLS"] = initial_url
 
         try:
-            await start_ws_server("127.0.0.1", ws_port)
+            await start_ws_server(listen_host, listen_port)
             self.bus_started = True
-            listen_host, listen_port = get_ws_address()
-            event_bus_url = f"ws://{listen_host}:{listen_port}"
-            os.environ["EVENT_BUS_URL"] = event_bus_url
-            os.environ["BROKER_WS_URLS"] = event_bus_url
-            self.activity.add("event_bus", f"listening on {event_bus_url}")
+            actual_host, actual_port = get_ws_address()
+            final_host = configured_host or actual_host
+            final_url = _build_url(final_host, actual_port)
+            os.environ["EVENT_BUS_URL"] = final_url
+            os.environ["BROKER_WS_URLS"] = final_url
+            self.activity.add("event_bus", f"listening on {final_url}")
         except Exception as exc:
             self.activity.add("event_bus", f"failed: {exc}", ok=False)
             log.warning(
