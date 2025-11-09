@@ -138,7 +138,7 @@ def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
 
     async def run():
         with caplog.at_level("WARNING"):
-            return await agent.discover_tokens(offline=True)
+            return await agent.discover_tokens()
 
     tokens = asyncio.run(run())
     assert tokens == [VALID_MINT]
@@ -211,6 +211,32 @@ def test_discover_tokens_recovers_from_merge_exception(monkeypatch, caplog):
     assert tokens == [VALID_MINT]
     assert "Websocket merge failed" in caplog.text
     assert "Websocket merge yielded no tokens" in caplog.text
+
+
+def test_discover_tokens_offline_falls_back_without_network(monkeypatch, caplog):
+    _reset_cache()
+
+    fallback_calls: list[int] = []
+
+    async def fail_discover_once(*_args, **_kwargs):
+        raise AssertionError("network discovery should not run in offline fallback")
+
+    def fake_fallback(self):
+        fallback_calls.append(1)
+        return [VALID_MINT]
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fail_discover_once)
+    monkeypatch.setattr(DiscoveryAgent, "_fallback_tokens", fake_fallback)
+
+    agent = DiscoveryAgent()
+
+    with caplog.at_level("WARNING"):
+        tokens = asyncio.run(agent.discover_tokens(offline=True))
+
+    assert tokens == [VALID_MINT]
+    assert fallback_calls == [1]
+    assert agent.last_method == "offline-static"
+    assert "offline mode using cached/static fallback seeds" in caplog.text
 
 
 def test_collect_social_mentions(monkeypatch):

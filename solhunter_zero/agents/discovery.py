@@ -261,10 +261,16 @@ class DiscoveryAgent:
         ttl = self.cache_ttl
         method_override = method is not None
         requested_method = resolve_discovery_method(method)
-        if requested_method is None and offline and not method_override:
-            requested_method = "helius"
+        offline_static_fallback = False
         if requested_method is None:
-            active_method = self.default_method or DEFAULT_DISCOVERY_METHOD
+            if offline and not method_override:
+                if token_file:
+                    active_method = "file"
+                else:
+                    active_method = "offline-static"
+                    offline_static_fallback = True
+            else:
+                active_method = self.default_method or DEFAULT_DISCOVERY_METHOD
             if method_override and isinstance(method, str) and method.strip():
                 logger.warning(
                     "Unsupported discovery method %r; falling back to %s",
@@ -310,24 +316,31 @@ class DiscoveryAgent:
         details: Dict[str, Dict[str, Any]] = {}
         tokens: List[str] = []
 
-        for attempt in range(attempts):
-            tokens, details = await self._discover_once(
-                method=active_method,
-                offline=offline,
-                token_file=token_file,
+        if offline_static_fallback:
+            logger.warning(
+                "DiscoveryAgent offline mode using cached/static fallback seeds"
             )
-            tokens = self._normalise(tokens)
-            tokens, details = await self._apply_social_mentions(tokens, details)
-            if tokens:
-                break
-            if attempt < attempts - 1:
-                logger.warning(
-                    "No tokens discovered (method=%s, attempt=%d/%d)",
-                    active_method,
-                    attempt + 1,
-                    attempts,
+            tokens = self._fallback_tokens()
+            details = {}
+        else:
+            for attempt in range(attempts):
+                tokens, details = await self._discover_once(
+                    method=active_method,
+                    offline=offline,
+                    token_file=token_file,
                 )
-                await asyncio.sleep(self.backoff)
+                tokens = self._normalise(tokens)
+                tokens, details = await self._apply_social_mentions(tokens, details)
+                if tokens:
+                    break
+                if attempt < attempts - 1:
+                    logger.warning(
+                        "No tokens discovered (method=%s, attempt=%d/%d)",
+                        active_method,
+                        attempt + 1,
+                        attempts,
+                    )
+                    await asyncio.sleep(self.backoff)
 
         if not tokens:
             tokens = self._fallback_tokens()
