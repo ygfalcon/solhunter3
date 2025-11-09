@@ -178,6 +178,22 @@ class DiscoveryAgent:
         self.limit = int(os.getenv("DISCOVERY_LIMIT", "60") or 60)
         self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
+        mempool_max_wait_env = os.getenv("DISCOVERY_MEMPOOL_MAX_WAIT")
+        try:
+            mempool_max_wait = (
+                float(mempool_max_wait_env)
+                if mempool_max_wait_env not in {None, ""}
+                else None
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid DISCOVERY_MEMPOOL_MAX_WAIT=%r; falling back to TOKEN_DISCOVERY_BACKOFF",
+                mempool_max_wait_env,
+            )
+            mempool_max_wait = None
+        if mempool_max_wait is None:
+            mempool_max_wait = self.backoff
+        self.mempool_max_wait = max(float(mempool_max_wait), 0.0)
         self.max_attempts = max(1, int(os.getenv("TOKEN_DISCOVERY_RETRIES", "2") or 2))
         self.mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
         env_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
@@ -517,7 +533,7 @@ class DiscoveryAgent:
         details: Dict[str, Dict[str, Any]] = {}
         timeout = max(float(_MEMPOOL_TIMEOUT), 0.1)
         retries = max(1, int(_MEMPOOL_TIMEOUT_RETRIES))
-        max_wait = max(self.backoff, 0.0)
+        max_wait = max(self.mempool_max_wait, 0.0)
         deadline: float | None
         if max_wait:
             deadline = time.perf_counter() + max_wait
@@ -535,6 +551,10 @@ class DiscoveryAgent:
                         deadline_triggered = True
                         timed_out = True
                         break
+                    logger.debug(
+                        "Mempool stream waiting for events (%.2fs remaining)",
+                        max(remaining, 0.0),
+                    )
                     wait_for_timeout = min(timeout, remaining)
                 else:
                     wait_for_timeout = timeout
@@ -548,10 +568,21 @@ class DiscoveryAgent:
                     item = await asyncio.wait_for(anext(gen), timeout=wait_for_timeout)
                 except asyncio.TimeoutError:
                     timeouts += 1
-                    if deadline is not None and (deadline - time.perf_counter()) <= 0:
-                        deadline_triggered = True
-                        timed_out = True
-                        break
+                    if deadline is not None:
+                        remaining = deadline - time.perf_counter()
+                        if remaining <= 0:
+                            deadline_triggered = True
+                            timed_out = True
+                            break
+                        logger.debug(
+                            "Mempool stream still waiting for events (%.2fs remaining)",
+                            max(remaining, 0.0),
+                        )
+                        if timeouts >= retries:
+                            # Reset timeout counter so we can keep waiting while the
+                            # configured deadline allows more time.
+                            timeouts = 0
+                        continue
                     if timeouts >= retries:
                         timed_out = True
                         break
