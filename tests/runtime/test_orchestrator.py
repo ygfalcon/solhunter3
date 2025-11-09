@@ -1,7 +1,46 @@
 import asyncio
+import importlib
+import socket
+import sys
 import types
+from contextlib import closing
 
 import pytest
+
+
+def _install_solana_stub() -> None:
+    try:
+        importlib.import_module("solana.rpc.core")
+        return
+    except Exception:
+        solana_module = types.ModuleType("solana")
+        rpc_module = types.ModuleType("solana.rpc")
+        api_module = types.ModuleType("solana.rpc.api")
+        async_module = types.ModuleType("solana.rpc.async_api")
+        core_module = types.ModuleType("solana.rpc.core")
+
+        class _RPCException(RuntimeError):
+            pass
+
+        api_module.Client = lambda *args, **kwargs: None
+        async_module.AsyncClient = lambda *args, **kwargs: None
+        core_module.RPCException = _RPCException
+
+        solana_module.__path__ = []  # mark as package
+        solana_module.rpc = rpc_module
+        rpc_module.__path__ = []
+        rpc_module.api = api_module
+        rpc_module.async_api = async_module
+        rpc_module.core = core_module
+
+        sys.modules["solana"] = solana_module
+        sys.modules["solana.rpc"] = rpc_module
+        sys.modules["solana.rpc.api"] = api_module
+        sys.modules["solana.rpc.async_api"] = async_module
+        sys.modules["solana.rpc.core"] = core_module
+
+
+_install_solana_stub()
 
 import tests.runtime.test_trading_runtime  # ensure optional deps stubbed
 
@@ -149,3 +188,60 @@ async def test_orchestrator_starts_golden_pipeline_by_default(monkeypatch):
     assert any(stage == "golden:start" and ok and "providers=" in detail for stage, ok, detail in published)
 
     await orch.stop_all()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_ui_restart_rebinds_ports(monkeypatch):
+    host = "127.0.0.1"
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+        sock.bind((host, 0))
+        http_port = sock.getsockname()[1]
+    ws_port = http_port + 100
+
+    ports: list[str] = []
+    active_sockets: list[socket.socket] = []
+
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        if stage == "ui:http" and ok:
+            parts = detail.split("port=")
+            if len(parts) > 1:
+                ports.append(parts[1].split()[0])
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+
+    import solhunter_zero.runtime.orchestrator as orch_module
+
+    def fake_start_ui_ws() -> dict[str, object]:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, ws_port))
+        except OSError as exc:
+            sock.close()
+            raise RuntimeError(f"ws port {ws_port} busy") from exc
+        sock.listen()
+        active_sockets.append(sock)
+        return {"events": sock}
+
+    def fake_stop_ws() -> None:
+        while active_sockets:
+            active_sockets.pop().close()
+
+    monkeypatch.setattr(orch_module, "_start_ui_ws", fake_start_ui_ws)
+    monkeypatch.setattr(orch_module._ui_module, "stop_websockets", fake_stop_ws, raising=False)
+
+    monkeypatch.setenv("UI_HOST", host)
+    monkeypatch.setenv("UI_PORT", str(http_port))
+    monkeypatch.delenv("UI_DISABLE_HTTP_SERVER", raising=False)
+
+    for _ in range(2):
+        orch = RuntimeOrchestrator(run_http=True)
+        await orch.start_ui()
+        await orch.stop_all()
+        assert not active_sockets
+        assert orch.handles.ui_threads is None
+        assert orch.handles.ui_server is None
+        assert orch.handles.ui_http_thread is None
+
+    assert len(ports) == 2
+    assert ports[0] == ports[1] == str(http_port)

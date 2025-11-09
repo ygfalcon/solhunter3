@@ -179,6 +179,7 @@ class RuntimeHandles:
     ui_app: Any | None = None
     ui_threads: dict[str, Any] | None = None
     ui_server: Any | None = None
+    ui_http_thread: Any | None = None
     bus_started: bool = False
     tasks: list[asyncio.Task] = field(default_factory=list)
     ui_state: Any | None = None
@@ -550,6 +551,7 @@ class RuntimeOrchestrator:
                     log.exception("UI HTTP server failed")
                 finally:
                     self.handles.ui_server = None
+                    self.handles.ui_http_thread = None
                     if server is not None:
                         with suppress(Exception):
                             server.shutdown()
@@ -559,6 +561,7 @@ class RuntimeOrchestrator:
             port_queue: Queue[Any] = Queue(maxsize=1)
             t = threading.Thread(target=_serve, args=(port_queue,), daemon=True)
             t.start()
+            self.handles.ui_http_thread = t
             actual_port: str | None = None
             try:
                 result = port_queue.get(timeout=5)
@@ -854,6 +857,30 @@ class RuntimeOrchestrator:
                 pass
         self._ui_forwarder = None
         self.handles.ui_forwarder = None
+        try:
+            stop_ws = getattr(_ui_module, "stop_websockets", None)
+            if callable(stop_ws):
+                stop_ws()
+        except Exception:
+            log.exception("Failed to stop UI websockets")
+        threads = self.handles.ui_threads or {}
+        for thread in threads.values():
+            if hasattr(thread, "join"):
+                with suppress(Exception):
+                    thread.join(timeout=1.0)
+        self.handles.ui_threads = None
+        server = self.handles.ui_server
+        http_thread = self.handles.ui_http_thread
+        self.handles.ui_server = None
+        self.handles.ui_http_thread = None
+        if server is not None:
+            with suppress(Exception):
+                server.shutdown()
+            with suppress(Exception):
+                server.server_close()
+        if http_thread is not None:
+            with suppress(Exception):
+                http_thread.join(timeout=5.0)
         for unsub in list(self.handles.bus_subscriptions):
             try:
                 unsub()
