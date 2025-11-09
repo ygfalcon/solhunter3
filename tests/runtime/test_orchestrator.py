@@ -254,3 +254,48 @@ async def test_start_agents_aborts_when_wallet_verification_fails(monkeypatch):
     )
 
     await orch.stop_all()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_errors_when_default_agents_missing(monkeypatch, caplog):
+    caplog.set_level("ERROR")
+
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        return None
+
+    async def fake_startup(*_args, **_kwargs):
+        cfg = {"mode": "live"}
+        depth_proc = types.SimpleNamespace(poll=lambda: None)
+        return cfg, {}, depth_proc
+
+    class DummyMemory:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def start_writer(self) -> None:
+            return None
+
+    class DummyPortfolio:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(RuntimeOrchestrator, "_ensure_ui_forwarder", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(RuntimeOrchestrator, "_register_task", lambda self, task: None)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.perform_startup_async", fake_startup)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.Memory", DummyMemory)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.Portfolio", DummyPortfolio)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.AgentManager.from_default",
+        classmethod(lambda cls: None),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.resolve_golden_enabled", lambda cfg: False
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+
+    with pytest.raises(RuntimeError):
+        await orch.start_agents()
+
+    assert "no default agent manager" in caplog.text.lower()

@@ -649,7 +649,13 @@ class RuntimeOrchestrator:
                 strategy_manager = StrategyManager(strategies)
         else:
             agent_manager = AgentManager.from_default()
-            strategy_manager = None if agent_manager is not None else StrategyManager(strategies)
+            if agent_manager is None:
+                log.error(
+                    "Agent startup aborted: no default agent manager available. "
+                    "Ensure agents are configured or installed."
+                )
+                raise RuntimeError("no default agent manager available")
+            strategy_manager = None
 
         # Golden pipeline service wiring
         golden_enabled = resolve_golden_enabled(cfg)
