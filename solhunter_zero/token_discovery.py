@@ -252,6 +252,7 @@ async def _load_orca_catalog(
 ) -> Dict[str, List[Dict[str, Any]]]:
     if not _ENABLE_ORCA:
         return {}
+    global _ORCA_CATALOG_CACHE
     ttl = max(60.0, float(_ORCA_CATALOG_TTL))
     async with _ORCA_CATALOG_LOCK:
         expires, cached = _ORCA_CATALOG_CACHE
@@ -281,7 +282,6 @@ async def _load_orca_catalog(
                     if pool_entries:
                         normalized[mint] = pool_entries
         if normalized:
-            global _ORCA_CATALOG_CACHE
             _ORCA_CATALOG_CACHE = (time.monotonic() + ttl, normalized)
             return normalized
         return cached if cached else {}
@@ -697,7 +697,7 @@ async def _http_get_json(
     raise RuntimeError(f"request to {url} failed without response")
 
 
-async def _fetch_birdeye_tokens() -> List[TokenEntry]:
+async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]:
     """
     Pull BirdEye token list (paginated) for Solana with correct headers & params.
     Numeric filters only; no name/suffix heuristics.
@@ -718,13 +718,22 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
     if cached is not None:
         return cached
 
+    if limit is None or limit <= 0:
+        requested_limit = _MAX_TOKENS
+    else:
+        requested_limit = int(limit)
+
     tokens: Dict[str, TokenEntry] = {}
     offset = 0
-    target_count = max(int(_MAX_TOKENS * _OVERFETCH_FACTOR), _PAGE_LIMIT)
+    target_count = max(requested_limit, int(_MAX_TOKENS * _OVERFETCH_FACTOR), _PAGE_LIMIT)
     backoff = _BIRDEYE_BACKOFF
 
     logger.debug(
-        "BirdEye fetch start offset=%s limit=%s target=%s", offset, _PAGE_LIMIT, target_count
+        "BirdEye fetch start offset=%s page_limit=%s requested=%s target=%s",
+        offset,
+        _PAGE_LIMIT,
+        requested_limit,
+        target_count,
     )
 
     def _headers() -> dict:
@@ -739,7 +748,9 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
         session = await get_session(timeout=session_timeout)
     except TypeError:
         session = await get_session()
-    while offset < _MAX_OFFSET and len(tokens) < target_count:
+    while offset < _MAX_OFFSET:
+        if len(tokens) >= target_count:
+            break
         logger.debug(
             "BirdEye fetch page offset=%s limit=%s accumulated=%s",
             offset,
@@ -935,6 +946,8 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                 total_int = int(total) if total is not None else None
             except (TypeError, ValueError):
                 total_int = None
+            if len(tokens) >= target_count:
+                break
             if total_int is not None and offset >= total_int:
                 break
 
@@ -1605,7 +1618,7 @@ def discover_candidates(
                 except Exception as exc:
                     logger.debug("Orca catalog unavailable: %s", exc)
                     orca_catalog = {}
-            bird_task = asyncio.create_task(_fetch_birdeye_tokens())
+            bird_task = asyncio.create_task(_fetch_birdeye_tokens(limit=limit))
             mempool_task = (
                 asyncio.create_task(
                     _collect_mempool_signals(rpc_url, mempool_threshold)
@@ -1792,25 +1805,37 @@ def discover_candidates(
             task_list = list(task_map.keys())
 
             try:
-                iterator = asyncio.as_completed(
-                    task_list,
-                    timeout=overall_timeout if overall_timeout > 0 else None,
-                )
-                for fut in iterator:
-                    label = task_map[fut]
-                    try:
-                        result = await fut
-                    except Exception as exc:
-                        result = exc
-                    completed.add(fut)
-                    changed = await _merge_result(label, result)
-                    if not candidates or not changed:
-                        continue
-                    _score_candidates(candidates, mempool)
-                    snapshot = _snapshot(candidates, limit=limit)
-                    last_snapshot = snapshot
-                    emitted = True
-                    yield snapshot
+                pending_tasks = set(task_list)
+                wait_timeout = overall_timeout if overall_timeout > 0 else None
+                first_iteration = True
+                while pending_tasks:
+                    done, pending_tasks = await asyncio.wait(
+                        pending_tasks,
+                        timeout=wait_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not done:
+                        raise asyncio.TimeoutError
+                    if first_iteration:
+                        wait_timeout = None
+                        first_iteration = False
+                    for fut in done:
+                        completed.add(fut)
+                        label = task_map.get(fut)
+                        if label is None:
+                            continue
+                        try:
+                            result = fut.result()
+                        except Exception as exc:
+                            result = exc
+                        changed = await _merge_result(label, result)
+                        if not candidates or not changed:
+                            continue
+                        _score_candidates(candidates, mempool)
+                        snapshot = _snapshot(candidates, limit=limit)
+                        last_snapshot = snapshot
+                        emitted = True
+                        yield snapshot
             except asyncio.TimeoutError:
                 logger.warning(
                     "Discovery overall timeout after %.2fs; pending_tasks=%s",

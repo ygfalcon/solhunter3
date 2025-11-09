@@ -132,6 +132,104 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_discover_candidates_fetches_enough_pages_for_large_limit(monkeypatch):
+    td._cache_clear()
+    td._BIRDEYE_DISABLED_INFO = False
+
+    monkeypatch.setattr(td, "_MAX_TOKENS", 4)
+    monkeypatch.setattr(td, "_PAGE_LIMIT", 2)
+    monkeypatch.setattr(td, "_OVERFETCH_FACTOR", 0.5)
+    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", False)
+    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
+    monkeypatch.setattr(td, "_ENABLE_METEORA", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
+    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+    monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", lambda: [])
+
+    addresses = [
+        "So11111111111111111111111111111111111111112",
+        "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZsaAkJ9",
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+        "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av",
+        "J83JdAq8FDeC8v2WFE2QyXkJhtCmvYzu3d6PvMfo4WwS",
+    ]
+
+    def _make_token(addr: str, index: int) -> dict:
+        return {
+            "address": addr,
+            "name": f"Token {index}",
+            "symbol": f"TK{index}",
+            "v24hUSD": 100000 + index * 1000,
+            "liquidity": 120000 + index * 1000,
+            "price": 1.0 + index * 0.01,
+            "v24hChangePercent": 1.0,
+        }
+
+    pages = []
+    for i in range(0, len(addresses), td._PAGE_LIMIT):
+        chunk = addresses[i : i + td._PAGE_LIMIT]
+        tokens = [_make_token(addr, i + pos) for pos, addr in enumerate(chunk)]
+        pages.append({"data": {"tokens": tokens, "total": len(addresses)}})
+
+    class FakeResp:
+        def __init__(self, payload, status=200, headers=None):
+            self.status = status
+            self._payload = payload
+            self.headers = headers or {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            return None
+
+    class FakeSession:
+        def __init__(self, responses):
+            self._responses = list(responses)
+            self.calls = []
+
+        def get(self, url, *, params=None, headers=None, timeout=None):
+            idx = len(self.calls)
+            self.calls.append({"url": url, "params": params, "headers": headers})
+            if idx < len(self._responses):
+                payload = self._responses[idx]
+            else:
+                payload = {"data": {"tokens": [], "total": len(addresses)}}
+            return FakeResp(payload)
+
+    fake_session = FakeSession(pages)
+
+    async def fake_get_session(timeout=None):
+        _ = timeout
+        return fake_session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    limit = len(addresses)
+    batches = []
+    async for batch in td.discover_candidates(
+        "https://rpc", limit=limit, mempool_threshold=0.0
+    ):
+        batches.append(batch)
+
+    assert fake_session.calls
+    assert len(fake_session.calls) == len(pages)
+    assert batches, "expected incremental results"
+    final = batches[-1]
+    assert len(final) == limit
+    assert {item["address"] for item in final} == set(addresses)
+
+
+@pytest.mark.asyncio
 async def test_discover_candidates_merges_new_sources(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
@@ -140,7 +238,7 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
     monkeypatch.setattr(td, "_ENABLE_METEORA", True)
     monkeypatch.setattr(td, "_ENABLE_DEXLAB", True)
 
-    async def fake_bird():
+    async def fake_bird(*, limit=None):
         return []
 
     async def fake_collect(*args, **kwargs):
@@ -257,7 +355,7 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
     monkeypatch.setattr(td, "_ENABLE_METEORA", True)
     monkeypatch.setattr(td, "_ENABLE_DEXLAB", True)
 
-    async def fake_bird():
+    async def fake_bird(*, limit=None):
         return []
 
     async def fake_enrich(_candidates, *, addresses=None):
