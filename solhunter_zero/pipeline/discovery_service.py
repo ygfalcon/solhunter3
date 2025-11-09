@@ -97,6 +97,7 @@ class DiscoveryService:
         self._stopped = asyncio.Event()
         self._last_emitted: list[str] = []
         self._last_fetch_fresh: bool = True
+        self._last_fetch_partial: bool = False
         self._primed = False
 
     async def start(self) -> None:
@@ -121,7 +122,7 @@ class DiscoveryService:
             try:
                 tokens = await self._fetch()
                 fresh = self._last_fetch_fresh
-                await self._emit_tokens(tokens, fresh=fresh)
+                await self._emit_tokens(tokens, fresh=fresh, partial=self._last_fetch_partial)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
@@ -144,10 +145,13 @@ class DiscoveryService:
             offline=self.offline,
             token_file=self.token_file,
         )
+        effective_limit = self.limit or getattr(worker, "limit", None)
+        fetched_count = len(tokens)
+        partial_batch = bool(effective_limit and fetched_count < effective_limit)
         if self.limit:
             tokens = tokens[: self.limit]
         fetch_ts = time.time()
-        self._apply_fetch_stats(tokens, fetch_ts)
+        self._apply_fetch_stats(tokens, fetch_ts, partial=partial_batch)
         return list(tokens)
 
     def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
@@ -257,7 +261,7 @@ class DiscoveryService:
 
         return metadata
 
-    async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
+    async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool, partial: bool | None = None) -> None:
         seq: list[str] = []
         dropped = 0
         seen: set[str] = set()
@@ -284,10 +288,15 @@ class DiscoveryService:
             )
             return
         total_enqueued = 0
+        batch_partial = bool(partial)
         for chunk in self._iter_chunks(seq, self._emit_batch_size):
             batch = self._build_candidates(chunk)
             if not batch:
                 continue
+            for candidate in batch:
+                metadata = candidate.metadata
+                metadata["stale"] = not fresh
+                metadata["partial"] = batch_partial
             await self.queue.put(batch)
             total_enqueued += len(batch)
             log.debug("DiscoveryService queued chunk of %d token(s)", len(batch))
@@ -295,10 +304,11 @@ class DiscoveryService:
             log.info("DiscoveryService queued %d token(s) across %d chunk(s)", total_enqueued, max(1, (len(seq) + self._emit_batch_size - 1) // self._emit_batch_size))
         self._last_emitted = list(seq)
 
-    def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
+    def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float, *, partial: bool) -> None:
         payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
         self._last_fetch_ts = fetch_ts
         self._last_tokens = list(payload)
+        self._last_fetch_partial = bool(partial)
 
         cooldown = 0.0
         if payload:
@@ -306,6 +316,8 @@ class DiscoveryService:
             self._current_backoff = 0.0
             if self.cache_ttl:
                 cooldown = self.cache_ttl
+            if partial:
+                cooldown = min(self.cache_ttl, self.empty_cache_ttl)
         else:
             self._consecutive_empty += 1
             base_ttl = self.empty_cache_ttl
@@ -369,14 +381,17 @@ class DiscoveryService:
             seen.add(tok)
             unique.append(tok)
 
+        effective_limit = self.limit or getattr(self._agent, "limit", None)
+        unique_count = len(unique)
+        partial = bool(effective_limit and unique_count < effective_limit)
         if self.limit:
             unique = unique[: self.limit]
 
         fetch_ts = time.time()
-        self._apply_fetch_stats(unique, fetch_ts)
+        self._apply_fetch_stats(unique, fetch_ts, partial=partial)
 
         if unique:
-            await self._emit_tokens(unique, fresh=True)
+            await self._emit_tokens(unique, fresh=True, partial=partial)
         else:
             log.info("DiscoveryService startup clones produced no tokens")
 
