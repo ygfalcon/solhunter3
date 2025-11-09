@@ -5,8 +5,12 @@ import pytest
 
 import tests.runtime.test_trading_runtime  # ensure optional deps stubbed
 
+from contextlib import suppress
+from typing import Any
+
 from solhunter_zero.loop import ResourceBudgetExceeded
 from solhunter_zero.runtime.orchestrator import RuntimeOrchestrator
+from solhunter_zero.ui import UIState, create_app
 
 
 @pytest.fixture
@@ -147,5 +151,214 @@ async def test_orchestrator_starts_golden_pipeline_by_default(monkeypatch):
     assert "start" in golden_events
     assert orch._golden_service is not None
     assert any(stage == "golden:start" and ok and "providers=" in detail for stage, ok, detail in published)
+
+    await orch.stop_all()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_event_runtime_close_endpoint_simulates_exit(monkeypatch, tmp_path):
+    class _StubEventBus:
+        def __init__(self) -> None:
+            self._subscribers: dict[str, list] = {}
+            self.published: list[tuple[str, Any]] = []
+            self._BROKER_URLS: list[str] = []
+
+        def publish(self, topic: str, payload: Any) -> None:
+            self.published.append((topic, payload))
+
+        def subscribe(self, topic: str, handler):
+            handlers = self._subscribers.setdefault(topic, [])
+            handlers.append(handler)
+
+            def _unsubscribe() -> None:
+                with suppress(ValueError):
+                    handlers.remove(handler)
+
+            return _unsubscribe
+
+        async def start_ws_server(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def stop_ws_server(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def verify_broker_connection(self, *_args, **_kwargs) -> bool:
+            return True
+
+    monkeypatch.setenv("EVENT_DRIVEN", "1")
+    monkeypatch.setenv("GOLDEN_PIPELINE", "0")
+    monkeypatch.setenv("UI_DISABLE_HTTP_SERVER", "1")
+    monkeypatch.setenv("PORTFOLIO_PATH", str(tmp_path / "portfolio.json"))
+
+    stub_bus = _StubEventBus()
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.event_bus", stub_bus, raising=False)
+    monkeypatch.setattr("solhunter_zero.ui.event_bus", stub_bus, raising=False)
+
+    async def fake_startup(*_args, **_kwargs):
+        cfg = {
+            "agents": [{"name": "stub"}],
+            "strategies": [],
+            "loop_delay": 5,
+            "min_delay": 1,
+            "max_delay": 5,
+        }
+        depth_proc = types.SimpleNamespace(terminate=lambda: None)
+        return cfg, {}, depth_proc
+
+    class DummyPortfolio:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.balances: dict[str, dict[str, float]] = {}
+            self.closed_positions: dict[str, dict[str, float]] = {}
+
+        def _apply(self, token: str, delta: float, price: float) -> None:
+            record = self.balances.get(token)
+            if record is None:
+                record = {"amount": 0.0, "entry_price": price, "last_mark": price}
+                self.balances[token] = record
+            record.setdefault("entry_price", price)
+            record["last_mark"] = price
+            new_amount = max(record.get("amount", 0.0) + delta, 0.0)
+            record["amount"] = new_amount
+            if new_amount <= 0:
+                self.closed_positions[token] = dict(record)
+
+        def update(self, token: str, amount: float, price: float, **_kwargs) -> None:
+            self._apply(token, amount, price)
+
+        async def update_async(self, token: str, amount: float, price: float, **_kwargs) -> None:
+            self._apply(token, amount, price)
+
+        def get_position(self, token: str):
+            record = self.balances.get(token) or self.closed_positions.get(token)
+            if record is None:
+                return None
+            return types.SimpleNamespace(
+                token=token,
+                amount=float(record.get("amount", 0.0)),
+                entry_price=float(record.get("entry_price", 0.0)),
+                last_mark=float(record.get("last_mark", 0.0)),
+            )
+
+    class DummyMemory:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.started = False
+            self.logged: list[dict[str, Any]] = []
+
+        def start_writer(self) -> None:
+            self.started = True
+
+        async def log_trade(self, **kwargs) -> None:
+            self.logged.append(dict(kwargs))
+
+    class DummyAgentManager:
+        def __init__(self) -> None:
+            self.agents = [types.SimpleNamespace(name="stub")]
+            self.evolve_interval = 10
+            self.mutation_threshold = 0.0
+
+        @classmethod
+        def from_config(cls, _cfg):
+            return cls()
+
+        @classmethod
+        def from_default(cls):
+            return cls()
+
+        async def evolve(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def update_weights(self) -> None:
+            return None
+
+        def save_weights(self) -> None:
+            return None
+
+        def set_rl_disabled(self, *_args, **_kwargs) -> None:
+            return None
+
+    class DummyAgentRuntime:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.started = False
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.started = False
+
+    class DummyTradeExecutor:
+        def __init__(self, memory, portfolio) -> None:
+            self.memory = memory
+            self.portfolio = portfolio
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.started = False
+
+    class DummyDiscoveryAgent:
+        async def discover_tokens(self, *_args, **_kwargs):
+            return []
+
+    async def fake_rl_init(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.perform_startup_async", fake_startup)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.Memory", DummyMemory)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.Portfolio", DummyPortfolio)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.AgentManager", DummyAgentManager)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.AgentRuntime", DummyAgentRuntime, raising=False)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.TradeExecutor", DummyTradeExecutor, raising=False)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.DiscoveryAgent", DummyDiscoveryAgent, raising=False)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator._init_rl_training", fake_rl_init, raising=False)
+
+    orch = RuntimeOrchestrator(run_http=False)
+    orch.handles.ui_state = UIState()
+
+    await orch.start_agents()
+
+    assert callable(orch.handles.ui_state.close_position_handler)
+
+    trade_exec = orch.handles.trade_executor
+    assert trade_exec is not None
+    portfolio = trade_exec.portfolio
+    portfolio.update("SOL", 5.0, 12.0)
+
+    app = create_app(orch.handles.ui_state)
+    client = app.test_client()
+
+    response = client.post("/api/execution/close?mint=SOL&qty=3")
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "mint": "SOL", "qty": 3.0}
+
+    remaining = portfolio.get_position("SOL")
+    assert remaining is not None
+    assert remaining.amount == pytest.approx(2.0)
+
+    assert trade_exec.memory.logged == [
+        {
+            "token": "SOL",
+            "direction": "sell",
+            "amount": 3.0,
+            "price": 12.0,
+            "source": "manual_exit",
+        }
+    ]
+
+    assert (
+        "action_executed",
+        {
+            "action": {
+                "agent": "manual_exit",
+                "token": "SOL",
+                "side": "sell",
+                "amount": 3.0,
+                "price": 12.0,
+            },
+            "result": {"status": "simulated"},
+        },
+    ) in stub_bus.published
 
     await orch.stop_all()

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import errno
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -2895,7 +2897,19 @@ class UIState:
 
     def submit_close_position(self, mint: str, qty: float) -> Dict[str, Any]:
         try:
-            return self.close_position_handler(str(mint), float(qty))
+            result = self.close_position_handler(str(mint), float(qty))
+            if inspect.isawaitable(result):
+                def _execute() -> Dict[str, Any]:
+                    return asyncio.run(result)
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_execute)
+                    try:
+                        return future.result(timeout=10.0)
+                    except concurrent.futures.TimeoutError as exc:
+                        future.cancel()
+                        raise RuntimeError("close position timed out waiting for runtime loop") from exc
+            return result
         except Exception as exc:
             log.warning("UI close position handler failed: %s", exc)
             return {"ok": False, "error": str(exc)}

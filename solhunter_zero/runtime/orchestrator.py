@@ -6,10 +6,12 @@ import errno
 import importlib
 import inspect
 import logging
+import math
 import os
 import signal
 import socket
 import sys
+import time
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -758,6 +760,78 @@ class RuntimeOrchestrator:
 
         self.handles.agent_runtime = aruntime
         self.handles.trade_executor = execu
+
+        ui_state = self.handles.ui_state
+        if ui_state is not None and hasattr(ui_state, "close_position_handler"):
+            async def _handle_manual_close(mint: str, qty: float) -> dict[str, Any]:
+                token = str(mint or "").strip()
+                if not token:
+                    return {"ok": False, "error": "mint is required"}
+                try:
+                    size = float(qty)
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": "qty must be a number"}
+                if not math.isfinite(size) or size <= 0:
+                    return {"ok": False, "error": "qty must be positive"}
+
+                position = portfolio.get_position(token)
+                if position is None or getattr(position, "amount", 0.0) <= 0:
+                    return {"ok": False, "error": "no open position for mint"}
+
+                exit_qty = min(size, float(getattr(position, "amount", 0.0)))
+                if exit_qty <= 0:
+                    return {"ok": False, "error": "qty exceeds position size"}
+
+                price = float(getattr(position, "last_mark", 0.0) or getattr(position, "entry_price", 0.0) or 0.0)
+                if price <= 0:
+                    price = 1.0
+
+                trade_meta = {
+                    "token": token,
+                    "direction": "sell",
+                    "amount": exit_qty,
+                    "price": price,
+                    "source": "manual_exit",
+                }
+
+                if hasattr(memory, "log_trade"):
+                    try:
+                        await maybe_await(memory.log_trade(**trade_meta))
+                    except Exception:
+                        log.debug("Manual close: failed to log trade", exc_info=True)
+
+                try:
+                    await portfolio.update_async(
+                        token,
+                        -exit_qty,
+                        price,
+                        reason="manual_exit",
+                        meta={"source": "manual_exit", "requested_at": time.time()},
+                    )
+                except Exception as exc:
+                    log.warning("Manual close failed for %s: %s", token, exc)
+                    return {"ok": False, "error": f"failed to update portfolio: {exc}"}
+
+                try:
+                    event_bus.publish(
+                        "action_executed",
+                        {
+                            "action": {
+                                "agent": "manual_exit",
+                                "token": token,
+                                "side": "sell",
+                                "amount": exit_qty,
+                                "price": price,
+                            },
+                            "result": {"status": "simulated"},
+                        },
+                    )
+                except Exception:
+                    log.debug("Manual close: failed to publish action_executed", exc_info=True)
+
+                return {"ok": True, "mint": token, "qty": exit_qty}
+
+            ui_state.close_position_handler = _handle_manual_close  # type: ignore[assignment]
 
         async def _discovery_loop():
             agent = DiscoveryAgent()
