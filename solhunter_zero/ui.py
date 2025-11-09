@@ -3295,9 +3295,30 @@ class UIServer:
 
         try:
             server = make_server(self.host, self.port, self.app)
+        except OSError as exc:
+            self._server = None
+            self._thread = None
+            errno_value = exc.errno if exc.errno is not None else "unknown"
+            details = exc.strerror or str(exc)
+            message = (
+                f"Failed to start UI server on {self.host}:{self.port} "
+                f"(errno {errno_value}): {details}"
+            )
+            raise RuntimeError(message) from exc
         except BaseException as exc:  # pragma: no cover - defensive guard
             self._server = None
             self._thread = None
+            if isinstance(exc, SystemExit) and isinstance(exc.__context__, OSError):
+                os_error = exc.__context__
+                errno_value = (
+                    os_error.errno if os_error.errno is not None else "unknown"
+                )
+                details = os_error.strerror or str(os_error)
+                message = (
+                    f"Failed to start UI server on {self.host}:{self.port} "
+                    f"(errno {errno_value}): {details}"
+                )
+                raise RuntimeError(message) from os_error
             if isinstance(exc, SystemExit) and exc.__context__ is not None:
                 raise exc.__context__ from None  # type: ignore[misc]
             raise
