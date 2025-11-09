@@ -304,7 +304,7 @@ def test_discovery_uses_cached_tokens(monkeypatch):
     monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *a, **k: None)
     monkeypatch.setattr(
         "solhunter_zero.swarm_pipeline._score_token",
-        lambda token, pf: float(len(token)),
+        lambda token, pf, metadata=None, *, weights=None: float(len(token)),
     )
 
     pipeline = SwarmPipeline(_DummyAgentManager([]), Portfolio(path=None), dry_run=True)
@@ -338,7 +338,9 @@ def test_discovery_refreshes_cache(monkeypatch):
     monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *a, **k: None)
     monkeypatch.setattr(
         "solhunter_zero.swarm_pipeline._score_token",
-        lambda token, pf: 10.0 if token == "TokC" else 1.0,
+        lambda token, pf, metadata=None, *, weights=None: 10.0
+        if token == "TokC"
+        else 1.0,
     )
 
     pipeline = SwarmPipeline(_DummyAgentManager([]), Portfolio(path=None), dry_run=True)
@@ -363,6 +365,87 @@ def test_discovery_refreshes_cache(monkeypatch):
     assert "TokC" in stage.tokens
     assert pipeline._discovery_cache_tokens[0] == "TokC"
     assert pipeline._discovery_cache_expiry > time.time()
+
+
+def test_discovery_metadata_adjusts_ordering(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline, _score_token
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *a, **k: None)
+
+    tokens = [
+        "So11111111111111111111111111111111111111112",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    ]
+    portfolio = Portfolio(path=None)
+    base_scores = {tok: _score_token(tok, portfolio, metadata=None) for tok in tokens}
+    baseline_order = sorted(tokens, key=lambda t: (-base_scores[t], t))
+    boost_target = baseline_order[1]
+    suppress_target = baseline_order[0]
+
+    details = {
+        boost_target: {"mempool_score": 12.0, "liquidity": 1_500_000.0},
+        suppress_target: {},
+    }
+
+    class _StubDiscovery:
+        def __init__(self) -> None:
+            self.last_details = {token: dict(meta) for token, meta in details.items()}
+
+        async def discover_tokens(self, **kwargs):
+            self.last_details = {token: dict(meta) for token, meta in details.items()}
+            return list(tokens)
+
+    discovery = _StubDiscovery()
+
+    pipeline = SwarmPipeline(_DummyAgentManager([]), portfolio, dry_run=True)
+    pipeline.discovery_cache_limit = 2
+    pipeline._discovery_agent = discovery
+
+    monkeypatch.setattr(SwarmPipeline, "_ensure_discovery_agent", lambda self: discovery)
+
+    async def _run() -> None:
+        stage = await pipeline._run_discovery()
+        assert stage.tokens[0] == boost_target
+        assert stage.scores[boost_target] > stage.scores[suppress_target]
+
+    asyncio.run(_run())
+
+
+def test_discovery_without_metadata_preserves_order(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline, _score_token
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *a, **k: None)
+
+    tokens = [
+        "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+    ]
+    portfolio = Portfolio(path=None)
+    base_scores = {tok: _score_token(tok, portfolio, metadata=None) for tok in tokens}
+    baseline_order = sorted(tokens, key=lambda t: (-base_scores[t], t))
+
+    class _StubDiscovery:
+        def __init__(self) -> None:
+            self.last_details = {}
+
+        async def discover_tokens(self, **kwargs):
+            self.last_details = {}
+            return list(tokens)
+
+    discovery = _StubDiscovery()
+
+    pipeline = SwarmPipeline(_DummyAgentManager([]), portfolio, dry_run=True)
+    pipeline.discovery_cache_limit = 2
+    pipeline._discovery_agent = discovery
+
+    monkeypatch.setattr(SwarmPipeline, "_ensure_discovery_agent", lambda self: discovery)
+
+    async def _run() -> None:
+        stage = await pipeline._run_discovery()
+        assert stage.tokens[:2] == baseline_order
+        assert stage.scores[baseline_order[0]] >= stage.scores[baseline_order[1]]
+
+    asyncio.run(_run())
 
 
 def test_execution_skips_missing_price(monkeypatch, caplog):

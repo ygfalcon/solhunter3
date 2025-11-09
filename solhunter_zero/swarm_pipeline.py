@@ -9,10 +9,11 @@ consistent action normalisation, and explicit asset feedback to the portfolio.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Mapping, Optional, TYPE_CHECKING
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import math
 import os
@@ -605,7 +606,121 @@ def _resolve_lane(action: Dict[str, Any]) -> str:
     return "default"
 
 
-def _score_token(token: str, portfolio: Portfolio) -> float:
+_METADATA_SCORE_DEFAULTS: Dict[str, float] = {
+    "mempool_score": 5.0,
+    "helius_score": 1.0,
+    "score": 1.0,
+    "liquidity": 0.001,
+    "volume": 0.0005,
+    "market_cap": 0.0001,
+    "price_change": 0.05,
+}
+
+
+def _parse_metadata_weights(raw: str | None) -> Dict[str, float]:
+    if not raw:
+        return {}
+    overrides: Dict[str, float] = {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        candidates = parsed.items()
+    else:
+        parts = [chunk.strip() for chunk in raw.split(",") if chunk.strip()]
+        candidates = []
+        for part in parts:
+            if ":" in part:
+                key, value = part.split(":", 1)
+            elif "=" in part:
+                key, value = part.split("=", 1)
+            else:
+                continue
+            candidates.append((key.strip(), value.strip()))
+    for key, value in candidates:
+        if not isinstance(key, str):
+            continue
+        try:
+            weight = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(weight):
+            overrides[key] = weight
+    return overrides
+
+
+_METADATA_WEIGHT_OVERRIDES = _parse_metadata_weights(
+    os.getenv("SWARM_DISCOVERY_METADATA_WEIGHTS")
+)
+
+
+def _metadata_score(
+    metadata: Mapping[str, Any] | None,
+    *,
+    weights: Mapping[str, float] | None = None,
+) -> float:
+    if not metadata:
+        return 0.0
+    combined: Dict[str, float] = dict(_METADATA_SCORE_DEFAULTS)
+    if _METADATA_WEIGHT_OVERRIDES:
+        combined.update(_METADATA_WEIGHT_OVERRIDES)
+    if weights:
+        for key, value in weights.items():
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                combined[key] = numeric
+    score = 0.0
+    for key, weight in combined.items():
+        if not weight:
+            continue
+        value = metadata.get(key)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric):
+            continue
+        if key in {"liquidity", "volume", "market_cap"}:
+            numeric = math.log1p(max(0.0, numeric))
+        elif key == "price_change":
+            numeric = numeric / 100.0
+        score += numeric * weight
+    return score
+
+
+def _normalise_metadata_map(
+    raw: Mapping[str, Any] | None,
+) -> Dict[str, Mapping[str, Any]]:
+    if not isinstance(raw, Mapping):
+        return {}
+    normalised: Dict[str, Mapping[str, Any]] = {}
+    for token, detail in raw.items():
+        if not isinstance(token, str):
+            continue
+        canonical = canonical_mint(token)
+        if not canonical:
+            continue
+        if isinstance(detail, Mapping):
+            normalised[canonical] = detail
+        else:
+            try:
+                normalised[canonical] = dict(detail)
+            except Exception:
+                continue
+    return normalised
+
+
+def _score_token(
+    token: str,
+    portfolio: Portfolio,
+    metadata: Mapping[str, Any] | None = None,
+    *,
+    weights: Mapping[str, float] | None = None,
+) -> float:
     canonical = canonical_mint(token)
     score = 0.0
     balances = getattr(portfolio, "balances", {}) or {}
@@ -631,6 +746,7 @@ def _score_token(token: str, portfolio: Portfolio) -> float:
     digest = hashlib.blake2s(canonical.encode("utf-8"), digest_size=4).digest()
     jitter = (int.from_bytes(digest, "big") % 997) / 1_000_000_000
     score += jitter
+    score += _metadata_score(metadata, weights=weights)
     return score
 
 
@@ -794,6 +910,7 @@ class SwarmPipeline:
         tokens: Iterable[str],
         *,
         scores: Optional[Dict[str, float]] = None,
+        metadata: Optional[Mapping[str, Mapping[str, Any]]] = None,
         ttl: Optional[float] = None,
         refresh_ttl: bool = True,
         now: Optional[float] = None,
@@ -827,6 +944,8 @@ class SwarmPipeline:
         if len(ordered) > self.discovery_cache_limit:
             ordered = ordered[: self.discovery_cache_limit]
 
+        metadata_map = _normalise_metadata_map(metadata)
+
         merged_scores: Dict[str, float] = {}
         for tok, value in self._discovery_cache_scores.items():
             canonical = canonical_mint(tok)
@@ -855,7 +974,9 @@ class SwarmPipeline:
 
         for tok in ordered:
             if tok not in merged_scores:
-                merged_scores[tok] = _score_token(tok, self.portfolio)
+                merged_scores[tok] = _score_token(
+                    tok, self.portfolio, metadata_map.get(tok)
+                )
 
         self._discovery_cache_tokens = ordered
         self._discovery_cache_scores = {tok: merged_scores[tok] for tok in ordered}
@@ -1121,6 +1242,7 @@ class SwarmPipeline:
         cached_tokens = list(self._discovery_cache_tokens)
         cache_hit = False
         cache_refreshed = False
+        discovery_metadata: Dict[str, Mapping[str, Any]] = {}
 
         if (
             self.discovery_cache_ttl > 0
@@ -1145,6 +1267,8 @@ class SwarmPipeline:
                     token_file=self.token_file,
                     method=self.discovery_method,
                 )
+                raw_details = getattr(disc, "last_details", {})
+                discovery_metadata = _normalise_metadata_map(raw_details)
             except Exception as exc:
                 publish("runtime.log", RuntimeLog(stage="discovery", detail=f"error:{exc}"))
                 log.exception("Discovery failed")
@@ -1152,7 +1276,12 @@ class SwarmPipeline:
 
             if tokens:
                 stage.discovered = list(tokens)
-                self._update_discovery_cache(tokens, refresh_ttl=True, now=now)
+                self._update_discovery_cache(
+                    tokens,
+                    refresh_ttl=True,
+                    now=now,
+                    metadata=discovery_metadata,
+                )
                 cache_refreshed = True
                 cached_tokens = list(self._discovery_cache_tokens)
             elif cached_tokens:
@@ -1241,7 +1370,14 @@ class SwarmPipeline:
                 seen_tokens.add(tok)
         stage.tokens = deduped
 
-        scores = {mint: _score_token(mint, self.portfolio) for mint in stage.tokens}
+        if not discovery_metadata and self._discovery_agent is not None:
+            raw_details = getattr(self._discovery_agent, "last_details", {})
+            discovery_metadata = _normalise_metadata_map(raw_details)
+
+        scores = {
+            mint: _score_token(mint, self.portfolio, discovery_metadata.get(mint))
+            for mint in stage.tokens
+        }
         stage.scores = scores
         ranked = sorted(stage.tokens, key=lambda t: (-scores.get(t, 0.0), t))
         stage.tokens = ranked[:limit]
@@ -1272,6 +1408,7 @@ class SwarmPipeline:
         self._update_discovery_cache(
             stage.tokens,
             scores=stage.scores,
+            metadata=discovery_metadata,
             refresh_ttl=refresh_ttl,
             ttl=ttl_override,
         )
