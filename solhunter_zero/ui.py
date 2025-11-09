@@ -1418,6 +1418,11 @@ _WS_CHANNELS: dict[str, _WebsocketState] = {
     "logs": _WebsocketState("logs"),
 }
 
+# Tracks the most recent auto-generated websocket URLs that ``start_websockets``
+# injected into the environment. This allows future calls to refresh the values
+# when ports change while avoiding overwriting user-supplied configuration.
+_AUTO_WS_ENV_VALUES: dict[str, str] = {}
+
 
 def _resolve_host() -> str:
     for key in _WS_HOST_ENV_KEYS:
@@ -2446,7 +2451,24 @@ def start_websockets() -> dict[str, threading.Thread]:
         "UI_LOGS_WS": logs_url,
     }
     for key, value in defaults.items():
-        os.environ[key] = value
+        existing = os.environ.get(key)
+        previous_auto = _AUTO_WS_ENV_VALUES.get(key)
+
+        if existing is None or (previous_auto is not None and existing == previous_auto):
+            os.environ[key] = value
+            _AUTO_WS_ENV_VALUES[key] = value
+            action = "set" if existing is None else "refreshed"
+            log.info(
+                "UI websocket env %s %s to auto-generated URL %s", key, action, value
+            )
+        else:
+            _AUTO_WS_ENV_VALUES.pop(key, None)
+            log.info(
+                "UI websocket env %s kept preconfigured value %s (auto-generated %s)",
+                key,
+                existing,
+                value,
+            )
     log.info(
         "UI websockets listening on rl=%s events=%s logs=%s",
         _RL_WS_PORT,
