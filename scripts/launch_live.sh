@@ -243,10 +243,25 @@ import socket
 import time
 from urllib.parse import urlparse
 
+DEFAULT_TIMEOUT = 30.0
+
+
+def _read_timeout(raw: str | None) -> float:
+    if not raw:
+        return DEFAULT_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT
+    return max(value, 0.0)
+
+
 bus_url = os.environ.get("EVENT_BUS_URL", "ws://127.0.0.1:8779")
 parsed = urlparse(bus_url)
 host = parsed.hostname or "127.0.0.1"
 port = parsed.port or 8779
+timeout = _read_timeout(os.environ.get("EVENT_BUS_RELEASE_TIMEOUT"))
+
 
 def port_busy() -> bool:
     try:
@@ -255,13 +270,24 @@ def port_busy() -> bool:
     except OSError:
         return False
 
-for attempt in range(5):
+
+deadline = time.monotonic() + timeout
+sleep_interval = 1.0
+max_sleep = 5.0
+
+while True:
     if not port_busy():
         print(f"free {host} {port}")
         break
-    time.sleep(1.0)
-else:
-    print(f"busy {host} {port}")
+
+    now = time.monotonic()
+    if now >= deadline:
+        print(f"busy {host} {port}")
+        break
+
+    remaining = max(deadline - now, 0.0)
+    time.sleep(min(sleep_interval, remaining))
+    sleep_interval = min(sleep_interval * 1.5, max_sleep)
 PY
 }
 
