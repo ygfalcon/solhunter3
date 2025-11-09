@@ -1,3 +1,4 @@
+import errno
 import socket
 
 import pytest
@@ -14,8 +15,12 @@ def test_ui_server_start_port_conflict_raises() -> None:
 
         server = UIServer(state, host=host, port=port)
 
-        with pytest.raises(OSError):
+        with pytest.raises(RuntimeError) as excinfo:
             server.start()
+
+        message = str(excinfo.value)
+        assert f"{host}:{port}" in message
+        assert f"errno {errno.EADDRINUSE}" in message
 
         assert server._server is None
         assert not (server._thread and server._thread.is_alive())
