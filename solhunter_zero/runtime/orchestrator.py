@@ -992,6 +992,19 @@ class RuntimeOrchestrator:
                 pass
         self._ui_forwarder = None
         self.handles.ui_forwarder = None
+        ui_server = self.handles.ui_server
+        if ui_server is not None:
+            with suppress(Exception):
+                ui_server.shutdown()
+            with suppress(Exception):
+                ui_server.server_close()
+        self.handles.ui_server = None
+        stop_ws = getattr(_ui_module, "stop_websockets", None)
+        if callable(stop_ws):
+            try:
+                stop_ws()
+            except Exception:
+                pass
         for unsub in list(self.handles.bus_subscriptions):
             try:
                 unsub()

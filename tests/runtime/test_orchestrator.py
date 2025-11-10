@@ -1,5 +1,8 @@
 import asyncio
+import os
+import socket
 import types
+from urllib.parse import urlparse
 
 import pytest
 
@@ -58,6 +61,74 @@ async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
     ui_stage = ws_events[-1]
     assert ui_stage.get("ok") is False
     assert "boom" in str(ui_stage.get("detail"))
+
+
+@pytest.mark.anyio("asyncio")
+async def test_stop_all_releases_ui_ports(monkeypatch):
+    pytest.importorskip("websockets")
+    from solhunter_zero import ui as ui_module
+
+    def reserve_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
+    monkeypatch.setenv("UI_HOST", "127.0.0.1")
+    monkeypatch.setenv("UI_PORT", str(reserve_port()))
+    monkeypatch.setenv("UI_RL_WS_PORT", str(reserve_port()))
+    monkeypatch.setenv("UI_EVENT_WS_PORT", str(reserve_port()))
+    monkeypatch.setenv("UI_LOG_WS_PORT", str(reserve_port()))
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module.UIState",
+        lambda: None,
+        raising=False,
+    )
+
+    def _simple_wsgi_app(_state):  # type: ignore[override]
+        def _app(environ, start_response):
+            start_response("200 OK", [("Content-Type", "text/plain")])
+            return [b"ok"]
+
+        return _app
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        _simple_wsgi_app,
+    )
+
+    if hasattr(ui_module, "stop_websockets"):
+        ui_module.stop_websockets()
+
+    orch = RuntimeOrchestrator(run_http=True)
+    await orch.start_ui()
+
+    first_http_port = int(os.getenv("UI_PORT", "0") or 0)
+    ws_urls_first = ui_module.get_ws_urls()
+    first_ws_ports = {
+        name: urlparse(url).port for name, url in ws_urls_first.items() if url
+    }
+    assert first_http_port > 0
+    assert len(first_ws_ports) == 3
+
+    await orch.stop_all()
+
+    orch_again = RuntimeOrchestrator(run_http=True)
+    await orch_again.start_ui()
+
+    second_http_port = int(os.getenv("UI_PORT", "0") or 0)
+    ws_urls_second = ui_module.get_ws_urls()
+    second_ws_ports = {
+        name: urlparse(url).port for name, url in ws_urls_second.items() if url
+    }
+
+    assert second_http_port == first_http_port
+    assert second_ws_ports == first_ws_ports
+
+    await orch_again.stop_all()
 
 
 def test_orchestrator_stops_on_resource_budget(monkeypatch):
