@@ -729,7 +729,28 @@ log_info "Ensuring Redis availability"
 ensure_redis
 log_info "Redis helper completed"
 
+declare -a CHILD_PIDS=()
+register_child() {
+  CHILD_PIDS+=("$1")
+}
+
+cleanup() {
+  release_runtime_lock
+  if [[ -z ${CHILD_PIDS+x} ]]; then
+    return
+  fi
+  for pid in "${CHILD_PIDS[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
 acquire_runtime_lock
+trap cleanup EXIT
+trap 'cleanup; exit $EXIT_HEALTH' ERR
+trap 'cleanup; exit 0' INT TERM
 
 ORIG_SOLHUNTER_MODE=${SOLHUNTER_MODE-}
 ORIG_MODE=${MODE-}
@@ -782,11 +803,6 @@ if ! redis_health; then
 fi
 log_info "Redis health check passed"
 
-declare -a CHILD_PIDS=()
-register_child() {
-  CHILD_PIDS+=("$1")
-}
-
 start_log_stream() {
   local log=$1
   local label=$2
@@ -808,23 +824,6 @@ start_log_stream() {
   local tail_pid=$!
   register_child "$tail_pid"
 }
-
-cleanup() {
-  release_runtime_lock
-  if [[ -z ${CHILD_PIDS+x} ]]; then
-    return
-  fi
-  for pid in "${CHILD_PIDS[@]}"; do
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      kill "$pid" >/dev/null 2>&1 || true
-      wait "$pid" 2>/dev/null || true
-    fi
-  done
-}
-
-trap cleanup EXIT
-trap 'cleanup; exit $EXIT_HEALTH' ERR
-trap 'cleanup; exit 0' INT TERM
 
 start_controller() {
   local mode=$1
