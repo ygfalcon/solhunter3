@@ -19,7 +19,7 @@ def anyio_backend() -> str:
 
 
 @pytest.mark.anyio("asyncio")
-async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
+async def test_orchestrator_reports_ui_ws_failure_when_optional(monkeypatch):
     events: list[dict[str, object]] = []
 
     def capture_publish(topic, payload, *_args, **_kwargs):
@@ -54,14 +54,68 @@ async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
         fail_ws_start,
     )
 
+    monkeypatch.setenv("UI_WS_OPTIONAL", "1")
+
     orch = RuntimeOrchestrator(run_http=False)
     await orch.start_ui()
 
     ws_events = [event for event in events if event.get("stage") == "ui:ws"]
     assert ws_events, "expected ui:ws stage emission"
     ui_stage = ws_events[-1]
+    assert ui_stage.get("ok") is True
+    detail = str(ui_stage.get("detail"))
+    assert detail.startswith("degraded:")
+    assert "boom" in detail
+
+
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_exits_when_ui_ws_required(monkeypatch):
+    events: list[dict[str, object]] = []
+
+    def capture_publish(topic, payload, *_args, **_kwargs):
+        if topic == "runtime.stage_changed":
+            events.append(payload)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.event_bus.publish",
+        capture_publish,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    def fail_ws_start() -> dict[str, object]:
+        raise RuntimeError("ws boom")
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        fail_ws_start,
+    )
+
+    monkeypatch.delenv("UI_WS_OPTIONAL", raising=False)
+
+    orch = RuntimeOrchestrator(run_http=False)
+
+    with pytest.raises(SystemExit):
+        await orch.start_ui()
+
+    ws_events = [event for event in events if event.get("stage") == "ui:ws"]
+    assert ws_events, "expected ui:ws stage emission"
+    ui_stage = ws_events[-1]
     assert ui_stage.get("ok") is False
-    assert "boom" in str(ui_stage.get("detail"))
+    assert "ws boom" in str(ui_stage.get("detail"))
 
 
 @pytest.mark.anyio("asyncio")
@@ -90,7 +144,7 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
 
     monkeypatch.setattr(
         "solhunter_zero.runtime.orchestrator._start_ui_ws",
-        lambda: {},
+        lambda: {"events": object()},
     )
 
     shutdown_signal = threading.Event()
@@ -162,7 +216,7 @@ async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
     )
     monkeypatch.setattr(
         "solhunter_zero.runtime.orchestrator._start_ui_ws",
-        lambda: {},
+        lambda: {"events": object()},
     )
 
     orch = RuntimeOrchestrator(run_http=True)

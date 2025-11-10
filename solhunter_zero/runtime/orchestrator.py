@@ -589,6 +589,8 @@ class RuntimeOrchestrator:
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
         await self._publish_stage("ui:ws", ws_ok, ws_detail)
+        if not ws_ok and not ws_optional:
+            raise SystemExit(1)
         http_disabled = parse_bool_env("UI_DISABLE_HTTP_SERVER", False)
 
         def _determine_host_and_requested_port() -> tuple[str, int]:
