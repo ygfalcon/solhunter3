@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
+import os
+import socket
 import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,3 +58,58 @@ def test_wait_for_ready_accepts_disabled(tmp_path: Path) -> None:
     )
 
     subprocess.run(["bash", "-c", bash_script], check=True, cwd=REPO_ROOT)
+
+
+def test_wait_for_socket_release_backoff() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    wait_function = _extract_function(source, "wait_for_socket_release")
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_sock.bind(("127.0.0.1", 0))
+        server_sock.listen(1)
+        host, port = server_sock.getsockname()
+
+        def _release_socket() -> None:
+            time.sleep(5.2)
+            server_sock.close()
+
+        releaser = threading.Thread(target=_release_socket, daemon=True)
+        releaser.start()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "EVENT_BUS_URL": f"ws://{host}:{port}",
+                "EVENT_BUS_RELEASE_TIMEOUT": "8",
+                "PYTHON_BIN": sys.executable,
+            }
+        )
+
+        bash_script = (
+            "set -euo pipefail\n"
+            + wait_function
+            + "wait_for_socket_release\n"
+        )
+
+        completed = subprocess.run(
+            ["bash", "-c", bash_script],
+            check=True,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        releaser.join()
+
+        assert f"free {host} {port}" in completed.stdout
+    finally:
+        if 'releaser' in locals():
+            releaser.join(timeout=6)
+        # Ensure the socket is closed if the releaser thread exited early.
+        try:
+            server_sock.close()
+        except OSError:
+            pass

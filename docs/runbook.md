@@ -158,6 +158,11 @@ secrets, ensures Redis is reachable, and starts both paper and live runtime cont
 before flipping the live executor on. Watch `artifacts/prelaunch/logs/live_runtime.log`
 for the `RUNTIME_READY` marker and the console summary before lifting notional caps.
 
+If the event bus port is slow to release between runs (for example when a previous
+runtime is still winding down), set `EVENT_BUS_RELEASE_TIMEOUT` (seconds, default 30)
+before invoking the launcher. The script will retry the socket probe with backoff until
+the timeout elapses.
+
 Reviewers can reference `scripts/launch_live.sh` for the full argument contract and
 verify the command above matches the required flags.
 
