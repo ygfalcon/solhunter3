@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 import subprocess
 import sys
 import threading
 import time
+from textwrap import dedent
 from pathlib import Path
 
 
@@ -113,3 +115,55 @@ def test_wait_for_socket_release_backoff() -> None:
             server_sock.close()
         except OSError:
             pass
+
+
+def test_normalize_bus_configuration_exports() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    normalize_fn = _extract_function(source, "normalize_bus_configuration")
+
+    bash_script = dedent(
+        """
+        set -euo pipefail
+        PYTHON_BIN=%(python)s
+        export BROKER_CHANNEL='test-channel'
+        export EVENT_BUS_URL='wss://bus.example/ws'
+        export REDIS_URL='cache.example:6380/1'
+        export MINT_STREAM_REDIS_URL='cache.example:6380/1'
+        export MEMPOOL_STREAM_REDIS_URL='cache.example:6380/1'
+        export AMM_WATCH_REDIS_URL='cache.example:6380/1'
+        %(normalize)s
+        normalize_bus_configuration
+        """
+        % {
+            "python": shlex.quote(sys.executable),
+            "normalize": normalize_fn,
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=os.environ.copy(),
+    )
+
+    exports: dict[str, str] = {}
+    for line in completed.stdout.strip().splitlines():
+        assert line.startswith("export "), line
+        assignment = shlex.split(line[len("export "):])[0]
+        key, value = assignment.split("=", 1)
+        exports[key] = value
+
+    assert exports["BROKER_CHANNEL"] == "test-channel"
+    assert exports["EVENT_BUS_URL"] == "wss://bus.example/ws"
+    assert exports["REDIS_URL"] == "redis://cache.example:6380/1"
+    assert exports["MINT_STREAM_REDIS_URL"] == "redis://cache.example:6380/1"
+    assert exports["MEMPOOL_STREAM_REDIS_URL"] == "redis://cache.example:6380/1"
+    assert exports["AMM_WATCH_REDIS_URL"] == "redis://cache.example:6380/1"
+    assert exports["MINT_STREAM_BROKER_CHANNEL"] == "test-channel"
+    assert exports["MEMPOOL_STREAM_BROKER_CHANNEL"] == "test-channel"
+    assert exports["AMM_WATCH_BROKER_CHANNEL"] == "test-channel"
+    assert "RUNTIME_MANIFEST channel=test-channel" in completed.stderr
