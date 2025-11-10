@@ -466,10 +466,14 @@ log_path = os.environ.get("RUNTIME_LOG_PATH")
 if not log_path or not os.path.exists(log_path):
     sys.exit(0)
 
-pattern = re.compile(r"UI_READY .*url=([^ ]+)")
+url_pattern = re.compile(r"UI_READY .*url=([^ ]+)")
+disabled_pattern = re.compile("UI_HTTP_DISABLED\\b")
 with open(log_path, "r", encoding="utf-8", errors="ignore") as handle:
     for line in handle:
-        match = pattern.search(line)
+        if disabled_pattern.search(line):
+            print("__HTTP_DISABLED__")
+            break
+        match = url_pattern.search(line)
         if match:
             print(match.group(1))
             break
@@ -479,7 +483,11 @@ PY
 check_ui_health() {
   local log=$1
   local url=""
-  RUNTIME_LOG_PATH="$log" url=$(extract_ui_url)
+  url=$(RUNTIME_LOG_PATH="$log" extract_ui_url)
+  if [[ $url == "__HTTP_DISABLED__" ]]; then
+    log_info "UI HTTP server disabled intentionally; skipping health check"
+    return 0
+  fi
   if [[ -z $url ]]; then
     log_warn "UI readiness URL not yet available for health check"
     return 1

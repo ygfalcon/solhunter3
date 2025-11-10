@@ -262,17 +262,10 @@ class RuntimeOrchestrator:
         if loop and not loop.is_closed():
             loop.create_task(self.stop_all())
 
-    def _emit_ui_ready(self, host: str, port: int) -> None:
+    def _emit_ui_ready(self, host: str | None, port: int, http_enabled: bool = True) -> None:
         """Log and persist UI readiness details for downstream consumers."""
 
-        url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-        if hasattr(_ui_module, "_resolve_public_host"):
-            try:
-                url_host = _ui_module._resolve_public_host(host)  # type: ignore[attr-defined]
-            except Exception:  # pragma: no cover - defensive
-                url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-        scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
-        ui_url = f"{scheme}://{url_host}:{port}"
+        host = host or "127.0.0.1"
         ws_urls: dict[str, str] = {}
         if hasattr(_ui_module, "get_ws_urls"):
             try:
@@ -282,6 +275,26 @@ class RuntimeOrchestrator:
         rl_url = ws_urls.get("rl") or "-"
         events_url = ws_urls.get("events") or "-"
         logs_url = ws_urls.get("logs") or "-"
+        if not http_enabled:
+            port_text = str(port) if port > 0 else "auto"
+            log.info(
+                "UI_HTTP_DISABLED host=%s port=%s rl_ws=%s events_ws=%s logs_ws=%s",
+                host,
+                port_text,
+                rl_url,
+                events_url,
+                logs_url,
+            )
+            return
+
+        url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+        if hasattr(_ui_module, "_resolve_public_host"):
+            try:
+                url_host = _ui_module._resolve_public_host(host)  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover - defensive
+                url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+        scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
+        ui_url = f"{scheme}://{url_host}:{port}"
         readiness_line = (
             "UI_READY "
             f"url={ui_url} "
@@ -586,7 +599,7 @@ class RuntimeOrchestrator:
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
         await self._publish_stage("ui:ws", ws_ok, ws_detail)
-        http_disabled = parse_bool_env("UI_DISABLE_HTTP_SERVER", False)
+        http_disabled_env = parse_bool_env("UI_DISABLE_HTTP_SERVER", False)
 
         def _determine_host_and_requested_port() -> tuple[str, int]:
             host = os.getenv("UI_HOST", "127.0.0.1")
@@ -601,7 +614,9 @@ class RuntimeOrchestrator:
                 requested_port = 0
             return host, requested_port
 
-        if self.run_http and not http_disabled:
+        http_enabled = self.run_http and not http_disabled_env
+
+        if http_enabled:
             # Start Flask server in a background thread using werkzeug only if available.
             import threading
 
@@ -656,7 +671,7 @@ class RuntimeOrchestrator:
                     self.handles.ui_server = server
                     port_queue.put(port)
                     try:
-                        self._emit_ui_ready(host, port)
+                        self._emit_ui_ready(host, port, True)
                     except Exception:
                         log.exception("Failed to emit UI readiness signal")
                     finally:
@@ -726,20 +741,21 @@ class RuntimeOrchestrator:
                 "shutdown_event": shutdown_event,
                 "ready_event": ready_event,
             }
-        elif http_disabled:
+        else:
             host, requested_port = _determine_host_and_requested_port()
             if requested_port > 0:
                 os.environ.setdefault("UI_PORT", str(requested_port))
             port_for_ready = requested_port if requested_port > 0 else 0
             try:
-                self._emit_ui_ready(host, port_for_ready)
+                self._emit_ui_ready(host, port_for_ready, False)
             except Exception:
                 log.exception("Failed to emit UI readiness signal (HTTP disabled)")
             port_detail = str(requested_port) if requested_port > 0 else "auto"
+            reason = "env" if http_disabled_env else "runtime"
             await self._publish_stage(
                 "ui:http",
                 True,
-                f"disabled host={host} port={port_detail}",
+                f"disabled reason={reason} host={host} port={port_detail}",
             )
 
     async def start_agents(self) -> None:

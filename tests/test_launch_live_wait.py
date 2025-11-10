@@ -62,6 +62,47 @@ def test_wait_for_ready_accepts_disabled(tmp_path: Path) -> None:
     subprocess.run(["bash", "-c", bash_script], check=True, cwd=REPO_ROOT)
 
 
+def test_check_ui_health_skips_when_http_disabled(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "extract_ui_url")
+        + _extract_function(source, "check_ui_health")
+    )
+
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "[ts] UI_HTTP_DISABLED host=127.0.0.1 port=auto rl_ws=- events_ws=- logs_ws=-",
+            ]
+        )
+    )
+
+    bash_script = (
+        "set -euo pipefail\n"
+        + functions
+        + f"check_ui_health '{log_path}'\n"
+    )
+
+    env = os.environ.copy()
+    env["PYTHON_BIN"] = sys.executable
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+        env=env,
+    )
+
+    assert "UI HTTP server disabled intentionally" in completed.stdout
+
+
 def test_wait_for_socket_release_backoff() -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()

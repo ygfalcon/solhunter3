@@ -133,13 +133,13 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
 @pytest.mark.anyio("asyncio")
 async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
     events: list[tuple[str, bool, str]] = []
-    ready_calls: list[tuple[str, int]] = []
+    ready_calls: list[tuple[str, int, bool]] = []
 
     async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
         events.append((stage, ok, detail))
 
-    def fake_emit_ui_ready(self, host: str, port: int) -> None:
-        ready_calls.append((host, port))
+    def fake_emit_ui_ready(self, host: str, port: int, http_enabled: bool = True) -> None:
+        ready_calls.append((host, port, http_enabled))
 
     monkeypatch.setenv("UI_DISABLE_HTTP_SERVER", "1")
     monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
@@ -166,7 +166,7 @@ async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
     orch = RuntimeOrchestrator(run_http=True)
     await orch.start_ui()
 
-    assert ready_calls == [("127.0.0.1", 5000)]
+    assert ready_calls == [("127.0.0.1", 5000, False)]
     http_events = [event for event in events if event[0] == "ui:http"]
     assert http_events, "expected ui:http stage emission"
     latest = http_events[-1]
