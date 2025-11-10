@@ -33,6 +33,11 @@ from .production import load_production_env
 from .runtime_defaults import DEFAULT_UI_PORT
 from .util import parse_bool_env
 
+try:  # pragma: no cover - optional dependency
+    from prometheus_client import Counter  # type: ignore
+except Exception:  # pragma: no cover - prometheus optional
+    Counter = None  # type: ignore
+
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +47,17 @@ _UI_META_CACHE_TTL = 1.0
 _ui_meta_cache: tuple[float, Dict[str, Any]] | None = None
 _active_ui_state: "UIState" | None = None
 _ENV_BOOTSTRAPPED = False
+
+_QUEUE_DROP_WARNING_INTERVAL = float(os.getenv("UI_QUEUE_DROP_WARNING_INTERVAL", "10") or 10.0)
+
+if Counter is not None:  # pragma: no branch - optional metrics
+    _WS_QUEUE_DROP_TOTAL = Counter(
+        "solhunter_ws_queue_drops_total",
+        "Websocket messages dropped due to queue overflow",
+        labelnames=("channel",),
+    )
+else:  # pragma: no cover - metrics optional
+    _WS_QUEUE_DROP_TOTAL = None
 
 
 def _bootstrap_ui_environment() -> None:
@@ -1390,6 +1406,7 @@ class _WebsocketState:
         "queue_depth",
         "queue_high",
         "drop_count",
+        "last_drop_warning_at",
         "recent_close_codes",
         "lock",
     )
@@ -1409,6 +1426,7 @@ class _WebsocketState:
         self.queue_depth: int = 0
         self.queue_high: int = 0
         self.drop_count: int = 0
+        self.last_drop_warning_at: float = 0.0
         self.recent_close_codes: Deque[int | None] = deque(maxlen=10)
         self.lock = threading.Lock()
 
@@ -1737,12 +1755,39 @@ def _enqueue_message(
             except asyncio.QueueEmpty:  # pragma: no cover - race
                 pass
             state.queue.put_nowait((message, meta_payload))
+            now = time.monotonic()
+            warn_depth = 0
+            warn_high = 0
+            warn_max = 0
+            warn_drops = 0
+            should_log = False
             with state.lock:
                 state.drop_count += 1
                 depth = state.queue.qsize()
                 state.queue_depth = depth
                 if depth > state.queue_high:
                     state.queue_high = depth
+                warn_depth = depth
+                warn_high = state.queue_high
+                warn_max = state.queue_max
+                warn_drops = state.drop_count
+                if _WS_QUEUE_DROP_TOTAL is not None:
+                    try:
+                        _WS_QUEUE_DROP_TOTAL.labels(channel=state.name).inc()
+                    except Exception:  # pragma: no cover - defensive metrics guard
+                        pass
+                if now - state.last_drop_warning_at >= _QUEUE_DROP_WARNING_INTERVAL:
+                    state.last_drop_warning_at = now
+                    should_log = True
+            if should_log:
+                log.warning(
+                    "Websocket channel %s queue overflow: depth=%d high=%d max=%d drops=%d",
+                    state.name,
+                    warn_depth,
+                    warn_high,
+                    warn_max,
+                    warn_drops,
+                )
         else:
             with state.lock:
                 depth = state.queue.qsize()
@@ -2044,6 +2089,7 @@ def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> No
         state.queue_depth = 0
         state.queue_high = 0
         state.drop_count = 0
+        state.last_drop_warning_at = 0.0
         state.recent_close_codes.clear()
         state.client_filters.clear()
 
@@ -2085,6 +2131,7 @@ def _start_channel(
             state.queue_depth = 0
             state.queue_high = 0
             state.drop_count = 0
+            state.last_drop_warning_at = 0.0
             state.recent_close_codes = deque(maxlen=10)
 
         async def _broadcast_loop() -> None:

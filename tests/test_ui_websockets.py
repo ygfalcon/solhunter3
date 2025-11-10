@@ -1,4 +1,6 @@
 import importlib
+import asyncio
+import logging
 import os
 import socket
 import threading
@@ -183,6 +185,99 @@ def test_websocket_env_preserves_preconfigured_url(monkeypatch):
                 loop.call_soon_threadsafe(loop.stop)
         for t in threads.values():
             t.join(timeout=1)
+
+
+def test_enqueue_message_logs_warning_when_queue_full(caplog):
+    ui = _reload_ui_module()
+    state = ui._WS_CHANNELS["events"]
+
+    class ImmediateLoop:
+        def call_soon_threadsafe(self, callback, *args, **kwargs):
+            callback(*args, **kwargs)
+
+    class FullQueue:
+        def __init__(self) -> None:
+            self.maxsize = 1
+            self.items = [("stale", None)]
+
+        def put_nowait(self, item):
+            if len(self.items) >= self.maxsize:
+                raise asyncio.QueueFull
+            self.items.append(item)
+
+        def get_nowait(self):
+            if not self.items:
+                raise asyncio.QueueEmpty
+            return self.items.pop(0)
+
+        def task_done(self):
+            return None
+
+        def qsize(self):
+            return len(self.items)
+
+    class CounterStub:
+        def __init__(self) -> None:
+            self.calls = []
+            self.incremented = 0
+
+        def labels(self, **labels):
+            self.calls.append(labels)
+            return self
+
+        def inc(self):
+            self.incremented += 1
+
+    loop = ImmediateLoop()
+    queue = FullQueue()
+    counter_stub = CounterStub()
+    original_loop = state.loop
+    original_queue = state.queue
+    previous_counter = getattr(ui, "_WS_QUEUE_DROP_TOTAL", None)
+    with state.lock:
+        prev_queue_max = state.queue_max
+        prev_queue_depth = state.queue_depth
+        prev_queue_high = state.queue_high
+        prev_drop_count = state.drop_count
+        prev_last_warning = state.last_drop_warning_at
+        state.queue_max = queue.maxsize
+        state.queue_depth = queue.qsize()
+        state.queue_high = queue.qsize()
+        state.drop_count = 0
+        state.last_drop_warning_at = 0.0
+    state.loop = loop
+    state.queue = queue
+    ui._WS_QUEUE_DROP_TOTAL = counter_stub
+
+    caplog.set_level(logging.WARNING)
+    caplog.clear()
+
+    try:
+        assert ui._enqueue_message("events", {"value": 1}) is True
+        with state.lock:
+            assert state.drop_count == 1
+        assert counter_stub.incremented == 1
+        assert counter_stub.calls == [{"channel": "events"}]
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "queue overflow" in record.getMessage()
+        ]
+        assert warnings, "expected queue overflow warning when queue is forced full"
+        warning = warnings[-1]
+        assert "events" in warning.getMessage()
+        assert f"max={queue.maxsize}" in warning.getMessage()
+    finally:
+        state.loop = original_loop
+        state.queue = original_queue
+        with state.lock:
+            state.queue_max = prev_queue_max
+            state.queue_depth = prev_queue_depth
+            state.queue_high = prev_queue_high
+            state.drop_count = prev_drop_count
+            state.last_drop_warning_at = prev_last_warning
+        ui._WS_QUEUE_DROP_TOTAL = previous_counter
 
 
 def _reload_ui_module():
