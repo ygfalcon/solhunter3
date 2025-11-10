@@ -34,7 +34,24 @@ _stubs.install_stubs()
 if importlib.util.find_spec("aiohttp") is None:
     aiohttp_mod = types.ModuleType("aiohttp")
     aiohttp_mod.__spec__ = importlib.machinery.ModuleSpec("aiohttp", None)
-    aiohttp_mod.ClientSession = object
+
+    class ClientSession:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.closed = False
+
+        async def __aenter__(self):  # pragma: no cover - stub helper
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):  # pragma: no cover - stub helper
+            self.closed = True
+            return False
+
+        async def close(self):  # pragma: no cover - stub helper
+            self.closed = True
+
+    aiohttp_mod.ClientSession = ClientSession
     aiohttp_mod.TCPConnector = object
 
     class ClientTimeout:

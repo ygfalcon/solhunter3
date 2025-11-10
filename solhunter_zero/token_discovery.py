@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence, AsyncIterator
+from urllib.parse import urlparse
 
 import yaml
 from aiohttp import ClientTimeout
@@ -788,7 +789,7 @@ async def _http_get_json(
     raise RuntimeError(f"request to {url} failed without response")
 
 
-async def _fetch_birdeye_tokens() -> List[TokenEntry]:
+async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]:
     """
     Pull BirdEye token list (paginated) for Solana with correct headers & params.
     Numeric filters only; no name/suffix heuristics.
@@ -821,11 +822,25 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
 
     tokens: Dict[str, TokenEntry] = {}
     offset = 0
-    target_count = max(int(_MAX_TOKENS * _OVERFETCH_FACTOR), _PAGE_LIMIT)
+    if limit is None:
+        effective_limit = _MAX_TOKENS
+    else:
+        try:
+            effective_limit = int(limit)
+        except (TypeError, ValueError):
+            effective_limit = _MAX_TOKENS
+    if effective_limit <= 0:
+        effective_limit = _MAX_TOKENS
+    effective_limit = min(effective_limit, _MAX_TOKENS)
+    target_count = max(int(effective_limit * _OVERFETCH_FACTOR), _PAGE_LIMIT)
     backoff = _BIRDEYE_BACKOFF
 
     logger.debug(
-        "BirdEye fetch start offset=%s limit=%s target=%s", offset, _PAGE_LIMIT, target_count
+        "BirdEye fetch start offset=%s limit=%s target=%s effective_limit=%s",
+        offset,
+        _PAGE_LIMIT,
+        target_count,
+        effective_limit,
     )
 
     def _headers() -> dict:
@@ -835,12 +850,19 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
             "Accept": "application/json",
         }
 
-    session_timeout = ClientTimeout(total=12, connect=4, sock_read=8)
+    try:
+        session_timeout = ClientTimeout(total=12, connect=4, sock_read=8)
+    except TypeError:
+        try:
+            session_timeout = ClientTimeout(total=12, sock_connect=4, sock_read=8)
+        except TypeError:
+            session_timeout = ClientTimeout(total=12)
     try:
         session = await get_session(timeout=session_timeout)
     except TypeError:
         session = await get_session()
     while offset < _MAX_OFFSET and len(tokens) < target_count:
+        initial_count = len(tokens)
         logger.debug(
             "BirdEye fetch page offset=%s limit=%s accumulated=%s",
             offset,
@@ -1027,6 +1049,8 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                 entry["volume"] = max(entry["volume"], volume)
                 entry["price"] = price or entry.get("price", 0.0)
                 entry["price_change"] = change
+                if len(tokens) >= effective_limit:
+                    break
 
             offset += _PAGE_LIMIT
             total = data.get("total")
@@ -1038,6 +1062,12 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
                 total_int = None
             if total_int is not None and offset >= total_int:
                 break
+
+        if len(tokens) >= effective_limit:
+            break
+
+        if len(tokens) <= initial_count:
+            break
 
     result = list(tokens.values())
     _cache_set(cache_key, result)
@@ -1706,7 +1736,7 @@ def discover_candidates(
                 except Exception as exc:
                     logger.debug("Orca catalog unavailable: %s", exc)
                     orca_catalog = {}
-            bird_task = asyncio.create_task(_fetch_birdeye_tokens())
+            bird_task = asyncio.create_task(_fetch_birdeye_tokens(limit=limit))
             mempool_task = (
                 asyncio.create_task(
                     _collect_mempool_signals(rpc_url, mempool_threshold)
