@@ -6,6 +6,7 @@ import contextlib
 import errno
 import functools
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -1457,6 +1458,37 @@ def _resolve_public_host(bind_host: str | None = None) -> str:
     return "127.0.0.1"
 
 
+def _wrap_host_for_url(host: str | None) -> str | None:
+    """Return ``host`` wrapped in brackets when required for IPv6 URLs."""
+
+    if host is None:
+        return None
+
+    stripped = host.strip()
+    if not stripped:
+        return None
+
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return stripped
+
+    base = stripped
+    zone_index: str | None = None
+    if "%" in stripped:
+        base, _, zone_index = stripped.partition("%")
+
+    try:
+        parsed = ipaddress.ip_address(base)
+    except ValueError:
+        return stripped
+
+    if isinstance(parsed, ipaddress.IPv6Address):
+        if zone_index:
+            return f"[{base}%{zone_index}]"
+        return f"[{base}]"
+
+    return stripped
+
+
 def _parse_port(value: str | None, default: int) -> int:
     if value is None or value == "":
         return default
@@ -1847,7 +1879,16 @@ def _split_netloc(netloc: str | None) -> tuple[str | None, int | None]:
     if not netloc:
         return None, None
     parsed = urlparse(f"//{netloc}", scheme="http")
-    return parsed.hostname, parsed.port
+    host = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+        if ":" in netloc and not netloc.startswith("["):
+            host = netloc
+    if host is None and ":" in netloc and not netloc.startswith("["):
+        host = netloc
+    return host, port
 
 
 def _channel_path(channel: str) -> str:
@@ -1899,6 +1940,7 @@ def get_ws_urls() -> dict[str, str | None]:
             state = _WS_CHANNELS.get(channel)
             host = state.host if state and state.host else _resolve_host()
             url_host = _resolve_public_host(host)
+            netloc_host = _wrap_host_for_url(url_host) or url_host
             if channel == "rl":
                 port = state.port or _RL_WS_PORT
             elif channel == "events":
@@ -1910,7 +1952,7 @@ def get_ws_urls() -> dict[str, str | None]:
                 continue
             path = _channel_path(channel)
             scheme = _infer_ws_scheme()
-            resolved = f"{scheme}://{url_host}:{port}{path}"
+            resolved = f"{scheme}://{netloc_host}:{port}{path}"
         urls[channel] = resolved
     return urls
 
@@ -1939,9 +1981,11 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
             if not path.startswith("/"):
                 path = "/" + path.lstrip("/")
             scheme = parsed.scheme or scheme_hint
-            netloc = host or ""
+            effective_host = host or ""
+            wrapped_host = _wrap_host_for_url(effective_host) or effective_host
+            netloc = wrapped_host
             if port:
-                netloc = f"{host}:{port}"
+                netloc = f"{wrapped_host}:{port}" if wrapped_host else f"{port}"
             manifest[f"{channel}_ws"] = urlunparse((scheme, netloc, path, "", "", ""))
             manifest[f"{channel}_ws_available"] = True
         else:

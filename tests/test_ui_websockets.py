@@ -189,6 +189,7 @@ def _reload_ui_module():
     for name in list(sys.modules):
         if name.startswith("websockets"):
             sys.modules.pop(name, None)
+    sys.modules.setdefault("websockets", types.SimpleNamespace())
     sys.modules.setdefault("sqlparse", types.SimpleNamespace())
     sys.modules.setdefault(
         "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet"))
@@ -245,3 +246,35 @@ def test_manifest_omits_zero_ports():
         available_key = f"{channel}_ws_available"
         assert payload[ws_key] is None
         assert payload[available_key] is False
+
+
+def test_get_ws_urls_ipv6_public_host(monkeypatch):
+    ui = _reload_ui_module()
+
+    for key in (
+        "UI_EVENTS_WS",
+        "UI_EVENTS_WS_URL",
+        "UI_WS_URL",
+        "UI_RL_WS",
+        "UI_RL_WS_URL",
+        "UI_LOGS_WS",
+        "UI_LOG_WS_URL",
+        "UI_PUBLIC_HOST",
+        "PUBLIC_URL_HOST",
+        "UI_EXTERNAL_HOST",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("UI_PUBLIC_HOST", "::1")
+
+    events_state = ui._WS_CHANNELS["events"]
+    monkeypatch.setattr(events_state, "port", 8123, raising=False)
+
+    expected = f"ws://[::1]:8123{ui._channel_path('events')}"
+
+    urls = ui.get_ws_urls()
+    assert urls["events"] == expected
+
+    manifest = ui.build_ui_manifest(None)
+    assert manifest["events_ws"] == expected
+    assert manifest["events_ws_available"] is True
