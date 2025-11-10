@@ -197,13 +197,10 @@ class DiscoveryAgent:
         ws_resolved = self._as_websocket_url(ws_env) or DEFAULT_SOLANA_WS
         os.environ.setdefault("SOLANA_WS_URL", ws_resolved)
         self.ws_url = ws_resolved
-        self.birdeye_api_key = os.getenv(
-            "BIRDEYE_API_KEY",
-            "b1e60d72780940d1bd929b9b2e9225e6",
-        )
-        if not self.birdeye_api_key:
+        self.birdeye_api_key = os.getenv("BIRDEYE_API_KEY")
+        if not (self.birdeye_api_key or "").strip():
             logger.warning(
-                "BIRDEYE_API_KEY missing; discovery will fall back to static tokens"
+                "BIRDEYE_API_KEY is not set; BirdEye-powered discovery requires an API key"
             )
         limit = resolve_discovery_limit(default=60)
         if limit < MIN_DISCOVERY_LIMIT:
@@ -404,13 +401,34 @@ class DiscoveryAgent:
         mempool_enabled = True
         if mempool_flag is not None:
             mempool_enabled = mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
-        config_error = not (self.birdeye_api_key or "").strip() and not mempool_enabled
+        missing_birdeye_key = not (self.birdeye_api_key or "").strip()
+        config_error = missing_birdeye_key and not mempool_enabled
         fallback_used = False
         self._config_error_active = config_error
 
+        birdeye_required = active_method == "helius"
+        if config_error and birdeye_required:
+            message = (
+                "BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled; "
+                "set BIRDEYE_API_KEY or enable mempool discovery"
+            )
+            if not self._config_error_warned:
+                logger.error("DiscoveryAgent configuration error: %s", message)
+                self._config_error_warned = True
+            if not self._config_error_event_reported:
+                publish(
+                    "runtime.log",
+                    RuntimeLog(
+                        stage="discovery",
+                        detail="config_error=birdeye_missing_mempool_disabled",
+                        level="ERROR",
+                    ),
+                )
+                self._config_error_event_reported = True
+            raise RuntimeError(message)
         if config_error and not self._config_error_warned:
             logger.warning(
-                "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled; discovery will rely on cached/static seeds",
+                "DiscoveryAgent configuration warning: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled"
             )
             self._config_error_warned = True
 
@@ -458,12 +476,11 @@ class DiscoveryAgent:
         )
 
         if config_error and not self._config_error_event_reported:
-            warning_detail = "config_error=birdeye_missing_mempool_disabled"
             publish(
                 "runtime.log",
                 RuntimeLog(
                     stage="discovery",
-                    detail=warning_detail,
+                    detail="config_error=birdeye_missing_mempool_disabled",
                     level="WARN",
                 ),
             )

@@ -3,6 +3,8 @@ import sys
 import time
 import types
 
+import pytest
+
 if "base58" not in sys.modules:
     def _fake_b58decode(value):
         if not isinstance(value, str):
@@ -348,7 +350,7 @@ def test_discover_tokens_recovers_from_merge_exception(monkeypatch, caplog):
     assert "Websocket merge yielded no tokens" in caplog.text
 
 
-def test_discover_tokens_uses_fallback_when_config_invalid(monkeypatch, caplog):
+def test_discover_tokens_errors_when_config_invalid(monkeypatch, caplog):
     _reset_cache()
     monkeypatch.setenv("BIRDEYE_API_KEY", "")
     monkeypatch.setenv("DISCOVERY_ENABLE_MEMPOOL", "0")
@@ -377,21 +379,17 @@ def test_discover_tokens_uses_fallback_when_config_invalid(monkeypatch, caplog):
     agent.birdeye_api_key = ""
     agent._config_error_warned = False
 
-    async def run():
-        with caplog.at_level("WARNING"):
-            return await agent.discover_tokens()
+    with caplog.at_level("ERROR"):
+        with pytest.raises(RuntimeError) as excinfo:
+            asyncio.run(agent.discover_tokens())
 
-    tokens = asyncio.run(run())
-    assert tokens, "fallback tokens expected"
-    assert tokens[0] == "So11111111111111111111111111111111111111112"
-    assert (
-        "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled"
-        in caplog.text
-    )
+    assert "BirdEye API key missing" in str(excinfo.value)
+    assert "BirdEye API key missing" in caplog.text
     assert any(
         topic == "runtime.log"
         and getattr(payload, "detail", "")
         == "config_error=birdeye_missing_mempool_disabled"
+        and getattr(payload, "level", "") == "ERROR"
         for topic, payload in publish_calls
     )
 
