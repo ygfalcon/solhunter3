@@ -624,6 +624,21 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_runtime_ui_disabled_clears_env(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "0")
+    monkeypatch.setenv("UI_PORT", "7777")
+
+    runtime = TradingRuntime(ui_port=8888)
+
+    assert os.getenv("UI_PORT") is None
+
+    await runtime._start_ui()
+
+    assert runtime.ui_server is None
+    assert os.getenv("UI_PORT") is None
+
+
+@pytest.mark.anyio("asyncio")
 async def test_trading_runtime_ui_port_conflict_raises_friendly_error(monkeypatch):
     captured_instances: list[object] = []
 

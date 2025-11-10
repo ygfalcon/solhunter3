@@ -275,7 +275,6 @@ class TradingRuntime:
             os.environ["UI_HOST"] = ui_host
             if not os.environ.get("UI_WS_HOST"):
                 os.environ["UI_WS_HOST"] = ui_host
-        os.environ["UI_PORT"] = str(self.ui_port)
 
         self._ui_enabled = os.getenv("UI_ENABLED", "1").lower() not in {
             "0",
@@ -283,6 +282,8 @@ class TradingRuntime:
             "no",
             "off",
         }
+        if not self._ui_enabled:
+            self._set_ui_port_env(None)
         self.cfg: Dict[str, Any] = {}
         self.runtime_cfg: Any = None
         self.depth_proc: Optional[Any] = None
@@ -390,6 +391,15 @@ class TradingRuntime:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
 
+    @staticmethod
+    def _set_ui_port_env(port: Optional[int]) -> None:
+        """Expose the active UI port via environment variables."""
+
+        if port is None:
+            os.environ.pop("UI_PORT", None)
+            return
+        os.environ["UI_PORT"] = str(port)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -493,6 +503,8 @@ class TradingRuntime:
         if self.ui_server:
             self.ui_server.stop()
             self.ui_server = None
+
+        self._set_ui_port_env(None)
 
         if ui_ws_started:
             stop_websockets()
@@ -946,6 +958,8 @@ class TradingRuntime:
         self.ui_ws_threads = None
         self._ui_ws_started_here = False
 
+        self._set_ui_port_env(None)
+
         if not self._ui_enabled:
             self.ui_server = None
             log.info("TradingRuntime: UI disabled via UI_ENABLED")
@@ -961,6 +975,7 @@ class TradingRuntime:
             finally:
                 self.ui_server = None
                 self.ui_ws_threads = None
+                self._set_ui_port_env(None)
             conflict_message = (
                 f"Unable to start UI server on {self.ui_host}:{self.ui_port}. "
                 "Another process may already be using the port."
@@ -973,7 +988,7 @@ class TradingRuntime:
                 self.ui_port = int(resolved_port)
             except (TypeError, ValueError):  # pragma: no cover - defensive guard
                 pass
-        os.environ["UI_PORT"] = str(self.ui_port)
+        self._set_ui_port_env(self.ui_port)
         resolved_host = (
             getattr(self.ui_server, "host", None)
             or self.ui_host
