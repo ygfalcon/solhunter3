@@ -36,6 +36,22 @@ def _extract_function(source: str, name: str) -> str:
     return source[start:end] + "\n"
 
 
+def _build_socket_check_script(source: str, success_template: str, failure_template: str) -> str:
+    functions = "".join(
+        _extract_function(source, name)
+        for name in ("timestamp", "log_info", "log_warn", "wait_for_socket_release", "check_event_bus_socket")
+    )
+
+    return (
+        "set -euo pipefail\n"
+        + functions
+        + "EXIT_SOCKET=99\n"
+        + f"if ! check_event_bus_socket {shlex.quote(success_template)} {shlex.quote(failure_template)}; then\n"
+        + "  exit $EXIT_SOCKET\n"
+        + "fi\n"
+    )
+
+
 def test_wait_for_ready_accepts_disabled(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
@@ -146,6 +162,165 @@ def test_wait_for_socket_release_skips_remote_hosts() -> None:
     )
 
     assert "skip example.com 8779" in completed.stdout
+
+
+def test_initial_socket_check_aborts_when_busy() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    bash_script = _build_socket_check_script(
+        source,
+        "Event bus port %s:%s ready",
+        "Event bus port %s:%s is still in use after the grace window; aborting launch",
+    )
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_sock.bind(("127.0.0.1", 0))
+        server_sock.listen(1)
+        host, port = server_sock.getsockname()
+
+        def _accept_loop() -> None:
+            try:
+                while True:
+                    conn, _ = server_sock.accept()
+                    conn.close()
+            except OSError:
+                pass
+
+        acceptor = threading.Thread(target=_accept_loop, daemon=True)
+        acceptor.start()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHON_BIN": sys.executable,
+                "EVENT_BUS_URL": f"ws://{host}:{port}",
+                "EVENT_BUS_RELEASE_TIMEOUT": "0.2",
+            }
+        )
+
+        completed = subprocess.run(
+            ["bash", "-c", bash_script],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert completed.returncode == 99
+        assert (
+            f"Event bus port {host}:{port} is still in use after the grace window; aborting launch"
+            in completed.stderr
+        )
+    finally:
+        try:
+            server_sock.close()
+        except OSError:
+            pass
+        if 'acceptor' in locals():
+            acceptor.join(timeout=1)
+
+
+def test_second_socket_check_reports_busy_port() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    bash_script = _build_socket_check_script(
+        source,
+        "Event bus port %s:%s ready for live launch",
+        "Event bus port %s:%s remained busy after shutting down the paper runtime; aborting live launch",
+    )
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_sock.bind(("127.0.0.1", 0))
+        server_sock.listen(1)
+        host, port = server_sock.getsockname()
+
+        def _accept_loop() -> None:
+            try:
+                while True:
+                    conn, _ = server_sock.accept()
+                    conn.close()
+            except OSError:
+                pass
+
+        acceptor = threading.Thread(target=_accept_loop, daemon=True)
+        acceptor.start()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHON_BIN": sys.executable,
+                "EVENT_BUS_URL": f"ws://{host}:{port}",
+                "EVENT_BUS_RELEASE_TIMEOUT": "0.2",
+            }
+        )
+
+        completed = subprocess.run(
+            ["bash", "-c", bash_script],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+        assert completed.returncode == 99
+        assert (
+            f"Event bus port {host}:{port} remained busy after shutting down the paper runtime; aborting live launch"
+            in completed.stderr
+        )
+    finally:
+        try:
+            server_sock.close()
+        except OSError:
+            pass
+        if 'acceptor' in locals():
+            acceptor.join(timeout=1)
+
+
+def test_socket_check_reports_ready_message() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    bash_script = _build_socket_check_script(
+        source,
+        "Event bus port %s:%s ready for live launch",
+        "Event bus port %s:%s remained busy after shutting down the paper runtime; aborting live launch",
+    )
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", 0))
+        host, port = probe.getsockname()
+    finally:
+        probe.close()
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": sys.executable,
+            "EVENT_BUS_URL": f"ws://{host}:{port}",
+            "EVENT_BUS_RELEASE_TIMEOUT": "0.2",
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert (
+        f"Event bus port {host}:{port} ready for live launch"
+        in completed.stdout
+    )
 
 
 def test_normalize_bus_configuration_exports() -> None:

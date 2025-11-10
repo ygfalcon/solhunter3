@@ -408,6 +408,31 @@ while True:
 PY
 }
 
+check_event_bus_socket() {
+  local success_template=$1
+  local failure_template=$2
+  local socket_state_raw
+  local socket_state
+  local socket_host
+  local socket_port
+  local formatted
+
+  socket_state_raw=$(wait_for_socket_release)
+  read -r socket_state socket_host socket_port <<<"$socket_state_raw"
+  socket_host=${socket_host:-127.0.0.1}
+  socket_port=${socket_port:-8779}
+
+  if [[ $socket_state == "busy" ]]; then
+    printf -v formatted "$failure_template" "$socket_host" "$socket_port"
+    log_warn "$formatted"
+    return 1
+  fi
+
+  printf -v formatted "$success_template" "$socket_host" "$socket_port"
+  log_info "$formatted"
+  return 0
+}
+
 acquire_runtime_lock() {
   local output
   output=$("$PYTHON_BIN" - <<'PY'
@@ -851,16 +876,11 @@ if ! eval "$BUS_EXPORTS"; then
 fi
 log_info "RUNTIME_MANIFEST channel=$BROKER_CHANNEL redis=$REDIS_URL mint_stream=$MINT_STREAM_REDIS_URL mempool=$MEMPOOL_STREAM_REDIS_URL amm_watch=$AMM_WATCH_REDIS_URL bus=$EVENT_BUS_URL"
 
-SOCKET_STATE_RAW=$(wait_for_socket_release)
-read -r SOCKET_STATE SOCKET_HOST SOCKET_PORT <<<"$SOCKET_STATE_RAW"
-SOCKET_HOST=${SOCKET_HOST:-127.0.0.1}
-SOCKET_PORT=${SOCKET_PORT:-8779}
-if [[ $SOCKET_STATE == "busy" ]]; then
-  log_warn "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} is still in use after the grace window; aborting launch"
+if ! check_event_bus_socket \
+  "Event bus port %s:%s ready" \
+  "Event bus port %s:%s is still in use after the grace window; aborting launch"; then
   log_warn "Hint: terminate the lingering process (e.g. pkill -f 'event_bus') and run bash scripts/clean_session.sh to clear stale locks before retrying"
   exit $EXIT_SOCKET
-else
-  log_info "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} ready"
 fi
 
 log_info "Ensuring Redis availability"
@@ -1129,6 +1149,13 @@ fi
 log_info "Connectivity soak complete: $SOAK_RESULT"
 unset CONNECTIVITY_SKIP_UI_PROBES
 log_info "UI connectivity probes re-enabled for live launch"
+
+if ! check_event_bus_socket \
+  "Event bus port %s:%s ready for live launch" \
+  "Event bus port %s:%s remained busy after shutting down the paper runtime; aborting live launch"; then
+  log_warn "Hint: terminate lingering processes bound to the event bus and rerun bash scripts/clean_session.sh before retrying"
+  exit $EXIT_SOCKET
+fi
 
 export MODE=live
 # keep env aligned with the flag we passed to the controller
