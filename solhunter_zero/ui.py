@@ -1843,11 +1843,22 @@ def _infer_ws_scheme(request_scheme: str | None = None) -> str:
     return "ws"
 
 
-def _split_netloc(netloc: str | None) -> tuple[str | None, int | None]:
+def _split_netloc(netloc: str | None) -> tuple[str | None, int | None, str | None]:
     if not netloc:
-        return None, None
-    parsed = urlparse(f"//{netloc}", scheme="http")
-    return parsed.hostname, parsed.port
+        return None, None, None
+
+    candidate = netloc.strip()
+    if not candidate:
+        return None, None, None
+
+    has_scheme = "://" in candidate
+    parsed = urlparse(candidate if has_scheme else f"//{candidate}")
+
+    scheme = parsed.scheme.lower() if parsed.scheme else None
+    if not has_scheme:
+        scheme = None
+
+    return parsed.hostname, parsed.port, scheme
 
 
 def _channel_path(channel: str) -> str:
@@ -1917,28 +1928,53 @@ def get_ws_urls() -> dict[str, str | None]:
 
 def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
     urls = get_ws_urls()
-    scheme_hint = _infer_ws_scheme(getattr(req, "scheme", None))
+    request_scheme = getattr(req, "scheme", None)
     public_host_env = (
         os.getenv("UI_PUBLIC_HOST")
         or os.getenv("PUBLIC_URL_HOST")
         or os.getenv("UI_EXTERNAL_HOST")
     )
-    public_host, _ = _split_netloc(public_host_env)
-    request_host, _ = _split_netloc(getattr(req, "host", None))
+    public_host, public_port, public_scheme = _split_netloc(public_host_env)
+    request_host, request_port, _ = _split_netloc(getattr(req, "host", None))
+
+    def _scheme_from_hint(candidate: str | None) -> str | None:
+        if not candidate:
+            return None
+        lowered = candidate.lower()
+        if lowered in {"https", "wss"}:
+            return "wss"
+        if lowered in {"http", "ws"}:
+            return "ws"
+        return None
+
+    override_scheme = _scheme_from_hint(public_scheme)
+    fallback_scheme = _infer_ws_scheme(request_scheme)
 
     manifest: Dict[str, Any] = {}
     for channel in ("rl", "events", "logs"):
         raw_url = urls.get(channel)
         if raw_url:
             parsed = urlparse(raw_url)
-            host = public_host or parsed.hostname or request_host or _resolve_host()
-            port = parsed.port
+            parsed_host = parsed.hostname
+            if parsed_host in {"http", "https"}:
+                parsed_host = None
+            host = public_host or parsed_host or request_host or _resolve_host()
+            port = (
+                public_port
+                if public_port is not None
+                else parsed.port
+                if parsed.port is not None
+                else request_port
+            )
             path = parsed.path or ""
             if path in {"", "/", "/ws"}:
                 path = _channel_path(channel)
+            if parsed_host is None and path.startswith("//"):
+                path = _channel_path(channel)
             if not path.startswith("/"):
                 path = "/" + path.lstrip("/")
-            scheme = parsed.scheme or scheme_hint
+            parsed_scheme = _scheme_from_hint(parsed.scheme)
+            scheme = override_scheme or parsed_scheme or fallback_scheme
             netloc = host or ""
             if port:
                 netloc = f"{host}:{port}"
