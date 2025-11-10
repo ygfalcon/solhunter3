@@ -30,6 +30,9 @@ class Proposal:
     agent: str
 
 
+_DEFAULT_EVAL_CONCURRENCY = max(1, int(os.getenv("AGENT_EVALUATION_CONCURRENCY", "8") or 8))
+
+
 class AgentRuntime:
     def __init__(self, manager: AgentManager, portfolio: Portfolio) -> None:
         self.manager = manager
@@ -39,6 +42,7 @@ class AgentRuntime:
         self._tokens: set[str] = set()
         self._ewma: dict[str, float] = {}
         self._subscriptions: list[Callable[[], None]] = []
+        self._eval_semaphore = asyncio.Semaphore(_DEFAULT_EVAL_CONCURRENCY)
 
     async def start(self) -> None:
         self._running = True
@@ -121,10 +125,11 @@ class AgentRuntime:
             pass
 
     async def _evaluate_and_publish(self, token: str) -> None:
-        try:
-            actions: List[Dict[str, Any]] = await self.manager.evaluate(token, self.portfolio)
-        except Exception:
-            return
+        async with self._eval_semaphore:
+            try:
+                actions: List[Dict[str, Any]] = await self.manager.evaluate(token, self.portfolio)
+            except Exception:
+                return
         for act in actions:
             # Map evaluated actions directly to decisions; includes price/amount
             price = act.get("price")
