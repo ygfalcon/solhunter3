@@ -95,6 +95,8 @@ _CACHE: dict[str, object] = {
     "rpc_identity": "",
 }
 
+_CACHE_LOCK = asyncio.Lock()
+
 
 def _rpc_identity(url: Optional[str]) -> str:
     """Return a stable identity for the active RPC endpoint/cluster."""
@@ -326,14 +328,18 @@ class DiscoveryAgent:
         else:
             active_method = requested_method
         current_rpc_identity = _rpc_identity(self.rpc_url)
+        async with _CACHE_LOCK:
+            cached_tokens_raw = _CACHE.get("tokens")
+            cache_limit = int(_CACHE.get("limit", 0))
+            cached_method = (_CACHE.get("method") or "").lower()
+            cached_identity = str(_CACHE.get("rpc_identity") or "")
+            cache_ts = float(_CACHE.get("ts", 0.0))
+
         cached_tokens = (
-            list(_CACHE.get("tokens", []))
-            if isinstance(_CACHE.get("tokens"), list)
+            list(cached_tokens_raw)
+            if isinstance(cached_tokens_raw, list)
             else []
         )
-        cache_limit = int(_CACHE.get("limit", 0))
-        cached_method = (_CACHE.get("method") or "").lower()
-        cached_identity = str(_CACHE.get("rpc_identity") or "")
         identity_matches = bool(
             (not cached_identity and not current_rpc_identity)
             or cached_identity == current_rpc_identity
@@ -385,7 +391,7 @@ class DiscoveryAgent:
         if (
             ttl > 0
             and cached_tokens
-            and now - float(_CACHE.get("ts", 0.0)) < ttl
+            and now - cache_ts < ttl
             and (not method_override or cached_method == active_method or not cached_method)
             and identity_matches
         ):
@@ -474,11 +480,12 @@ class DiscoveryAgent:
             self._config_error_event_reported = True
 
         if ttl > 0 and tokens:
-            _CACHE["tokens"] = list(tokens)
-            _CACHE["ts"] = now
-            _CACHE["limit"] = self.limit
-            _CACHE["method"] = active_method
-            _CACHE["rpc_identity"] = current_rpc_identity
+            async with _CACHE_LOCK:
+                _CACHE["tokens"] = list(tokens)
+                _CACHE["ts"] = now
+                _CACHE["limit"] = self.limit
+                _CACHE["method"] = active_method
+                _CACHE["rpc_identity"] = current_rpc_identity
 
         return tokens
 
