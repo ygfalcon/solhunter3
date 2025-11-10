@@ -171,3 +171,58 @@ def test_normalize_bus_configuration_exports() -> None:
     assert exports["MEMPOOL_STREAM_BROKER_CHANNEL"] == "test-channel"
     assert exports["AMM_WATCH_BROKER_CHANNEL"] == "test-channel"
     assert "RUNTIME_MANIFEST channel=test-channel" in completed.stderr
+
+
+def test_validate_env_file_handles_export(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    marker = "validate_env_file() {"
+    start = source.find(marker)
+    if start == -1:
+        raise ValueError("validate_env_file not found in launch_live.sh")
+    end = source.find("\n}\n", start)
+    if end == -1:
+        raise ValueError("validate_env_file did not terminate as expected")
+    validate_fn = source[start : end + len("\n}\n")]
+
+    env_file = tmp_path / "env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "API_KEY=alpha",  # simple assignment
+                "export PUBLIC_URL=https://service.invalid",  # exported assignment
+                "export SECRET_TOKEN=beta",  # exported secret should be masked
+            ]
+        )
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": sys.executable,
+            "ENV_FILE": str(env_file),
+        }
+    )
+
+    bash_script = dedent(
+        """
+        set -euo pipefail
+        %(validate)s
+        validate_env_file
+        """
+        % {"validate": validate_fn}
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    )
+
+    output_lines = completed.stdout.strip().splitlines()
+    assert "API_KEY=***" in output_lines
+    assert "SECRET_TOKEN=***" in output_lines
+    assert "PUBLIC_URL=https://service.invalid" in output_lines
