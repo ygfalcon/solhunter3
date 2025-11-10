@@ -143,7 +143,7 @@ _CACHE_LOCK = Lock()
 _BIRDEYE_DISABLED_INFO = False
 
 _ORCA_CATALOG_CACHE: tuple[float, Dict[str, List[Dict[str, Any]]]] = (0.0, {})
-_ORCA_CATALOG_LOCK: asyncio.Lock = asyncio.Lock()
+_ORCA_CATALOG_LOCK: asyncio.Lock | None = None
 
 _BIRDEYE_TOKENLIST_URL = (
     (os.getenv("BIRDEYE_TOKENLIST_URL") or "https://api.birdeye.so/defi/tokenlist")
@@ -267,6 +267,13 @@ async def _get_cache_lock() -> asyncio.Lock:
     return _JSON_CACHE_LOCK
 
 
+async def _get_orca_catalog_lock() -> asyncio.Lock:
+    global _ORCA_CATALOG_LOCK
+    if _ORCA_CATALOG_LOCK is None:
+        _ORCA_CATALOG_LOCK = asyncio.Lock()
+    return _ORCA_CATALOG_LOCK
+
+
 def _resolve_birdeye_api_key() -> str:
     """Return the configured BirdEye API key (env var or default)."""
 
@@ -345,7 +352,8 @@ async def _load_orca_catalog(
     if not _ENABLE_ORCA:
         return {}
     ttl = max(60.0, float(_ORCA_CATALOG_TTL))
-    async with _ORCA_CATALOG_LOCK:
+    lock = await _get_orca_catalog_lock()
+    async with lock:
         global _ORCA_CATALOG_CACHE
         expires, cached = _ORCA_CATALOG_CACHE
         now = time.monotonic()
