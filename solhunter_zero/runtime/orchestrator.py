@@ -568,6 +568,7 @@ class RuntimeOrchestrator:
                     detail_text_parts.append(text)
             ws_detail = "; ".join(detail_text_parts)
             ws_ok = True
+        ws_urls: dict[str, str] = {}
         if hasattr(_ui_module, "get_ws_urls"):
             try:
                 ws_urls = _ui_module.get_ws_urls()  # type: ignore[attr-defined]
@@ -589,6 +590,23 @@ class RuntimeOrchestrator:
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
         await self._publish_stage("ui:ws", ws_ok, ws_detail)
+        if ws_ok:
+            status = "ok"
+            if ws_detail.lower().startswith("degraded"):
+                status = "degraded"
+            rl_url = ws_urls.get("rl") or "-"
+            events_url = ws_urls.get("events") or "-"
+            logs_url = ws_urls.get("logs") or "-"
+            readiness_line = (
+                "UI_WS_READY "
+                f"status={status} "
+                f"rl_ws={rl_url} "
+                f"events_ws={events_url} "
+                f"logs_ws={logs_url}"
+            )
+            if ws_detail and status != "ok":
+                readiness_line += f" detail={ws_detail}"
+            log.info(readiness_line)
         http_disabled = parse_bool_env("UI_DISABLE_HTTP_SERVER", False)
 
         def _determine_host_and_requested_port() -> tuple[str, int]:

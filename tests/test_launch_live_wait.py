@@ -46,6 +46,7 @@ def test_wait_for_ready_accepts_disabled(tmp_path: Path) -> None:
         "\n".join(
             [
                 "[ts] UI_READY url=http://localhost:1234",  # UI ready marker
+                "[ts] UI_WS_READY status=ok rl_ws=ws://localhost:2345 events_ws=ws://localhost:3456 logs_ws=ws://localhost:4567",
                 "[ts] Event bus: connected",  # Event bus connected marker
                 "[ts] stage=golden:start ok=True detail=disabled",  # Golden pipeline disabled marker
                 "[ts] RUNTIME_READY",  # Runtime ready marker

@@ -1005,6 +1005,7 @@ wait_for_ready() {
   local waited=0
   local ui_seen=0
   local bus_seen=0
+  local ui_ws_seen=0
   local golden_seen=0
   local golden_disabled_seen=0
   local runtime_seen=0
@@ -1014,6 +1015,9 @@ wait_for_ready() {
     fi
     if [[ $ui_seen -eq 0 ]] && grep -q "UI_READY" "$log" 2>/dev/null; then
       ui_seen=1
+    fi
+    if [[ $ui_ws_seen -eq 0 ]] && grep -q "UI_WS_READY" "$log" 2>/dev/null; then
+      ui_ws_seen=1
     fi
     if [[ $bus_seen -eq 0 ]] && grep -q "Event bus: connected" "$log" 2>/dev/null; then
       bus_seen=1
@@ -1029,7 +1033,7 @@ wait_for_ready() {
     if [[ $runtime_seen -eq 0 ]] && grep -q "RUNTIME_READY" "$log" 2>/dev/null; then
       runtime_seen=1
     fi
-    if [[ $ui_seen -eq 1 && $bus_seen -eq 1 && $golden_seen -eq 1 && $runtime_seen -eq 1 ]]; then
+    if [[ $ui_seen -eq 1 && $ui_ws_seen -eq 1 && $bus_seen -eq 1 && $golden_seen -eq 1 && $runtime_seen -eq 1 ]]; then
       return 0
     fi
     if [[ -n $pid ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -1042,6 +1046,9 @@ wait_for_ready() {
   local missing=""
   if [[ $ui_seen -eq 0 ]]; then
     missing+=" UI_READY"
+  fi
+  if [[ $ui_ws_seen -eq 0 ]]; then
+    missing+=" UI_WS_READY"
   fi
   if [[ $bus_seen -eq 0 ]]; then
     missing+=" Event bus"
