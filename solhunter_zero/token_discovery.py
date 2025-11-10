@@ -821,7 +821,12 @@ async def _fetch_birdeye_tokens() -> List[TokenEntry]:
 
     tokens: Dict[str, TokenEntry] = {}
     offset = 0
-    target_count = max(int(_MAX_TOKENS * _OVERFETCH_FACTOR), _PAGE_LIMIT)
+    overfetch = max(1.0, float(_OVERFETCH_FACTOR))
+    target_count = max(
+        _PAGE_LIMIT,
+        _MAX_TOKENS,
+        int(math.ceil(_MAX_TOKENS * overfetch)),
+    )
     backoff = _BIRDEYE_BACKOFF
 
     logger.debug(

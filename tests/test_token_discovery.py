@@ -132,6 +132,93 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_birdeye_tokens_respects_requested_limit(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    monkeypatch.setattr(td, "_MAX_TOKENS", 5)
+    monkeypatch.setattr(td, "_PAGE_LIMIT", 2)
+    monkeypatch.setattr(td, "_OVERFETCH_FACTOR", 0.8)
+    monkeypatch.setattr(td, "_MAX_OFFSET", 50)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "key")
+    monkeypatch.setattr(td, "_BIRDEYE_TOKENLIST_URL", "https://example.test/tokens")
+
+    addresses = [
+        "So11111111111111111111111111111111111111112",
+        "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU",
+        "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "7XSZv4a5oX28kNvztNFVQVw1Gc7YDxUM3FZ3VAbbYzup",
+        "4k3Dyjzvzp8e9mioLY7dHyQ2j7W4A5Lxw5Eohkxm5BD",
+    ]
+
+    def _item(addr: str, *, liq: float) -> dict:
+        return {
+            "address": addr,
+            "name": f"Token {addr[:4]}",
+            "symbol": addr[:3],
+            "v24hUSD": 10000 + liq,
+            "liquidity": liq,
+            "price": 1.0,
+            "v24hChangePercent": 0.5,
+        }
+
+    payloads = [
+        {"data": {"tokens": [_item(a, liq=1000 + i) for i, a in enumerate(addresses[:2])], "total": len(addresses)}},
+        {"data": {"tokens": [_item(a, liq=2000 + i) for i, a in enumerate(addresses[2:4])], "total": len(addresses)}},
+        {"data": {"tokens": [_item(a, liq=3000 + i) for i, a in enumerate(addresses[4:])], "total": len(addresses)}},
+    ]
+
+    class FakeResp:
+        status = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self, *args, **kwargs):
+            _ = args, kwargs
+            return self._payload
+
+        async def text(self):
+            return ""
+
+        def raise_for_status(self):
+            return None
+
+    class FakeSession:
+        def __init__(self, payloads):
+            self._payloads = list(payloads)
+            self.calls = []
+
+        def get(self, url, *, params=None, headers=None, timeout=None):
+            self.calls.append((url, params))
+            if not self._payloads:
+                raise AssertionError("exhausted fake responses")
+            return FakeResp(self._payloads.pop(0))
+
+    fake_session = FakeSession(payloads)
+
+    async def get_session(*, timeout=None):
+        _ = timeout
+        return fake_session
+
+    monkeypatch.setattr(td, "get_session", get_session)
+
+    result = await td._fetch_birdeye_tokens()
+
+    assert len(result) >= td._MAX_TOKENS
+    returned = {entry["address"] for entry in result}
+    assert set(addresses[: td._MAX_TOKENS]).issubset(returned)
+    assert len(fake_session.calls) >= 3
+
+
+@pytest.mark.asyncio
 async def test_discover_candidates_merges_new_sources(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
