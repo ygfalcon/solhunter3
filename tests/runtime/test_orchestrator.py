@@ -130,6 +130,51 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
             thread_obj.join(timeout=1)
 
 
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
+    events: list[tuple[str, bool, str]] = []
+    ready_calls: list[tuple[str, int]] = []
+
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        events.append((stage, ok, detail))
+
+    def fake_emit_ui_ready(self, host: str, port: int) -> None:
+        ready_calls.append((host, port))
+
+    monkeypatch.setenv("UI_DISABLE_HTTP_SERVER", "1")
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(RuntimeOrchestrator, "_emit_ui_ready", fake_emit_ui_ready)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {},
+    )
+
+    orch = RuntimeOrchestrator(run_http=True)
+    await orch.start_ui()
+
+    assert ready_calls == [("127.0.0.1", 5000)]
+    http_events = [event for event in events if event[0] == "ui:http"]
+    assert http_events, "expected ui:http stage emission"
+    latest = http_events[-1]
+    assert latest[1] is True
+    assert "disabled" in latest[2]
+    assert "port=5000" in latest[2]
+
+
 def test_orchestrator_stops_on_resource_budget(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
