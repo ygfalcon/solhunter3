@@ -65,6 +65,48 @@ async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_orchestrator_logs_ui_ws_ready(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    ws_urls = {
+        "events": "ws://localhost:1111/events",
+        "logs": "ws://localhost:1111/logs",
+        "rl": "ws://localhost:1111/rl",
+    }
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: ws_urls)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {"events": object()},
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+    await orch.start_ui()
+
+    ws_logs = [message for message in caplog.messages if message.startswith("UI_WS_READY ")]
+    assert ws_logs, "expected UI_WS_READY log entry"
+    latest = ws_logs[-1]
+    assert "status=ok" in latest
+    assert "events_ws=ws://localhost:1111/events" in latest
+    assert "logs_ws=ws://localhost:1111/logs" in latest
+    assert "rl_ws=ws://localhost:1111/rl" in latest
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
