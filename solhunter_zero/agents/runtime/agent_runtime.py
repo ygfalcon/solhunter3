@@ -17,6 +17,7 @@ from ... import event_bus
 from ...agent_manager import AgentManager
 from ...portfolio import Portfolio
 from ...prices import fetch_token_prices_async
+from ...token_aliases import canonical_mint, validate_mint
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class AgentRuntime:
             entries = payload
         else:
             entries = [payload]
+        normalized_tokens: set[str] = set()
         for entry in entries:
             raw_token: Any = None
             if isinstance(entry, Mapping):
@@ -97,14 +99,38 @@ class AgentRuntime:
                     raw_token = entry.get("mint")
             else:
                 raw_token = entry
-            if not raw_token:
+            if raw_token is None:
                 continue
-            token = str(raw_token)
+            token_text = str(raw_token)
+            canonical = canonical_mint(token_text)
+            if not canonical:
+                log.debug(
+                    "ignoring empty token discovery",
+                    extra={"raw_token": token_text},
+                )
+                continue
+            if not validate_mint(canonical):
+                log.debug(
+                    "ignoring invalid token discovery",
+                    extra={"token": canonical, "raw_token": token_text},
+                )
+                continue
+            if canonical in normalized_tokens:
+                log.debug(
+                    "ignoring duplicate token discovery",
+                    extra={"token": canonical, "raw_token": token_text},
+                )
+                continue
+            normalized_tokens.add(canonical)
             try:
-                self._tokens.add(token)
+                self._tokens.add(canonical)
             except Exception:
                 pass
-            task = asyncio.create_task(self._evaluate_and_publish(token))
+            log.debug(
+                "scheduling evaluation for discovered token",
+                extra={"token": canonical, "raw_token": token_text},
+            )
+            task = asyncio.create_task(self._evaluate_and_publish(canonical))
             self._tasks.append(task)
             task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
 
