@@ -39,6 +39,7 @@ class AgentRuntime:
         self._tokens: set[str] = set()
         self._ewma: dict[str, float] = {}
         self._subscriptions: list[Callable[[], None]] = []
+        self._evaluate_error_count: int = 0
 
     async def start(self) -> None:
         self._running = True
@@ -124,6 +125,18 @@ class AgentRuntime:
         try:
             actions: List[Dict[str, Any]] = await self.manager.evaluate(token, self.portfolio)
         except Exception:
+            self._evaluate_error_count += 1
+            if log.isEnabledFor(logging.ERROR) and (
+                self._evaluate_error_count == 1 or self._evaluate_error_count % 10 == 0
+            ):
+                log.exception(
+                    "manager.evaluate failed",
+                    extra={
+                        "token": token,
+                        "error_count": self._evaluate_error_count,
+                        "portfolio_total_value": getattr(self.portfolio, "total_value", None),
+                    },
+                )
             return
         for act in actions:
             # Map evaluated actions directly to decisions; includes price/amount
