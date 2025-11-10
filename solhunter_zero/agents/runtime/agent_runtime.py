@@ -10,6 +10,7 @@ coordinator can consolidate them into decisions.
 import asyncio
 import logging
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
@@ -36,8 +37,9 @@ class AgentRuntime:
         self.portfolio = portfolio
         self._tasks: list[asyncio.Task] = []
         self._running = False
-        self._tokens: set[str] = set()
-        self._ewma: dict[str, float] = {}
+        self._max_tracked_tokens = int(os.getenv("RUNTIME_MAX_TRACKED_TOKENS", "256") or 256)
+        self._tokens: OrderedDict[str, None] = OrderedDict()
+        self._ewma: OrderedDict[str, float] = OrderedDict()
         self._subscriptions: list[Callable[[], None]] = []
 
     async def start(self) -> None:
@@ -96,10 +98,7 @@ class AgentRuntime:
             if not raw_token:
                 continue
             token = str(raw_token)
-            try:
-                self._tokens.add(token)
-            except Exception:
-                pass
+            self._remember_token(token)
             task = asyncio.create_task(self._evaluate_and_publish(token))
             self._tasks.append(task)
             task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
@@ -115,7 +114,7 @@ class AgentRuntime:
                 # Clip outliers to 2x previous EWMA
                 clipped = min(price, 2.0 * prev)
                 ewma = alpha * clipped + (1 - alpha) * prev
-                self._ewma[token] = ewma
+                self._update_ewma(token, ewma)
                 self.portfolio.record_prices({token: ewma})
         except Exception:
             pass
@@ -183,9 +182,11 @@ class AgentRuntime:
         interval = float(os.getenv("PRICE_BACKFILL_INTERVAL", "10") or 10)
         while self._running:
             try:
-                tokens = set(self._tokens) | set(self.portfolio.balances.keys())
+                tracked_tokens = list(self._tokens.keys())
+                portfolio_tokens = list(self.portfolio.balances.keys())
+                tokens: list[str] = list(dict.fromkeys(tracked_tokens + portfolio_tokens))
                 if tokens:
-                    prices = await fetch_token_prices_async(list(tokens))
+                    prices = await fetch_token_prices_async(tokens)
                     # publish price_update events for tokens we have no recent history for
                     for tok, pr in prices.items():
                         if pr:
@@ -197,3 +198,24 @@ class AgentRuntime:
             except Exception:
                 pass
             await asyncio.sleep(max(1.0, interval))
+
+    def _remember_token(self, token: str) -> None:
+        try:
+            if token in self._tokens:
+                self._tokens.move_to_end(token)
+            else:
+                self._tokens[token] = None
+                if len(self._tokens) > self._max_tracked_tokens:
+                    oldest, _ = self._tokens.popitem(last=False)
+                    self._ewma.pop(oldest, None)
+        except Exception:
+            pass
+
+    def _update_ewma(self, token: str, value: float) -> None:
+        try:
+            self._ewma[token] = value
+            self._ewma.move_to_end(token)
+            if len(self._ewma) > self._max_tracked_tokens:
+                self._ewma.popitem(last=False)
+        except Exception:
+            pass
