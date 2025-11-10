@@ -134,7 +134,7 @@ import json
 import os
 import socket
 import sys
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 DEFAULT_REDIS = "redis://localhost:6379/1"
 DEFAULT_BUS = "ws://127.0.0.1:8779"
@@ -149,7 +149,13 @@ redis_keys = [
     "AMM_WATCH_REDIS_URL",
 ]
 
-def _canonical(url: str) -> tuple[str, str, int, int]:
+def _format_host(host: str) -> str:
+    if ":" in host and not (host.startswith("[") and host.endswith("]")):
+        return f"[{host}]"
+    return host
+
+
+def _canonical(url: str) -> tuple[str, int]:
     candidate = url if "://" in url else f"redis://{url}"
     parsed = urlparse(candidate)
     scheme = parsed.scheme or "redis"
@@ -158,17 +164,55 @@ def _canonical(url: str) -> tuple[str, str, int, int]:
     path = (parsed.path or "/").lstrip("/")
     segment = path.split("/", 1)[0]
     db = int(segment) if segment else 0
-    return scheme, host, port, db
+
+    host_part = _format_host(host)
+    netloc_prefix = ""
+    if parsed.username is not None:
+        netloc_prefix = parsed.username
+        if parsed.password is not None:
+            netloc_prefix = f"{netloc_prefix}:{parsed.password}"
+    elif parsed.password is not None:
+        netloc_prefix = f":{parsed.password}"
+    if netloc_prefix:
+        netloc_prefix = f"{netloc_prefix}@"
+
+    netloc = f"{netloc_prefix}{host_part}:{port}"
+    canonical = urlunparse((scheme, netloc, f"/{db}", "", parsed.query, parsed.fragment))
+    return canonical, db
+
+
+def _mask_redis_url(url: str) -> str:
+    parsed = urlparse(url)
+    scheme = parsed.scheme or "redis"
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 6379
+    host_part = _format_host(host)
+
+    username = parsed.username
+    password = parsed.password
+    netloc_prefix = ""
+    if username is not None:
+        netloc_prefix = username
+        if password is not None:
+            netloc_prefix = f"{netloc_prefix}:***"
+    elif password is not None:
+        netloc_prefix = ":***"
+    if netloc_prefix:
+        netloc_prefix = f"{netloc_prefix}@"
+
+    netloc = f"{netloc_prefix}{host_part}:{port}"
+    return urlunparse((scheme, netloc, parsed.path or "/", "", parsed.query, parsed.fragment))
 
 errors: list[str] = []
 manifest: dict[str, str] = {}
+masked_manifest: dict[str, str] = {}
 target_url: str | None = None
 
 for key in redis_keys:
     raw = os.environ.get(key) or DEFAULT_REDIS
     os.environ[key] = raw
     try:
-        scheme, host, port, db = _canonical(raw)
+        canonical, db = _canonical(raw)
     except Exception:
         errors.append(f"{key} has invalid Redis URL: {raw}")
         continue
@@ -177,9 +221,9 @@ for key in redis_keys:
             f"{key} targets database {db}; configure database 1 for all runtime services "
             "(export {key}=redis://localhost:6379/1 or update your env file)."
         )
-    canonical = f"{scheme}://{host}:{port}/{db}"
     os.environ[key] = canonical
     manifest[key] = canonical
+    masked_manifest[key] = _mask_redis_url(canonical)
     if target_url is None:
         target_url = canonical
     elif canonical != target_url:
@@ -211,10 +255,10 @@ if errors:
 manifest_line = (
     "RUNTIME_MANIFEST "
     f"channel={channel} "
-    f"redis={manifest.get('REDIS_URL', DEFAULT_REDIS)} "
-    f"mint_stream={manifest.get('MINT_STREAM_REDIS_URL', DEFAULT_REDIS)} "
-    f"mempool={manifest.get('MEMPOOL_STREAM_REDIS_URL', DEFAULT_REDIS)} "
-    f"amm_watch={manifest.get('AMM_WATCH_REDIS_URL', DEFAULT_REDIS)} "
+    f"redis={masked_manifest.get('REDIS_URL', DEFAULT_REDIS)} "
+    f"mint_stream={masked_manifest.get('MINT_STREAM_REDIS_URL', DEFAULT_REDIS)} "
+    f"mempool={masked_manifest.get('MEMPOOL_STREAM_REDIS_URL', DEFAULT_REDIS)} "
+    f"amm_watch={masked_manifest.get('AMM_WATCH_REDIS_URL', DEFAULT_REDIS)} "
     f"bus={bus_url}"
 )
 print(manifest_line)
