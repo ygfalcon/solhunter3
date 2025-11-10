@@ -581,7 +581,22 @@ class RuntimeOrchestrator:
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
         await self._publish_stage("ui:ws", ws_ok, ws_detail)
-        if self.run_http and str(os.getenv("UI_DISABLE_HTTP_SERVER", "")).lower() not in {"1", "true", "yes"}:
+        http_disabled = parse_bool_env("UI_DISABLE_HTTP_SERVER", False)
+
+        def _determine_host_and_requested_port() -> tuple[str, int]:
+            host = os.getenv("UI_HOST", "127.0.0.1")
+            port_env: str | int | None = os.getenv("UI_PORT")
+            if not port_env:
+                port_env = os.getenv("PORT")
+            if not port_env:
+                port_env = "5000"
+            try:
+                requested_port = int(str(port_env))
+            except (TypeError, ValueError):
+                requested_port = 0
+            return host, requested_port
+
+        if self.run_http and not http_disabled:
             # Start Flask server in a background thread using werkzeug only if available.
             import threading
 
@@ -613,12 +628,7 @@ class RuntimeOrchestrator:
             ) -> None:
                 server = None
                 try:
-                    host = os.getenv("UI_HOST", "127.0.0.1")
-                    port_env = os.getenv("UI_PORT", os.getenv("PORT", "5000") or 5000)
-                    try:
-                        requested_port = int(port_env)
-                    except (TypeError, ValueError):
-                        requested_port = 0
+                    host, requested_port = _determine_host_and_requested_port()
 
                     if shutdown_event.is_set():
                         ready_event.set()
@@ -711,6 +721,21 @@ class RuntimeOrchestrator:
                 "shutdown_event": shutdown_event,
                 "ready_event": ready_event,
             }
+        elif http_disabled:
+            host, requested_port = _determine_host_and_requested_port()
+            if requested_port > 0:
+                os.environ.setdefault("UI_PORT", str(requested_port))
+            port_for_ready = requested_port if requested_port > 0 else 0
+            try:
+                self._emit_ui_ready(host, port_for_ready)
+            except Exception:
+                log.exception("Failed to emit UI readiness signal (HTTP disabled)")
+            port_detail = str(requested_port) if requested_port > 0 else "auto"
+            await self._publish_stage(
+                "ui:http",
+                True,
+                f"disabled host={host} port={port_detail}",
+            )
 
     async def start_agents(self) -> None:
         # Use existing startup path to ensure consistent connectivity + depth_service
