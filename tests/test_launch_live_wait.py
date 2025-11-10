@@ -132,6 +132,8 @@ def test_normalize_bus_configuration_exports() -> None:
         export MINT_STREAM_REDIS_URL='cache.example:6380/1'
         export MEMPOOL_STREAM_REDIS_URL='cache.example:6380/1'
         export AMM_WATCH_REDIS_URL='cache.example:6380/1'
+        export BROKER_URL='cache.example:6380/1'
+        export BROKER_URLS='cache.example:6380/1 , cache.example:6380/1'
         %(normalize)s
         normalize_bus_configuration
         """
@@ -163,6 +165,8 @@ def test_normalize_bus_configuration_exports() -> None:
     assert exports["MINT_STREAM_REDIS_URL"] == "redis://cache.example:6380/1"
     assert exports["MEMPOOL_STREAM_REDIS_URL"] == "redis://cache.example:6380/1"
     assert exports["AMM_WATCH_REDIS_URL"] == "redis://cache.example:6380/1"
+    assert exports["BROKER_URL"] == "redis://cache.example:6380/1"
+    assert exports["BROKER_URLS"] == "redis://cache.example:6380/1,redis://cache.example:6380/1"
     assert exports["MINT_STREAM_BROKER_CHANNEL"] == "test-channel"
     assert exports["MEMPOOL_STREAM_BROKER_CHANNEL"] == "test-channel"
     assert exports["AMM_WATCH_BROKER_CHANNEL"] == "test-channel"
