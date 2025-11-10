@@ -135,6 +135,7 @@ import os
 import socket
 import sys
 from urllib.parse import urlparse
+import shlex
 
 DEFAULT_REDIS = "redis://localhost:6379/1"
 DEFAULT_BUS = "ws://127.0.0.1:8779"
@@ -217,7 +218,18 @@ manifest_line = (
     f"amm_watch={manifest.get('AMM_WATCH_REDIS_URL', DEFAULT_REDIS)} "
     f"bus={bus_url}"
 )
-print(manifest_line)
+print(manifest_line, file=sys.stderr)
+
+exports = {
+    "BROKER_CHANNEL": channel,
+    "EVENT_BUS_URL": bus_url,
+    **manifest,
+}
+for key in channel_keys:
+    exports[key] = os.environ[key]
+
+for key, value in exports.items():
+    print(f"export {key}={shlex.quote(value)}")
 PY
 }
 
@@ -707,11 +719,15 @@ log_info "Provider status"
 printf '%s\n' "$PROVIDER_STATUS"
 
 log_info "Standardising event bus and Redis configuration"
-if ! BUS_MANIFEST=$(normalize_bus_configuration); then
+if ! BUS_EXPORTS=$(normalize_bus_configuration); then
   log_warn "Inconsistent Redis or broker configuration detected"
   exit $EXIT_KEYS
 fi
-log_info "$BUS_MANIFEST"
+if ! eval "$BUS_EXPORTS"; then
+  log_warn "Failed to apply canonical Redis or broker configuration"
+  exit $EXIT_KEYS
+fi
+log_info "RUNTIME_MANIFEST channel=$BROKER_CHANNEL redis=$REDIS_URL mint_stream=$MINT_STREAM_REDIS_URL mempool=$MEMPOOL_STREAM_REDIS_URL amm_watch=$AMM_WATCH_REDIS_URL bus=$EVENT_BUS_URL"
 
 SOCKET_STATE_RAW=$(wait_for_socket_release)
 read -r SOCKET_STATE SOCKET_HOST SOCKET_PORT <<<"$SOCKET_STATE_RAW"
