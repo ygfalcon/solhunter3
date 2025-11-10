@@ -10,6 +10,8 @@ import time
 from textwrap import dedent
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,7 +38,14 @@ def _extract_function(source: str, name: str) -> str:
     return source[start:end] + "\n"
 
 
-def test_wait_for_ready_accepts_disabled(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "golden_line",
+    [
+        "[ts] stage=golden:start ok=True detail=disabled",
+        "[ts] golden:start disabled",
+    ],
+)
+def test_wait_for_ready_accepts_disabled(tmp_path: Path, golden_line: str) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
     functions = _extract_function(source, "print_log_excerpt") + _extract_function(source, "wait_for_ready")
@@ -47,7 +56,7 @@ def test_wait_for_ready_accepts_disabled(tmp_path: Path) -> None:
             [
                 "[ts] UI_READY url=http://localhost:1234",  # UI ready marker
                 "[ts] Event bus: connected",  # Event bus connected marker
-                "[ts] stage=golden:start ok=True detail=disabled",  # Golden pipeline disabled marker
+                golden_line,
                 "[ts] RUNTIME_READY",  # Runtime ready marker
             ]
         )

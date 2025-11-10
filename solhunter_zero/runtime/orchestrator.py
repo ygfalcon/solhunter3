@@ -861,6 +861,7 @@ class RuntimeOrchestrator:
                 self._golden_service = None
                 raise
         else:
+            log.info("golden:start disabled")
             await self._publish_stage("golden:start", True, "disabled")
 
         # Announce loaded agents
