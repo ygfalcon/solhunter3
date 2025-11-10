@@ -8,6 +8,13 @@ from aiohttp import ClientTimeout
 from solhunter_zero import token_discovery as td
 
 
+def test_token_discovery_importable_under_pytest():
+    import importlib
+
+    reloaded = importlib.reload(td)
+    assert reloaded is td
+
+
 @pytest.mark.asyncio
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()
