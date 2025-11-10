@@ -134,7 +134,7 @@ import json
 import os
 import socket
 import sys
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 import shlex
 
 DEFAULT_REDIS = "redis://localhost:6379/1"
@@ -150,7 +150,7 @@ redis_keys = [
     "AMM_WATCH_REDIS_URL",
 ]
 
-def _canonical(url: str) -> tuple[str, str, int, int]:
+def _canonical(url: str) -> tuple[int, str]:
     candidate = url if "://" in url else f"redis://{url}"
     parsed = urlparse(candidate)
     scheme = parsed.scheme or "redis"
@@ -159,7 +159,27 @@ def _canonical(url: str) -> tuple[str, str, int, int]:
     path = (parsed.path or "/").lstrip("/")
     segment = path.split("/", 1)[0]
     db = int(segment) if segment else 0
-    return scheme, host, port, db
+
+    auth = ""
+    if parsed.username is not None or parsed.password is not None:
+        user = parsed.username or ""
+        if parsed.password is None:
+            auth = f"{user}@"
+        else:
+            auth = f"{user}:{parsed.password}@"
+
+    netloc = f"{auth}{host}:{port}"
+    canonical = urlunparse(
+        (
+            scheme,
+            netloc,
+            f"/{db}",
+            "",
+            parsed.query or "",
+            parsed.fragment or "",
+        )
+    )
+    return db, canonical
 
 errors: list[str] = []
 manifest: dict[str, str] = {}
@@ -169,7 +189,7 @@ for key in redis_keys:
     raw = os.environ.get(key) or DEFAULT_REDIS
     os.environ[key] = raw
     try:
-        scheme, host, port, db = _canonical(raw)
+        db, canonical = _canonical(raw)
     except Exception:
         errors.append(f"{key} has invalid Redis URL: {raw}")
         continue
@@ -178,7 +198,6 @@ for key in redis_keys:
             f"{key} targets database {db}; configure database 1 for all runtime services "
             "(export {key}=redis://localhost:6379/1 or update your env file)."
         )
-    canonical = f"{scheme}://{host}:{port}/{db}"
     os.environ[key] = canonical
     manifest[key] = canonical
     if target_url is None:
