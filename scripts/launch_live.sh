@@ -526,6 +526,17 @@ Usage: bash scripts/launch_live.sh --env <env-file> --micro <0|1> [--canary] --b
 EOF
 }
 
+validate_config_path() {
+  local candidate=$1
+  if [[ -z $candidate ]]; then
+    return 0
+  fi
+  if [[ ! -r $candidate ]]; then
+    echo "Config file $candidate must exist and be readable" >&2
+    exit $EXIT_KEYS
+  fi
+}
+
 need_val() {
   # ensure a flag expecting a value actually has one
   if [[ -z ${2:-} || ${2:-} == --* ]]; then
@@ -579,6 +590,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --config)
       need_val "$1" "${2:-}"; CONFIG_PATH=$2
+      validate_config_path "$CONFIG_PATH"
       shift 2
       ;;
     -h|--help)
@@ -634,12 +646,7 @@ if [[ ! -f $ENV_FILE ]]; then
   exit $EXIT_KEYS
 fi
 
-if [[ -n $CONFIG_PATH ]]; then
-  if [[ ! -e $CONFIG_PATH || ! -r $CONFIG_PATH ]]; then
-    echo "Config file $CONFIG_PATH must exist and be readable" >&2
-    exit $EXIT_KEYS
-  fi
-fi
+validate_config_path "$CONFIG_PATH"
 
 if [[ $CANARY_MODE -eq 1 ]]; then
   if [[ -z $CANARY_BUDGET || -z $CANARY_RISK ]]; then
