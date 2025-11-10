@@ -139,6 +139,8 @@ _STATIC_FALLBACK = [
 
 DEFAULT_DISCOVERY_METHOD = "helius"
 
+MIN_DISCOVERY_LIMIT = 1
+
 DEFAULT_MEMPOOL_MAX_WAIT = 10.0
 
 _DISCOVERY_METHOD_ALIASES: dict[str, str] = {
@@ -203,7 +205,15 @@ class DiscoveryAgent:
             logger.warning(
                 "BIRDEYE_API_KEY missing; discovery will fall back to static tokens"
             )
-        self.limit = resolve_discovery_limit(default=60)
+        limit = resolve_discovery_limit(default=60)
+        if limit < MIN_DISCOVERY_LIMIT:
+            logger.warning(
+                "Discovery limit %d below minimum %d; using minimum",
+                limit,
+                MIN_DISCOVERY_LIMIT,
+            )
+            limit = MIN_DISCOVERY_LIMIT
+        self.limit = limit
         self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
         mempool_max_wait_env = os.getenv("DISCOVERY_MEMPOOL_MAX_WAIT")
