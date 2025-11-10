@@ -199,7 +199,7 @@ files unless the loader is invoked with `overwrite=True`.
 | `USE_GNN_ROUTING` | `0` | Enable gnn routing |
 | `USE_GPU_SIM` | `` | Enable gpu sim |
 | `UI_PROXY_FIX` | `0` | When `1`, wrap the Flask UI with Werkzeug's `ProxyFix` so scheme/host reflect `X-Forwarded-*` headers |
-| `UI_PUBLIC_HOST` | `` | Hostname advertised to UI clients when the server binds to `0.0.0.0`/`::`; set when fronting the UI with a proxy |
+| `UI_PUBLIC_HOST` | `` | Hostname advertised to UI clients when the server binds to `0.0.0.0`/`::`; when unset the runtime falls back to the inbound request host (if available) or the system hostname, so set this explicitly when fronting the UI with a proxy |
 | `USE_MEV_BUNDLES` | `false` | Enable mev bundles |
 | `USE_NUMBA_ROUTE` | `0` | Enable numba route |
 | `USE_PRICE_STREAMS` | `0` | Enable price streams |

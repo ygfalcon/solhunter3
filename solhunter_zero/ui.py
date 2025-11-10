@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -1433,7 +1434,9 @@ def _resolve_host() -> str:
     return "127.0.0.1"
 
 
-def _resolve_public_host(bind_host: str | None = None) -> str:
+def _resolve_public_host(
+    bind_host: str | None = None, *, request_host: str | None = None
+) -> str:
     """Determine the hostname exposed to UI clients."""
 
     def _clean(value: str | None) -> str | None:
@@ -1454,6 +1457,28 @@ def _resolve_public_host(bind_host: str | None = None) -> str:
     bind = _clean(bind_host)
     if bind and bind not in {"0.0.0.0", "::"}:
         return bind
+
+    request_candidate = _clean(request_host)
+    if request_candidate:
+        host_only, _, _ = _split_netloc(request_candidate)
+        request_candidate = _clean(host_only or request_candidate)
+        if request_candidate and request_candidate not in {"0.0.0.0", "::"}:
+            return request_candidate
+
+    hostname: str | None = None
+    try:
+        hostname = socket.getfqdn()
+    except Exception:
+        hostname = None
+    if not _clean(hostname):
+        try:
+            hostname = socket.gethostname()
+        except Exception:
+            hostname = None
+
+    hostname = _clean(hostname)
+    if hostname and hostname not in {"0.0.0.0", "::"}:
+        return hostname
 
     return "127.0.0.1"
 
@@ -1892,7 +1917,7 @@ def _channel_path(channel: str) -> str:
     return candidate
 
 
-def get_ws_urls() -> dict[str, str | None]:
+def get_ws_urls(request_host: str | None = None) -> dict[str, str | None]:
     """Return websocket URLs for RL, events, and logs channels."""
 
     channel_env_keys: dict[str, tuple[str, ...]] = {
@@ -1910,7 +1935,7 @@ def get_ws_urls() -> dict[str, str | None]:
         if not resolved:
             state = _WS_CHANNELS.get(channel)
             host = state.host if state and state.host else _resolve_host()
-            url_host = _resolve_public_host(host)
+            url_host = _resolve_public_host(host, request_host=request_host)
             if channel == "rl":
                 port = state.port or _RL_WS_PORT
             elif channel == "events":
@@ -1928,7 +1953,8 @@ def get_ws_urls() -> dict[str, str | None]:
 
 
 def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
-    urls = get_ws_urls()
+    request_host = getattr(req, "host", None)
+    urls = get_ws_urls(request_host)
     request_scheme = getattr(req, "scheme", None)
     public_host_env = (
         os.getenv("UI_PUBLIC_HOST")
@@ -1936,7 +1962,7 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
         or os.getenv("UI_EXTERNAL_HOST")
     )
     public_host, public_port, public_scheme = _split_netloc(public_host_env)
-    request_host, request_port, _ = _split_netloc(getattr(req, "host", None))
+    request_host, request_port, _ = _split_netloc(request_host)
 
     def _scheme_from_hint(candidate: str | None) -> str | None:
         if not candidate:

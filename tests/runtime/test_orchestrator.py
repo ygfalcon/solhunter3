@@ -212,6 +212,47 @@ def test_emit_ui_ready_skips_invalid_port(monkeypatch, caplog, tmp_path):
     assert not (tmp_path / "ui_url.txt").exists()
 
 
+def test_emit_ui_ready_uses_detected_host(monkeypatch, caplog, tmp_path):
+    caplog.set_level(logging.INFO)
+
+    for key in ("UI_PUBLIC_HOST", "PUBLIC_URL_HOST", "UI_EXTERNAL_HOST"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("UI_HOST", "0.0.0.0")
+
+    detected_host = "ui-runtime.example.test"
+    monkeypatch.setattr(
+        "solhunter_zero.ui.socket.getfqdn", lambda: detected_host, raising=False
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.ui.socket.gethostname", lambda: detected_host, raising=False
+    )
+
+    captured_urls: list[str] = []
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._publish_ui_url_to_redis",
+        lambda url: captured_urls.append(url),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._runtime_artifact_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module.get_ws_urls",
+        lambda request_host=None: {},
+        raising=False,
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+    orch._emit_ui_ready("0.0.0.0", 5000)
+
+    readiness_logs = [message for message in caplog.messages if message.startswith("UI_READY ")]
+    assert readiness_logs, "expected UI_READY log entry"
+    assert any(f"url=http://{detected_host}:5000" in message for message in readiness_logs)
+    assert captured_urls == [f"http://{detected_host}:5000"]
+    assert (tmp_path / "ui_url.txt").read_text(encoding="utf-8") == f"http://{detected_host}:5000"
+
+
 def test_orchestrator_stops_on_resource_budget(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
