@@ -161,7 +161,12 @@ class TradeExecutor:
                     prices[token] = price
                     total_val = self.portfolio.total_value(prices)
                 except Exception:
-                    total_val = 0.0
+                    log.exception(
+                        "TradeExecutor[%s %s]: portfolio valuation failed; skipping execution",
+                        side,
+                        token,
+                    )
+                    return
                 scale = 1.0
                 if ramp > 0 and self._n < ramp:
                     scale = max(0.1, (self._n + 1) / ramp)

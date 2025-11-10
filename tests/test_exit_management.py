@@ -1,6 +1,9 @@
 import asyncio
+import logging
 import time
+from types import SimpleNamespace
 from typing import Any, Dict, List
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -197,6 +200,60 @@ def test_voting_conflict_bias_prefers_sell() -> None:
     asyncio.run(_run())
     assert emitted, "sell decision should be emitted"
     assert emitted[0].side == "sell"
+
+
+def test_trade_executor_skips_when_valuation_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    portfolio = Portfolio(path=None)
+    portfolio._apply_update("ABC", 5.0, 10.0, ts=0.0)
+
+    memory = SimpleNamespace(log_trade=AsyncMock())
+    executor = TradeExecutor(memory=memory, portfolio=portfolio)
+
+    monkeypatch.setattr(
+        portfolio,
+        "total_value",
+        MagicMock(side_effect=RuntimeError("valuation failed")),
+    )
+
+    portfolio.update_async = AsyncMock()
+    place_order_mock = AsyncMock()
+    monkeypatch.setattr(
+        "solhunter_zero.exec_service.service.place_order_async",
+        place_order_mock,
+    )
+    published: list[tuple[tuple[Any, ...], Dict[str, Any]]] = []
+    monkeypatch.setattr(
+        "solhunter_zero.exec_service.service.event_bus.publish",
+        lambda *a, **k: published.append((a, k)),
+    )
+
+    payload = {
+        "token": "ABC",
+        "side": "sell",
+        "expected_price": 12.0,
+        "size": 1.0,
+    }
+
+    async def _run() -> None:
+        caplog.set_level(logging.ERROR, logger="solhunter_zero.exec_service.service")
+        executor._on_decision(payload)
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+    assert executor._n == 0
+    assert not published
+    assert memory.log_trade.await_count == 0
+    assert portfolio.update_async.await_count == 0
+    assert place_order_mock.await_count == 0
+    assert any(
+        "portfolio valuation failed" in record.getMessage()
+        and record.exc_info is not None
+        for record in caplog.records
+    )
+    assert not executor._tasks
 
 
 def test_executor_builds_clamped_exit_plan(monkeypatch: pytest.MonkeyPatch) -> None:
