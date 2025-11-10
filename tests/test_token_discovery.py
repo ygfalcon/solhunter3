@@ -132,6 +132,94 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_discover_candidates_reuses_shared_session(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", True)
+    monkeypatch.setattr(td, "_ENABLE_METEORA", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
+    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
+    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+
+    class FakeSession:
+        def __init__(self):
+            self.closed = False
+            self.close_calls = 0
+
+        def get(self, *args, **kwargs):
+            raise AssertionError("HTTP requests not expected in test")
+
+        async def close(self):
+            self.closed = True
+            self.close_calls += 1
+
+    fake_session = FakeSession()
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return fake_session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    async def fake_birdeye():
+        return []
+
+    async def fake_collect(*args, **kwargs):
+        return {}
+
+    seen_sessions = []
+
+    async def fake_dexscreener(*, session=None):
+        assert session is fake_session
+        assert not fake_session.closed
+        seen_sessions.append(session)
+        return [
+            {
+                "address": "Fake111111111111111111111111111111111111111",
+                "symbol": "FAKE",
+                "name": "Fake Token",
+                "liquidity": 150000,
+                "volume": 220000,
+                "price": 1.0,
+                "price_change": 1.5,
+            }
+        ]
+
+    async def fake_meteora(*, session=None):
+        _ = session
+        return []
+
+    async def fake_dexlab(*, session=None):
+        _ = session
+        return []
+
+    async def fake_enrich(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_birdeye)
+    monkeypatch.setattr(td, "_collect_mempool_signals", fake_collect)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", fake_dexscreener)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", fake_meteora)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", fake_dexlab)
+    monkeypatch.setattr(td, "_enrich_with_solscan", fake_enrich)
+
+    await td.discover_candidates("https://rpc", limit=3, mempool_threshold=0.0)
+    first_sessions = list(seen_sessions)
+    assert first_sessions, "expected dex sources to run"
+    assert all(sess is fake_session for sess in first_sessions)
+    assert not fake_session.closed
+    assert fake_session.close_calls == 0
+
+    await td.discover_candidates("https://rpc", limit=3, mempool_threshold=0.0)
+    second_sessions = seen_sessions[len(first_sessions) :]
+    assert second_sessions, "expected dex sources to run again"
+    assert all(sess is fake_session for sess in second_sessions)
+    assert not fake_session.closed
+    assert fake_session.close_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_discover_candidates_merges_new_sources(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
