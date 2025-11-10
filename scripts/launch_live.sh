@@ -562,11 +562,21 @@ check_ui_health() {
     return 1
   fi
   local target="${url%/}/ui/meta"
-  local max_attempts=3
+  local total_timeout_raw="${READY_TIMEOUT:-30}"
+  local total_timeout=30
+  if [[ $total_timeout_raw =~ ^[0-9]+$ ]]; then
+    total_timeout=$total_timeout_raw
+  fi
+  if (( total_timeout <= 0 )); then
+    total_timeout=1
+  fi
+  local deadline=$((SECONDS + total_timeout))
   local sleep_seconds=1
-  local attempt=1
-  while (( attempt <= max_attempts )); do
-    log_info "UI health check attempt ${attempt}/${max_attempts} GET $target"
+  local max_sleep=10
+  local attempt=0
+  while (( SECONDS < deadline )); do
+    attempt=$((attempt + 1))
+    log_info "UI health check attempt ${attempt} GET $target"
     if UI_HEALTH_URL="$target" "$PYTHON_BIN" - <<'PY'
 import os
 import sys
@@ -583,17 +593,31 @@ with urllib.request.urlopen(req, timeout=5) as resp:
 sys.exit(0)
 PY
     then
-      log_info "UI health endpoint responded successfully"
+      log_info "UI health endpoint responded successfully (url=$target)"
       return 0
     fi
-    if (( attempt < max_attempts )); then
-      log_warn "UI health endpoint check failed (attempt ${attempt}/${max_attempts}); retrying in ${sleep_seconds}s"
-      sleep "$sleep_seconds"
-    else
-      log_warn "UI health endpoint check failed after ${max_attempts} attempts"
+    local now=$SECONDS
+    if (( now >= deadline )); then
+      break
     fi
-    attempt=$((attempt + 1))
+    local remaining=$((deadline - now))
+    local sleep_for=$sleep_seconds
+    if (( sleep_for > remaining )); then
+      sleep_for=$remaining
+    fi
+    log_warn "UI health endpoint check failed (attempt ${attempt}); retrying in ${sleep_for}s (remaining ${remaining}s)"
+    sleep "$sleep_for"
+    if (( sleep_seconds < max_sleep )); then
+      sleep_seconds=$((sleep_seconds * 2))
+      if (( sleep_seconds > max_sleep )); then
+        sleep_seconds=$max_sleep
+      fi
+    fi
   done
+  if (( attempt == 0 )); then
+    attempt=1
+  fi
+  log_warn "UI health endpoint check failed after ${attempt} attempts"
   return 1
 }
 
