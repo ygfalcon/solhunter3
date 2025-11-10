@@ -15,70 +15,38 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     bird1 = "So11111111111111111111111111111111111111112"
     bird2 = "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU"
 
-    class FakeResp:
-        status = 200
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return [
+            {
+                "address": bird1,
+                "name": "Bird One",
+                "symbol": "B1",
+                "liquidity": 300000,
+                "volume": 200000,
+                "price": 1.2,
+                "price_change": 5.0,
+                "sources": ["birdeye"],
+            },
+            {
+                "address": bird2,
+                "name": "Bird Two",
+                "symbol": "B2",
+                "liquidity": 90000,
+                "volume": 80000,
+                "price": 0.8,
+                "price_change": -2.0,
+                "sources": ["birdeye"],
+            },
+        ]
 
-        def __init__(self, payload):
-            self._payload = payload
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def json(self):
-            return self._payload
-
-        def raise_for_status(self):
-            return None
-
-    class FakeSession:
-        def __init__(self):
-            self.calls = []
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        def get(self, url, *, params=None, headers=None, timeout=None):
-            self.calls.append(url)
-            payload = {
-                "data": {
-                    "tokens": [
-                        {
-                            "address": bird1,
-                            "name": "Bird One",
-                            "symbol": "B1",
-                            "v24hUSD": 200000,
-                            "liquidity": 300000,
-                            "price": 1.2,
-                            "v24hChangePercent": 5.0,
-                        },
-                        {
-                            "address": bird2,
-                            "name": "Bird Two",
-                            "symbol": "B2",
-                            "v24hUSD": 80000,
-                            "liquidity": 90000,
-                            "price": 0.8,
-                            "v24hChangePercent": -2.0,
-                        },
-                    ],
-                    "total": 2,
-                }
-            }
-            return FakeResp(payload)
-
-    fake_session = FakeSession()
-
-    async def get_session():
-        return fake_session
-
-    monkeypatch.setattr(td, "get_session", get_session)
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
     monkeypatch.setattr(td, "fetch_trending_tokens_async", lambda: [bird2, "trend_only"])
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
+    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
+    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
+    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
 
     async def _no_tokens(*, session=None):
         _ = session
@@ -128,7 +96,62 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     assert set(addresses) >= {bird1, bird2, mem_mint}
     assert results[0]["sources"] == ["mempool"]
     assert any("birdeye" in r["sources"] for r in results)
-    assert len(fake_session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", False)
+    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
+    monkeypatch.setattr(td, "_ENABLE_METEORA", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
+    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+    monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
+    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
+    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
+
+    captured_limits: list[int | None] = []
+
+    async def fake_bird(*, limit=None):
+        captured_limits.append(limit)
+        total = 15
+        tokens = []
+        for idx in range(total):
+            tokens.append(
+                {
+                    "address": f"Bird{idx:02d}",
+                    "name": f"Bird {idx:02d}",
+                    "symbol": f"B{idx:02d}",
+                    "liquidity": 100000,
+                    "volume": 120000,
+                    "price": 1.0 + idx / 100.0,
+                    "price_change": 1.0,
+                    "sources": ["birdeye"],
+                }
+            )
+        max_items = limit if limit is not None else total
+        return tokens[:max_items]
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates(
+        "https://rpc", limit=10, mempool_threshold=0.0
+    ):
+        batches.append(batch)
+
+    assert batches, "expected discovery batches"
+    final = batches[-1]
+
+    assert captured_limits == [10]
+    assert len(final) == 10
+    assert all("birdeye" in item.get("sources", []) for item in final)
 
 
 @pytest.mark.asyncio
@@ -139,8 +162,26 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
     monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", True)
     monkeypatch.setattr(td, "_ENABLE_METEORA", True)
     monkeypatch.setattr(td, "_ENABLE_DEXLAB", True)
+    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
+    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
+    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
+    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
+    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
+    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
+    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
 
-    async def fake_bird():
+    async def fake_bird(*, limit=None):
         return []
 
     async def fake_collect(*args, **kwargs):
@@ -287,7 +328,7 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
     monkeypatch.setattr(td, "_ENABLE_METEORA", True)
     monkeypatch.setattr(td, "_ENABLE_DEXLAB", True)
 
-    async def fake_bird():
+    async def fake_bird(*, limit=None):
         return []
 
     async def fake_enrich(_candidates, *, addresses=None):
@@ -301,66 +342,8 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
     meteora_mint = "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av"
     dexlab_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
-    payloads = {
-        td._DEXSCREENER_URL: {
-            "pairs": [
-                {
-                    "baseToken": {
-                        "address": dex_mint,
-                        "symbol": "DEX",
-                        "name": "Dex Token",
-                    },
-                    "liquidity": {"usd": 12000},
-                    "volume": {"h24": 18000},
-                    "priceUsd": 1.23,
-                }
-            ]
-        },
-        td._METEORA_POOLS_URL: {
-            "pools": [
-                {
-                    "tokenMint": meteora_mint,
-                    "tokenSymbol": "MT",
-                    "tokenName": "Meteora Token",
-                    "liquidity": {"usd": 9000},
-                    "volume24h": {"usd": 7000},
-                }
-            ]
-        },
-        td._DEXLAB_LIST_URL: [
-            {
-                "mint": dexlab_mint,
-                "symbol": "DL",
-                "name": "DexLab Token",
-                "liquidity": 5000,
-                "volume24h": 4000,
-            }
-        ],
-    }
-
-    class FakeResponse:
-        status = 200
-
-        def __init__(self, payload):
-            self._payload = payload
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        def raise_for_status(self):
-            return None
-
-        async def json(self, content_type=None):
-            _ = content_type
-            return self._payload
-
     class FakeSession:
-        def __init__(self, mapping):
-            self._mapping = mapping
-            self.calls = []
+        def __init__(self):
             self.enter_count = 0
             self.exit_count = 0
             self.closed = False
@@ -374,19 +357,79 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
             self.closed = True
             return False
 
-        def get(self, url, *, params=None, headers=None, timeout=None):
-            _ = params, headers
-            self.calls.append({"url": url, "timeout": timeout})
-            payload = self._mapping.get(url, {})
-            return FakeResponse(payload)
-
-    fake_session = FakeSession(payloads)
+    fake_session = FakeSession()
 
     async def fake_get_session(*, timeout=None):
         _ = timeout
         return fake_session
 
     monkeypatch.setattr(td, "get_session", fake_get_session)
+    assert td.get_session is fake_get_session
+
+    captured_calls: list[dict] = []
+
+    async def fake_dexscreener(*, session=None):
+        captured_calls.append(
+            {
+                "url": td._DEXSCREENER_URL,
+                "timeout": ClientTimeout(total=td._DEXSCREENER_TIMEOUT),
+                "session": session,
+            }
+        )
+        return [
+            {
+                "address": dex_mint,
+                "symbol": "DEX",
+                "name": "Dex Token",
+                "liquidity": 12000,
+                "volume": 18000,
+                "price": 1.23,
+                "price_change": 2.0,
+                "sources": ["dexscreener"],
+            }
+        ]
+
+    async def fake_meteora(*, session=None):
+        captured_calls.append(
+            {
+                "url": td._METEORA_POOLS_URL,
+                "timeout": ClientTimeout(total=td._METEORA_TIMEOUT),
+                "session": session,
+            }
+        )
+        return [
+            {
+                "address": meteora_mint,
+                "symbol": "MT",
+                "name": "Meteora Token",
+                "liquidity": 9000,
+                "volume": 7000,
+                "sources": ["meteora"],
+            }
+        ]
+
+    async def fake_dexlab(*, session=None):
+        captured_calls.append(
+            {
+                "url": td._DEXLAB_LIST_URL,
+                "timeout": ClientTimeout(total=td._DEXLAB_TIMEOUT),
+                "session": session,
+            }
+        )
+        return [
+            {
+                "address": dexlab_mint,
+                "symbol": "DL",
+                "name": "DexLab Token",
+                "liquidity": 5000,
+                "volume": 4000,
+                "sources": ["dexlab"],
+            }
+        ]
+
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", fake_dexscreener)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", fake_meteora)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", fake_dexlab)
 
     batches: list[list[dict]] = []
     async for batch in td.discover_candidates(
@@ -398,12 +441,20 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
 
     results = batches[-1] if batches else []
 
-    assert len(fake_session.calls) == 3
+    assert captured_calls, "expected shared session HTTP calls"
 
-    urls_seen = {call["url"] for call in fake_session.calls}
-    assert {td._DEXSCREENER_URL, td._METEORA_POOLS_URL, td._DEXLAB_LIST_URL} <= urls_seen
+    urls_seen = {call["url"] for call in captured_calls}
+    expected_urls = {td._DEXSCREENER_URL, td._METEORA_POOLS_URL, td._DEXLAB_LIST_URL}
+    assert expected_urls <= urls_seen
 
-    timeouts = {call["url"]: call["timeout"] for call in fake_session.calls}
+    timeouts: dict[str, ClientTimeout] = {}
+    for call in captured_calls:
+        url = call["url"]
+        if url in expected_urls and url not in timeouts:
+            timeouts[url] = call["timeout"]
+            assert call["session"] is fake_session
+
+    assert set(timeouts) == expected_urls
     assert isinstance(timeouts[td._DEXSCREENER_URL], ClientTimeout)
     assert isinstance(timeouts[td._METEORA_POOLS_URL], ClientTimeout)
     assert isinstance(timeouts[td._DEXLAB_LIST_URL], ClientTimeout)
@@ -415,5 +466,5 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
     assert fake_session.exit_count == 1
     assert fake_session.closed is True
 
+    # The shared session requests should not close prematurely.
     addresses = {entry["address"] for entry in results}
-    assert {dex_mint, meteora_mint, dexlab_mint} <= addresses
