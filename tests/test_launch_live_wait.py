@@ -72,6 +72,74 @@ def test_wait_for_ready_accepts_disabled(tmp_path: Path, golden_line: str) -> No
     subprocess.run(["bash", "-c", bash_script], check=True, cwd=REPO_ROOT)
 
 
+def test_check_ui_health_skips_when_disabled_flag(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "extract_ui_url")
+        + _extract_function(source, "check_ui_health")
+    )
+
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text("")
+
+    python_bin = shlex.quote(sys.executable)
+    bash_script = (
+        "set -euo pipefail\n"
+        + functions
+        + f"PYTHON_BIN={python_bin}\n"
+        + "UI_DISABLE_HTTP_SERVER=1\n"
+        + f"check_ui_health '{log_path}'\n"
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "UI health check skipped: HTTP server disabled (UI_DISABLE_HTTP_SERVER=1" in completed.stdout
+
+
+def test_check_ui_health_skips_when_port_zero(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "extract_ui_url")
+        + _extract_function(source, "check_ui_health")
+    )
+
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text("[ts] UI_READY url=unavailable\n")
+
+    python_bin = shlex.quote(sys.executable)
+    bash_script = (
+        "set -euo pipefail\n"
+        + functions
+        + f"PYTHON_BIN={python_bin}\n"
+        + f"check_ui_health '{log_path}'\n"
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "UI health check skipped: HTTP server disabled" in completed.stdout
+    assert "ui_url=unavailable" in completed.stdout
+
+
 def test_wait_for_socket_release_backoff() -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()

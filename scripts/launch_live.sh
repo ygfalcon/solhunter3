@@ -556,7 +556,59 @@ PY
 check_ui_health() {
   local log=$1
   local url=""
-  RUNTIME_LOG_PATH="$log" url=$(extract_ui_url)
+  local http_disabled=0
+  local -a disable_reasons=()
+  local disable_env=${UI_DISABLE_HTTP_SERVER:-}
+  if [[ -n $disable_env ]]; then
+    local normalized=${disable_env,,}
+    case $normalized in
+      1|true|yes)
+        http_disabled=1
+        disable_reasons+=("UI_DISABLE_HTTP_SERVER=$disable_env")
+        ;;
+    esac
+  fi
+  url=$(RUNTIME_LOG_PATH="$log" extract_ui_url)
+  if (( http_disabled == 0 )) && [[ -n $url ]]; then
+    if [[ $url == "unavailable" ]]; then
+      http_disabled=1
+      disable_reasons+=("ui_url=unavailable")
+    else
+      local parsed_port=""
+      if parsed_port=$(UI_HEALTH_PARSE_URL="$url" "$PYTHON_BIN" - <<'PY'
+import os
+import sys
+from urllib.parse import urlparse
+
+url = os.environ.get("UI_HEALTH_PARSE_URL")
+if not url:
+    sys.exit(1)
+
+parsed = urlparse(url)
+if parsed.port is None:
+    sys.exit(1)
+
+print(parsed.port)
+PY
+      ); then
+        if [[ $parsed_port == "0" ]]; then
+          http_disabled=1
+          disable_reasons+=("port=0")
+        fi
+      fi
+    fi
+  fi
+  if (( http_disabled == 1 )); then
+    local reason_str
+    if (( ${#disable_reasons[@]} > 0 )); then
+      local IFS=", "
+      reason_str="${disable_reasons[*]}"
+    else
+      reason_str="http disabled"
+    fi
+    log_info "UI health check skipped: HTTP server disabled (${reason_str})"
+    return 0
+  fi
   if [[ -z $url ]]; then
     log_warn "UI readiness URL not yet available for health check"
     return 1
