@@ -491,6 +491,113 @@ def test_discovery_cache_is_scoped_per_rpc(monkeypatch):
     assert call_count["value"] == 2
 
 
+def test_discover_tokens_concurrent_calls_use_cache_lock(monkeypatch):
+    _reset_cache()
+
+    async def runner():
+        class InstrumentedLock:
+            def __init__(self) -> None:
+                self.enter_count = 0
+                self.max_active = 0
+                self._active = 0
+                self._lock = asyncio.Lock()
+
+            async def __aenter__(self):
+                await self._lock.acquire()
+                self.enter_count += 1
+                self._active += 1
+                if self._active > self.max_active:
+                    self.max_active = self._active
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                self._active -= 1
+                self._lock.release()
+
+        instrumented_lock = InstrumentedLock()
+        monkeypatch.setattr(discovery_mod, "_CACHE_LOCK", instrumented_lock)
+
+        agent = DiscoveryAgent()
+        agent.cache_ttl = 60.0
+
+        call_counter = {"value": 0}
+        first_call_ready = asyncio.Event()
+        release_first_call = asyncio.Event()
+
+        async def fake_discover_once(self, *, method, offline, token_file):
+            del method, offline, token_file
+            call_counter["value"] += 1
+            if call_counter["value"] == 1:
+                first_call_ready.set()
+                await release_first_call.wait()
+            return [VALID_MINT], {}
+
+        async def passthrough_social(self, tokens, details, *, offline=False):
+            del offline
+            return tokens, details or {}
+
+        monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+        monkeypatch.setattr(DiscoveryAgent, "_apply_social_mentions", passthrough_social)
+
+        first_task = asyncio.create_task(agent.discover_tokens())
+        await first_call_ready.wait()
+        second_task = asyncio.create_task(agent.discover_tokens())
+        await asyncio.sleep(0)
+        release_first_call.set()
+
+        results = await asyncio.gather(first_task, second_task)
+        return results, instrumented_lock
+
+    results, instrumented_lock = asyncio.run(runner())
+
+    assert results[0] == [VALID_MINT]
+    assert results[1] == [VALID_MINT]
+    assert instrumented_lock.enter_count >= 4
+    assert instrumented_lock.max_active == 1
+    assert discovery_mod._CACHE["tokens"] == [VALID_MINT]
+
+
+def test_discover_tokens_concurrent_cached_reads(monkeypatch):
+    _reset_cache()
+
+    async def runner():
+        agent = DiscoveryAgent()
+        agent.cache_ttl = 60.0
+
+        now = time.time()
+        identity = discovery_mod._rpc_identity(agent.rpc_url)
+
+        async with discovery_mod._CACHE_LOCK:
+            discovery_mod._CACHE.update(
+                {
+                    "tokens": [VALID_MINT],
+                    "ts": now,
+                    "limit": agent.limit,
+                    "method": agent.default_method
+                    or discovery_mod.DEFAULT_DISCOVERY_METHOD,
+                    "rpc_identity": identity,
+                }
+            )
+
+        async def fail_discover_once(self, *, method, offline, token_file):  # pragma: no cover - defensive
+            del method, offline, token_file
+            raise AssertionError("_discover_once should not be called when cache is valid")
+
+        monkeypatch.setattr(DiscoveryAgent, "_discover_once", fail_discover_once)
+
+        results = await asyncio.gather(
+            agent.discover_tokens(),
+            agent.discover_tokens(),
+        )
+        return results
+
+    results = asyncio.run(runner())
+
+    assert results[0] == [VALID_MINT]
+    assert results[1] == [VALID_MINT]
+    assert discovery_mod._CACHE["tokens"] == [VALID_MINT]
+
+
 def test_offline_discovery_skips_social_mentions(monkeypatch, caplog):
     _reset_cache()
 
