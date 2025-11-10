@@ -24,6 +24,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from flask import Flask, Request, Response, jsonify, render_template, request
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.serving import BaseWSGIServer, make_server
 
 from . import event_bus
@@ -3015,6 +3016,9 @@ def create_app(state: UIState | None = None) -> Flask:
     _set_active_ui_state(state)
 
     app = Flask(__name__)  # type: ignore[arg-type]
+
+    if parse_bool_env("UI_PROXY_FIX", False):
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
     @app.after_request
     def _no_store(response: Response) -> Response:

@@ -533,6 +533,7 @@ def stub_flask() -> None:
         def __init__(self, name, static_folder=None):
             self.routes: List[tuple[str, tuple[str, ...], Callable[..., Any]]] = []
             self._after_request = lambda resp: resp
+            self.wsgi_app = lambda environ, start_response: []  # pragma: no cover - stub
 
         def route(self, path, methods=None):
             if methods is None:
@@ -642,18 +643,39 @@ def stub_werkzeug() -> None:
     serving = types.ModuleType('werkzeug.serving')
     serving.__spec__ = importlib.machinery.ModuleSpec('werkzeug.serving', None)
 
+    middleware = types.ModuleType('werkzeug.middleware')
+    middleware.__spec__ = importlib.machinery.ModuleSpec('werkzeug.middleware', None)
+
+    proxy_fix = types.ModuleType('werkzeug.middleware.proxy_fix')
+    proxy_fix.__spec__ = importlib.machinery.ModuleSpec('werkzeug.middleware.proxy_fix', None)
+
     class BaseWSGIServer:  # pragma: no cover - stub
         pass
 
     def make_server(*args, **kwargs):  # pragma: no cover - stub
         return BaseWSGIServer()
 
+    class ProxyFix:  # pragma: no cover - stub
+        def __init__(self, app, **kwargs):
+            self.app = app
+            self.settings = kwargs
+
+        def __call__(self, environ, start_response):
+            return self.app(environ, start_response)
+
     serving.BaseWSGIServer = BaseWSGIServer
     serving.make_server = make_server
 
+    proxy_fix.ProxyFix = ProxyFix
+
+    middleware.proxy_fix = proxy_fix
+
     werkzeug.serving = serving
+    werkzeug.middleware = middleware
     sys.modules.setdefault('werkzeug', werkzeug)
     sys.modules.setdefault('werkzeug.serving', serving)
+    sys.modules.setdefault('werkzeug.middleware', middleware)
+    sys.modules.setdefault('werkzeug.middleware.proxy_fix', proxy_fix)
 
 
 def stub_requests() -> None:
@@ -675,6 +697,114 @@ def stub_requests() -> None:
     mod.post = lambda *a, **k: None
     sys.modules.setdefault('requests', mod)
     sys.modules.setdefault('requests.exceptions', exceptions)
+
+
+def stub_solana() -> None:
+    if 'solana' in sys.modules:
+        return
+    import importlib.util
+    if importlib.util.find_spec('solana') is not None:
+        return
+
+    solana = types.ModuleType('solana')
+    solana.__spec__ = importlib.machinery.ModuleSpec('solana', None)
+    solana.__path__ = []  # type: ignore[attr-defined]
+
+    rpc = types.ModuleType('solana.rpc')
+    rpc.__spec__ = importlib.machinery.ModuleSpec('solana.rpc', None)
+
+    core = types.ModuleType('solana.rpc.core')
+    core.__spec__ = importlib.machinery.ModuleSpec('solana.rpc.core', None)
+
+    class RPCException(Exception):
+        pass
+
+    core.RPCException = RPCException
+
+    async_api = types.ModuleType('solana.rpc.async_api')
+    async_api.__spec__ = importlib.machinery.ModuleSpec('solana.rpc.async_api', None)
+
+    class AsyncClient:  # pragma: no cover - stub
+        def __init__(self, *args, **kwargs):
+            self.endpoint = args[0] if args else kwargs.get('endpoint')
+
+        async def close(self) -> None:
+            return None
+
+    async_api.AsyncClient = AsyncClient
+
+    api = types.ModuleType('solana.rpc.api')
+    api.__spec__ = importlib.machinery.ModuleSpec('solana.rpc.api', None)
+
+    class Client:  # pragma: no cover - stub
+        def __init__(self, *args, **kwargs):
+            self.endpoint = args[0] if args else kwargs.get('endpoint')
+
+    api.Client = Client
+
+    rpc.core = core
+    rpc.async_api = async_api
+    rpc.api = api
+
+    solana.rpc = rpc
+
+    sys.modules.setdefault('solana', solana)
+    sys.modules.setdefault('solana.rpc', rpc)
+    sys.modules.setdefault('solana.rpc.core', core)
+    sys.modules.setdefault('solana.rpc.async_api', async_api)
+    sys.modules.setdefault('solana.rpc.api', api)
+
+
+def stub_pydantic() -> None:
+    if 'pydantic' in sys.modules:
+        return
+    import importlib.util
+    if importlib.util.find_spec('pydantic') is not None:
+        return
+
+    mod = types.ModuleType('pydantic')
+    mod.__spec__ = importlib.machinery.ModuleSpec('pydantic', None)
+
+    class ValidationError(Exception):
+        pass
+
+    class BaseModel:
+        def __init__(self, **data):  # pragma: no cover - stub
+            for key, value in data.items():
+                setattr(self, key, value)
+
+        def dict(self, *args, **kwargs):  # pragma: no cover - stub
+            return dict(self.__dict__)
+
+        def model_dump(self, *args, **kwargs):  # pragma: no cover - stub
+            return dict(self.__dict__)
+
+        class Config:  # pragma: no cover - stub
+            arbitrary_types_allowed = True
+
+    class AnyUrl(str):
+        pass
+
+    class ValidationInfo:  # pragma: no cover - stub
+        def __init__(self, *, data=None):
+            self.data = data or {}
+
+    def _decorator(*args, **kwargs):
+        def _wrap(func):
+            return func
+
+        return _wrap
+
+    mod.BaseModel = BaseModel
+    mod.AnyUrl = AnyUrl
+    mod.ValidationError = ValidationError
+    mod.ValidationInfo = ValidationInfo
+    mod.field_validator = _decorator
+    mod.model_validator = _decorator
+    mod.validator = _decorator
+    mod.root_validator = _decorator
+
+    sys.modules.setdefault('pydantic', mod)
 
 
 def stub_cryptography() -> None:
@@ -1194,6 +1324,8 @@ def install_stubs() -> None:
     stub_flask()
     stub_werkzeug()
     stub_requests()
+    stub_solana()
+    stub_pydantic()
     stub_cryptography()
     stub_rich()
     stub_aiofiles()

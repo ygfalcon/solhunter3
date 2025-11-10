@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable
 
 import pytest
 from flask import Flask
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 import solhunter_zero.ui as ui
 from solhunter_zero.runtime import runtime_wiring
@@ -26,6 +27,16 @@ def _active_state() -> ui.UIState:
     state = ui._get_active_ui_state()
     assert state is not None
     return state
+
+
+def test_create_app_proxy_fix_opt_in(monkeypatch):
+    monkeypatch.setenv("UI_PROXY_FIX", "1")
+    previous_state = ui._get_active_ui_state()
+    app = ui.create_app(previous_state)
+    try:
+        assert isinstance(app.wsgi_app, ProxyFix)
+    finally:
+        ui._set_active_ui_state(previous_state)
 
 
 def test_run_state_endpoint(client, monkeypatch):
