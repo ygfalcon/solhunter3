@@ -72,6 +72,7 @@ def test_collect_mempool_times_out(monkeypatch, caplog):
     )
     monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT", 0.01)
     monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT_RETRIES", 1)
+    monkeypatch.setenv("DISCOVERY_MEMPOOL_MAX_WAIT", "0.05")
     monkeypatch.setenv("TOKEN_DISCOVERY_BACKOFF", "0.05")
 
     agent = DiscoveryAgent()
@@ -143,6 +144,62 @@ def test_collect_mempool_waits_for_slow_stream(monkeypatch, caplog):
     assert details[VALID_MINT]["address"] == VALID_MINT
     assert elapsed >= 0.045
     assert "waiting for events" in caplog.text
+
+
+def test_collect_mempool_honours_default_wait(monkeypatch):
+    _reset_cache()
+
+    class DelayedYield:
+        def __init__(self, delay: float = 1.2) -> None:
+            self._delay = delay
+            self._emitted = False
+            self._start: float | None = None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._emitted:
+                raise StopAsyncIteration
+            if self._start is None:
+                self._start = time.perf_counter()
+            try:
+                while time.perf_counter() - self._start < self._delay:
+                    await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                raise
+            self._emitted = True
+            return {"address": VALID_MINT, "score": 5.5}
+
+        async def aclose(self):
+            return None
+
+    def delayed_stream(*_args, **_kwargs):
+        return DelayedYield()
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.stream_ranked_mempool_tokens_with_depth",
+        delayed_stream,
+    )
+    monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT", 0.25)
+    monkeypatch.setattr(discovery_mod, "_MEMPOOL_TIMEOUT_RETRIES", 1)
+    monkeypatch.delenv("DISCOVERY_MEMPOOL_MAX_WAIT", raising=False)
+    monkeypatch.setenv("TOKEN_DISCOVERY_BACKOFF", "0.1")
+
+    agent = DiscoveryAgent()
+
+    async def run():
+        start = time.perf_counter()
+        tokens, details = await agent._collect_mempool()
+        elapsed = time.perf_counter() - start
+        return elapsed, tokens, details
+
+    elapsed, tokens, details = asyncio.run(run())
+
+    assert elapsed >= 1.0
+    assert elapsed < 5.0
+    assert tokens == [VALID_MINT]
+    assert details[VALID_MINT]["address"] == VALID_MINT
 
 
 def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):

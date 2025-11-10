@@ -113,6 +113,8 @@ _STATIC_FALLBACK = [
 
 DEFAULT_DISCOVERY_METHOD = "helius"
 
+DEFAULT_MEMPOOL_MAX_WAIT = 10.0
+
 _DISCOVERY_METHOD_ALIASES: dict[str, str] = {
     "helius": "helius",
     "api": "helius",
@@ -179,20 +181,18 @@ class DiscoveryAgent:
         self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
         mempool_max_wait_env = os.getenv("DISCOVERY_MEMPOOL_MAX_WAIT")
-        try:
-            mempool_max_wait = (
-                float(mempool_max_wait_env)
-                if mempool_max_wait_env not in {None, ""}
-                else None
-            )
-        except (TypeError, ValueError):
-            logger.warning(
-                "Invalid DISCOVERY_MEMPOOL_MAX_WAIT=%r; falling back to TOKEN_DISCOVERY_BACKOFF",
-                mempool_max_wait_env,
-            )
-            mempool_max_wait = None
-        if mempool_max_wait is None:
-            mempool_max_wait = self.backoff
+        if mempool_max_wait_env in {None, ""}:
+            mempool_max_wait = DEFAULT_MEMPOOL_MAX_WAIT
+        else:
+            try:
+                mempool_max_wait = float(mempool_max_wait_env)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid DISCOVERY_MEMPOOL_MAX_WAIT=%r; using default %.1fs",
+                    mempool_max_wait_env,
+                    DEFAULT_MEMPOOL_MAX_WAIT,
+                )
+                mempool_max_wait = DEFAULT_MEMPOOL_MAX_WAIT
         self.mempool_max_wait = max(float(mempool_max_wait), 0.0)
         self.max_attempts = max(1, int(os.getenv("TOKEN_DISCOVERY_RETRIES", "2") or 2))
         self.mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
@@ -609,7 +609,7 @@ class DiscoveryAgent:
         retries = max(1, int(_MEMPOOL_TIMEOUT_RETRIES))
         max_wait = max(self.mempool_max_wait, 0.0)
         deadline: float | None
-        if max_wait:
+        if max_wait > 0.0:
             deadline = time.perf_counter() + max_wait
         else:
             deadline = None
@@ -620,14 +620,14 @@ class DiscoveryAgent:
             while len(tokens) < self.limit:
                 remaining: float | None = None
                 if deadline is not None:
-                    remaining = deadline - time.perf_counter()
+                    remaining = max(deadline - time.perf_counter(), 0.0)
                     if remaining <= 0:
                         deadline_triggered = True
                         timed_out = True
                         break
                     logger.debug(
                         "Mempool stream waiting for events (%.2fs remaining)",
-                        max(remaining, 0.0),
+                        remaining,
                     )
                     wait_for_timeout = min(timeout, remaining)
                 else:
@@ -643,7 +643,7 @@ class DiscoveryAgent:
                 except asyncio.TimeoutError:
                     timeouts += 1
                     if deadline is not None:
-                        remaining = deadline - time.perf_counter()
+                        remaining = max(deadline - time.perf_counter(), 0.0)
                         if remaining <= 0:
                             deadline_triggered = True
                             timed_out = True
