@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, cast
 
 from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
@@ -41,7 +41,7 @@ class DiscoveryService:
         cache_ttl: float = 20.0,
         empty_cache_ttl: Optional[float] = None,
         backoff_factor: float = 2.0,
-        max_backoff: Optional[float] = None,
+        max_backoff: Optional[float] = 60.0,
         limit: Optional[int] = None,
         offline: bool = False,
         token_file: Optional[str] = None,
@@ -55,7 +55,32 @@ class DiscoveryService:
             empty_cache_ttl = self.cache_ttl
         self.empty_cache_ttl = max(0.0, float(empty_cache_ttl)) if empty_cache_ttl is not None else 0.0
         self.backoff_factor = max(1.0, float(backoff_factor))
-        self.max_backoff = None if max_backoff is None else max(0.0, float(max_backoff))
+
+        raw_max_backoff = os.getenv("DISCOVERY_MAX_BACKOFF")
+        _env_backoff = object()
+        env_max_backoff: Optional[float] | object = _env_backoff
+        if raw_max_backoff is not None:
+            try:
+                parsed_backoff = float(raw_max_backoff)
+            except ValueError:
+                log.warning("Invalid DISCOVERY_MAX_BACKOFF=%r; ignoring", raw_max_backoff)
+            else:
+                if parsed_backoff <= 0:
+                    env_max_backoff = None
+                else:
+                    env_max_backoff = parsed_backoff
+
+        effective_backoff: Optional[float]
+        if env_max_backoff is not _env_backoff:
+            effective_backoff = cast(Optional[float], env_max_backoff)
+        else:
+            effective_backoff = max_backoff
+
+        if effective_backoff is None:
+            self.max_backoff = None
+        else:
+            capped = max(0.0, float(effective_backoff))
+            self.max_backoff = None if capped == 0.0 else capped
         self.limit = limit
         self.offline = offline
         self.token_file = token_file
@@ -317,7 +342,6 @@ class DiscoveryService:
         cooldown = 0.0
         if payload:
             self._consecutive_empty = 0
-            self._current_backoff = 0.0
             if self.cache_ttl:
                 cooldown = self.cache_ttl
         else:
@@ -328,10 +352,14 @@ class DiscoveryService:
                     cooldown = base_ttl * (self.backoff_factor ** (self._consecutive_empty - 1))
                 else:
                     cooldown = base_ttl
-            self._current_backoff = cooldown
 
         if self.max_backoff is not None and cooldown:
             cooldown = min(cooldown, self.max_backoff)
+
+        if payload:
+            self._current_backoff = 0.0
+        else:
+            self._current_backoff = cooldown
 
         if cooldown:
             self._cooldown_until = fetch_ts + cooldown
