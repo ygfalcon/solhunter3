@@ -272,7 +272,9 @@ class RuntimeOrchestrator:
             except Exception:  # pragma: no cover - defensive
                 url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
         scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
-        ui_url = f"{scheme}://{url_host}:{port}"
+        ui_url: str | None = None
+        if port > 0:
+            ui_url = f"{scheme}://{url_host}:{port}"
         ws_urls: dict[str, str] = {}
         if hasattr(_ui_module, "get_ws_urls"):
             try:
@@ -284,26 +286,27 @@ class RuntimeOrchestrator:
         logs_url = ws_urls.get("logs") or "-"
         readiness_line = (
             "UI_READY "
-            f"url={ui_url} "
+            f"url={ui_url if ui_url is not None else 'unavailable'} "
             f"rl_ws={rl_url} "
             f"events_ws={events_url} "
             f"logs_ws={logs_url}"
         )
         log.info(readiness_line)
-        artifact_dir: Path | None = None
-        try:
-            artifact_dir = _runtime_artifact_dir()
-        except Exception as exc:  # pragma: no cover - filesystem issues
-            log.warning("Failed to prepare UI artifact directory: %s", exc)
-        if artifact_dir is not None:
+        if ui_url is not None:
+            artifact_dir: Path | None = None
             try:
-                (artifact_dir / "ui_url.txt").write_text(ui_url, encoding="utf-8")
+                artifact_dir = _runtime_artifact_dir()
             except Exception as exc:  # pragma: no cover - filesystem issues
-                log.warning("Failed to write UI URL artifact: %s", exc)
-        try:
-            _publish_ui_url_to_redis(ui_url)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning("Error publishing UI URL to redis: %s", exc)
+                log.warning("Failed to prepare UI artifact directory: %s", exc)
+            if artifact_dir is not None:
+                try:
+                    (artifact_dir / "ui_url.txt").write_text(ui_url, encoding="utf-8")
+                except Exception as exc:  # pragma: no cover - filesystem issues
+                    log.warning("Failed to write UI URL artifact: %s", exc)
+            try:
+                _publish_ui_url_to_redis(ui_url)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("Error publishing UI URL to redis: %s", exc)
 
     async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
         try:

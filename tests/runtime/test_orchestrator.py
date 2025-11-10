@@ -1,7 +1,9 @@
 import asyncio
+import logging
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -173,6 +175,41 @@ async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
     assert latest[1] is True
     assert "disabled" in latest[2]
     assert "port=5000" in latest[2]
+
+
+def test_emit_ui_ready_skips_invalid_port(monkeypatch, caplog, tmp_path):
+    captured_urls: list[str] = []
+    artifact_called = False
+
+    def fake_publish_ui_url(ui_url: str) -> None:
+        captured_urls.append(ui_url)
+
+    def fake_runtime_artifact_dir() -> Path:
+        nonlocal artifact_called
+        artifact_called = True
+        return tmp_path
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._publish_ui_url_to_redis",
+        fake_publish_ui_url,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._runtime_artifact_dir",
+        fake_runtime_artifact_dir,
+    )
+
+    caplog.set_level(logging.INFO)
+
+    orch = RuntimeOrchestrator(run_http=False)
+    orch._emit_ui_ready("127.0.0.1", 0)
+
+    readiness_logs = [message for message in caplog.messages if message.startswith("UI_READY ")]
+    assert readiness_logs, "expected UI_READY log entry"
+    assert all(":0" not in message for message in readiness_logs)
+    assert all("url=unavailable" in message for message in readiness_logs)
+    assert not artifact_called
+    assert captured_urls == []
+    assert not (tmp_path / "ui_url.txt").exists()
 
 
 def test_orchestrator_stops_on_resource_budget(monkeypatch):
