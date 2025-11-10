@@ -60,6 +60,17 @@ def test_invalid_env_limit(monkeypatch, caplog):
     assert "Invalid DISCOVERY_LIMIT" in caplog.text
 
 
+def test_negative_env_limit(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("DISCOVERY_LIMIT", "-5")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.limit == 1
+    assert "below minimum" in caplog.text
+
+
 def test_collect_mempool_times_out(monkeypatch, caplog):
     _reset_cache()
 
