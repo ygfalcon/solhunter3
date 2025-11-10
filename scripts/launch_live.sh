@@ -1206,11 +1206,85 @@ print(json.dumps(result))
 PY
 }
 
+validate_connectivity_soak() {
+  local soak_json=$1
+  local report_path=${2:-}
+  local analysis=""
+  export SOAK_RESULT_JSON="$soak_json"
+  if ! analysis=$("$PYTHON_BIN" - <<'PY'
+import json
+import os
+import sys
+
+payload = os.environ.get("SOAK_RESULT_JSON")
+if payload is None:
+    sys.exit(0)
+
+try:
+    result = json.loads(payload)
+except Exception as exc:
+    print(f"invalid JSON: {exc}", end="")
+    sys.exit(1)
+
+issues: list[str] = []
+
+reconnect_count = result.get("reconnect_count")
+if isinstance(reconnect_count, (int, float)) and reconnect_count:
+    issues.append(f"reconnect_count={int(reconnect_count)}")
+
+metrics = result.get("metrics")
+if isinstance(metrics, dict):
+    for name, stats in metrics.items():
+        if not isinstance(stats, dict):
+            continue
+        errors = stats.get("errors")
+        if isinstance(errors, dict):
+            total = 0
+            parts: list[str] = []
+            for key, value in sorted(errors.items()):
+                if isinstance(value, (int, float)) and value:
+                    total += int(value)
+                    parts.append(f"{key}={int(value)}")
+            if total:
+                if parts:
+                    issues.append(f"{name} errors: {', '.join(parts)}")
+                else:
+                    issues.append(f"{name} errors: {total}")
+        elif errors:
+            issues.append(f"{name} errors: {errors}")
+
+if issues:
+    print("; ".join(issues), end="")
+    sys.exit(1)
+PY
+  ); then
+    local status=$?
+    if [[ $status -eq 0 ]]; then
+      status=1
+    fi
+    if [[ -z ${analysis:-} ]]; then
+      analysis="connectivity soak validation failed"
+    fi
+    if [[ -n ${report_path:-} ]]; then
+      analysis+=" (report=${report_path})"
+    fi
+    log_warn "Connectivity soak reported failures: $analysis"
+    unset SOAK_RESULT_JSON
+    return "$status"
+  fi
+  unset SOAK_RESULT_JSON
+  return 0
+}
+
 export SOAK_DURATION="$SOAK_DURATION"
 export SOAK_REPORT="$ARTIFACT_DIR/connectivity_report.json"
 SOAK_RESULT=""
 if ! SOAK_RESULT=$(connectivity_soak); then
   log_warn "Connectivity soak failed"
+  exit $EXIT_CONNECTIVITY
+fi
+
+if ! validate_connectivity_soak "$SOAK_RESULT" "$SOAK_REPORT"; then
   exit $EXIT_CONNECTIVITY
 fi
 
