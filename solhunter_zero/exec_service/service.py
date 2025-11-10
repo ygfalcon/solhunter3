@@ -11,7 +11,8 @@ import asyncio
 import logging
 import os
 import random
-from typing import Any, Callable, Dict, List
+from collections.abc import Coroutine
+from typing import Any, Callable, Dict, List, Tuple
 
 from .. import event_bus
 try:
@@ -37,6 +38,17 @@ class TradeExecutor:
         self._n = 0
         self._subscriptions: List[Callable[[], None]] = []
         self._tasks: List[asyncio.Task] = []
+        concurrency_raw = os.getenv("TRADE_EXECUTOR_MAX_CONCURRENCY", "3")
+        try:
+            concurrency = int(concurrency_raw)
+        except (TypeError, ValueError):
+            concurrency = 3
+        if concurrency <= 0:
+            concurrency = 1
+        self._max_concurrency = concurrency
+        self._exec_semaphore = asyncio.Semaphore(self._max_concurrency)
+        self._running_keys: set[Tuple[str, str]] = set()
+        self._pending_payloads: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     def start(self) -> None:
         self._subscriptions.append(event_bus.subscribe("action_decision", self._on_decision))
@@ -53,6 +65,8 @@ class TradeExecutor:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        self._running_keys.clear()
+        self._pending_payloads.clear()
 
     def _build_execution_plan(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         token = str(payload.get("token") or payload.get("mint") or "").strip()
@@ -136,111 +150,145 @@ class TradeExecutor:
         token = str(payload.get("token") or payload.get("mint") or "").strip()
         if not token:
             return
+        key = (token, side)
         plan_payload = dict(payload)
         plan_payload["token"] = token
         plan_payload["side"] = side
-        plan = self._build_execution_plan(plan_payload)
-        price = plan.get("expected_price", 0.0)
-        if plan["total_qty"] <= 0 or price <= 0:
-            return
+        self._pending_payloads[key] = plan_payload
+        self._reschedule_if_pending(key)
 
-        async def _exec() -> None:
-            try:
-                fraction_limit = float(os.getenv("MAX_TRADE_FRACTION", "0.25") or 0.25)
-                ramp = int(os.getenv("RAMP_TRADES_COUNT", "10") or 10)
-                total_val = 0.0
-                try:
-                    prices = {
-                        t: (
-                            self.portfolio.price_history.get(t, [p.entry_price])[-1]
-                            if self.portfolio.price_history.get(t)
-                            else p.entry_price
-                        )
-                        for t, p in self.portfolio.balances.items()
-                    }
-                    prices[token] = price
-                    total_val = self.portfolio.total_value(prices)
-                except Exception:
-                    total_val = 0.0
-                scale = 1.0
-                if ramp > 0 and self._n < ramp:
-                    scale = max(0.1, (self._n + 1) / ramp)
-                self._n += 1
-                scaled_qty = plan["total_qty"] * scale
-                notional = scaled_qty * price
-                if total_val > 0 and notional > fraction_limit * total_val:
-                    log.warning(
-                        "circuit breaker: notional %.4f exceeds fraction %.2f of portfolio %.4f; skipping",
-                        notional,
-                        fraction_limit,
-                        total_val,
-                    )
-                    return
-                live_drill = str(os.getenv("LIVE_DRILL", "")).lower() in {"1", "true", "yes"}
-                executed = 0.0
-                scale_factor = (scaled_qty / plan["total_qty"]) if plan["total_qty"] > 0 else 0.0
-                for slice_plan in plan["slices"]:
-                    qty = float(slice_plan.get("qty", 0.0))
-                    if qty <= 0:
-                        continue
-                    qty *= scale_factor if scale_factor > 0 else 1.0
-                    if qty <= 0:
-                        continue
-                    jitter = float(slice_plan.get("jitter_sec", JITTER_LOW))
-                    await asyncio.sleep(jitter)
-                    action_qty = qty
-                    executed += action_qty
-                    action = {
-                        "agent": "swarm",
-                        "token": token,
-                        "side": side,
-                        "amount": action_qty,
-                        "price": price,
-                        "max_slippage_bps": plan["max_slippage_bps"],
-                    }
-                    if live_drill:
-                        await self.memory.log_trade(token=token, direction=side, amount=action_qty, price=price)
-                        await self.portfolio.update_async(token, action_qty if side == "buy" else -action_qty, price)
-                        try:
-                            event_bus.publish(
-                                "action_executed",
-                                {"action": action, "result": {"status": "simulated"}},
-                            )
-                        except Exception:
-                            pass
-                    else:
-                        await place_order_async(
-                            token,
-                            side,
-                            action_qty,
-                            price,
-                            testnet=False,
-                            dry_run=False,
-                            keypair=None,
-                        )
-                        await self.memory.log_trade(token=token, direction=side, amount=action_qty, price=price)
-                        await self.portfolio.update_async(token, action_qty if side == "buy" else -action_qty, price)
-                        try:
-                            event_bus.publish(
-                                "action_executed",
-                                {"action": action, "result": {"status": "ok"}},
-                            )
-                        except Exception:
-                            pass
-                if executed <= 0:
-                    log.info("TradeExecutor[%s]: no slices executed", token)
-            except Exception as exc:
-                log.warning("execution failed for %s %s: %s", side, token, exc)
-
+    def _submit_task(self, coro: Coroutine[Any, Any, None]) -> None:
         try:
             loop = asyncio.get_event_loop()
-            if loop.is_running():
-                task = asyncio.create_task(_exec())
-                self._tasks.append(task)
-                task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
-            else:
-                loop.run_until_complete(_exec())
         except RuntimeError:
             loop = asyncio.new_event_loop()
-            loop.run_until_complete(_exec())
-            loop.close()
+            try:
+                loop.run_until_complete(coro)
+            finally:
+                loop.close()
+            return
+        if loop.is_running():
+            task = asyncio.create_task(coro)
+            self._tasks.append(task)
+            task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
+        else:
+            loop.run_until_complete(coro)
+
+    def _reschedule_if_pending(self, key: Tuple[str, str]) -> None:
+        if key not in self._pending_payloads:
+            return
+        if key in self._running_keys:
+            return
+        self._running_keys.add(key)
+        try:
+            self._submit_task(self._run_key(key))
+        except Exception:
+            self._running_keys.discard(key)
+            self._pending_payloads.pop(key, None)
+            raise
+
+    async def _run_key(self, key: Tuple[str, str]) -> None:
+        try:
+            async with self._exec_semaphore:
+                while True:
+                    payload = self._pending_payloads.pop(key, None)
+                    if not payload:
+                        break
+                    plan = self._build_execution_plan(payload)
+                    price = float(plan.get("expected_price", 0.0))
+                    if plan["total_qty"] <= 0 or price <= 0:
+                        continue
+                    await self._execute_plan(plan, price)
+        finally:
+            self._running_keys.discard(key)
+            self._reschedule_if_pending(key)
+
+    async def _execute_plan(self, plan: Dict[str, Any], price: float) -> None:
+        token = plan.get("token", "")
+        side = plan.get("side", "")
+        try:
+            fraction_limit = float(os.getenv("MAX_TRADE_FRACTION", "0.25") or 0.25)
+            ramp = int(os.getenv("RAMP_TRADES_COUNT", "10") or 10)
+            total_val = 0.0
+            try:
+                prices = {
+                    t: (
+                        self.portfolio.price_history.get(t, [p.entry_price])[-1]
+                        if self.portfolio.price_history.get(t)
+                        else p.entry_price
+                    )
+                    for t, p in self.portfolio.balances.items()
+                }
+                prices[token] = price
+                total_val = self.portfolio.total_value(prices)
+            except Exception:
+                total_val = 0.0
+            scale = 1.0
+            if ramp > 0 and self._n < ramp:
+                scale = max(0.1, (self._n + 1) / ramp)
+            self._n += 1
+            scaled_qty = plan["total_qty"] * scale
+            notional = scaled_qty * price
+            if total_val > 0 and notional > fraction_limit * total_val:
+                log.warning(
+                    "circuit breaker: notional %.4f exceeds fraction %.2f of portfolio %.4f; skipping",
+                    notional,
+                    fraction_limit,
+                    total_val,
+                )
+                return
+            live_drill = str(os.getenv("LIVE_DRILL", "")).lower() in {"1", "true", "yes"}
+            executed = 0.0
+            scale_factor = (scaled_qty / plan["total_qty"]) if plan["total_qty"] > 0 else 0.0
+            for slice_plan in plan["slices"]:
+                qty = float(slice_plan.get("qty", 0.0))
+                if qty <= 0:
+                    continue
+                qty *= scale_factor if scale_factor > 0 else 1.0
+                if qty <= 0:
+                    continue
+                jitter = float(slice_plan.get("jitter_sec", JITTER_LOW))
+                await asyncio.sleep(jitter)
+                action_qty = qty
+                executed += action_qty
+                action = {
+                    "agent": "swarm",
+                    "token": token,
+                    "side": side,
+                    "amount": action_qty,
+                    "price": price,
+                    "max_slippage_bps": plan["max_slippage_bps"],
+                }
+                if live_drill:
+                    await self.memory.log_trade(token=token, direction=side, amount=action_qty, price=price)
+                    await self.portfolio.update_async(token, action_qty if side == "buy" else -action_qty, price)
+                    try:
+                        event_bus.publish(
+                            "action_executed",
+                            {"action": action, "result": {"status": "simulated"}},
+                        )
+                    except Exception:
+                        pass
+                else:
+                    await place_order_async(
+                        token,
+                        side,
+                        action_qty,
+                        price,
+                        testnet=False,
+                        dry_run=False,
+                        keypair=None,
+                    )
+                    await self.memory.log_trade(token=token, direction=side, amount=action_qty, price=price)
+                    await self.portfolio.update_async(token, action_qty if side == "buy" else -action_qty, price)
+                    try:
+                        event_bus.publish(
+                            "action_executed",
+                            {"action": action, "result": {"status": "ok"}},
+                        )
+                    except Exception:
+                        pass
+            if executed <= 0:
+                log.info("TradeExecutor[%s]: no slices executed", token)
+        except Exception as exc:
+            log.warning("execution failed for %s %s: %s", side, token, exc)
