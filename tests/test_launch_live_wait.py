@@ -282,6 +282,42 @@ def test_normalize_bus_configuration_exports() -> None:
     assert "RUNTIME_MANIFEST channel=test-channel" in completed.stderr
 
 
+def test_normalize_bus_configuration_canonicalizes_broker_url() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    normalize_fn = _extract_function(source, "normalize_bus_configuration")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": sys.executable,
+            "REDIS_URL": "redis://localhost:6380/1",
+            "MINT_STREAM_REDIS_URL": "redis://localhost:6380/1",
+            "MEMPOOL_STREAM_REDIS_URL": "redis://localhost:6380/1",
+            "AMM_WATCH_REDIS_URL": "redis://localhost:6380/1",
+            "BROKER_URL": "redis://localhost:6380/2",
+        }
+    )
+
+    bash_script = (
+        "set -euo pipefail\n"
+        + normalize_fn
+        + "normalize_bus_configuration\n"
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert "export BROKER_URL=redis://localhost:6380/1" in completed.stdout
+    assert "redis://localhost:6380/2" not in completed.stdout
+
+
 def test_validate_env_file_handles_export(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
