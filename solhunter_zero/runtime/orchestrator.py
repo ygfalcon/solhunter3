@@ -1139,6 +1139,34 @@ class RuntimeOrchestrator:
             await close_session()
         except Exception:
             pass
+
+        threads = self.handles.ui_threads or {}
+        stop_ws = getattr(_ui_module, "stop_websockets", None)
+        if callable(stop_ws):
+            with suppress(Exception):
+                stop_ws()
+
+        for thread_info in threads.values():
+            thread_obj = None
+            shutdown_event = None
+
+            if isinstance(thread_info, dict):
+                thread_obj = thread_info.get("thread")
+                shutdown_event = thread_info.get("shutdown_event")
+            else:
+                thread_obj = thread_info
+
+            if shutdown_event is not None:
+                with suppress(Exception):
+                    shutdown_event.set()
+
+            if thread_obj is not None and hasattr(thread_obj, "join"):
+                with suppress(Exception):
+                    thread_obj.join(timeout=5)
+
+        self.handles.ui_threads = None
+        self.handles.ui_server = None
+
         await self._publish_stage("runtime:stopped", True)
 
 
