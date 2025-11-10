@@ -376,7 +376,7 @@ def _is_local_host(hostname: str) -> bool:
 
 
 if not _is_local_host(host):
-    print(f"skip {host} {port}")
+    print(f"free {host} {port} remote")
     raise SystemExit(0)
 
 
@@ -852,15 +852,20 @@ fi
 log_info "RUNTIME_MANIFEST channel=$BROKER_CHANNEL redis=$REDIS_URL mint_stream=$MINT_STREAM_REDIS_URL mempool=$MEMPOOL_STREAM_REDIS_URL amm_watch=$AMM_WATCH_REDIS_URL bus=$EVENT_BUS_URL"
 
 SOCKET_STATE_RAW=$(wait_for_socket_release)
-read -r SOCKET_STATE SOCKET_HOST SOCKET_PORT <<<"$SOCKET_STATE_RAW"
+read -r SOCKET_STATE SOCKET_HOST SOCKET_PORT SOCKET_REMOTE <<<"$SOCKET_STATE_RAW"
 SOCKET_HOST=${SOCKET_HOST:-127.0.0.1}
 SOCKET_PORT=${SOCKET_PORT:-8779}
+SOCKET_REMOTE=${SOCKET_REMOTE:-}
 if [[ $SOCKET_STATE == "busy" ]]; then
   log_warn "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} is still in use after the grace window; aborting launch"
   log_warn "Hint: terminate the lingering process (e.g. pkill -f 'event_bus') and run bash scripts/clean_session.sh to clear stale locks before retrying"
   exit $EXIT_SOCKET
 else
-  log_info "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} ready"
+  if [[ $SOCKET_REMOTE == "remote" ]]; then
+    log_info "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} ready (remote endpoint; skipping local socket release verification)"
+  else
+    log_info "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} ready"
+  fi
 fi
 
 log_info "Ensuring Redis availability"
