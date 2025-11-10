@@ -200,6 +200,10 @@ files unless the loader is invoked with `overwrite=True`.
 | `USE_GPU_SIM` | `` | Enable gpu sim |
 | `UI_PROXY_FIX` | `0` | When `1`, wrap the Flask UI with Werkzeug's `ProxyFix` so scheme/host reflect `X-Forwarded-*` headers |
 | `UI_PUBLIC_HOST` | `` | Hostname advertised to UI clients when the server binds to `0.0.0.0`/`::`; set when fronting the UI with a proxy |
+| `UI_WS_SCHEME` | `` | Force UI websocket URLs to advertise `ws` or `wss`; set to `wss` when TLS is configured |
+| `UI_WS_SSL_CERT_PATH` | `` | PEM certificate served by the UI websocket endpoints when TLS is enabled |
+| `UI_WS_SSL_KEY_PATH` | `` | Private key matching `UI_WS_SSL_CERT_PATH` |
+| `UI_WS_SSL_CA_PATH` | `` | Optional CA bundle used to verify client certificates when TLS is enabled |
 | `USE_MEV_BUNDLES` | `false` | Enable mev bundles |
 | `USE_NUMBA_ROUTE` | `0` | Enable numba route |
 | `USE_PRICE_STREAMS` | `0` | Enable price streams |
@@ -233,6 +237,17 @@ interfaces and publish the externally reachable host separately:
    `UI_PROXY_FIX=1` so Flask honours the forwarded scheme and host when building
    absolute URLs and redirects. Leave it disabled when the runtime is directly
    exposed to avoid trusting spoofed headers.
+
+Alternatively the UI can terminate TLS directly. Set `UI_WS_SCHEME=wss` and
+point `UI_WS_SSL_CERT_PATH`/`UI_WS_SSL_KEY_PATH` at PEM files for the
+certificate and private key. When the runtime successfully loads the key
+material it passes an `ssl.SSLContext` to the websocket servers and the REST
+manifest advertises `wss://` endpoints. If the configuration is incomplete or
+invalid the runtime logs a warning and falls back to plaintext `ws://` URLs so
+clients are never misled by unreachable secure endpoints. An optional
+`UI_WS_SSL_CA_PATH` allows providing a CA bundle for client certificate
+validation when TLS is enabled. The legacy `WS_SCHEME` override remains
+supported for backwards compatibility.
 
 With this split configuration, health endpoints and WebSocket URLs in the REST
 manifest reflect the proxy address instead of defaulting to `127.0.0.1`, so SPA

@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import types
+import ssl
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1365,6 +1366,82 @@ else:
 _ADDR_IN_USE_ERRNOS = {errno.EADDRINUSE}
 
 
+_WS_SSL_CONTEXT_LOCK = threading.Lock()
+_WS_SSL_CONTEXT_SENTINEL: object = object()
+_WS_SSL_CONTEXT_VALUE: ssl.SSLContext | None | object = _WS_SSL_CONTEXT_SENTINEL
+_WS_SSL_CONFIGURED = False
+_WS_SSL_WARNING_LOGGED = False
+
+
+def _normalize_ssl_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    return os.path.expanduser(candidate)
+
+
+def _resolve_ws_ssl_context() -> tuple[ssl.SSLContext | None, bool]:
+    global _WS_SSL_CONTEXT_VALUE, _WS_SSL_CONFIGURED
+
+    with _WS_SSL_CONTEXT_LOCK:
+        cached = _WS_SSL_CONTEXT_VALUE
+        if cached is not _WS_SSL_CONTEXT_SENTINEL:
+            if isinstance(cached, ssl.SSLContext):
+                return cached, _WS_SSL_CONFIGURED
+            return None, _WS_SSL_CONFIGURED
+
+        cert_path = _normalize_ssl_path(
+            os.getenv("UI_WS_SSL_CERT_PATH") or os.getenv("UI_WS_SSL_CERT")
+        )
+        key_path = _normalize_ssl_path(
+            os.getenv("UI_WS_SSL_KEY_PATH") or os.getenv("UI_WS_SSL_KEY")
+        )
+        ca_path = _normalize_ssl_path(
+            os.getenv("UI_WS_SSL_CA_PATH") or os.getenv("UI_WS_SSL_CA")
+        )
+
+        configured = bool(cert_path or key_path or ca_path)
+        _WS_SSL_CONFIGURED = configured
+
+        if not configured:
+            _WS_SSL_CONTEXT_VALUE = None
+            return None, False
+
+        if not cert_path or not key_path:
+            log.error(
+                "UI websocket TLS requires both UI_WS_SSL_CERT_PATH and UI_WS_SSL_KEY_PATH",
+            )
+            _WS_SSL_CONTEXT_VALUE = None
+            return None, True
+
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            if ca_path:
+                context.load_verify_locations(cafile=ca_path)
+        except FileNotFoundError as exc:
+            log.error("UI websocket TLS failed to load certificates: %s", exc)
+            _WS_SSL_CONTEXT_VALUE = None
+            return None, True
+        except Exception as exc:  # pragma: no cover - unexpected ssl failure
+            log.error("UI websocket TLS failed to initialize: %s", exc)
+            _WS_SSL_CONTEXT_VALUE = None
+            return None, True
+
+        _WS_SSL_CONTEXT_VALUE = context
+        return context, True
+
+
+def _warn_ws_ssl_override(reason: str) -> None:
+    global _WS_SSL_WARNING_LOGGED
+    if _WS_SSL_WARNING_LOGGED:
+        return
+    log.warning("UI websocket TLS requested but %s; falling back to ws", reason)
+    _WS_SSL_WARNING_LOGGED = True
+
+
 rl_ws_loop: asyncio.AbstractEventLoop | None = None
 event_ws_loop: asyncio.AbstractEventLoop | None = None
 log_ws_loop: asyncio.AbstractEventLoop | None = None
@@ -1837,10 +1914,21 @@ def _normalize_ws_url(value: str | None) -> str | None:
 
 def _infer_ws_scheme(request_scheme: str | None = None) -> str:
     override = (os.getenv("UI_WS_SCHEME") or os.getenv("WS_SCHEME") or "").strip().lower()
-    if override in {"ws", "wss"}:
-        return override
-    if request_scheme and request_scheme.lower() in {"https", "wss"}:
+    context, configured = _resolve_ws_ssl_context()
+
+    if override == "wss":
+        if context is not None:
+            return "wss"
+        reason = "a TLS context could not be initialized" if configured else "no certificate/key configured"
+        _warn_ws_ssl_override(reason)
+        return "ws"
+
+    if override == "ws":
+        return "ws"
+
+    if request_scheme and request_scheme.lower() in {"https", "wss"} and context is not None:
         return "wss"
+
     return "ws"
 
 
@@ -2056,6 +2144,7 @@ def _start_channel(
     queue_size: int,
     ping_interval: float,
     ping_timeout: float,
+    ssl_context: ssl.SSLContext | None,
 ) -> threading.Thread:
     state = _WS_CHANNELS[channel]
     ready: Queue[Any] = Queue(maxsize=1)
@@ -2281,6 +2370,7 @@ def _start_channel(
                         candidate_port,
                         ping_interval=ping_interval,
                         ping_timeout=ping_timeout,
+                        ssl=ssl_context,
                     )
                 )
             except OSError as exc:
@@ -2439,6 +2529,7 @@ def start_websockets() -> dict[str, threading.Thread]:
     ping_timeout = float(os.getenv("UI_WS_PING_TIMEOUT", os.getenv("WS_PING_TIMEOUT", "20")))
     url_host = _resolve_public_host(host)
     scheme = _infer_ws_scheme()
+    ssl_context = _resolve_ws_ssl_context()[0] if scheme == "wss" else None
 
     rl_port = _resolve_port("UI_RL_WS_PORT", "RL_WS_PORT", default=_RL_WS_PORT_DEFAULT)
     log_port = _resolve_port("UI_LOG_WS_PORT", default=_LOG_WS_PORT_DEFAULT)
@@ -2452,6 +2543,7 @@ def start_websockets() -> dict[str, threading.Thread]:
             queue_size=queue_size,
             ping_interval=ping_interval,
             ping_timeout=ping_timeout,
+            ssl_context=ssl_context,
         )
         threads["events"] = _start_channel(
             "events",
@@ -2460,6 +2552,7 @@ def start_websockets() -> dict[str, threading.Thread]:
             queue_size=queue_size,
             ping_interval=ping_interval,
             ping_timeout=ping_timeout,
+            ssl_context=ssl_context,
         )
         threads["logs"] = _start_channel(
             "logs",
@@ -2468,6 +2561,7 @@ def start_websockets() -> dict[str, threading.Thread]:
             queue_size=queue_size,
             ping_interval=ping_interval,
             ping_timeout=ping_timeout,
+            ssl_context=ssl_context,
         )
     except Exception:
         for state in _WS_CHANNELS.values():
