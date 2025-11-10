@@ -97,22 +97,46 @@ def _acquire_runtime_lock(path: Path) -> None:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
             existing_pid: int | None = None
+            alive = False
             try:
                 existing_pid = int(path.read_text(encoding="utf-8").strip())
             except Exception:
                 existing_pid = None
-            if existing_pid and _process_alive(existing_pid):
+            if existing_pid:
+                alive = _process_alive(existing_pid)
+                if alive:
+                    log.info(
+                        "Runtime lock %s is held by pid %s; refusing to steal it.",
+                        path,
+                        existing_pid,
+                    )
+            if alive:
                 raise SystemExit(
                     f"SolHunter runtime already running (pid {existing_pid}); "
                     "terminate it or remove the lock file."
                 )
             try:
                 path.unlink()
+            except FileNotFoundError:
+                continue
+            except PermissionError:
+                alive = True
+                log.warning(
+                    "Runtime lock %s owned by pid %s could not be removed because "
+                    "of insufficient permissions; refusing to steal it.",
+                    path,
+                    existing_pid if existing_pid is not None else "unknown",
+                )
             except OSError:
                 raise SystemExit(
                     "SolHunter runtime lock is held and could not be cleared; "
                     "remove artifacts/.cache/runtime.lock if the process exited."
                 ) from None
+            if alive:
+                raise SystemExit(
+                    f"SolHunter runtime already running (pid {existing_pid}); "
+                    "terminate it or remove the lock file."
+                )
             continue
         else:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
