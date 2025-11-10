@@ -236,6 +236,34 @@ ensure_local_redis_if_needed(urls)
 PY
 }
 
+redis_health() {
+  if [[ -z ${REDIS_URL:-} ]]; then
+    return 0
+  fi
+  if command -v redis-cli >/dev/null 2>&1; then
+    redis-cli -u "$REDIS_URL" PING >/dev/null 2>&1
+  else
+    "$PYTHON_BIN" - <<'PY'
+import os
+import asyncio
+from solhunter_zero.production import ConnectivityChecker
+async def _check():
+    checker = ConnectivityChecker()
+    try:
+        ok = await checker.check("redis")
+        if not ok:
+            raise SystemExit(1)
+    except AttributeError:
+        for target in checker.targets:
+            if target.get("name") == "redis":
+                result = await checker._probe_redis(target["name"], target["url"])
+                if not result.ok:
+                    raise SystemExit(1)
+asyncio.run(_check())
+PY
+  fi
+}
+
 wait_for_socket_release() {
   "$PYTHON_BIN" - <<'PY'
 import os
@@ -729,6 +757,13 @@ log_info "Ensuring Redis availability"
 ensure_redis
 log_info "Redis helper completed"
 
+log_info "Running Redis health check"
+if ! redis_health; then
+  log_warn "Redis health check failed"
+  exit $EXIT_HEALTH
+fi
+log_info "Redis health check passed"
+
 declare -a CHILD_PIDS=()
 register_child() {
   CHILD_PIDS+=("$1")
@@ -767,41 +802,6 @@ if [[ -n ${ORIG_MODE:-} ]]; then
 else
   unset MODE
 fi
-
-redis_health() {
-  if [[ -z ${REDIS_URL:-} ]]; then
-    return 0
-  fi
-  if command -v redis-cli >/dev/null 2>&1; then
-    redis-cli -u "$REDIS_URL" PING >/dev/null 2>&1
-  else
-    "$PYTHON_BIN" - <<'PY'
-import os
-import asyncio
-from solhunter_zero.production import ConnectivityChecker
-async def _check():
-    checker = ConnectivityChecker()
-    try:
-        ok = await checker.check("redis")
-        if not ok:
-            raise SystemExit(1)
-    except AttributeError:
-        for target in checker.targets:
-            if target.get("name") == "redis":
-                result = await checker._probe_redis(target["name"], target["url"])
-                if not result.ok:
-                    raise SystemExit(1)
-asyncio.run(_check())
-PY
-  fi
-}
-
-log_info "Running Redis health check"
-if ! redis_health; then
-  log_warn "Redis health check failed"
-  exit $EXIT_HEALTH
-fi
-log_info "Redis health check passed"
 
 start_log_stream() {
   local log=$1
