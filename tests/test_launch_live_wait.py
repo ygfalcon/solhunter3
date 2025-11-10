@@ -117,6 +117,37 @@ def test_wait_for_socket_release_backoff() -> None:
             pass
 
 
+def test_wait_for_socket_release_skips_remote_hosts() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    wait_function = _extract_function(source, "wait_for_socket_release")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "EVENT_BUS_URL": "wss://example.com/ws",
+            "PYTHON_BIN": sys.executable,
+        }
+    )
+
+    bash_script = (
+        "set -euo pipefail\n"
+        + wait_function
+        + "wait_for_socket_release\n"
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert "skip example.com 8779" in completed.stdout
+
+
 def test_normalize_bus_configuration_exports() -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()

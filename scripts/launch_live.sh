@@ -338,6 +338,7 @@ PY
 
 wait_for_socket_release() {
   "$PYTHON_BIN" - <<'PY'
+import ipaddress
 import os
 import socket
 import time
@@ -361,6 +362,22 @@ parsed = urlparse(bus_url)
 host = parsed.hostname or "127.0.0.1"
 port = parsed.port or 8779
 timeout = _read_timeout(os.environ.get("EVENT_BUS_RELEASE_TIMEOUT"))
+
+
+def _is_local_host(hostname: str) -> bool:
+    normalized = (hostname or "").strip().lower()
+    if not normalized or normalized == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_loopback
+
+
+if not _is_local_host(host):
+    print(f"skip {host} {port}")
+    raise SystemExit(0)
 
 
 def port_busy() -> bool:
