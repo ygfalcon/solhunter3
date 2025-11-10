@@ -145,7 +145,7 @@ def test_wait_for_socket_release_skips_remote_hosts() -> None:
         env=env,
     )
 
-    assert "skip example.com 8779" in completed.stdout
+    assert "free example.com 8779 remote" in completed.stdout
 
 
 def test_normalize_bus_configuration_exports() -> None:
