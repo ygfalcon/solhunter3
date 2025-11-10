@@ -150,6 +150,70 @@ redis_keys = [
     "AMM_WATCH_REDIS_URL",
 ]
 
+REDIS_MISMATCH_ERROR = (
+    "All Redis URLs must match. Use identical redis://host:port/1 values for "
+    "REDIS_URL, MINT_STREAM_REDIS_URL, MEMPOOL_STREAM_REDIS_URL, AMM_WATCH_REDIS_URL, "
+    "BROKER_URL, and BROKER_URLS (adjust exports or pass --env with the canonical settings)."
+)
+
+
+def _record_target(canonical: str) -> None:
+    global target_url
+    if canonical is None:
+        return
+    if target_url is None:
+        target_url = canonical
+    elif canonical != target_url:
+        errors.append(REDIS_MISMATCH_ERROR)
+
+
+def _normalize_single_key(key: str, raw: str | None) -> None:
+    if raw is None:
+        return
+    os.environ[key] = raw
+    try:
+        scheme, host, port, db = _canonical(raw)
+    except Exception:
+        errors.append(f"{key} has invalid Redis URL: {raw}")
+        return
+    if db != 1:
+        errors.append(
+            f"{key} targets database {db}; configure database 1 for all runtime services "
+            f"(export {key}=redis://localhost:6379/1 or update your env file)."
+        )
+    canonical = f"{scheme}://{host}:{port}/{db}"
+    os.environ[key] = canonical
+    manifest[key] = canonical
+    _record_target(canonical)
+
+
+def _normalize_multi_key(key: str, raw: str | None) -> None:
+    if not raw:
+        return
+    os.environ[key] = raw
+    parts = [segment.strip() for segment in raw.split(",") if segment.strip()]
+    canonical_parts: list[str] = []
+    for part in parts:
+        try:
+            scheme, host, port, db = _canonical(part)
+        except Exception:
+            errors.append(f"{key} has invalid Redis URL: {part}")
+            continue
+        if db != 1:
+            errors.append(
+                f"{key} targets database {db}; configure database 1 for all runtime services "
+                f"(export {key}=redis://localhost:6379/1 or update your env file)."
+            )
+        canonical = f"{scheme}://{host}:{port}/{db}"
+        canonical_parts.append(canonical)
+        _record_target(canonical)
+    if canonical_parts:
+        canonical_value = ",".join(canonical_parts)
+        os.environ[key] = canonical_value
+        manifest[key] = canonical_value
+    else:
+        os.environ.pop(key, None)
+
 def _canonical(url: str) -> tuple[str, str, int, int]:
     candidate = url if "://" in url else f"redis://{url}"
     parsed = urlparse(candidate)
@@ -181,14 +245,10 @@ for key in redis_keys:
     canonical = f"{scheme}://{host}:{port}/{db}"
     os.environ[key] = canonical
     manifest[key] = canonical
-    if target_url is None:
-        target_url = canonical
-    elif canonical != target_url:
-        errors.append(
-            "All Redis URLs must match. Use identical redis://host:port/1 values for "
-            "REDIS_URL, MINT_STREAM_REDIS_URL, MEMPOOL_STREAM_REDIS_URL, and AMM_WATCH_REDIS_URL "
-            "(adjust exports or pass --env with the canonical settings)."
-        )
+    _record_target(canonical)
+
+_normalize_single_key("BROKER_URL", os.environ.get("BROKER_URL"))
+_normalize_multi_key("BROKER_URLS", os.environ.get("BROKER_URLS"))
 
 channel_keys = [
     "MINT_STREAM_BROKER_CHANNEL",
