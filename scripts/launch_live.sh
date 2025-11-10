@@ -696,7 +696,7 @@ for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
     if '=' not in line:
         continue
     key, value = line.split('=', 1)
-    key = key.strip()
+    key = re.sub(r'^export\s+', '', key.strip())
     value = value.strip().strip('"').strip("'")
     values[key] = value
     if value == "":
