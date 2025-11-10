@@ -938,6 +938,9 @@ class RuntimeOrchestrator:
         async def _discovery_loop():
             agent = DiscoveryAgent()
             method = discovery_method
+            base_delay = max(5, min(60, loop_delay))
+            max_backoff = max(base_delay, base_delay * 8)
+            sleep_delay = base_delay
             while True:
                 try:
                     tokens = await agent.discover_tokens(method=method, offline=False)
@@ -949,9 +952,18 @@ class RuntimeOrchestrator:
                             for token in tokens
                         ]
                         event_bus.publish("token_discovered", entries)
+                    sleep_delay = base_delay
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
-                    pass
-                await asyncio.sleep(max(5, min(60, loop_delay)))
+                    source = str(method or "runtime")
+                    log.exception(
+                        "Discovery loop error during %s discovery (source=%s)",
+                        source,
+                        source,
+                    )
+                    sleep_delay = min(sleep_delay * 2, max_backoff)
+                await asyncio.sleep(sleep_delay)
 
         async def _evolve_loop():
             # Evolve/mutate/cull continually based on success metrics
