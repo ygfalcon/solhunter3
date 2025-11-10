@@ -1820,8 +1820,31 @@ def _enqueue_message(
                 if depth > state.queue_high:
                     state.queue_high = depth
 
-    state.loop.call_soon_threadsafe(_put)
-    return True
+    try:
+        state.loop.call_soon_threadsafe(_put)
+        return True
+    except RuntimeError:
+        now = time.monotonic()
+        should_log = False
+        warn_drops = 0
+        with state.lock:
+            state.drop_count += 1
+            warn_drops = state.drop_count
+            if _WS_QUEUE_DROP_TOTAL is not None:
+                try:
+                    _WS_QUEUE_DROP_TOTAL.labels(channel=state.name).inc()
+                except Exception:  # pragma: no cover - defensive metrics guard
+                    pass
+            if now - state.last_drop_warning_at >= _QUEUE_DROP_WARNING_INTERVAL:
+                state.last_drop_warning_at = now
+                should_log = True
+        if should_log:
+            log.warning(
+                "Websocket channel %s dropping message: event loop is closed (drops=%d)",
+                state.name,
+                warn_drops,
+            )
+        return False
 
 
 def push_event(payload: Any) -> bool:

@@ -280,6 +280,64 @@ def test_enqueue_message_logs_warning_when_queue_full(caplog):
         ui._WS_QUEUE_DROP_TOTAL = previous_counter
 
 
+def test_enqueue_message_handles_closed_loop(caplog):
+    ui = _reload_ui_module()
+    state = ui._WS_CHANNELS["events"]
+
+    class ClosedLoop:
+        def call_soon_threadsafe(self, callback, *args, **kwargs):
+            raise RuntimeError("Event loop is closed")
+
+    class CounterStub:
+        def __init__(self) -> None:
+            self.incremented = 0
+            self.last_labels = None
+
+        def labels(self, **labels):
+            self.last_labels = labels
+            return self
+
+        def inc(self):
+            self.incremented += 1
+
+    original_loop = state.loop
+    original_queue = state.queue
+    previous_counter = getattr(ui, "_WS_QUEUE_DROP_TOTAL", None)
+    with state.lock:
+        prev_drop_count = state.drop_count
+        prev_last_warning = state.last_drop_warning_at
+        state.drop_count = 0
+        state.last_drop_warning_at = 0.0
+    state.loop = ClosedLoop()
+    state.queue = asyncio.Queue()
+    counter_stub = CounterStub()
+    ui._WS_QUEUE_DROP_TOTAL = counter_stub
+
+    caplog.set_level(logging.WARNING)
+    caplog.clear()
+
+    try:
+        assert ui._enqueue_message("events", {"value": 1}) is False
+        with state.lock:
+            assert state.drop_count == 1
+        assert counter_stub.incremented == 1
+        assert counter_stub.last_labels == {"channel": "events"}
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "event loop is closed" in record.getMessage()
+        ]
+        assert warnings, "expected warning when loop is closed"
+    finally:
+        state.loop = original_loop
+        state.queue = original_queue
+        with state.lock:
+            state.drop_count = prev_drop_count
+            state.last_drop_warning_at = prev_last_warning
+        ui._WS_QUEUE_DROP_TOTAL = previous_counter
+
+
 def _reload_ui_module():
     for name in list(sys.modules):
         if name.startswith("websockets"):
