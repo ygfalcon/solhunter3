@@ -1,4 +1,5 @@
 import asyncio
+import time
 import types
 
 import pytest
@@ -417,3 +418,19 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
 
     addresses = {entry["address"] for entry in results}
     assert {dex_mint, meteora_mint, dexlab_mint} <= addresses
+
+
+def test_compute_feature_vector_respects_trending_threshold(monkeypatch):
+    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 50.0, raising=False)
+
+    entry = {
+        "liquidity": 75.0,
+        "volume": 125.0,
+        "sources": {"birdeye"},
+        "discovered_at": time.time(),
+    }
+
+    features = td._compute_feature_vector(entry, mempool=None)
+
+    assert "sellable" in features
+    assert features["sellable"] == pytest.approx(1.0)

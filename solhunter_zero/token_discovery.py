@@ -27,6 +27,7 @@ from .providers import orca as orca_provider
 from .providers import raydium as raydium_provider
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
+from .token_scanner import _TRENDING_MIN_LIQUIDITY
 from .util.mints import is_valid_solana_mint
 
 logger = logging.getLogger(__name__)
