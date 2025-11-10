@@ -189,6 +189,7 @@ def _reload_ui_module():
     for name in list(sys.modules):
         if name.startswith("websockets"):
             sys.modules.pop(name, None)
+    sys.modules.setdefault("websockets", types.ModuleType("websockets"))
     sys.modules.setdefault("sqlparse", types.SimpleNamespace())
     sys.modules.setdefault(
         "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet"))
@@ -245,3 +246,39 @@ def test_manifest_omits_zero_ports():
         available_key = f"{channel}_ws_available"
         assert payload[ws_key] is None
         assert payload[available_key] is False
+
+
+def test_manifest_public_host_full_url(monkeypatch):
+    ui = _reload_ui_module()
+
+    for key in (
+        "UI_EVENTS_WS",
+        "UI_EVENTS_WS_URL",
+        "UI_WS_URL",
+        "UI_RL_WS",
+        "UI_RL_WS_URL",
+        "UI_LOGS_WS",
+        "UI_LOG_WS_URL",
+        "UI_PUBLIC_HOST",
+        "PUBLIC_URL_HOST",
+        "UI_EXTERNAL_HOST",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    for state in ui._WS_CHANNELS.values():
+        state.port = 0
+        state.host = None
+
+    ui._RL_WS_PORT = 9101
+    ui._EVENT_WS_PORT = 9100
+    ui._LOG_WS_PORT = 9102
+
+    monkeypatch.setenv("UI_PUBLIC_HOST", "https://public.example:8443")
+
+    manifest = ui.build_ui_manifest(None)
+
+    assert manifest["events_ws"] == "wss://public.example:8443/ws/events"
+    assert manifest["rl_ws"] == "wss://public.example:8443/ws/rl"
+    assert manifest["logs_ws"] == "wss://public.example:8443/ws/logs"
+    for channel in ("rl", "events", "logs"):
+        assert manifest[f"{channel}_ws_available"] is True
