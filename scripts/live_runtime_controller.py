@@ -10,7 +10,7 @@ import signal
 import sys
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from solhunter_zero.logging_utils import setup_stdout_logging
 
@@ -102,6 +102,9 @@ def _emit_runtime_manifest() -> None:
             )
         host = parsed.hostname or "localhost"
         port = parsed.port or 6379
+        host_display = host
+        if ":" in host_display and not host_display.startswith("["):
+            host_display = f"[{host_display}]"
         segment = (parsed.path or "/").lstrip("/").split("/", 1)[0]
         try:
             db_index = int(segment) if segment else 0
@@ -111,11 +114,27 @@ def _emit_runtime_manifest() -> None:
             raise SystemExit(
                 f"{key} targets Redis database {db_index}; configure Redis database 1 for all runtime services."
             )
-        normalized = f"{scheme}://{host}:{port}/{db_index}"
+        canonical_endpoint = f"{scheme}://{host_display}:{port}/{db_index}"
+        userinfo = ""
+        netloc = parsed.netloc
+        if netloc:
+            userinfo_part, sep, _ = netloc.rpartition("@")
+            if sep:
+                userinfo = f"{userinfo_part}@"
+        normalized = urlunparse(
+            (
+                scheme,
+                f"{userinfo}{host_display}:{port}",
+                f"/{db_index}",
+                "",
+                parsed.query,
+                "",
+            )
+        )
         os.environ[key] = normalized
         if canonical_url is None:
-            canonical_url = normalized
-        elif normalized != canonical_url:
+            canonical_url = canonical_endpoint
+        elif canonical_endpoint != canonical_url:
             raise SystemExit(
                 "All runtime components must share the same Redis endpoint. Set REDIS_URL, MINT_STREAM_REDIS_URL, "
                 "MEMPOOL_STREAM_REDIS_URL, and AMM_WATCH_REDIS_URL to the same host:port/1 value."
