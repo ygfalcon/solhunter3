@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 """Event-driven agent runtime scaffolding.
 
 This is optional and enabled when EVENT_DRIVEN=1. It wraps the existing
@@ -39,6 +38,15 @@ class AgentRuntime:
         self._tokens: set[str] = set()
         self._ewma: dict[str, float] = {}
         self._subscriptions: list[Callable[[], None]] = []
+        limit_env = os.getenv("AGENT_EVALUATION_CONCURRENCY", "8")
+        semaphore: asyncio.Semaphore | None = None
+        try:
+            limit = int(limit_env)
+        except (TypeError, ValueError):
+            limit = 8
+        if limit > 0:
+            semaphore = asyncio.Semaphore(limit)
+        self._evaluation_semaphore = semaphore
 
     async def start(self) -> None:
         self._running = True
@@ -100,7 +108,7 @@ class AgentRuntime:
                 self._tokens.add(token)
             except Exception:
                 pass
-            task = asyncio.create_task(self._evaluate_and_publish(token))
+            task = asyncio.create_task(self._evaluate_with_semaphore(token))
             self._tasks.append(task)
             task.add_done_callback(lambda t: self._tasks.remove(t) if t in self._tasks else None)
 
@@ -120,64 +128,85 @@ class AgentRuntime:
         except Exception:
             pass
 
-    async def _evaluate_and_publish(self, token: str) -> None:
+    async def _evaluate_with_semaphore(self, token: str) -> None:
+        semaphore = self._evaluation_semaphore
+        if semaphore is not None:
+            await semaphore.acquire()
+        try:
+            await self._evaluate_and_publish(token, semaphore)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("failed to evaluate token", extra={"token": token})
+
+    async def _evaluate_and_publish(
+        self, token: str, semaphore: asyncio.Semaphore | None = None
+    ) -> None:
         try:
             actions: List[Dict[str, Any]] = await self.manager.evaluate(token, self.portfolio)
         except Exception:
+            if semaphore is not None:
+                semaphore.release()
             return
-        for act in actions:
-            # Map evaluated actions directly to decisions; includes price/amount
-            price = act.get("price")
-            try:
-                price = float(price)
-            except (TypeError, ValueError):
-                price = None
+        try:
+            for act in actions:
+                # Map evaluated actions directly to decisions; includes price/amount
+                price = act.get("price")
+                try:
+                    price = float(price)
+                except (TypeError, ValueError):
+                    price = None
 
-            if price is None or price <= 0:
-                hist = self.portfolio.price_history.get(token, [])
-                if hist:
+                if price is None or price <= 0:
+                    hist = self.portfolio.price_history.get(token, [])
+                    if hist:
+                        try:
+                            price = float(hist[-1])
+                        except Exception:
+                            price = None
+
+                if (price is None or price <= 0) and token not in self._ewma:
                     try:
-                        price = float(hist[-1])
+                        prices = await fetch_token_prices_async([token])
+                        fetched = float(prices.get(token, 0.0) or 0.0)
+                        if fetched > 0:
+                            price = fetched
                     except Exception:
                         price = None
 
-            if (price is None or price <= 0) and token not in self._ewma:
+                # Prefer EWMA if available (smoother decisions)
+                if token in self._ewma:
+                    ewma_price = float(self._ewma[token])
+                    if ewma_price > 0:
+                        price = ewma_price
+
+                if price is None or price <= 0:
+                    log.warning("dropping action due to missing price", extra={"token": token})
+                    continue
+
+                decision = {
+                    "token": act.get("token"),
+                    "side": act.get("side"),
+                    "size": float(act.get("amount", 0.0)),
+                    "price": float(price),
+                    "rationale": {"agent": act.get("agent"), "conviction_delta": act.get("conviction_delta")},
+                }
                 try:
-                    prices = await fetch_token_prices_async([token])
-                    fetched = float(prices.get(token, 0.0) or 0.0)
-                    if fetched > 0:
-                        price = fetched
+                    event_bus.publish("action_decision", decision)
                 except Exception:
-                    price = None
-
-            # Prefer EWMA if available (smoother decisions)
-            if token in self._ewma:
-                ewma_price = float(self._ewma[token])
-                if ewma_price > 0:
-                    price = ewma_price
-
-            if price is None or price <= 0:
-                log.warning("dropping action due to missing price", extra={"token": token})
-                continue
-
-            decision = {
-                "token": act.get("token"),
-                "side": act.get("side"),
-                "size": float(act.get("amount", 0.0)),
-                "price": float(price),
-                "rationale": {"agent": act.get("agent"), "conviction_delta": act.get("conviction_delta")},
-            }
+                    continue
+            # Emit a small summary for UI/metrics
             try:
-                event_bus.publish("action_decision", decision)
+                buys = sum(1 for a in actions if a.get("side") == "buy")
+                sells = sum(1 for a in actions if a.get("side") == "sell")
+                event_bus.publish(
+                    "decision_summary", {"token": token, "count": len(actions), "buys": buys, "sells": sells}
+                )
             except Exception:
-                continue
-        # Emit a small summary for UI/metrics
-        try:
-            buys = sum(1 for a in actions if a.get("side") == "buy")
-            sells = sum(1 for a in actions if a.get("side") == "sell")
-            event_bus.publish("decision_summary", {"token": token, "count": len(actions), "buys": buys, "sells": sells})
-        except Exception:
-            pass
+                pass
+        finally:
+            if semaphore is not None:
+                semaphore.release()
 
     async def _price_backfill_loop(self) -> None:
         interval = float(os.getenv("PRICE_BACKFILL_INTERVAL", "10") or 10)
