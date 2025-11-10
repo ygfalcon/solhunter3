@@ -198,6 +198,7 @@ files unless the loader is invoked with `overwrite=True`.
 | `USE_FLASH_LOANS` | `0` | Enable flash loans |
 | `USE_GNN_ROUTING` | `0` | Enable gnn routing |
 | `USE_GPU_SIM` | `` | Enable gpu sim |
+| `UI_PROXY_FIX` | `0` | When `1`, wrap the Flask UI with Werkzeug's `ProxyFix` so scheme/host reflect `X-Forwarded-*` headers |
 | `UI_PUBLIC_HOST` | `` | Hostname advertised to UI clients when the server binds to `0.0.0.0`/`::`; set when fronting the UI with a proxy |
 | `USE_MEV_BUNDLES` | `false` | Enable mev bundles |
 | `USE_NUMBA_ROUTE` | `0` | Enable numba route |
@@ -228,6 +229,10 @@ interfaces and publish the externally reachable host separately:
    compatibility with older deployments.
 3. Terminate TLS and route `/ws/{events,rl,logs}` plus the REST API through your
    reverse proxy (Nginx, HAProxy, etc.) to the bound runtime ports.
+4. When the runtime sits behind one or more trusted proxies, set
+   `UI_PROXY_FIX=1` so Flask honours the forwarded scheme and host when building
+   absolute URLs and redirects. Leave it disabled when the runtime is directly
+   exposed to avoid trusting spoofed headers.
 
 With this split configuration, health endpoints and WebSocket URLs in the REST
 manifest reflect the proxy address instead of defaulting to `127.0.0.1`, so SPA
