@@ -338,19 +338,14 @@ class DiscoveryAgent:
                     logger.warning("Failed to read token_file %s: %s", token_file, exc)
                     tokens = []
                 details: Dict[str, Dict[str, Any]] = {}
-            elif cached_tokens and identity_matches:
-                tokens = list(cached_tokens)
-                offline_source = "cache"
-                details = {}
             else:
-                if cached_tokens and not identity_matches:
-                    logger.debug(
-                        "DiscoveryAgent offline cache ignored due to RPC mismatch (cached=%s, current=%s)",
-                        cached_identity,
-                        current_rpc_identity,
-                    )
                 tokens = self._fallback_tokens()
                 details = {}
+                if tokens:
+                    offline_source = "cache"
+                else:
+                    offline_source = "static"
+                    tokens = self._static_fallback_tokens()
             tokens = self._normalise(tokens)
             tokens, details = await self._apply_social_mentions(
                 tokens, details, offline=True
@@ -432,6 +427,8 @@ class DiscoveryAgent:
 
         if not tokens:
             tokens = self._fallback_tokens()
+            if not tokens:
+                tokens = self._static_fallback_tokens()
             details = {}
             fallback_used = True
 
@@ -728,8 +725,12 @@ class DiscoveryAgent:
         if mem_tokens:
             return mem_tokens, mem_details
 
-        logger.warning("All discovery sources empty; returning static fallback")
-        fallback = [tok for tok in self._fallback_tokens() if not self._should_skip_token(tok)]
+        logger.warning("All discovery sources empty; returning fallback tokens")
+        fallback_tokens = self._fallback_tokens()
+        cached = _CACHE.get("tokens")
+        if not fallback_tokens and isinstance(cached, list) and cached:
+            fallback_tokens = self._static_fallback_tokens()
+        fallback = [tok for tok in fallback_tokens if not self._should_skip_token(tok)]
         return fallback, {}
 
     def _normalise(self, tokens: Iterable[Any]) -> List[str]:
@@ -753,14 +754,32 @@ class DiscoveryAgent:
 
     def _fallback_tokens(self) -> List[str]:
         cached = list(_CACHE.get("tokens", [])) if isinstance(_CACHE.get("tokens"), list) else []
-        if cached:
-            logger.warning("DiscoveryAgent falling back to cached tokens (%d)", len(cached))
-            result: List[str] = []
-            for tok in cached[: self.limit]:
-                canonical = canonical_mint(tok)
-                if validate_mint(canonical):
-                    result.append(canonical)
-            return result
+        if not cached:
+            return []
+
+        cached_identity = str(_CACHE.get("rpc_identity") or "")
+        current_identity = _rpc_identity(self.rpc_url)
+        identity_matches = bool(
+            (not cached_identity and not current_identity)
+            or cached_identity == current_identity
+        )
+        if not identity_matches:
+            logger.debug(
+                "DiscoveryAgent cached tokens ignored due to RPC mismatch (cached=%s, current=%s)",
+                cached_identity,
+                current_identity,
+            )
+            return []
+
+        logger.warning("DiscoveryAgent falling back to cached tokens (%d)", len(cached))
+        result: List[str] = []
+        for tok in cached[: self.limit]:
+            canonical = canonical_mint(tok)
+            if validate_mint(canonical):
+                result.append(canonical)
+        return result
+
+    def _static_fallback_tokens(self) -> List[str]:
         logger.warning("DiscoveryAgent using static discovery fallback")
         result: List[str] = []
         for tok in _STATIC_FALLBACK[: self.limit]:
