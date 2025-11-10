@@ -1,7 +1,10 @@
 import asyncio
+import os
+import socket
 import threading
 import time
 import types
+from contextlib import closing
 
 import pytest
 
@@ -128,6 +131,93 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
         thread_obj = http_thread_info.get("thread")
         if isinstance(thread_obj, threading.Thread):
             thread_obj.join(timeout=1)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_stop_all_releases_http_socket(monkeypatch):
+    stage_events: list[tuple[str, bool, str]] = []
+
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        stage_events.append((stage, ok, detail))
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {}, __name__="stub_ui")
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {},
+    )
+
+    class DummyServer:
+        daemon_threads = True
+
+        def __init__(self, host: str, port: int, _app: object) -> None:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._sock.bind((host, port))
+            self._sock.listen()
+            self.server_address = self._sock.getsockname()
+            self._shutdown = threading.Event()
+            self._closed = False
+
+        def serve_forever(self) -> None:
+            while not self._shutdown.is_set():
+                self._shutdown.wait(timeout=0.05)
+
+        def shutdown(self) -> None:
+            self._shutdown.set()
+
+        def server_close(self) -> None:
+            if not self._closed:
+                self._sock.close()
+                self._closed = True
+
+    def make_dummy_server(host: str, port: int, app: object) -> DummyServer:
+        return DummyServer(host, port, app)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.make_server",
+        make_dummy_server,
+    )
+
+    monkeypatch.setenv("UI_HOST", "127.0.0.1")
+    monkeypatch.setenv("UI_PORT", "0")
+    monkeypatch.delenv("UI_DISABLE_HTTP_SERVER", raising=False)
+
+    orch = RuntimeOrchestrator(run_http=True)
+    await orch.start_ui()
+
+    http_threads = orch.handles.ui_threads or {}
+    http_info = http_threads.get("http") if isinstance(http_threads, dict) else None
+    assert isinstance(http_info, dict)
+    http_thread = http_info.get("thread")
+    assert isinstance(http_thread, threading.Thread)
+    assert http_thread.is_alive()
+
+    port_value = int(os.getenv("UI_PORT", "0"))
+    assert port_value > 0
+
+    await orch.stop_all()
+
+    assert any(stage == "runtime:stopped" for stage, _, _ in stage_events)
+    assert not http_thread.is_alive()
+
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as test_sock:
+        test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        test_sock.bind(("127.0.0.1", port_value))
 
 
 @pytest.mark.anyio("asyncio")

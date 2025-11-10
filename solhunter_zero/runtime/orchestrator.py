@@ -10,6 +10,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
@@ -1063,6 +1064,14 @@ class RuntimeOrchestrator:
             return
         self._closed = True
         await self._publish_stage("runtime:stopping", True)
+        shutdown_event = None
+        http_thread = None
+        threads = self.handles.ui_threads
+        if isinstance(threads, dict):
+            http_info = threads.get("http")
+            if isinstance(http_info, dict):
+                shutdown_event = http_info.get("shutdown_event")
+                http_thread = http_info.get("thread")
         # Cancel tasks
         tasks = list(self.handles.tasks)
         for task in tasks:
@@ -1136,6 +1145,24 @@ class RuntimeOrchestrator:
             await close_session()
         except Exception:
             pass
+        if shutdown_event is not None and hasattr(shutdown_event, "set"):
+            with suppress(Exception):
+                shutdown_event.set()
+        server = self.handles.ui_server
+        if server is not None:
+            with suppress(Exception):
+                server.shutdown()
+            with suppress(Exception):
+                server.server_close()
+        self.handles.ui_server = None
+        if isinstance(http_thread, threading.Thread):
+            if http_thread.is_alive():
+                try:
+                    await asyncio.to_thread(http_thread.join, 2.0)
+                except RuntimeError:
+                    with suppress(Exception):
+                        http_thread.join(timeout=2.0)
+        self.handles.ui_threads = None
         await self._publish_stage("runtime:stopped", True)
 
 
