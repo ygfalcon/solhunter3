@@ -31,7 +31,15 @@ from .util.mints import clean_candidate_mints
 def _default_enrich_rpc() -> str:
     candidate = (os.environ.get("HELIUS_RPC_URL") or os.environ.get("SOLANA_RPC_URL") or "").strip()
     if candidate:
-        assert "api-key=" in candidate, "HELIUS_RPC_URL must include ?api-key=..."
+        lowered = candidate.lower()
+        if "helius" in lowered and "api-key=" not in lowered:
+            warn_once_per(
+                30.0,
+                f"helius-enrich-missing-key-{candidate}",
+                "Helius RPC URL missing api-key query parameter: %s",
+                candidate,
+                logger=logging.getLogger(__name__),
+            )
     return candidate
 
 
