@@ -224,6 +224,63 @@ def test_executor_builds_clamped_exit_plan(monkeypatch: pytest.MonkeyPatch) -> N
         assert slice_["qty"] <= payload["depth_1pct_usd"] * 0.35 / payload["expected_price"] + 1e-9
 
 
+def test_trade_executor_dry_run_skips_live_orders(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def fake_place_order(*args: Any, **kwargs: Any) -> None:
+        calls.append((args, kwargs))
+
+    async def fast_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "solhunter_zero.exec_service.service.place_order_async",
+        fake_place_order,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.exec_service.service.event_bus.publish",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.exec_service.service.asyncio.sleep",
+        fast_sleep,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.exec_service.service.random.uniform",
+        lambda *_args, **_kwargs: 0.0,
+    )
+
+    class RecordingMemory(DummyMemory):
+        def __init__(self) -> None:
+            self.logged: list[dict[str, Any]] = []
+
+        async def log_trade(self, **info: Any) -> None:
+            self.logged.append(info)
+
+    memory = RecordingMemory()
+    portfolio = Portfolio(path=None)
+    executor = TradeExecutor(memory=memory, portfolio=portfolio, dry_run=True, testnet=True)
+
+    payload = {
+        "token": "ABC",
+        "side": "buy",
+        "notional_usd": 100.0,
+        "expected_price": 10.0,
+        "max_slippage_bps": 50.0,
+        "depth_1pct_usd": 1_000.0,
+    }
+
+    async def _run() -> None:
+        executor._on_decision(payload)
+        tasks = list(executor._tasks)
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    asyncio.run(_run())
+
+    assert not calls, "place_order_async should not be invoked in dry-run mode"
+    assert memory.logged, "dry-run execution should still record simulated trades"
+
 def test_exit_summary_tracks_queue_and_missed() -> None:
     manager = ExitManager()
     manager.register_entry(

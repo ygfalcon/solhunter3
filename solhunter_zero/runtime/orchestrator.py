@@ -872,6 +872,24 @@ class RuntimeOrchestrator:
 
         # Choose mode: event-driven vs classic loop
         event_driven = parse_bool_env("EVENT_DRIVEN", True)
+        mode_candidates = [
+            str(cfg.get("mode", "")),
+            os.getenv("RUNTIME_MODE"),
+            os.getenv("TRADING_MODE"),
+            os.getenv("MODE"),
+            getattr(flags, "mode", None),
+        ]
+        active_mode = "paper"
+        for candidate in mode_candidates:
+            if not candidate:
+                continue
+            text = str(candidate).strip().lower()
+            if text:
+                active_mode = text
+                break
+        micro_mode_enabled = bool(getattr(flags, "micro_mode", False))
+        executor_dry_run = active_mode != "live" or micro_mode_enabled
+        executor_testnet = active_mode != "live"
         # Live drill: simulate executions on live data without broadcasting trades
         try:
             import os as _os
@@ -962,7 +980,12 @@ class RuntimeOrchestrator:
 
         aruntime = AgentRuntime(agent_manager or AgentManager.from_default(), portfolio)
         await aruntime.start()
-        execu = TradeExecutor(memory, portfolio)
+        execu = TradeExecutor(
+            memory,
+            portfolio,
+            dry_run=executor_dry_run,
+            testnet=executor_testnet,
+        )
         execu.start()
 
         self.handles.agent_runtime = aruntime

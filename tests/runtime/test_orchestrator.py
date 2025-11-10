@@ -337,8 +337,12 @@ async def test_orchestrator_starts_golden_pipeline_by_default(monkeypatch):
     monkeypatch.setattr("solhunter_zero.runtime.orchestrator.Portfolio", DummyPortfolio)
     monkeypatch.setattr("solhunter_zero.runtime.orchestrator.AgentManager", DummyAgentManager)
     monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.resolve_golden_enabled",
+        lambda _cfg: False,
+    )
+    monkeypatch.setattr(
         "solhunter_zero.runtime.orchestrator.get_feature_flags",
-        lambda: types.SimpleNamespace(mode="live"),
+        lambda: types.SimpleNamespace(mode="live", micro_mode=False),
     )
     monkeypatch.setattr(
         "solhunter_zero.runtime.orchestrator.verify_live_account",
@@ -428,7 +432,7 @@ async def test_start_agents_aborts_when_wallet_verification_fails(monkeypatch):
     monkeypatch.setattr("solhunter_zero.runtime.orchestrator.AgentManager", DummyAgentManager)
     monkeypatch.setattr(
         "solhunter_zero.runtime.orchestrator.get_feature_flags",
-        lambda: types.SimpleNamespace(mode="live"),
+        lambda: types.SimpleNamespace(mode="live", micro_mode=False),
     )
 
     def failing_verify() -> dict:
@@ -453,6 +457,150 @@ async def test_start_agents_aborts_when_wallet_verification_fails(monkeypatch):
 
     await orch.stop_all()
 
+
+@pytest.mark.anyio("asyncio")
+async def test_start_agents_paper_mode_uses_dry_run_executor(monkeypatch):
+    for key in ("MODE", "RUNTIME_MODE", "TRADING_MODE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("EVENT_DRIVEN", "1")
+
+    async def fake_publish_stage(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def fake_startup(*_args, **_kwargs):
+        cfg = {
+            "mode": "paper",
+            "memory_path": "memory://",
+            "portfolio_path": "portfolio.json",
+        }
+        depth_proc = types.SimpleNamespace(poll=lambda: None)
+        return cfg, {}, depth_proc
+
+    class DummyMemory:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def start_writer(self) -> None:
+            return None
+
+    class DummyPortfolio:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    class DummyAgentManager:
+        def __init__(self) -> None:
+            self.agents = []
+            self.evolve_interval = 30
+            self.mutation_threshold = 0.0
+
+        @classmethod
+        def from_config(cls, _cfg):
+            return cls()
+
+        @classmethod
+        def from_default(cls):
+            return cls()
+
+        async def evolve(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def update_weights(self, *_args, **_kwargs) -> None:
+            return None
+
+        def save_weights(self) -> None:
+            return None
+
+    class DummyAgentRuntime:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    class DummyDiscoveryAgent:
+        async def discover_tokens(self, *_args, **_kwargs):
+            return []
+
+    async def fake_init_rl_training(*_args, **_kwargs):
+        return None
+
+    class DummyTask:
+        def cancel(self) -> None:
+            return None
+
+        def add_done_callback(self, _cb) -> None:
+            return None
+
+    def fake_create_task(coro, *_args, **_kwargs):
+        try:
+            coro.close()
+        except AttributeError:
+            pass
+        return DummyTask()
+
+    executor_args: dict[str, object] = {}
+
+    class DummyTradeExecutor:
+        def __init__(self, *_args, **kwargs) -> None:
+            executor_args.update(kwargs)
+
+        def start(self) -> None:
+            executor_args["started"] = True
+
+        async def stop(self) -> None:
+            executor_args["stopped"] = True
+
+    class DummyEventBus:
+        def publish(self, *_args, **_kwargs) -> None:
+            return None
+
+        def subscribe(self, *_args, **_kwargs):
+            return lambda: None
+
+        async def start_ws_server(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def stop_ws_server(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def verify_broker_connection(self, *_args, **_kwargs) -> bool:
+            return True
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(RuntimeOrchestrator, "_ensure_ui_forwarder", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(RuntimeOrchestrator, "_register_task", lambda self, task: None)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.perform_startup_async", fake_startup)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.Memory", DummyMemory)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.Portfolio", DummyPortfolio)
+    monkeypatch.setattr("solhunter_zero.runtime.orchestrator.AgentManager", DummyAgentManager)
+    monkeypatch.setattr("solhunter_zero.agents.runtime.AgentRuntime", DummyAgentRuntime)
+    monkeypatch.setattr("solhunter_zero.agents.discovery.DiscoveryAgent", DummyDiscoveryAgent)
+    monkeypatch.setattr("solhunter_zero.loop._init_rl_training", fake_init_rl_training)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.asyncio.create_task",
+        fake_create_task,
+    )
+    monkeypatch.setattr("solhunter_zero.exec_service.TradeExecutor", DummyTradeExecutor)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.get_feature_flags",
+        lambda: types.SimpleNamespace(mode="paper", micro_mode=False),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.event_bus",
+        DummyEventBus(),
+        raising=False,
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+    await orch.start_agents()
+
+    assert executor_args.get("dry_run") is True
+    assert executor_args.get("testnet") is True
+
+    await orch.stop_all()
 
 @pytest.mark.anyio("asyncio")
 async def test_orchestrator_errors_when_default_agents_missing(monkeypatch, caplog):

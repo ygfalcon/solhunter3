@@ -31,9 +31,18 @@ JITTER_HIGH = 3.0
 
 
 class TradeExecutor:
-    def __init__(self, memory: Memory, portfolio: Portfolio) -> None:
+    def __init__(
+        self,
+        memory: Memory,
+        portfolio: Portfolio,
+        *,
+        dry_run: bool = False,
+        testnet: bool = False,
+    ) -> None:
         self.memory = memory
         self.portfolio = portfolio
+        self.dry_run = bool(dry_run)
+        self.testnet = bool(testnet)
         self._n = 0
         self._subscriptions: List[Callable[[], None]] = []
         self._tasks: List[asyncio.Task] = []
@@ -198,35 +207,39 @@ class TradeExecutor:
                         "price": price,
                         "max_slippage_bps": plan["max_slippage_bps"],
                     }
-                    if live_drill:
-                        await self.memory.log_trade(token=token, direction=side, amount=action_qty, price=price)
-                        await self.portfolio.update_async(token, action_qty if side == "buy" else -action_qty, price)
-                        try:
-                            event_bus.publish(
-                                "action_executed",
-                                {"action": action, "result": {"status": "simulated"}},
-                            )
-                        except Exception:
-                            pass
-                    else:
+                    simulate = live_drill or self.dry_run
+                    status = "simulated" if simulate else "ok"
+                    if simulate and not live_drill:
+                        log.debug(
+                            "TradeExecutor[%s]: dry-run skipping live order side=%s qty=%.8f price=%.8f",
+                            token,
+                            side,
+                            action_qty,
+                            price,
+                        )
+                    if not simulate:
                         await place_order_async(
                             token,
                             side,
                             action_qty,
                             price,
-                            testnet=False,
-                            dry_run=False,
+                            testnet=self.testnet,
+                            dry_run=self.dry_run,
                             keypair=None,
                         )
-                        await self.memory.log_trade(token=token, direction=side, amount=action_qty, price=price)
-                        await self.portfolio.update_async(token, action_qty if side == "buy" else -action_qty, price)
-                        try:
-                            event_bus.publish(
-                                "action_executed",
-                                {"action": action, "result": {"status": "ok"}},
-                            )
-                        except Exception:
-                            pass
+                    await self.memory.log_trade(token=token, direction=side, amount=action_qty, price=price)
+                    await self.portfolio.update_async(
+                        token,
+                        action_qty if side == "buy" else -action_qty,
+                        price,
+                    )
+                    try:
+                        event_bus.publish(
+                            "action_executed",
+                            {"action": action, "result": {"status": status}},
+                        )
+                    except Exception:
+                        pass
                 if executed <= 0:
                     log.info("TradeExecutor[%s]: no slices executed", token)
             except Exception as exc:
