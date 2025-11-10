@@ -2756,10 +2756,18 @@ class UIState:
 
     def snapshot_health(self) -> Dict[str, Any]:
         try:
-            return dict(self.health_provider())
+            data = self.health_provider()
         except Exception:  # pragma: no cover
             log.exception("UI health provider failed")
             return {"ok": False}
+
+        if isinstance(data, Mapping):
+            payload: Dict[str, Any] = dict(data)
+        else:
+            payload = {}
+
+        payload.setdefault("ok", False)
+        return payload
 
     def snapshot_run_state(self) -> Dict[str, Any]:
         try:
@@ -3291,7 +3299,10 @@ def create_app(state: UIState | None = None) -> Flask:
     def health() -> Any:
         run_state = state.snapshot_run_state()
         health_snapshot = state.snapshot_health()
-        ok = bool(health_snapshot.get("ok", True))
+        if not isinstance(health_snapshot, Mapping):
+            health_snapshot = {"ok": False}
+
+        ok = bool(health_snapshot.get("ok"))
         payload = {
             "ok": ok,
             "run_state": run_state,

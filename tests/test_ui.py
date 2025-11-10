@@ -217,6 +217,17 @@ def test_health_endpoint(monkeypatch, client):
         collectors.stop()
 
 
+def test_root_health_defaults_to_false(monkeypatch, client):
+    state = _active_state()
+    monkeypatch.setattr(state, "health_provider", lambda: {})
+
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is False
+    assert payload["health"]["ok"] is False
+
+
 def test_logs_tail_endpoint(monkeypatch, client):
     state = _active_state()
     monkeypatch.setattr(state, "logs_provider", lambda: [{"msg": "a"}, {"msg": "b"}])
