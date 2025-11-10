@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 import types
 
 import pytest
@@ -58,6 +60,74 @@ async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
     ui_stage = ws_events[-1]
     assert ui_stage.get("ok") is False
     assert "boom" in str(ui_stage.get("detail"))
+
+
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
+    events: list[tuple[str, bool, str]] = []
+
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        events.append((stage, ok, detail))
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {},
+    )
+
+    shutdown_signal = threading.Event()
+
+    class DummyServer:
+        daemon_threads = True
+
+        def serve_forever(self) -> None:
+            shutdown_signal.wait()
+
+        def shutdown(self) -> None:
+            shutdown_signal.set()
+
+        def server_close(self) -> None:
+            return None
+
+    def delayed_make_server(_host: str, _port: int, _app: object) -> DummyServer:
+        time.sleep(6.0)
+        return DummyServer()
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.make_server",
+        delayed_make_server,
+    )
+
+    orch = RuntimeOrchestrator(run_http=True)
+    await orch.start_ui()
+
+    http_events = [event for event in events if event[0] == "ui:http"]
+    assert http_events, "expected ui:http stage emission"
+    assert http_events[-1][1] is True
+
+    shutdown_signal.set()
+    threads = orch.handles.ui_threads or {}
+    http_thread_info = threads.get("http") if isinstance(threads, dict) else None
+    if isinstance(http_thread_info, dict):
+        thread_obj = http_thread_info.get("thread")
+        if isinstance(thread_obj, threading.Thread):
+            thread_obj.join(timeout=1)
 
 
 def test_orchestrator_stops_on_resource_budget(monkeypatch):

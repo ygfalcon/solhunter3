@@ -606,7 +606,11 @@ class RuntimeOrchestrator:
                     sock.bind((host, 0))
                     return sock.getsockname()[1], True
 
-            def _serve(port_queue: Queue[Any]) -> None:
+            def _serve(
+                port_queue: Queue[Any],
+                shutdown_event: "threading.Event",
+                ready_event: "threading.Event",
+            ) -> None:
                 server = None
                 try:
                     host = os.getenv("UI_HOST", "127.0.0.1")
@@ -616,12 +620,20 @@ class RuntimeOrchestrator:
                     except (TypeError, ValueError):
                         requested_port = 0
 
+                    if shutdown_event.is_set():
+                        ready_event.set()
+                        return
+
                     port, changed = _select_listen_port(host, requested_port)
                     if changed:
                         log.warning(
                             "Requested UI port %s unavailable; using %s instead", requested_port, port
                         )
                     os.environ["UI_PORT"] = str(port)
+
+                    if shutdown_event.is_set():
+                        ready_event.set()
+                        return
 
                     app = self.handles.ui_app or _create_ui_app(self.handles.ui_state)
                     server = make_server(host, port, app)
@@ -632,11 +644,17 @@ class RuntimeOrchestrator:
                         self._emit_ui_ready(host, port)
                     except Exception:
                         log.exception("Failed to emit UI readiness signal")
+                    finally:
+                        ready_event.set()
+
+                    if shutdown_event.is_set():
+                        return
                     server.serve_forever()
                 except Exception:
                     with suppress(Exception):
                         port_queue.put(sys.exc_info()[1] or RuntimeError("ui serve failed"))
                     log.exception("UI HTTP server failed")
+                    ready_event.set()
                 finally:
                     self.handles.ui_server = None
                     if server is not None:
@@ -646,12 +664,30 @@ class RuntimeOrchestrator:
                             server.server_close()
 
             port_queue: Queue[Any] = Queue(maxsize=1)
-            t = threading.Thread(target=_serve, args=(port_queue,), daemon=True)
+            shutdown_event = threading.Event()
+            ready_event = threading.Event()
+            t = threading.Thread(
+                target=_serve,
+                args=(port_queue, shutdown_event, ready_event),
+                daemon=True,
+            )
             t.start()
             actual_port: str | None = None
             try:
-                result = port_queue.get(timeout=5)
+                wait_env = os.getenv("UI_HTTP_START_TIMEOUT", "30")
+                try:
+                    wait_timeout = float(wait_env)
+                except (TypeError, ValueError):
+                    wait_timeout = 30.0
+                if wait_timeout <= 0:
+                    wait_timeout = 30.0
+                result = port_queue.get(timeout=wait_timeout)
             except Empty:
+                shutdown_event.set()
+                with suppress(Exception):
+                    if self.handles.ui_server is not None:
+                        self.handles.ui_server.shutdown()
+                t.join(timeout=1)
                 await self._publish_stage(
                     "ui:http",
                     False,
@@ -662,11 +698,19 @@ class RuntimeOrchestrator:
                     await self._publish_stage("ui:http", False, str(result))
                 else:
                     actual_port = str(result)
+                    ready_wait = min(5.0, wait_timeout)
+                    if ready_wait > 0:
+                        ready_event.wait(timeout=ready_wait)
                     await self._publish_stage(
                         "ui:http",
                         True,
                         f"host={os.getenv('UI_HOST','127.0.0.1')} port={actual_port}",
                     )
+            threads["http"] = {
+                "thread": t,
+                "shutdown_event": shutdown_event,
+                "ready_event": ready_event,
+            }
 
     async def start_agents(self) -> None:
         # Use existing startup path to ensure consistent connectivity + depth_service
