@@ -938,10 +938,15 @@ class RuntimeOrchestrator:
         async def _discovery_loop():
             agent = DiscoveryAgent()
             method = discovery_method
+            failure_streak = 0
+            empty_streak = 0
+            warn_threshold = 3
             while True:
                 try:
                     tokens = await agent.discover_tokens(method=method, offline=False)
+                    failure_streak = 0
                     if tokens:
+                        empty_streak = 0
                         now_ts = time.time()
                         source = str(method or "runtime")
                         entries = [
@@ -949,8 +954,39 @@ class RuntimeOrchestrator:
                             for token in tokens
                         ]
                         event_bus.publish("token_discovered", entries)
-                except Exception:
-                    pass
+                    else:
+                        empty_streak += 1
+                        if empty_streak >= warn_threshold:
+                            streak = empty_streak
+                            source = str(method or "runtime")
+                            log.warning(
+                                "Discovery agent returned no tokens for %s consecutive iterations (method=%s)",
+                                streak,
+                                source,
+                            )
+                            await self._publish_stage(
+                                "discovery:loop",
+                                False,
+                                f"empty_results={streak} method={source}",
+                            )
+                            empty_streak = 0
+                except Exception as exc:
+                    failure_streak += 1
+                    empty_streak = 0
+                    if failure_streak >= warn_threshold:
+                        streak = failure_streak
+                        source = str(method or "runtime")
+                        log.exception(
+                            "Discovery agent failed for %s consecutive iterations (method=%s)",
+                            streak,
+                            source,
+                        )
+                        await self._publish_stage(
+                            "discovery:loop",
+                            False,
+                            f"errors={streak} method={source} last_error={type(exc).__name__}",
+                        )
+                        failure_streak = 0
                 await asyncio.sleep(max(5, min(60, loop_delay)))
 
         async def _evolve_loop():
