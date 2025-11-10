@@ -10,6 +10,7 @@ import os
 import logging
 import threading
 import time
+import inspect
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2061,9 +2062,38 @@ def discover_candidates(
                     yield final
 
         if shared_session_obj is not None:
-            async with shared_session_obj as shared_session:
+            shared_session: aiohttp.ClientSession | None = shared_session_obj
+            owns_session = False
+            exit_method = None
+
+            if not isinstance(shared_session_obj, aiohttp.ClientSession):
+                enter = getattr(shared_session_obj, "__aenter__", None)
+                exit_candidate = getattr(shared_session_obj, "__aexit__", None)
+                if (
+                    callable(enter)
+                    and callable(exit_candidate)
+                    and not hasattr(shared_session_obj, "get")
+                ):
+                    shared_session = await enter()
+                    exit_method = exit_candidate
+                    owns_session = True
+
+            try:
                 async for batch in _run(shared_session):
                     yield batch
+            finally:
+                if owns_session and exit_method is not None:
+                    with contextlib.suppress(Exception):
+                        result = exit_method(None, None, None)
+                        if inspect.isawaitable(result):
+                            await result
+                elif owns_session and shared_session is not None:
+                    close = getattr(shared_session, "close", None)
+                    if callable(close):
+                        with contextlib.suppress(Exception):
+                            result = close()
+                            if inspect.isawaitable(result):
+                                await result
         else:
             async for batch in _run(None):
                 yield batch
