@@ -60,6 +60,38 @@ async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
     assert "boom" in str(ui_stage.get("detail"))
 
 
+@pytest.mark.anyio("asyncio")
+async def test_start_ui_fails_when_runtime_wiring_fails(monkeypatch):
+    async def fake_publish_stage(_self, _stage: str, _ok: bool, _detail: str = "") -> None:
+        return None
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+
+    def fail_initialise(_state):
+        raise RuntimeError("runtime wiring failure")
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        fail_initialise,
+    )
+
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+
+    with pytest.raises(RuntimeError, match="runtime wiring failure"):
+        await orch.start_ui()
+
+
 def test_orchestrator_stops_on_resource_budget(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 

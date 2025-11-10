@@ -491,6 +491,7 @@ class RuntimeOrchestrator:
                 self.handles.runtime_wiring = initialise_runtime_wiring(state_obj)
             except Exception:
                 log.exception("Failed to initialise runtime wiring for UI state")
+                raise
         app = _create_ui_app(state_obj)
         ws_optional = parse_bool_env("UI_WS_OPTIONAL", False)
         threads: dict[str, Any] = {}
