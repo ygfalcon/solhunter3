@@ -167,7 +167,9 @@ def _record_target(canonical: str) -> None:
         errors.append(REDIS_MISMATCH_ERROR)
 
 
-def _normalize_single_key(key: str, raw: str | None) -> None:
+def _normalize_single_key(
+    key: str, raw: str | None, *, force_db: int | None = None
+) -> None:
     if raw is None:
         return
     os.environ[key] = raw
@@ -176,18 +178,21 @@ def _normalize_single_key(key: str, raw: str | None) -> None:
     except Exception:
         errors.append(f"{key} has invalid Redis URL: {raw}")
         return
-    if db != 1:
+    canonical_db = force_db if force_db is not None else db
+    if force_db is None and db != 1:
         errors.append(
             f"{key} targets database {db}; configure database 1 for all runtime services "
             f"(export {key}=redis://localhost:6379/1 or update your env file)."
         )
-    canonical = f"{scheme}://{host}:{port}/{db}"
+    canonical = f"{scheme}://{host}:{port}/{canonical_db}"
     os.environ[key] = canonical
     manifest[key] = canonical
     _record_target(canonical)
 
 
-def _normalize_multi_key(key: str, raw: str | None) -> None:
+def _normalize_multi_key(
+    key: str, raw: str | None, *, force_db: int | None = None
+) -> None:
     if not raw:
         return
     os.environ[key] = raw
@@ -199,12 +204,13 @@ def _normalize_multi_key(key: str, raw: str | None) -> None:
         except Exception:
             errors.append(f"{key} has invalid Redis URL: {part}")
             continue
-        if db != 1:
+        canonical_db = force_db if force_db is not None else db
+        if force_db is None and db != 1:
             errors.append(
                 f"{key} targets database {db}; configure database 1 for all runtime services "
                 f"(export {key}=redis://localhost:6379/1 or update your env file)."
             )
-        canonical = f"{scheme}://{host}:{port}/{db}"
+        canonical = f"{scheme}://{host}:{port}/{canonical_db}"
         canonical_parts.append(canonical)
         _record_target(canonical)
     if canonical_parts:
@@ -247,8 +253,8 @@ for key in redis_keys:
     manifest[key] = canonical
     _record_target(canonical)
 
-_normalize_single_key("BROKER_URL", os.environ.get("BROKER_URL"))
-_normalize_multi_key("BROKER_URLS", os.environ.get("BROKER_URLS"))
+_normalize_single_key("BROKER_URL", os.environ.get("BROKER_URL"), force_db=1)
+_normalize_multi_key("BROKER_URLS", os.environ.get("BROKER_URLS"), force_db=1)
 
 channel_keys = [
     "MINT_STREAM_BROKER_CHANNEL",
@@ -285,6 +291,10 @@ exports = {
     "EVENT_BUS_URL": bus_url,
     **manifest,
 }
+for key in ("BROKER_URL", "BROKER_URLS"):
+    value = os.environ.get(key)
+    if value:
+        exports[key] = value
 for key in channel_keys:
     exports[key] = os.environ[key]
 
