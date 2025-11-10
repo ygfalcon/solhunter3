@@ -49,6 +49,17 @@ def test_stream_mempool_events(monkeypatch):
     assert data["address"] == VALID_MINT
 
 
+def test_invalid_env_limit(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("DISCOVERY_LIMIT", "fast")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.limit == 60
+    assert "Invalid DISCOVERY_LIMIT" in caplog.text
+
+
 def test_collect_mempool_times_out(monkeypatch, caplog):
     _reset_cache()
 
