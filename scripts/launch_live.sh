@@ -1007,11 +1007,8 @@ fi
 start_log_stream() {
   local log=$1
   local label=$2
-  # Ensure the log starts empty so the stream only includes fresh entries.
-  # This mirrors ``: > file`` truncation behaviour that works on both GNU and
-  # BSD (macOS) ``tail`` implementations without relying on ``tail -n0``
-  # semantics.
-  : > "$log"
+  # Stream existing and new log entries without truncating the file so we do
+  # not drop output emitted before the streamer attaches.
   local __last_line=""
   {
     tail -n +1 -F "$log" 2>/dev/null |
@@ -1030,6 +1027,8 @@ start_controller() {
   local mode=$1
   local log=$2
   local notify=$3
+  # Truncate the log before launching the controller to drop any stale output.
+  : > "$log"
   local args=("$ROOT_DIR/scripts/live_runtime_controller.py" "--mode" "$mode" "--micro" "$MICRO_FLAG")
   if [[ -n $CONFIG_PATH ]]; then
     args+=("--config" "$CONFIG_PATH")
