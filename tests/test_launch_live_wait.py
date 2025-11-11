@@ -38,6 +38,59 @@ def _extract_function(source: str, name: str) -> str:
     return source[start:end] + "\n"
 
 
+def test_start_log_stream_preserves_existing_content(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    start_log_stream_fn = _extract_function(source, "start_log_stream")
+
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text("MARKER\n")
+
+    bash_script = dedent(
+        """
+        set -euo pipefail
+        declare -a CHILD_PIDS=()
+        timestamp() { echo ts; }
+        register_child() {
+          CHILD_PIDS+=("$1")
+        }
+        """
+        + start_log_stream_fn
+        + dedent(
+            f"""
+        log_file={shlex.quote(str(log_path))}
+        start_log_stream "$log_file" "test"
+        sleep 1
+        echo 'AFTER' >> "$log_file"
+        sleep 1
+        for pid in "${{CHILD_PIDS[@]}}"; do
+          kill "$pid" >/dev/null 2>&1 || true
+        done
+        for pid in $(jobs -p); do
+          kill "$pid" >/dev/null 2>&1 || true
+        done
+        for pid in $(pgrep -f "tail -n \\+1 -F $log_file"); do
+          kill "$pid" >/dev/null 2>&1 || true
+        done
+        sleep 1
+        """
+        )
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    assert "[ts] [test] MARKER" in lines
+    assert "[ts] [test] AFTER" in lines
+    assert log_path.read_text().splitlines() == ["MARKER", "AFTER"]
+
+
 @pytest.mark.parametrize(
     "golden_line",
     [
