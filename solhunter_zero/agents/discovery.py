@@ -479,13 +479,20 @@ class DiscoveryAgent:
                 )
             self._config_error_event_reported = True
 
-        if ttl > 0 and tokens:
+        if ttl > 0 and tokens and not fallback_used:
             async with _CACHE_LOCK:
                 _CACHE["tokens"] = list(tokens)
                 _CACHE["ts"] = now
                 _CACHE["limit"] = self.limit
                 _CACHE["method"] = active_method
                 _CACHE["rpc_identity"] = current_rpc_identity
+        elif fallback_used:
+            async with _CACHE_LOCK:
+                # Mark the cache as expired so the next call performs live discovery.
+                _CACHE["ts"] = 0.0
+                _CACHE["limit"] = 0
+                _CACHE["method"] = ""
+                _CACHE["rpc_identity"] = ""
 
         return tokens
 
