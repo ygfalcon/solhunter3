@@ -223,6 +223,109 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_stop_all_shuts_down_http_thread(monkeypatch):
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        return None
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    ui_stub = types.SimpleNamespace(
+        UIState=lambda: object(),
+        get_ws_urls=lambda: {},
+        stop_websockets=lambda: None,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws", lambda: {"events": object()}
+    )
+    monkeypatch.setattr(RuntimeOrchestrator, "_emit_ui_ready", lambda *_args, **_kwargs: None)
+
+    async def fake_close_session() -> None:
+        return None
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.close_session",
+        fake_close_session,
+        raising=False,
+    )
+
+    server_stop = threading.Event()
+    serve_started = threading.Event()
+
+    class DummyServer:
+        daemon_threads = True
+
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+            self.server_close_calls = 0
+            self.timeout = None
+
+        def handle_request(self) -> None:
+            serve_started.set()
+            if server_stop.wait(0.01):
+                raise OSError("stopped")
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            server_stop.set()
+
+        def server_close(self) -> None:
+            self.server_close_calls += 1
+
+        def serve_forever(self) -> None:  # pragma: no cover - ensured unused
+            raise AssertionError("serve_forever should not be called")
+
+    dummy_server = DummyServer()
+
+    def fake_make_server(_host: str, _port: int, _app: object) -> DummyServer:
+        return dummy_server
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.make_server",
+        fake_make_server,
+    )
+
+    orch = RuntimeOrchestrator(run_http=True)
+    await orch.start_ui()
+
+    assert serve_started.wait(timeout=1), "expected HTTP server loop to start"
+
+    threads = orch.handles.ui_threads or {}
+    http_thread_info = threads.get("http") if isinstance(threads, dict) else None
+    assert isinstance(http_thread_info, dict)
+    thread_obj = http_thread_info.get("thread")
+    shutdown_event = http_thread_info.get("shutdown_event")
+
+    assert isinstance(thread_obj, threading.Thread)
+    assert thread_obj.is_alive()
+    assert shutdown_event is not None
+    assert hasattr(shutdown_event, "is_set")
+    assert not shutdown_event.is_set()
+
+    await orch.stop_all()
+
+    thread_obj.join(timeout=1)
+    assert not thread_obj.is_alive()
+    assert shutdown_event.is_set()
+    assert server_stop.is_set()
+    assert dummy_server.shutdown_calls >= 1
+    assert dummy_server.server_close_calls >= 1
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_start_aborts_on_http_failure(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 

@@ -691,7 +691,23 @@ class RuntimeOrchestrator:
 
                     if shutdown_event.is_set():
                         return
-                    server.serve_forever()
+                    try:
+                        timeout = getattr(server, "timeout", None)
+                        if not timeout or timeout <= 0:
+                            server.timeout = 0.5
+                    except Exception:  # pragma: no cover - defensive attribute access
+                        pass
+
+                    while not shutdown_event.is_set():
+                        try:
+                            server.handle_request()
+                        except OSError:
+                            break
+                        except Exception:
+                            if not shutdown_event.is_set():
+                                log.exception("UI HTTP server request handling failed")
+                            break
+                    return
                 except Exception:
                     with suppress(Exception):
                         port_queue.put(sys.exc_info()[1] or RuntimeError("ui serve failed"))
@@ -1176,6 +1192,13 @@ class RuntimeOrchestrator:
             await close_session()
         except Exception:
             pass
+
+        server = self.handles.ui_server
+        if server is not None:
+            with suppress(Exception):
+                server.shutdown()
+            with suppress(Exception):
+                server.server_close()
 
         threads = self.handles.ui_threads or {}
         stop_ws = getattr(_ui_module, "stop_websockets", None)
