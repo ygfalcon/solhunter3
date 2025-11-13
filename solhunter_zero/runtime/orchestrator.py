@@ -715,21 +715,22 @@ class RuntimeOrchestrator:
             )
             t.start()
             actual_port: str | None = None
+            wait_env = os.getenv("UI_HTTP_START_TIMEOUT", "30")
             try:
-                wait_env = os.getenv("UI_HTTP_START_TIMEOUT", "30")
-                try:
-                    wait_timeout = float(wait_env)
-                except (TypeError, ValueError):
-                    wait_timeout = 30.0
-                if wait_timeout <= 0:
-                    wait_timeout = 30.0
-                result = port_queue.get(timeout=wait_timeout)
+                wait_timeout = float(wait_env)
+            except (TypeError, ValueError):
+                wait_timeout = 30.0
+            if wait_timeout <= 0:
+                wait_timeout = 30.0
+            try:
+                result = await asyncio.to_thread(port_queue.get, True, wait_timeout)
             except Empty:
                 shutdown_event.set()
                 with suppress(Exception):
                     if self.handles.ui_server is not None:
                         self.handles.ui_server.shutdown()
-                t.join(timeout=1)
+                with suppress(Exception):
+                    await asyncio.to_thread(t.join, 1)
                 await self._publish_stage(
                     "ui:http",
                     False,
@@ -737,6 +738,14 @@ class RuntimeOrchestrator:
                 )
                 http_ok = False
                 http_detail = "ui server did not report readiness within timeout"
+            except asyncio.CancelledError as exc:
+                shutdown_event.set()
+                with suppress(Exception):
+                    if self.handles.ui_server is not None:
+                        self.handles.ui_server.shutdown()
+                with suppress(Exception):
+                    await asyncio.to_thread(t.join, 1)
+                raise RuntimeError("UI HTTP startup cancelled") from exc
             else:
                 if isinstance(result, Exception):
                     detail_text = str(result) or result.__class__.__name__
@@ -747,7 +756,16 @@ class RuntimeOrchestrator:
                     actual_port = str(result)
                     ready_wait = min(5.0, wait_timeout)
                     if ready_wait > 0:
-                        ready_event.wait(timeout=ready_wait)
+                        try:
+                            await asyncio.to_thread(ready_event.wait, ready_wait)
+                        except asyncio.CancelledError as exc:
+                            shutdown_event.set()
+                            with suppress(Exception):
+                                if self.handles.ui_server is not None:
+                                    self.handles.ui_server.shutdown()
+                            with suppress(Exception):
+                                await asyncio.to_thread(t.join, 1)
+                            raise RuntimeError("UI HTTP startup cancelled") from exc
                     await self._publish_stage(
                         "ui:http",
                         True,

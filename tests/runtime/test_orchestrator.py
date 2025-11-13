@@ -223,6 +223,102 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_orchestrator_http_wait_allows_other_coroutines(monkeypatch):
+    events: list[tuple[str, bool, str]] = []
+
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        events.append((stage, ok, detail))
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {"events": object()},
+    )
+
+    loop = asyncio.get_running_loop()
+    make_server_called = asyncio.Event()
+    server_shutdown = threading.Event()
+
+    class DummyServer:
+        daemon_threads = True
+
+        def serve_forever(self) -> None:
+            server_shutdown.wait()
+
+        def shutdown(self) -> None:
+            server_shutdown.set()
+
+        def server_close(self) -> None:
+            return None
+
+    def slow_make_server(_host: str, _port: int, _app: object) -> DummyServer:
+        loop.call_soon_threadsafe(make_server_called.set)
+        time.sleep(0.2)
+        return DummyServer()
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.make_server",
+        slow_make_server,
+    )
+
+    progress = 0
+    stop_progress = asyncio.Event()
+
+    async def tracker() -> None:
+        nonlocal progress
+        while not stop_progress.is_set():
+            progress += 1
+            await asyncio.sleep(0)
+
+    tracker_task = asyncio.create_task(tracker())
+
+    orch = RuntimeOrchestrator(run_http=True)
+    start_task = asyncio.create_task(orch.start_ui())
+
+    await make_server_called.wait()
+    progress_before = progress
+    await asyncio.sleep(0.05)
+    progress_after = progress
+
+    assert progress_after > progress_before
+
+    await start_task
+    stop_progress.set()
+    await tracker_task
+
+    server_shutdown.set()
+    threads = orch.handles.ui_threads or {}
+    http_thread_info = threads.get("http") if isinstance(threads, dict) else None
+    if isinstance(http_thread_info, dict):
+        shutdown_event = http_thread_info.get("shutdown_event")
+        if isinstance(shutdown_event, threading.Event):
+            shutdown_event.set()
+        thread_obj = http_thread_info.get("thread")
+        if isinstance(thread_obj, threading.Thread):
+            thread_obj.join(timeout=1)
+
+    http_events = [event for event in events if event[0] == "ui:http"]
+    assert http_events, "expected ui:http stage emission"
+    assert http_events[-1][1] is True
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_start_aborts_on_http_failure(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
