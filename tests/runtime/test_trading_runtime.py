@@ -655,6 +655,12 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
 async def test_runtime_ui_disabled_clears_env(monkeypatch):
     monkeypatch.setenv("UI_ENABLED", "0")
     monkeypatch.setenv("UI_PORT", "7777")
+    monkeypatch.setenv("UI_HTTP_URL", "http://stale.ui:1234")
+    monkeypatch.setenv("UI_HEALTH_URL", "http://stale.ui:1234/healthz")
+    monkeypatch.setenv("UI_WS_URL", "ws://stale/events")
+    monkeypatch.setenv("UI_EVENTS_WS_URL", "ws://stale/events")
+    monkeypatch.setenv("UI_RL_WS_URL", "ws://stale/rl")
+    monkeypatch.setenv("UI_LOG_WS_URL", "ws://stale/logs")
 
     runtime = TradingRuntime(ui_port=8888)
 
@@ -664,6 +670,15 @@ async def test_runtime_ui_disabled_clears_env(monkeypatch):
 
     assert runtime.ui_server is None
     assert os.getenv("UI_PORT") is None
+    for key in (
+        "UI_HTTP_URL",
+        "UI_HEALTH_URL",
+        "UI_WS_URL",
+        "UI_EVENTS_WS_URL",
+        "UI_RL_WS_URL",
+        "UI_LOG_WS_URL",
+    ):
+        assert os.getenv(key) is None
 
 
 @pytest.mark.anyio("asyncio")
@@ -692,6 +707,13 @@ async def test_trading_runtime_ui_port_conflict_raises_friendly_error(monkeypatc
 
     runtime = TradingRuntime(ui_host="127.0.0.1", ui_port=7654)
 
+    monkeypatch.setenv("UI_HTTP_URL", "http://stale.ui:7654")
+    monkeypatch.setenv("UI_HEALTH_URL", "http://stale.ui:7654/healthz")
+    monkeypatch.setenv("UI_WS_URL", "ws://stale/events")
+    monkeypatch.setenv("UI_EVENTS_WS_URL", "ws://stale/events")
+    monkeypatch.setenv("UI_RL_WS_URL", "ws://stale/rl")
+    monkeypatch.setenv("UI_LOG_WS_URL", "ws://stale/logs")
+
     with pytest.raises(RuntimeError) as excinfo:
         await runtime._start_ui()
 
@@ -702,10 +724,55 @@ async def test_trading_runtime_ui_port_conflict_raises_friendly_error(monkeypatc
     assert captured_instances, "UIServer should have been constructed"
     server = captured_instances[-1]
     assert getattr(server, "stopped", False), "UIServer.stop() should be called on failure"
+    for key in (
+        "UI_HTTP_URL",
+        "UI_HEALTH_URL",
+        "UI_WS_URL",
+        "UI_EVENTS_WS_URL",
+        "UI_RL_WS_URL",
+        "UI_LOG_WS_URL",
+    ):
+        assert os.getenv(key) is None
+
+
+def test_trading_runtime_stop_ui_clears_env(monkeypatch):
+    runtime = TradingRuntime()
+    runtime.ui_server = type("_Server", (), {"stop": lambda self: setattr(self, "stopped", True)})()
+    runtime.ui_ws_threads = {"events": object()}
+    runtime._ui_ws_started_here = True
+
+    stop_calls = {"count": 0}
+
+    def _fake_stop_websockets() -> None:
+        stop_calls["count"] += 1
+
+    monkeypatch.setattr(runtime_module, "stop_websockets", _fake_stop_websockets)
+
+    for key in (
+        "UI_HTTP_URL",
+        "UI_HEALTH_URL",
+        "UI_WS_URL",
+        "UI_EVENTS_WS_URL",
+        "UI_RL_WS_URL",
+        "UI_LOG_WS_URL",
+    ):
+        monkeypatch.setenv(key, "stale")
+
+    runtime._stop_ui()
 
     assert runtime.ui_server is None
     assert runtime.ui_ws_threads is None
-    assert not runtime._ui_ws_started_here
+    assert runtime._ui_ws_started_here is False
+    assert stop_calls["count"] == 1
+    for key in (
+        "UI_HTTP_URL",
+        "UI_HEALTH_URL",
+        "UI_WS_URL",
+        "UI_EVENTS_WS_URL",
+        "UI_RL_WS_URL",
+        "UI_LOG_WS_URL",
+    ):
+        assert os.getenv(key) is None
 
 
 @pytest.mark.anyio("asyncio")
