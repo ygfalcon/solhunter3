@@ -812,7 +812,11 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
             )
             _BIRDEYE_DISABLED_INFO = True
         logger.debug("BirdEye API key missing; skipping BirdEye discovery")
-        return []
+        raise DiscoveryConfigurationError(
+            "birdeye",
+            "BirdEye API key missing; BirdEye discovery disabled.",
+            remediation="Set the BIRDEYE_API_KEY environment variable.",
+        )
 
     cache_key = _current_cache_key()
     cached = _cache_get(cache_key)
