@@ -865,10 +865,29 @@ class RuntimeOrchestrator:
 
     async def start_agents(self) -> None:
         # Use existing startup path to ensure consistent connectivity + depth_service
-        await self._publish_stage("agents:startup", True)
-        cfg, runtime_cfg, proc = await perform_startup_async(
-            self.config_path, offline=False, dry_run=False
-        )
+        try:
+            cfg, runtime_cfg, proc = await perform_startup_async(
+                self.config_path, offline=False, dry_run=False
+            )
+        except Exception as exc:
+            detail = str(exc) or exc.__class__.__name__
+            await self._publish_stage("agents:startup", False, detail)
+            raise
+        else:
+            detail_parts: list[str] = []
+            if isinstance(cfg, dict):
+                selected_name = (
+                    cfg.get("selected_config")
+                    or cfg.get("config_name")
+                    or cfg.get("name")
+                )
+                if selected_name:
+                    detail_parts.append(f"config={selected_name}")
+            depth_pid = getattr(proc, "pid", None) if proc is not None else None
+            if depth_pid is not None:
+                detail_parts.append(f"depth_pid={depth_pid}")
+            detail = " ".join(detail_parts)
+            await self._publish_stage("agents:startup", True, detail)
         self.handles.depth_proc = proc
 
         flags = get_feature_flags()
