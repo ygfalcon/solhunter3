@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence, AsyncIterator
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence, AsyncIterator, Tuple
 from urllib.parse import urlparse
 
 import yaml
@@ -205,6 +205,63 @@ def _load_scoring_weights() -> tuple[float, Dict[str, float]]:
 
 
 _SCORING_BIAS, _SCORING_WEIGHTS = _load_scoring_weights()
+
+
+def get_scoring_context() -> Tuple[float, Dict[str, float]]:
+    """Return the active scoring bias and weight mapping."""
+
+    return float(_SCORING_BIAS), dict(_SCORING_WEIGHTS)
+
+
+def compute_score_from_features(
+    features: Mapping[str, Any],
+    *,
+    bias: float | None = None,
+    weights: Mapping[str, float] | None = None,
+) -> Tuple[float, List[Dict[str, float]], List[Dict[str, float]]]:
+    """Recompute discovery score details for ``features``.
+
+    The returned tuple consists of ``(score, breakdown, top_features)`` where the
+    breakdown enumerates each feature contribution using the supplied scoring
+    weights and bias.
+    """
+
+    if bias is None:
+        bias = float(_SCORING_BIAS)
+    if weights is None:
+        weights_map: Mapping[str, float] = _SCORING_WEIGHTS
+    else:
+        weights_map = weights
+
+    z = float(bias)
+    breakdown: List[Dict[str, float]] = []
+
+    for name, raw_value in features.items():
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+
+        weight = float(weights_map.get(name, 0.0))
+        contribution = weight * value
+        breakdown.append(
+            {
+                "name": name,
+                "value": float(value),
+                "weight": weight,
+                "contribution": float(contribution),
+            }
+        )
+        z += contribution
+
+    score = _sigmoid(z)
+    top_features = sorted(
+        breakdown,
+        key=lambda item: abs(item.get("contribution", 0.0)),
+        reverse=True,
+    )[:3]
+
+    return float(score), breakdown, top_features
 _STAGE_B_SCORE_THRESHOLD = float(os.getenv("DISCOVERY_STAGE_B_THRESHOLD", "0.65") or 0.65)
 _STAGE_B_MIN_SOURCES = int(os.getenv("DISCOVERY_STAGE_B_MIN_SOURCES", "2") or 2)
 _SOLSCAN_NEGATIVE_TTL = float(os.getenv("SOLSCAN_NEGATIVE_TTL", "1800") or 1800.0)

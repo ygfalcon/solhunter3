@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import time
+import math
 import types
 
 if "base58" not in sys.modules:
@@ -22,7 +23,14 @@ VALID_MINT = "So11111111111111111111111111111111111111112"
 
 def _reset_cache():
     discovery_mod._CACHE.update(
-        {"tokens": [], "ts": 0.0, "limit": 0, "method": "", "rpc_identity": ""}
+        {
+            "tokens": [],
+            "ts": 0.0,
+            "limit": 0,
+            "method": "",
+            "rpc_identity": "",
+            "details": {},
+        }
     )
 
 
@@ -676,6 +684,7 @@ def test_discover_tokens_concurrent_cached_reads(monkeypatch):
                     "method": agent.default_method
                     or discovery_mod.DEFAULT_DISCOVERY_METHOD,
                     "rpc_identity": identity,
+                    "details": {},
                 }
             )
 
@@ -696,6 +705,107 @@ def test_discover_tokens_concurrent_cached_reads(monkeypatch):
     assert results[0] == [VALID_MINT]
     assert results[1] == [VALID_MINT]
     assert discovery_mod._CACHE["tokens"] == [VALID_MINT]
+
+
+def test_cached_details_hydrate_with_weights(monkeypatch):
+    _reset_cache()
+
+    agent = DiscoveryAgent()
+    agent.cache_ttl = 60.0
+    identity = discovery_mod._rpc_identity(agent.rpc_url)
+    now = time.time()
+    features = {"alpha": 1.0}
+
+    async def fail_discover_once(self, *, method, offline, token_file):  # pragma: no cover
+        raise AssertionError("_discover_once should not be called when cache is valid")
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fail_discover_once)
+    monkeypatch.setattr(
+        discovery_mod,
+        "get_scoring_context",
+        lambda: (0.0, {"alpha": 2.0}),
+    )
+
+    async def seed_cache():
+        async with discovery_mod._CACHE_LOCK:
+            discovery_mod._CACHE.update(
+                {
+                    "tokens": [VALID_MINT],
+                    "details": {VALID_MINT: {"score_features": features}},
+                    "ts": now,
+                    "limit": agent.limit,
+                    "method": agent.default_method,
+                    "rpc_identity": identity,
+                }
+            )
+
+    asyncio.run(seed_cache())
+
+    tokens = asyncio.run(agent.discover_tokens())
+
+    assert tokens == [VALID_MINT]
+    detail = agent.last_details[VALID_MINT]
+    expected_score = 1.0 / (1.0 + math.exp(-2.0))
+    assert math.isclose(detail["score"], expected_score, rel_tol=1e-6)
+    assert detail["cached"] is True
+    assert detail["cache_stale"] is False
+    assert "cache" in detail["sources"]
+    assert "cache:stale" not in detail["sources"]
+    assert detail["score_breakdown"][0]["weight"] == 2.0
+    assert detail["score_breakdown"][0]["value"] == 1.0
+
+
+def test_stale_cache_fallback_preserves_metadata(monkeypatch):
+    _reset_cache()
+
+    agent = DiscoveryAgent()
+    agent.cache_ttl = 0.5
+    agent.max_attempts = 1
+    identity = discovery_mod._rpc_identity(agent.rpc_url)
+    stale_ts = time.time() - 10.0
+    features = {"alpha": 0.5}
+
+    async def empty_discover(self, *, method, offline, token_file):
+        return [], {}
+
+    async def passthrough_social(self, tokens, details, *, offline=False):
+        return tokens, details or {}
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", empty_discover)
+    monkeypatch.setattr(DiscoveryAgent, "_apply_social_mentions", passthrough_social)
+    monkeypatch.setattr(
+        discovery_mod,
+        "get_scoring_context",
+        lambda: (0.0, {"alpha": 2.0}),
+    )
+
+    async def seed_cache():
+        async with discovery_mod._CACHE_LOCK:
+            discovery_mod._CACHE.update(
+                {
+                    "tokens": [VALID_MINT],
+                    "details": {VALID_MINT: {"score_features": features}},
+                    "ts": stale_ts,
+                    "limit": agent.limit,
+                    "method": agent.default_method,
+                    "rpc_identity": identity,
+                }
+            )
+
+    asyncio.run(seed_cache())
+
+    tokens = asyncio.run(agent.discover_tokens())
+
+    assert tokens == [VALID_MINT]
+    detail = agent.last_details[VALID_MINT]
+    expected_score = 1.0 / (1.0 + math.exp(-1.0))
+    assert math.isclose(detail["score"], expected_score, rel_tol=1e-6)
+    assert detail["cached"] is True
+    assert detail["cache_stale"] is True
+    assert detail["fallback_reason"] == "cache"
+    sources = detail["sources"]
+    assert "cache" in sources and "cache:stale" in sources and "fallback" in sources
+    assert agent.last_fallback_used is True
 
 
 def test_fallback_results_do_not_populate_cache(monkeypatch):
@@ -819,6 +929,7 @@ def test_offline_discovery_skips_social_mentions(monkeypatch, caplog):
             "limit": agent.limit,
             "method": "",
             "rpc_identity": cached_identity,
+            "details": {},
         }
     )
 
