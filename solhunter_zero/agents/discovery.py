@@ -255,6 +255,12 @@ class DiscoveryAgent:
         self.news_feeds = self._split_env_list("NEWS_FEEDS")
         self.twitter_feeds = self._split_env_list("TWITTER_FEEDS")
         self.discord_feeds = self._split_env_list("DISCORD_FEEDS")
+        # These flags behave like latches for configuration issues. Once we log a
+        # warning to the Python logger we keep ``_config_error_warned`` latched to
+        # avoid noisy duplicate messages. The runtime event published via
+        # ``_config_error_event_reported`` is allowed to fire again after the
+        # configuration recovers so operators are notified if the problem
+        # returns.
         self._config_error_warned = False
         self._config_error_event_reported = False
 
@@ -419,6 +425,10 @@ class DiscoveryAgent:
                 "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled; discovery will rely on cached/static seeds",
             )
             self._config_error_warned = True
+        elif not config_error:
+            # Reset the event latch after the configuration recovers so that
+            # subsequent regressions publish another warning event.
+            self._config_error_event_reported = False
 
         for attempt in range(attempts):
             tokens, details = await self._discover_once(
