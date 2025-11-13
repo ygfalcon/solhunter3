@@ -105,7 +105,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     assert any("birdeye" in r["sources"] for r in results)
 
 
-def test_fetch_birdeye_tokens_missing_key_returns_empty(monkeypatch, caplog):
+def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch, caplog):
     td._BIRDEYE_CACHE.clear()
     monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
@@ -115,9 +115,10 @@ def test_fetch_birdeye_tokens_missing_key_returns_empty(monkeypatch, caplog):
         return await td._fetch_birdeye_tokens(limit=5)
 
     with caplog.at_level("WARNING", logger="solhunter_zero.token_discovery"):
-        tokens = asyncio.run(run())
+        with pytest.raises(td.DiscoveryConfigurationError) as excinfo:
+            asyncio.run(run())
 
-    assert tokens == []
+    assert "BirdEye API key missing" in str(excinfo.value)
     assert "BirdEye API key missing" in caplog.text
 
 
@@ -404,6 +405,7 @@ async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch,
     assert final, "fallback batch should contain entries"
     addresses = {item["address"] for item in final}
     assert "So11111111111111111111111111111111111111112" in addresses
+    assert all("fallback" in item.get("sources", []) for item in final)
     assert "BirdEye discovery disabled" in caplog.text
     assert "Discovery candidates using fallback set" in caplog.text
 
