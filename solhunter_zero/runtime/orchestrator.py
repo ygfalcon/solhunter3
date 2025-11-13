@@ -189,6 +189,60 @@ def _publish_ui_url_to_redis(ui_url: str) -> None:
         log.warning("Failed to publish UI URL to redis at %s: %s", redis_url, exc)
 
 
+_WILDCARD_LOOPBACK_MAP = {"0.0.0.0": "127.0.0.1", "::": "::1"}
+
+
+def _loopback_host_for(host: str | None) -> str | None:
+    if host is None:
+        return None
+    return _WILDCARD_LOOPBACK_MAP.get(host, host)
+
+
+def _normalize_url_host_to_loopback(url: str | None) -> str | None:
+    """Return *url* with wildcard hosts replaced by loopback equivalents."""
+
+    if not url:
+        return url
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return url
+
+    normalized_host = _loopback_host_for(parsed.hostname)
+    if normalized_host is None or normalized_host == parsed.hostname:
+        return url
+
+    host_component = normalized_host
+    if ":" in host_component and not host_component.startswith("["):
+        host_component = f"[{host_component}]"
+    if parsed.port is not None:
+        host_component = f"{host_component}:{parsed.port}"
+
+    userinfo = ""
+    if parsed.username:
+        userinfo = parsed.username
+        if parsed.password:
+            userinfo += f":{parsed.password}"
+        userinfo += "@"
+
+    netloc = f"{userinfo}{host_component}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _normalize_ws_urls(urls: dict[str, str] | None) -> dict[str, str]:
+    """Normalize websocket URLs by converting wildcard hosts to loopback."""
+
+    if not urls:
+        return {}
+
+    normalized: dict[str, str] = {}
+    for channel, value in urls.items():
+        normalized[channel] = (
+            _normalize_url_host_to_loopback(value) if isinstance(value, str) else value
+        )
+    return normalized
+
+
 @dataclass
 class RuntimeHandles:
     ui_app: Any | None = None
@@ -344,6 +398,9 @@ class RuntimeOrchestrator:
                 ws_urls = _ui_module.get_ws_urls()  # type: ignore[attr-defined]
             except Exception:
                 ws_urls = {}
+        ws_urls = _normalize_ws_urls(ws_urls)
+        if ui_url is not None:
+            ui_url = _normalize_url_host_to_loopback(ui_url)
         rl_url = ws_urls.get("rl") or "-"
         events_url = ws_urls.get("events") or "-"
         logs_url = ws_urls.get("logs") or "-"
@@ -669,6 +726,7 @@ class RuntimeOrchestrator:
             except Exception:
                 ws_urls = {}
             else:
+                ws_urls = _normalize_ws_urls(ws_urls)
                 env_map = {
                     "events": ("UI_EVENTS_WS", "UI_EVENTS_WS_URL", "UI_WS_URL"),
                     "rl": ("UI_RL_WS", "UI_RL_WS_URL"),
