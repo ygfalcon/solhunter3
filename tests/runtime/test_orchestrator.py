@@ -187,9 +187,10 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
 
     class DummyServer:
         daemon_threads = True
+        timeout = 0.01
 
-        def serve_forever(self) -> None:
-            shutdown_signal.wait()
+        def handle_request(self) -> None:
+            shutdown_signal.wait(0.01)
 
         def shutdown(self) -> None:
             shutdown_signal.set()
@@ -257,9 +258,10 @@ async def test_orchestrator_http_wait_allows_other_coroutines(monkeypatch):
 
     class DummyServer:
         daemon_threads = True
+        timeout = 0.01
 
-        def serve_forever(self) -> None:
-            server_shutdown.wait()
+        def handle_request(self) -> None:
+            server_shutdown.wait(0.01)
 
         def shutdown(self) -> None:
             server_shutdown.set()
@@ -383,6 +385,53 @@ async def test_orchestrator_start_aborts_on_http_failure(monkeypatch):
         if isinstance(thread_obj, threading.Thread):
             thread_obj.join(timeout=1)
 
+
+@pytest.mark.anyio("asyncio")
+async def test_stop_all_shuts_http_server_before_signalling_thread(monkeypatch):
+    call_order: list[str] = []
+
+    async def fake_publish_stage(self, _stage: str, _ok: bool, _detail: str = "") -> None:
+        return None
+
+    close_session = AsyncMock()
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr("solhunter_zero.http.close_session", close_session)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module.stop_websockets",
+        lambda: None,
+        raising=False,
+    )
+
+    class TrackingEvent(threading.Event):
+        def set(self) -> None:  # type: ignore[override]
+            call_order.append("event.set")
+            super().set()
+
+    class DummyThread:
+        def join(self, timeout: float | None = None) -> None:
+            call_order.append("thread.join")
+
+    class DummyServer:
+        def shutdown(self) -> None:
+            call_order.append("server.shutdown")
+
+        def server_close(self) -> None:
+            call_order.append("server.close")
+
+    orch = RuntimeOrchestrator(run_http=True)
+    orch.handles.ui_server = DummyServer()
+    orch.handles.ui_threads = {
+        "http": {
+            "thread": DummyThread(),
+            "shutdown_event": TrackingEvent(),
+        }
+    }
+
+    await orch.stop_all()
+
+    assert "server.shutdown" in call_order
+    assert "event.set" in call_order
+    assert call_order.index("server.shutdown") < call_order.index("event.set")
 
 @pytest.mark.anyio("asyncio")
 async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
