@@ -91,7 +91,67 @@ def test_ensure_virtualenv_respects_skip_flag(tmp_path: Path) -> None:
     )
 
     assert "LAUNCH_LIVE_SKIP_PIP is set" in completed.stdout
-    assert not pip_log.exists()
+    assert pip_log.exists()
+    assert pip_log.read_text().strip() == "check"
+
+
+def test_ensure_virtualenv_skip_flag_fails_when_pip_check_fails(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    ensure_fn = _extract_function(source, "ensure_virtualenv")
+    detect_fn = _extract_function(source, "detect_pip_online")
+
+    venv_dir = tmp_path / "venv"
+    bin_dir = venv_dir / "bin"
+    bin_dir.mkdir(parents=True)
+
+    python_bin = bin_dir / "python3"
+    python_bin.write_text("#!/usr/bin/env bash\nexit 0\n")
+    python_bin.chmod(0o755)
+
+    activate = bin_dir / "activate"
+    activate.write_text("#!/usr/bin/env bash\nexport VIRTUAL_ENV=$VENV_DIR\n")
+    activate.chmod(0o755)
+
+    pip_bin = bin_dir / "pip"
+    pip_bin.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ $1 == 'check' ]]; then\n"
+        "  echo 'dependency issue' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    pip_bin.chmod(0o755)
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        ROOT_DIR={shlex.quote(str(REPO_ROOT))}
+        VENV_DIR={shlex.quote(str(venv_dir))}
+        PYTHON_BIN={shlex.quote(str(python_bin))}
+        PIP_BIN={shlex.quote(str(pip_bin))}
+        LOG_DIR={shlex.quote(str(tmp_path))}
+        EXIT_DEPS=5
+        export LAUNCH_LIVE_SKIP_PIP=1
+        log_info() {{ printf '%s\n' "$*"; }}
+        log_warn() {{ printf '%s\n' "$*" >&2; }}
+        {detect_fn}
+        {ensure_fn}
+        ensure_virtualenv
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 5
+    assert "Existing virtual environment has dependency conflicts" in completed.stderr
+    assert str(tmp_path / "deps_install.log") in completed.stderr
 
 
 def test_ensure_virtualenv_exits_when_pip_check_fails(tmp_path: Path) -> None:

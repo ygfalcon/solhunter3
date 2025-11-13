@@ -110,6 +110,11 @@ ensure_virtualenv() {
   DEPS_LOG="$LOG_DIR/deps_install.log"
   if [[ -n ${LAUNCH_LIVE_SKIP_PIP:-} ]]; then
     log_info "LAUNCH_LIVE_SKIP_PIP is set; skipping Python dependency installation"
+    if ! "$PIP_BIN" check >"$DEPS_LOG" 2>&1; then
+      log_warn "Existing virtual environment has dependency conflicts (see $DEPS_LOG)"
+      exit $EXIT_DEPS
+    fi
+    log_info "Existing virtual environment passed dependency check"
     return
   fi
 
