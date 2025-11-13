@@ -2036,6 +2036,57 @@ def _channel_path(channel: str) -> str:
     return candidate
 
 
+def _extract_ws_candidates(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    text = raw.strip()
+    if not text:
+        return []
+
+    candidates: list[str] = []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, (list, tuple, set)):
+        for item in parsed:
+            if item is None:
+                continue
+            candidate = str(item).strip()
+            if candidate:
+                candidates.append(candidate)
+        if candidates:
+            return candidates
+
+    cleaned = text.replace("[", " ").replace("]", " ")
+    parts = [part.strip().strip("'\"") for part in cleaned.replace(";", ",").split(",")]
+    return [part for part in parts if part]
+
+
+def _event_bus_ws_url_from_env() -> str | None:
+    env_candidates: list[Any] = []
+
+    alias = os.getenv("EVENT_BUS_URL")
+    if alias:
+        env_candidates.append(alias)
+
+    for key in ("BROKER_WS_URLS", "EVENT_BUS_PEERS", "BROKER_URLS", "BROKER_URLS_JSON"):
+        values = _extract_ws_candidates(os.getenv(key))
+        if values:
+            env_candidates.append(values)
+
+    single = os.getenv("BROKER_URL")
+    if single:
+        env_candidates.append(single)
+
+    discovered = _discover_broker_url()
+    if discovered:
+        env_candidates.append(discovered)
+
+    selected = _select_first_url(*env_candidates)
+    return _normalize_ws_url(selected)
+
+
 def get_ws_urls(request_host: str | None = None) -> dict[str, str | None]:
     """Return websocket URLs for RL, events, and logs channels."""
 
@@ -2051,6 +2102,8 @@ def get_ws_urls(request_host: str | None = None) -> dict[str, str | None]:
             resolved = _normalize_ws_url(os.environ.get(env_key))
             if resolved:
                 break
+        if not resolved and channel == "events":
+            resolved = _event_bus_ws_url_from_env()
         if not resolved:
             state = _WS_CHANNELS.get(channel)
             host = state.host if state and state.host else _resolve_host()
