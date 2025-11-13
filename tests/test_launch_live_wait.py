@@ -335,6 +335,60 @@ def test_normalize_bus_configuration_exports() -> None:
     assert "RUNTIME_MANIFEST channel=test-channel" in completed.stderr
 
 
+def test_normalize_bus_configuration_preserves_credentials_and_redacts_logs() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    normalize_fn = _extract_function(source, "normalize_bus_configuration")
+
+    redis_url = "redis://:pass@host:6379/1?ssl=true"
+
+    bash_script = dedent(
+        """
+        set -euo pipefail
+        PYTHON_BIN=%(python)s
+        export BROKER_CHANNEL='secure-channel'
+        export REDIS_URL=%(redis)s
+        export MINT_STREAM_REDIS_URL=%(redis)s
+        export MEMPOOL_STREAM_REDIS_URL=%(redis)s
+        export AMM_WATCH_REDIS_URL=%(redis)s
+        export BROKER_URL=%(redis)s
+        export BROKER_URLS=%(redis)s
+        %(normalize)s
+        normalize_bus_configuration
+        """
+        % {
+            "python": shlex.quote(sys.executable),
+            "redis": shlex.quote(redis_url),
+            "normalize": normalize_fn,
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=os.environ.copy(),
+    )
+
+    exports: dict[str, str] = {}
+    for line in completed.stdout.strip().splitlines():
+        assert line.startswith("export "), line
+        assignment = shlex.split(line[len("export "):])[0]
+        key, value = assignment.split("=", 1)
+        exports[key] = value
+
+    assert exports["REDIS_URL"] == redis_url
+    assert exports["MINT_STREAM_REDIS_URL"] == redis_url
+    assert exports["MEMPOOL_STREAM_REDIS_URL"] == redis_url
+    assert exports["AMM_WATCH_REDIS_URL"] == redis_url
+    assert exports["BROKER_URL"] == redis_url
+    assert exports["BROKER_URLS"] == redis_url
+
+    assert "redis://****@host:6379/1?ssl=true" in completed.stderr
+    assert redis_url not in completed.stderr
+
 def test_normalize_bus_configuration_canonicalizes_broker_url() -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()

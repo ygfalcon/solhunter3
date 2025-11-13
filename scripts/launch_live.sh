@@ -134,6 +134,7 @@ import json
 import os
 import socket
 import sys
+from dataclasses import dataclass
 from urllib.parse import urlparse
 import shlex
 
@@ -157,6 +158,17 @@ REDIS_MISMATCH_ERROR = (
 )
 
 
+@dataclass
+class RedisURL:
+    scheme: str
+    username: str | None
+    password: str | None
+    host: str
+    port: int
+    db: int
+    query: str
+
+
 def _record_target(canonical: str) -> None:
     global target_url
     if canonical is None:
@@ -174,19 +186,20 @@ def _normalize_single_key(
         return
     os.environ[key] = raw
     try:
-        scheme, host, port, db = _canonical(raw)
+        parts = _canonical(raw)
     except Exception:
         errors.append(f"{key} has invalid Redis URL: {raw}")
         return
-    canonical_db = force_db if force_db is not None else db
-    if force_db is None and db != 1:
+    canonical_db = force_db if force_db is not None else parts.db
+    if force_db is None and parts.db != 1:
         errors.append(
-            f"{key} targets database {db}; configure database 1 for all runtime services "
+            f"{key} targets database {parts.db}; configure database 1 for all runtime services "
             f"(export {key}=redis://localhost:6379/1 or update your env file)."
         )
-    canonical = f"{scheme}://{host}:{port}/{canonical_db}"
+    canonical = _format_url(parts, db=canonical_db)
     os.environ[key] = canonical
     manifest[key] = canonical
+    redacted_manifest[key] = _format_url(parts, db=canonical_db, redact=True)
     _record_target(canonical)
 
 
@@ -198,29 +211,32 @@ def _normalize_multi_key(
     os.environ[key] = raw
     parts = [segment.strip() for segment in raw.split(",") if segment.strip()]
     canonical_parts: list[str] = []
+    redacted_parts: list[str] = []
     for part in parts:
         try:
-            scheme, host, port, db = _canonical(part)
+            redis_parts = _canonical(part)
         except Exception:
             errors.append(f"{key} has invalid Redis URL: {part}")
             continue
-        canonical_db = force_db if force_db is not None else db
-        if force_db is None and db != 1:
+        canonical_db = force_db if force_db is not None else redis_parts.db
+        if force_db is None and redis_parts.db != 1:
             errors.append(
-                f"{key} targets database {db}; configure database 1 for all runtime services "
+                f"{key} targets database {redis_parts.db}; configure database 1 for all runtime services "
                 f"(export {key}=redis://localhost:6379/1 or update your env file)."
             )
-        canonical = f"{scheme}://{host}:{port}/{canonical_db}"
+        canonical = _format_url(redis_parts, db=canonical_db)
         canonical_parts.append(canonical)
+        redacted_parts.append(_format_url(redis_parts, db=canonical_db, redact=True))
         _record_target(canonical)
     if canonical_parts:
         canonical_value = ",".join(canonical_parts)
         os.environ[key] = canonical_value
         manifest[key] = canonical_value
+        redacted_manifest[key] = ",".join(redacted_parts)
     else:
         os.environ.pop(key, None)
 
-def _canonical(url: str) -> tuple[str, str, int, int]:
+def _canonical(url: str) -> RedisURL:
     candidate = url if "://" in url else f"redis://{url}"
     parsed = urlparse(candidate)
     scheme = parsed.scheme or "redis"
@@ -229,28 +245,78 @@ def _canonical(url: str) -> tuple[str, str, int, int]:
     path = (parsed.path or "/").lstrip("/")
     segment = path.split("/", 1)[0]
     db = int(segment) if segment else 0
-    return scheme, host, port, db
+    return RedisURL(
+        scheme=scheme,
+        username=parsed.username,
+        password=parsed.password,
+        host=host,
+        port=port,
+        db=db,
+        query=parsed.query or "",
+    )
+
+
+def _format_url(parts: RedisURL, *, db: int | None = None, redact: bool = False) -> str:
+    target_db = parts.db if db is None else db
+    userinfo = _format_userinfo(parts, redact=redact)
+    netloc = parts.host
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    if userinfo:
+        netloc = f"{userinfo}@{netloc}"
+    url = f"{parts.scheme}://{netloc}/{target_db}"
+    if parts.query:
+        url = f"{url}?{parts.query}"
+    return url
+
+
+def _format_userinfo(parts: RedisURL, *, redact: bool) -> str:
+    if parts.username is None and parts.password is None:
+        return ""
+    if redact:
+        return "****"
+    username = parts.username or ""
+    password = parts.password
+    if password is None:
+        return username
+    if username:
+        return f"{username}:{password}"
+    return f":{password}"
+
+
+def _redact_url_for_log(value: str) -> str:
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return value
+    if not parsed.netloc or "@" not in parsed.netloc:
+        return value
+    _, _, host_segment = parsed.netloc.rpartition("@")
+    redacted_netloc = f"****@{host_segment}"
+    return parsed._replace(netloc=redacted_netloc).geturl()
 
 errors: list[str] = []
 manifest: dict[str, str] = {}
+redacted_manifest: dict[str, str] = {}
 target_url: str | None = None
 
 for key in redis_keys:
     raw = os.environ.get(key) or DEFAULT_REDIS
     os.environ[key] = raw
     try:
-        scheme, host, port, db = _canonical(raw)
+        parts = _canonical(raw)
     except Exception:
         errors.append(f"{key} has invalid Redis URL: {raw}")
         continue
-    if db != 1:
+    if parts.db != 1:
         errors.append(
-            f"{key} targets database {db}; configure database 1 for all runtime services "
+            f"{key} targets database {parts.db}; configure database 1 for all runtime services "
             "(export {key}=redis://localhost:6379/1 or update your env file)."
         )
-    canonical = f"{scheme}://{host}:{port}/{db}"
+    canonical = _format_url(parts)
     os.environ[key] = canonical
     manifest[key] = canonical
+    redacted_manifest[key] = _format_url(parts, redact=True)
     _record_target(canonical)
 
 _normalize_single_key("BROKER_URL", os.environ.get("BROKER_URL"), force_db=1)
@@ -278,11 +344,11 @@ if errors:
 manifest_line = (
     "RUNTIME_MANIFEST "
     f"channel={channel} "
-    f"redis={manifest.get('REDIS_URL', DEFAULT_REDIS)} "
-    f"mint_stream={manifest.get('MINT_STREAM_REDIS_URL', DEFAULT_REDIS)} "
-    f"mempool={manifest.get('MEMPOOL_STREAM_REDIS_URL', DEFAULT_REDIS)} "
-    f"amm_watch={manifest.get('AMM_WATCH_REDIS_URL', DEFAULT_REDIS)} "
-    f"bus={bus_url}"
+    f"redis={redacted_manifest.get('REDIS_URL', _redact_url_for_log(DEFAULT_REDIS))} "
+    f"mint_stream={redacted_manifest.get('MINT_STREAM_REDIS_URL', _redact_url_for_log(DEFAULT_REDIS))} "
+    f"mempool={redacted_manifest.get('MEMPOOL_STREAM_REDIS_URL', _redact_url_for_log(DEFAULT_REDIS))} "
+    f"amm_watch={redacted_manifest.get('AMM_WATCH_REDIS_URL', _redact_url_for_log(DEFAULT_REDIS))} "
+    f"bus={_redact_url_for_log(bus_url)}"
 )
 print(manifest_line, file=sys.stderr)
 
