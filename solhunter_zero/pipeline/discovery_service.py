@@ -117,6 +117,7 @@ class DiscoveryService:
         self._last_fetch_ts: float = 0.0
         self._cooldown_until: float = 0.0
         self._consecutive_empty: int = 0
+        self._consecutive_failures: int = 0
         self._current_backoff: float = 0.0
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
@@ -153,6 +154,7 @@ class DiscoveryService:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 log.exception("DiscoveryService failure: %s", exc)
+                self._apply_failure_backoff(time.time())
             await asyncio.sleep(self.interval)
 
     async def _fetch(self, *, agent: DiscoveryAgent | None = None) -> list[str]:
@@ -338,6 +340,7 @@ class DiscoveryService:
         payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
         self._last_fetch_ts = fetch_ts
         self._last_tokens = list(payload)
+        self._consecutive_failures = 0
 
         cooldown = 0.0
         if payload:
@@ -379,6 +382,35 @@ class DiscoveryService:
             self._cooldown_until = fetch_ts
 
         self._last_fetch_fresh = True
+
+    def _apply_failure_backoff(self, failure_ts: float) -> None:
+        self._consecutive_failures += 1
+
+        cooldown = 0.0
+        base_ttl = self.empty_cache_ttl
+        if base_ttl:
+            if self.backoff_factor > 1.0:
+                cooldown = base_ttl * (self.backoff_factor ** (self._consecutive_failures - 1))
+            else:
+                cooldown = base_ttl
+
+        if self.max_backoff is not None and cooldown:
+            cooldown = min(cooldown, self.max_backoff)
+
+        if cooldown:
+            new_cooldown_until = failure_ts + cooldown
+            if new_cooldown_until > self._cooldown_until:
+                self._cooldown_until = new_cooldown_until
+            self._current_backoff = cooldown
+            log.warning(
+                "DiscoveryService failure #%d; backoff for %.2fs",
+                self._consecutive_failures,
+                cooldown,
+            )
+        else:
+            self._cooldown_until = max(self._cooldown_until, failure_ts)
+
+        self._last_fetch_fresh = False
 
     async def _prime_startup_clones(self) -> None:
         clones = max(1, int(self.startup_clones))

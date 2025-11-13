@@ -89,3 +89,50 @@ def test_env_override_for_max_backoff():
         assert service._current_backoff == 4.5
 
     asyncio.run(runner())
+
+
+def test_failure_backoff_reuses_cooldown():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        service = DiscoveryService(
+            queue,
+            empty_cache_ttl=2.0,
+            backoff_factor=2.0,
+            max_backoff=5.0,
+        )
+
+        base_ts = 50.0
+        service._apply_failure_backoff(base_ts)
+        assert service._consecutive_failures == 1
+        assert service._current_backoff == 2.0
+        assert service._cooldown_until == base_ts + 2.0
+
+        service._apply_failure_backoff(base_ts + 1.0)
+        assert service._consecutive_failures == 2
+        assert service._current_backoff == 4.0
+        assert service._cooldown_until == base_ts + 1.0 + 4.0
+
+        service._apply_failure_backoff(base_ts + 2.0)
+        assert service._consecutive_failures == 3
+        assert service._current_backoff == 5.0
+        assert service._cooldown_until == base_ts + 2.0 + 5.0
+
+        assert not service._last_fetch_fresh
+
+    asyncio.run(runner())
+
+
+def test_failure_counter_resets_on_success():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        service = DiscoveryService(queue)
+
+        service._apply_failure_backoff(0.0)
+        assert service._consecutive_failures == 1
+
+        service._apply_fetch_stats(["So11111111111111111111111111111111111111112"], 1.0)
+
+        assert service._consecutive_failures == 0
+        assert service._current_backoff == 0.0
+
+    asyncio.run(runner())
