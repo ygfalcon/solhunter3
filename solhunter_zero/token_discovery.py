@@ -2006,48 +2006,65 @@ def discover_candidates(
                 f"{top_score:.4f}" if isinstance(top_score, (int, float)) else "n/a",
             )
 
+            fallback_final: List[TokenEntry] | None = None
+            fallback_reasons: List[str] = []
+
+            if not final:
+                fallback_entries = _fallback_candidate_tokens(limit)
+                fallback_candidates: Dict[str, Dict[str, Any]] = {}
+                for entry in fallback_entries:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    address = str(entry.get("address") or "").strip()
+                    if not address:
+                        continue
+                    entry_copy = dict(entry)
+                    sources = entry_copy.get("sources")
+                    if isinstance(sources, set):
+                        source_set = set(sources)
+                    elif isinstance(sources, (list, tuple)):
+                        source_set = {
+                            str(src)
+                            for src in sources
+                            if isinstance(src, str) and src
+                        }
+                    elif isinstance(sources, str) and sources:
+                        source_set = {sources}
+                    else:
+                        source_set = set()
+                    source_set.add("fallback")
+                    entry_copy["sources"] = source_set
+                    entry_copy.setdefault("score", 0.0)
+                    entry_copy.setdefault("_stage_b_eligible", False)
+                    fallback_candidates[address] = entry_copy
+
+                if fallback_candidates:
+                    if not candidates:
+                        fallback_reasons.append("live sources empty")
+                    cache_entry_count = sum(
+                        1
+                        for entry in fallback_candidates.values()
+                        if "cache" in entry.get("sources", set())
+                    )
+                    if cache_entry_count == 0:
+                        fallback_reasons.append("cache empty")
+
+                    fallback_final = _snapshot(fallback_candidates, limit=limit)
+                    if fallback_final:
+                        degrade_reason = ", ".join(fallback_reasons) or "fallback engaged"
+                        logger.warning(
+                            "Discovery degraded (%s); using fallback set (%d). config_error=%s",
+                            degrade_reason,
+                            len(fallback_candidates),
+                            config_error or "none",
+                        )
+
             if not emitted or final != last_snapshot:
                 if final:
                     yield final
-                elif config_error is not None:
-                    fallback_entries = _fallback_candidate_tokens(limit)
-                    if fallback_entries:
-                        fallback_candidates: Dict[str, Dict[str, Any]] = {}
-                        for entry in fallback_entries:
-                            if not isinstance(entry, Mapping):
-                                continue
-                            address = str(entry.get("address") or "").strip()
-                            if not address:
-                                continue
-                            entry_copy = dict(entry)
-                            sources = entry_copy.get("sources")
-                            if isinstance(sources, set):
-                                source_set = set(sources)
-                            elif isinstance(sources, (list, tuple)):
-                                source_set = {
-                                    str(src)
-                                    for src in sources
-                                    if isinstance(src, str) and src
-                                }
-                            elif isinstance(sources, str) and sources:
-                                source_set = {sources}
-                            else:
-                                source_set = set()
-                            source_set.add("fallback")
-                            entry_copy["sources"] = source_set
-                            entry_copy.setdefault("score", 0.0)
-                            entry_copy.setdefault("_stage_b_eligible", False)
-                            fallback_candidates[address] = entry_copy
-                        if fallback_candidates:
-                            logger.warning(
-                                "Discovery candidates using fallback set (%d) due to configuration error: %s",
-                                len(fallback_candidates),
-                                config_error,
-                            )
-                            fallback_final = _snapshot(fallback_candidates, limit=limit)
-                            if fallback_final:
-                                yield fallback_final
-                                return
+                elif fallback_final:
+                    yield fallback_final
+                    return
                 else:
                     yield final
 
