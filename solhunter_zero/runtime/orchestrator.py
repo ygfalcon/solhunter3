@@ -84,6 +84,17 @@ _UI_TOPIC_DEFAULTS: dict[str, str] = {
 }
 
 
+_TASK_STAGE_FAILURE_MAP: dict[str, str] = {
+    "trading_loop": "agents:loop",
+    "discovery_loop": "discovery:loop",
+    "evolve_loop": "agents:evolve",
+    "rpc_mint_stream": "discovery:mint_stream",
+    "jito_mempool_stream": "discovery:mempool_stream",
+    "amm_pool_watcher": "discovery:amm_watch",
+    "seed_token_publisher": "discovery:seed_tokens",
+}
+
+
 class _UIPanelForwarder:
     """Subscribe to event-bus topics and push snapshots to the UI."""
 
@@ -230,6 +241,12 @@ class RuntimeOrchestrator:
 
     async def _handle_resource_budget_exit(self, exc: ResourceBudgetExceeded) -> None:
         detail = str(exc)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and not loop.is_closed():
+            loop.create_task(self._publish_stage("agents:loop", False, detail))
         await self._publish_stage("runtime:resource_exit", False, detail)
         await self.stop_all()
 
@@ -261,6 +278,10 @@ class RuntimeOrchestrator:
             return
         self._stop_reason = str(exc)
         log.exception("Runtime task %s failed", task.get_name(), exc_info=exc)
+        if loop and not loop.is_closed():
+            stage = _TASK_STAGE_FAILURE_MAP.get(task.get_name() or "")
+            if stage:
+                loop.create_task(self._publish_stage(stage, False, str(exc)))
         if loop and not loop.is_closed():
             loop.create_task(self.stop_all())
 
@@ -351,6 +372,13 @@ class RuntimeOrchestrator:
                 log.warning("Error publishing UI URL to redis: %s", exc)
 
     async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        loop: asyncio.AbstractEventLoop | None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_closed():
+            return
         timestamp = time.time()
         if self._start_time is None:
             self._start_time = timestamp
