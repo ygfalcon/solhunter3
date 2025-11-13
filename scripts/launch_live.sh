@@ -439,10 +439,13 @@ channel = os.environ.get("BROKER_CHANNEL") or "solhunter-events-v3"
 client = redis.Redis.from_url(redis_url, socket_timeout=1.0)
 key = f"solhunter:runtime:lock:{channel}"
 token = str(uuid.uuid4())
+host = socket.gethostname()
+pid = os.getpid()
+ttl_seconds = 60
 payload = {
-    "pid": os.getpid(),
+    "pid": pid,
     "channel": channel,
-    "host": socket.gethostname(),
+    "host": host,
     "token": token,
     "ts": time.time(),
 }
@@ -458,32 +461,50 @@ if existing:
         data = json.loads(existing.decode("utf-8"))
     except Exception:
         data = {"raw": existing.decode("utf-8", "ignore")}
-    pid = data.get("pid")
-    alive = False
-    if isinstance(pid, int):
+    existing_host = data.get("host")
+    existing_pid = data.get("pid")
+    same_host = isinstance(existing_host, str) and existing_host == host
+    if same_host and isinstance(existing_pid, int):
         try:
-            os.kill(pid, 0)
+            os.kill(existing_pid, 0)
         except Exception:
-            alive = False
+            pass
         else:
-            alive = True
-    if alive:
-        print(
-            "Another runtime is already using this channel (" + _describe(data) + ").",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    # Attempt best-effort cleanup of stale lock
-    client.delete(key)
-    time.sleep(0.2)
+            print(
+                "Another runtime is already using this channel (" + _describe(data) + ").",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    if same_host:
+        client.delete(key)
+        time.sleep(0.2)
 
-if not client.set(key, json.dumps(payload), nx=True):
+if not client.set(key, json.dumps(payload), nx=True, ex=ttl_seconds):
     existing = client.get(key)
     if existing:
         try:
             data = json.loads(existing.decode("utf-8"))
         except Exception:
             data = {"raw": existing.decode("utf-8", "ignore")}
+        existing_host = data.get("host")
+        existing_pid = data.get("pid")
+        same_host = isinstance(existing_host, str) and existing_host == host
+        same_pid = isinstance(existing_pid, int) and existing_pid == pid
+        if same_host and same_pid:
+            token = data.get("token") or token
+            payload["token"] = token
+            print(f"{key} {token}")
+            sys.exit(0)
+        if not same_host or not same_pid:
+            print(
+                "Taking over runtime lock from "
+                + _describe(data)
+                + f" (current host={host} pid={pid})",
+                file=sys.stderr,
+            )
+            client.set(key, json.dumps(payload), ex=ttl_seconds)
+            print(f"{key} {token}")
+            sys.exit(0)
         print(
             "Another runtime is already using this channel (" + _describe(data) + ").",
             file=sys.stderr,
@@ -526,17 +547,34 @@ if not key or not token:
     sys.exit(0)
 
 client = redis.Redis.from_url(redis_url, socket_timeout=1.0)
-existing = client.get(key)
-if not existing:
-    sys.exit(0)
+
+release_script = """
+local current = redis.call('get', KEYS[1])
+if not current then
+  return 0
+end
+local ok, data = pcall(cjson.decode, current)
+if not ok then
+  return 0
+end
+if data['token'] == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end
+return 0
+"""
 
 try:
-    data = json.loads(existing.decode("utf-8"))
+    client.eval(release_script, 1, key, token)
 except Exception:
-    data = {"token": None}
-
-if data.get("token") == token:
-    client.delete(key)
+    existing = client.get(key)
+    if not existing:
+        sys.exit(0)
+    try:
+        data = json.loads(existing.decode("utf-8"))
+    except Exception:
+        data = {"token": None}
+    if data.get("token") == token:
+        client.delete(key)
 PY
   RUNTIME_LOCK_KEY=""
   RUNTIME_LOCK_TOKEN=""
