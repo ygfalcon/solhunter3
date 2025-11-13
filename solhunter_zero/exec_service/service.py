@@ -53,6 +53,12 @@ class TradeExecutor:
     def start(self) -> None:
         self._subscriptions.append(event_bus.subscribe("action_decision", self._on_decision))
 
+    @property
+    def max_concurrency(self) -> int:
+        """Maximum concurrent execution slots."""
+
+        return self._max_concurrency
+
     async def stop(self) -> None:
         for unsub in list(self._subscriptions):
             try:

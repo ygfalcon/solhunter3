@@ -32,7 +32,16 @@ def test_collectors_status_snapshot_updates(monkeypatch):
         await emit("runtime.stage_changed", {"stage": "bus:verify", "ok": True})
         await emit("runtime.stage_changed", {"stage": "agents:loop", "ok": True})
         await emit("heartbeat", {"service": "trading_loop"})
-        await emit("runtime.stage_changed", {"stage": "runtime:stopping", "ok": True})
+        await emit(
+            "runtime.stage_changed",
+            {
+                "stage": "runtime:stopping",
+                "ok": True,
+                "agent_count": 5,
+                "evaluation_concurrency": 8,
+                "executor_concurrency": 3,
+            },
+        )
 
     asyncio.run(drive())
 
@@ -41,6 +50,11 @@ def test_collectors_status_snapshot_updates(monkeypatch):
     assert status["trading_loop"] is False
     assert status["last_stage"] == "runtime:stopping"
     assert status["last_stage_ok"] is True
+    assert status["last_stage_meta"] == {
+        "agent_count": 5,
+        "evaluation_concurrency": 8,
+        "executor_concurrency": 3,
+    }
     assert status["bus_latency_ms"] is not None
     assert "environment" in status
     assert status["workflow"] == runtime_wiring.DEFAULT_RUNTIME_WORKFLOW
@@ -50,6 +64,11 @@ def test_collectors_status_snapshot_updates(monkeypatch):
     assert health["trading_loop"] is False
     assert health["last_stage"] == "runtime:stopping"
     assert health["last_stage_ok"] is True
+    assert health["last_stage_meta"] == {
+        "agent_count": 5,
+        "evaluation_concurrency": 8,
+        "executor_concurrency": 3,
+    }
     assert health["heartbeat_ts"] == status["heartbeat"]
     assert health["last_stage_ts"] == status["last_stage_ts"]
 

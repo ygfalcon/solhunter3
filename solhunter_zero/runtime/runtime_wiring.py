@@ -544,6 +544,7 @@ class RuntimeEventCollectors:
             "last_stage_ok": None,
             "last_stage_detail": None,
             "last_stage_ts": None,
+            "last_stage_meta": {},
         }
         self._topic_lock = threading.Lock()
         self._topic_activity: Dict[str, float] = {}
@@ -789,6 +790,11 @@ class RuntimeEventCollectors:
             stage = str(payload.get("stage") or "")
             ok = bool(payload.get("ok"))
             detail = payload.get("detail")
+            meta = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"stage", "ok", "detail"}
+            }
             now = time.time()
             with self._status_lock:
                 info = self._status_info
@@ -796,6 +802,7 @@ class RuntimeEventCollectors:
                 info["last_stage_ok"] = ok
                 info["last_stage_detail"] = detail
                 info["last_stage_ts"] = now
+                info["last_stage_meta"] = meta
                 if stage.startswith("bus:"):
                     if ok:
                         info["event_bus"] = True
@@ -1258,6 +1265,7 @@ class RuntimeEventCollectors:
             "last_stage_ok": info.get("last_stage_ok"),
             "last_stage_detail": info.get("last_stage_detail"),
             "last_stage_ts": info.get("last_stage_ts"),
+            "last_stage_meta": dict(info.get("last_stage_meta") or {}),
             "environment": (self._environment or "dev"),
             "workflow": workflow,
             "paused": bool(control.get("paused")),
@@ -1285,6 +1293,7 @@ class RuntimeEventCollectors:
             "last_stage_ok": info.get("last_stage_ok"),
             "last_stage_detail": info.get("last_stage_detail"),
             "last_stage_ts": info.get("last_stage_ts"),
+            "last_stage_meta": dict(info.get("last_stage_meta") or {}),
         }
 
     # Public provider accessors ------------------------------------------------

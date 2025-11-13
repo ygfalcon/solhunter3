@@ -207,7 +207,15 @@ class DemoContext:
             )
             event_bus.publish(
                 "runtime.stage_changed",
-                {"stage": "agents:event_runtime", "ok": True, "detail": "demo", "ts": now + 0.01},
+                {
+                    "stage": "agents:event_runtime",
+                    "ok": True,
+                    "detail": "demo",
+                    "ts": now + 0.01,
+                    "agent_count": len(self.tokens),
+                    "evaluation_concurrency": 8,
+                    "executor_concurrency": 3,
+                },
             )
 
         self.loop.run_until_complete(_mark())

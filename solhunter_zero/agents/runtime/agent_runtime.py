@@ -43,7 +43,8 @@ class AgentRuntime:
         self._tokens: set[str] = set()
         self._ewma: dict[str, float] = {}
         self._subscriptions: list[Callable[[], None]] = []
-        self._eval_semaphore = asyncio.Semaphore(_DEFAULT_EVAL_CONCURRENCY)
+        self._eval_concurrency = _DEFAULT_EVAL_CONCURRENCY
+        self._eval_semaphore = asyncio.Semaphore(self._eval_concurrency)
 
     async def start(self) -> None:
         self._running = True
@@ -69,6 +70,12 @@ class AgentRuntime:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+
+    @property
+    def evaluation_concurrency(self) -> int:
+        """Maximum number of concurrent agent evaluations."""
+
+        return self._eval_concurrency
 
     def _emit(self, p: Proposal) -> None:
         try:

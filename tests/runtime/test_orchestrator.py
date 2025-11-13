@@ -158,7 +158,7 @@ async def test_orchestrator_logs_ui_ws_ready(monkeypatch, caplog):
 async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
-    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "", extra=None) -> None:
         events.append((stage, ok, detail))
 
     monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
@@ -227,7 +227,7 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
 async def test_orchestrator_http_wait_allows_other_coroutines(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
-    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "", extra=None) -> None:
         events.append((stage, ok, detail))
 
     monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
@@ -324,7 +324,7 @@ async def test_orchestrator_http_wait_allows_other_coroutines(monkeypatch):
 async def test_orchestrator_start_aborts_on_http_failure(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
-    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "", extra=None) -> None:
         events.append((stage, ok, detail))
 
     monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
@@ -390,7 +390,7 @@ async def test_orchestrator_start_aborts_on_http_failure(monkeypatch):
 async def test_stop_all_shuts_http_server_before_signalling_thread(monkeypatch):
     call_order: list[str] = []
 
-    async def fake_publish_stage(self, _stage: str, _ok: bool, _detail: str = "") -> None:
+    async def fake_publish_stage(self, _stage: str, _ok: bool, _detail: str = "", _extra=None) -> None:
         return None
 
     close_session = AsyncMock()
@@ -438,13 +438,15 @@ async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
     events: list[tuple[str, bool, str]] = []
     ready_calls: list[tuple[str, int]] = []
 
-    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "", extra=None) -> None:
         events.append((stage, ok, detail))
 
     def fake_emit_ui_ready(self, host: str, port: int) -> None:
         ready_calls.append((host, port))
 
     monkeypatch.setenv("UI_DISABLE_HTTP_SERVER", "1")
+    monkeypatch.delenv("UI_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
     monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
     monkeypatch.setattr(RuntimeOrchestrator, "_emit_ui_ready", fake_emit_ui_ready)
     monkeypatch.setattr(
@@ -598,7 +600,7 @@ def test_emit_ui_ready_respects_canonical_ui_http_url(monkeypatch, caplog, tmp_p
 def test_orchestrator_stops_on_resource_budget(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
-    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "", extra=None) -> None:
         events.append((stage, ok, detail))
 
     async def fake_stop_all(self) -> None:
@@ -677,7 +679,7 @@ async def test_orchestrator_starts_golden_pipeline_by_default(monkeypatch):
 
     published: list[tuple[str, bool, str]] = []
 
-    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "", extra=None) -> None:
         published.append((stage, ok, detail))
 
     async def fake_startup(*_args, **_kwargs):
@@ -753,7 +755,7 @@ async def test_start_agents_aborts_when_wallet_verification_fails(monkeypatch):
 
     published: list[tuple[str, bool, str]] = []
 
-    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "", extra=None) -> None:
         published.append((stage, ok, detail))
 
     async def fake_startup(*_args, **_kwargs):
@@ -841,7 +843,7 @@ async def test_start_agents_aborts_when_wallet_verification_fails(monkeypatch):
 async def test_orchestrator_errors_when_default_agents_missing(monkeypatch, caplog):
     caplog.set_level("ERROR")
 
-    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "", extra=None) -> None:
         return None
 
     async def fake_startup(*_args, **_kwargs):

@@ -16,7 +16,7 @@ from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from werkzeug.serving import make_server
 
@@ -349,13 +349,27 @@ class RuntimeOrchestrator:
             except Exception as exc:  # pragma: no cover - defensive
                 log.warning("Error publishing UI URL to redis: %s", exc)
 
-    async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+    async def _publish_stage(
+        self,
+        stage: str,
+        ok: bool,
+        detail: str = "",
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        payload = {"stage": stage, "ok": ok, "detail": detail}
+        if extra:
+            for key, value in extra.items():
+                if key in {"stage", "ok"}:
+                    continue
+                if key == "detail" and detail:
+                    continue
+                payload[key] = value
         try:
-            event_bus.publish("runtime.stage_changed", {"stage": stage, "ok": ok, "detail": detail})
+            event_bus.publish("runtime.stage_changed", payload)
         except Exception:
             pass
         if os.getenv("ORCH_VERBOSE", "").lower() in {"1", "true", "yes"}:
-            log.info("stage=%s ok=%s detail=%s", stage, ok, detail)
+            log.info("stage=%s ok=%s detail=%s extra=%s", stage, ok, detail, dict(extra or {}))
 
     async def _ensure_ui_forwarder(self) -> None:
         if self._ui_forwarder is not None:
@@ -1087,6 +1101,32 @@ class RuntimeOrchestrator:
         self.handles.agent_runtime = aruntime
         self.handles.trade_executor = execu
 
+        manager = getattr(aruntime, "manager", None)
+        agent_count = len(getattr(manager, "agents", []) or [])
+        eval_concurrency = aruntime.evaluation_concurrency
+        exec_concurrency = execu.max_concurrency
+        detail = (
+            f"agents={agent_count} "
+            f"eval_concurrency={eval_concurrency} "
+            f"exec_concurrency={exec_concurrency}"
+        )
+        await self._publish_stage(
+            "agents:event_runtime",
+            True,
+            detail,
+            {
+                "agent_count": agent_count,
+                "evaluation_concurrency": eval_concurrency,
+                "executor_concurrency": exec_concurrency,
+            },
+        )
+        await self._publish_stage(
+            "executor:start",
+            True,
+            f"concurrency={exec_concurrency}",
+            {"executor_concurrency": exec_concurrency},
+        )
+
         async def _discovery_loop():
             agent = DiscoveryAgent()
             method = discovery_method
@@ -1146,7 +1186,30 @@ class RuntimeOrchestrator:
 
         self._register_task(asyncio.create_task(_discovery_loop(), name="discovery_loop"))
         self._register_task(asyncio.create_task(_evolve_loop(), name="evolve_loop"))
-        await self._publish_stage("agents:event_runtime", True)
+
+        runtime_for_stage = self.handles.agent_runtime
+        executor_for_stage = self.handles.trade_executor
+        manager_for_stage = getattr(runtime_for_stage, "manager", None)
+        agent_count = len(getattr(manager_for_stage, "agents", []) or [])
+        eval_concurrency = (
+            runtime_for_stage.evaluation_concurrency if runtime_for_stage else 0
+        )
+        exec_concurrency = executor_for_stage.max_concurrency if executor_for_stage else 0
+        detail = (
+            f"agents={agent_count} "
+            f"eval_concurrency={eval_concurrency} "
+            f"exec_concurrency={exec_concurrency}"
+        )
+        await self._publish_stage(
+            "agents:event_runtime",
+            True,
+            detail,
+            {
+                "agent_count": agent_count,
+                "evaluation_concurrency": eval_concurrency,
+                "executor_concurrency": exec_concurrency,
+            },
+        )
 
     async def start(self) -> None:
         # Make orchestrator subscribe to control messages
