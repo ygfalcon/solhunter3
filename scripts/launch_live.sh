@@ -456,13 +456,27 @@ ensure_redis() {
   "$PYTHON_BIN" - <<'PY'
 import os
 from solhunter_zero.redis_util import ensure_local_redis_if_needed
-urls = []
-for key in ("REDIS_URL", "BROKER_URL", "BROKER_URLS"):
-    raw = os.getenv(key)
+urls: list[str] = []
+seen: set[str] = set()
+
+
+def _append_urls(raw: str | None) -> None:
     if not raw:
-        continue
-    parts = [p.strip() for p in raw.split(',') if p.strip()]
-    urls.extend(parts)
+        return
+    for part in raw.split(','):
+        trimmed = part.strip()
+        if not trimmed or trimmed in seen:
+            continue
+        seen.add(trimmed)
+        urls.append(trimmed)
+
+
+for key, value in os.environ.items():
+    if key.endswith("_REDIS_URL"):
+        _append_urls(value)
+
+for key in ("REDIS_URL", "BROKER_URL", "BROKER_URLS"):
+    _append_urls(os.getenv(key))
 ensure_local_redis_if_needed(urls)
 PY
 }
