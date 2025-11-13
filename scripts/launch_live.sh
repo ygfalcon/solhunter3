@@ -230,7 +230,9 @@ DEFAULT_REDIS = "redis://localhost:6379/1"
 DEFAULT_BUS = "ws://127.0.0.1:8779"
 
 channel = os.environ.setdefault("BROKER_CHANNEL", "solhunter-events-v3")
-bus_url = os.environ.setdefault("EVENT_BUS_URL", DEFAULT_BUS)
+explicit_event_bus = bool(os.environ.get("EVENT_BUS_URL"))
+if not explicit_event_bus:
+    os.environ.setdefault("EVENT_BUS_URL", DEFAULT_BUS)
 
 redis_keys = [
     "REDIS_URL",
@@ -291,16 +293,59 @@ def _normalize_single_key(
     _record_target(canonical)
 
 
-def _normalize_multi_key(
-    key: str, raw: str | None, *, force_db: int | None = None
-) -> None:
+def _load_json_urls(env: str) -> list[str]:
+    raw = os.environ.get(env)
     if not raw:
-        return
-    os.environ[key] = raw
-    parts = [segment.strip() for segment in raw.split(",") if segment.strip()]
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        errors.append(f"{env} is not valid JSON: {raw}")
+        return []
+    urls: list[str] = []
+    if isinstance(data, str):
+        candidate = data.strip()
+        if candidate:
+            urls.append(candidate)
+        else:
+            errors.append(f"{env} contains an empty string")
+        return urls
+    if not isinstance(data, (list, tuple)):
+        errors.append(f"{env} must be a JSON array of URLs: {raw}")
+        return []
+    for entry in data:
+        if isinstance(entry, str):
+            candidate = entry.strip()
+            if candidate:
+                urls.append(candidate)
+            else:
+                errors.append(f"{env} includes an empty string entry")
+        else:
+            errors.append(f"{env} includes non-string entry: {entry!r}")
+    return urls
+
+
+def _normalize_multi_key(
+    key: str,
+    raw: str | None,
+    *,
+    force_db: int | None = None,
+    extras: list[str] | None = None,
+) -> list[str]:
+    candidates: list[str] = []
+    if raw:
+        os.environ[key] = raw
+        candidates.extend(
+            segment.strip() for segment in raw.split(",") if segment.strip()
+        )
+    elif extras:
+        # ensure key absent when only extras supply candidates
+        os.environ.pop(key, None)
+    if extras:
+        candidates.extend(url for url in extras if url)
     canonical_parts: list[str] = []
     redacted_parts: list[str] = []
-    for part in parts:
+    for part in candidates:
         try:
             redis_parts = _canonical(part)
         except Exception:
@@ -323,6 +368,7 @@ def _normalize_multi_key(
         redacted_manifest[key] = ",".join(redacted_parts)
     else:
         os.environ.pop(key, None)
+    return canonical_parts
 
 def _canonical(url: str) -> RedisURL:
     candidate = url if "://" in url else f"redis://{url}"
@@ -408,7 +454,21 @@ for key in redis_keys:
     _record_target(canonical)
 
 _normalize_single_key("BROKER_URL", os.environ.get("BROKER_URL"), force_db=1)
-_normalize_multi_key("BROKER_URLS", os.environ.get("BROKER_URLS"), force_db=1)
+json_urls = _load_json_urls("BROKER_URLS_JSON")
+canonical_brokers = _normalize_multi_key(
+    "BROKER_URLS",
+    os.environ.get("BROKER_URLS"),
+    force_db=1,
+    extras=json_urls,
+)
+
+if canonical_brokers and not explicit_event_bus:
+    candidate_bus = canonical_brokers[0]
+    parsed_bus = urlparse(candidate_bus)
+    if parsed_bus.scheme in {"redis", "rediss"}:
+        os.environ["EVENT_BUS_URL"] = candidate_bus
+
+bus_url = os.environ.get("EVENT_BUS_URL", DEFAULT_BUS)
 
 channel_keys = [
     "MINT_STREAM_BROKER_CHANNEL",

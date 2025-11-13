@@ -10,6 +10,7 @@ from typing import Mapping, Any, Sequence, cast
 from pathlib import Path
 from importlib import import_module
 import urllib.parse
+import json
 
 try:  # Python 3.11+
     import tomllib  # type: ignore[attr-defined]
@@ -945,10 +946,36 @@ def get_broker_url(cfg: Mapping[str, Any] | None = None) -> str | None:
 def get_broker_urls(cfg: Mapping[str, Any] | None = None) -> list[str]:
     """Return list of message broker URLs (``redis://``, ``rediss://``, ``nats://``)."""
     cfg = cfg or _ACTIVE_CONFIG
+    urls: list[str] = []
     env_val = os.getenv("BROKER_URLS")
     if env_val:
-        urls = [u.strip() for u in env_val.split(",") if u.strip()]
-    else:
+        urls.extend(u.strip() for u in env_val.split(",") if u.strip())
+    json_val = os.getenv("BROKER_URLS_JSON")
+    if json_val:
+        try:
+            parsed = json.loads(json_val)
+        except ValueError:
+            logger.warning("Ignoring invalid JSON in BROKER_URLS_JSON: %s", json_val)
+        else:
+            if isinstance(parsed, str):
+                candidate = parsed.strip()
+                if candidate:
+                    urls.append(candidate)
+            elif isinstance(parsed, (list, tuple)):
+                for entry in parsed:
+                    if isinstance(entry, str):
+                        candidate = entry.strip()
+                        if candidate:
+                            urls.append(candidate)
+                    else:
+                        logger.warning(
+                            "Ignoring non-string entry %r in BROKER_URLS_JSON", entry
+                        )
+            else:
+                logger.warning(
+                    "Ignoring unsupported structure in BROKER_URLS_JSON: %r", parsed
+                )
+    if not urls:
         raw = cfg.get("broker_urls")
         if isinstance(raw, str):
             urls = [u.strip() for u in raw.split(",") if u.strip()]
@@ -980,6 +1007,15 @@ def get_broker_urls(cfg: Mapping[str, Any] | None = None) -> list[str]:
             continue
         if url not in cleaned:
             cleaned.append(url)
+    if cleaned:
+        current_bus = (os.getenv("EVENT_BUS_URL") or "").strip()
+        cfg_bus = ""
+        if isinstance(cfg, Mapping):
+            cfg_bus = str(cfg.get("event_bus_url", "") or "").strip()
+        if not current_bus and not cfg_bus:
+            parsed = urllib.parse.urlparse(cleaned[0])
+            if parsed.scheme.lower() in {"redis", "rediss"}:
+                os.environ["EVENT_BUS_URL"] = cleaned[0]
     if not cleaned:
         bus_url = os.getenv("EVENT_BUS_URL", "")
         if bus_url:
