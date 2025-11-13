@@ -81,6 +81,21 @@ MEMPOOL_RANK_FLUSH_INTERVAL = float(
     os.getenv("MEMPOOL_RANK_FLUSH_INTERVAL", "0.05") or 0.05
 )
 
+
+def _load_depth_timeout() -> float:
+    fallback = os.getenv("DISCOVERY_WARM_TIMEOUT") or "5"
+    value = os.getenv("MEMPOOL_DEPTH_STREAM_TIMEOUT", fallback)
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        timeout = 5.0
+    if timeout < 0:
+        return 0.0
+    return timeout
+
+
+MEMPOOL_DEPTH_STREAM_TIMEOUT = _load_depth_timeout()
+
 _ROLLING_STATS: Dict[str, Dict[str, Deque[float]]] = {}
 _DYN_INTERVAL: float = 2.0
 _METRICS_TIMEOUT: float = 5.0
@@ -525,11 +540,36 @@ async def stream_ranked_mempool_tokens_with_depth(
     **kwargs,
 ) -> AsyncGenerator[Dict[str, float], None]:
     """Yield ranked mempool tokens enriched with depth metrics."""
-    async for event in stream_ranked_mempool_tokens(rpc_url, **kwargs):
-        token = event["address"]
-        depth, _imb, txr = order_book_ws.snapshot(token)
-        event["depth"] = depth
-        event["depth_tx_rate"] = txr
-        event["combined_score"] += depth + txr
-        if depth >= depth_threshold:
-            yield event
+    timeout = MEMPOOL_DEPTH_STREAM_TIMEOUT
+    stream = stream_ranked_mempool_tokens(rpc_url, **kwargs)
+    try:
+        while True:
+            try:
+                next_event = stream.__anext__()
+                if timeout > 0:
+                    event = await asyncio.wait_for(next_event, timeout=timeout)
+                else:
+                    event = await next_event
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "mempool depth stream timed out after %.2fs", timeout
+                )
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
+                break
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await stream.aclose()
+                raise
+            token = event["address"]
+            depth, _imb, txr = order_book_ws.snapshot(token)
+            event["depth"] = depth
+            event["depth_tx_rate"] = txr
+            event["combined_score"] += depth + txr
+            if depth >= depth_threshold:
+                yield event
+    finally:
+        with contextlib.suppress(Exception):
+            await stream.aclose()
