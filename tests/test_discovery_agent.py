@@ -348,6 +348,58 @@ def test_discover_tokens_recovers_from_merge_exception(monkeypatch, caplog):
     assert "Websocket merge yielded no tokens" in caplog.text
 
 
+def test_discover_once_websocket_omits_unsupported_merge_kwargs(monkeypatch):
+    _reset_cache()
+
+    async def fake_merge(rpc_url, *, mempool_threshold):
+        assert isinstance(rpc_url, str)
+        return [{"address": VALID_MINT}]
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.merge_sources", fake_merge
+    )
+
+    agent = DiscoveryAgent()
+    agent.limit = 42
+
+    tokens, details = asyncio.run(
+        agent._discover_once(method="websocket", offline=False, token_file=None)
+    )
+
+    assert tokens == [VALID_MINT]
+    assert details[VALID_MINT]["address"] == VALID_MINT
+
+
+def test_discover_once_websocket_supports_new_merge_kwargs(monkeypatch):
+    _reset_cache()
+
+    received: dict[str, object] = {}
+
+    async def fake_merge(rpc_url, *, limit, mempool_threshold, ws_url):
+        received["rpc_url"] = rpc_url
+        received["limit"] = limit
+        received["mempool_threshold"] = mempool_threshold
+        received["ws_url"] = ws_url
+        return [{"address": VALID_MINT}]
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.merge_sources", fake_merge
+    )
+
+    agent = DiscoveryAgent()
+    agent.limit = 15
+
+    tokens, details = asyncio.run(
+        agent._discover_once(method="websocket", offline=False, token_file=None)
+    )
+
+    assert tokens == [VALID_MINT]
+    assert details[VALID_MINT]["address"] == VALID_MINT
+    assert received["limit"] == agent.limit
+    assert received["mempool_threshold"] == agent.mempool_threshold
+    assert received["ws_url"] == agent.ws_url
+
+
 def test_discover_tokens_warns_when_birdeye_missing_and_mempool_disabled(
     monkeypatch, caplog
 ):
