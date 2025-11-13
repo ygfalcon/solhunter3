@@ -64,3 +64,36 @@ def test_ui_server_worker_bind_failure_surfaces_exception(monkeypatch) -> None:
 
     assert server._server is None
     assert server._thread is None or not server._thread.is_alive()
+
+
+def test_ui_server_stop_resets_environment_state() -> None:
+    state1 = UIState()
+    state1.discovery_recent_provider = lambda limit: [{"mint": "first"}]
+    server1 = UIServer(state1, host="127.0.0.1", port=0)
+
+    server1.start()
+    try:
+        assert ui._get_active_ui_state() is state1
+        assert ui._ENV_BOOTSTRAPPED is True
+        assert state1.snapshot_discovery_recent(1) == [{"mint": "first"}]
+    finally:
+        server1.stop()
+
+    assert ui._get_active_ui_state() is None
+    assert ui._ENV_BOOTSTRAPPED is False
+
+    state2 = UIState()
+    state2.discovery_recent_provider = lambda limit: [{"mint": "second"}]
+    server2 = UIServer(state2, host="127.0.0.1", port=0)
+
+    server2.start()
+    try:
+        active_state = ui._get_active_ui_state()
+        assert active_state is state2
+        assert active_state.snapshot_discovery_recent(1) == [{"mint": "second"}]
+        assert ui._ENV_BOOTSTRAPPED is True
+    finally:
+        server2.stop()
+
+    assert ui._get_active_ui_state() is None
+    assert ui._ENV_BOOTSTRAPPED is False

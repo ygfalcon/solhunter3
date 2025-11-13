@@ -23,6 +23,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlparse, urlunparse
+from weakref import WeakSet
 
 from flask import Flask, Request, Response, jsonify, render_template, request
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -49,6 +50,7 @@ _UI_META_CACHE_TTL = 1.0
 _ui_meta_cache: tuple[float, Dict[str, Any]] | None = None
 _active_ui_state: "UIState" | None = None
 _ENV_BOOTSTRAPPED = False
+_ACTIVE_HTTP_SERVERS: WeakSet["UIServer"] = WeakSet()
 
 _QUEUE_DROP_WARNING_INTERVAL = float(os.getenv("UI_QUEUE_DROP_WARNING_INTERVAL", "10") or 10.0)
 
@@ -83,6 +85,22 @@ def _set_active_ui_state(state: "UIState" | None) -> None:
 
 def _get_active_ui_state() -> "UIState" | None:
     return _active_ui_state
+
+
+def _teardown_ui_environment() -> None:
+    global _ENV_BOOTSTRAPPED
+    _set_active_ui_state(None)
+    _ENV_BOOTSTRAPPED = False
+
+
+def _register_ui_server(server: "UIServer") -> None:
+    _ACTIVE_HTTP_SERVERS.add(server)
+
+
+def _unregister_ui_server(server: "UIServer") -> None:
+    _ACTIVE_HTTP_SERVERS.discard(server)
+    if not _ACTIVE_HTTP_SERVERS:
+        _teardown_ui_environment()
 
 
 def _select_first_url(*candidates: Any) -> str | None:
@@ -3730,6 +3748,8 @@ class UIServer:
                 raise result.__context__ from None  # type: ignore[misc]
             raise result
 
+        _register_ui_server(self)
+
     def stop(self) -> None:
         server = self._server
         if server is not None:
@@ -3742,6 +3762,7 @@ class UIServer:
         self._thread = None
         self._server = None
         stop_websockets()
+        _unregister_ui_server(self)
 
 
 def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
