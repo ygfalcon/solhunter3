@@ -1517,6 +1517,17 @@ if ! MANIFEST_RAW=$(validate_env_file); then
   exit $EXIT_KEYS
 fi
 
+ENV_MANIFEST_PATH="$ROOT_DIR/artifacts/prelaunch/env_manifest.txt"
+if mkdir -p "$(dirname "$ENV_MANIFEST_PATH")"; then
+  if printf '%s\n' "$MANIFEST_RAW" >"$ENV_MANIFEST_PATH"; then
+    log_info "Wrote environment manifest to $ENV_MANIFEST_PATH"
+  else
+    log_warn "Failed to write environment manifest to $ENV_MANIFEST_PATH"
+  fi
+else
+  log_warn "Failed to create environment manifest directory for $ENV_MANIFEST_PATH"
+fi
+
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
