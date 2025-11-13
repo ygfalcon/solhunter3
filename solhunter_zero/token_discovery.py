@@ -143,7 +143,9 @@ _BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=_CACHE
 _CACHE_LOCK = Lock()
 _BIRDEYE_DISABLED_INFO = False
 
-_ORCA_CATALOG_CACHE: tuple[float, Dict[str, List[Dict[str, Any]]]] = (0.0, {})
+_ORCA_CATALOG_CACHE: tuple[
+    float, Dict[str, List[Dict[str, Any]]], float
+] = (0.0, {}, 0.0)
 _ORCA_CATALOG_LOCK: asyncio.Lock | None = None
 
 _BIRDEYE_TOKENLIST_URL = (
@@ -356,7 +358,7 @@ async def _load_orca_catalog(
     lock = await _get_orca_catalog_lock()
     async with lock:
         global _ORCA_CATALOG_CACHE
-        expires, cached = _ORCA_CATALOG_CACHE
+        expires, cached, failed_at = _ORCA_CATALOG_CACHE
         now = time.monotonic()
         if cached and expires > now:
             return cached
@@ -368,6 +370,7 @@ async def _load_orca_catalog(
             )
         except Exception as exc:
             logger.debug("Orca catalog fetch failed: %s", exc)
+            _ORCA_CATALOG_CACHE = (0.0, {}, now)
             return cached if cached else {}
         catalog_data = payload.get("catalog") if isinstance(payload, Mapping) else None
         normalized: Dict[str, List[Dict[str, Any]]] = {}
@@ -383,8 +386,9 @@ async def _load_orca_catalog(
                     if pool_entries:
                         normalized[mint] = pool_entries
         if normalized:
-            _ORCA_CATALOG_CACHE = (time.monotonic() + ttl, normalized)
+            _ORCA_CATALOG_CACHE = (time.monotonic() + ttl, normalized, 0.0)
             return normalized
+        _ORCA_CATALOG_CACHE = (0.0, {}, failed_at)
         return cached if cached else {}
 
 
