@@ -598,6 +598,45 @@ def test_discover_tokens_concurrent_cached_reads(monkeypatch):
     assert discovery_mod._CACHE["tokens"] == [VALID_MINT]
 
 
+def test_fallback_results_do_not_populate_cache(monkeypatch):
+    _reset_cache()
+
+    fallback_tokens = ["Fallback111111111111111111111111111111111111111"]
+    call_counter = {"value": 0}
+
+    async def fail_discover_once(self, *, method, offline, token_file):
+        del method, offline, token_file
+        call_counter["value"] += 1
+        return [], {}
+
+    def fake_fallback_tokens(self):
+        return list(fallback_tokens)
+
+    def fake_static_fallback_tokens(self):
+        raise AssertionError("static fallback should not be used when fallback tokens exist")
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fail_discover_once)
+    monkeypatch.setattr(DiscoveryAgent, "_fallback_tokens", fake_fallback_tokens)
+    monkeypatch.setattr(DiscoveryAgent, "_static_fallback_tokens", fake_static_fallback_tokens)
+
+    agent = DiscoveryAgent()
+    agent.cache_ttl = 60.0
+    agent.max_attempts = 1
+
+    async def runner():
+        first = await agent.discover_tokens()
+        second = await agent.discover_tokens()
+        return first, second
+
+    first, second = asyncio.run(runner())
+
+    assert first == fallback_tokens
+    assert second == fallback_tokens
+    assert call_counter["value"] == 2
+    assert discovery_mod._CACHE["tokens"] == []
+    assert discovery_mod._CACHE["ts"] == 0.0
+
+
 def test_offline_discovery_skips_social_mentions(monkeypatch, caplog):
     _reset_cache()
 
