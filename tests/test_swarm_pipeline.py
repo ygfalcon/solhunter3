@@ -429,6 +429,46 @@ def test_discovery_publishes_candidates(monkeypatch):
     assert detail_payload_b["extra"] == {"nested": "value"}
 
 
+def test_discovery_marks_fallback_when_agent_reports_it(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
+
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def _capture(topic, payload):
+        events.append((topic, payload))
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", _capture)
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline._score_token",
+        lambda token, pf: float(len(token)),
+    )
+
+    pipeline = SwarmPipeline(_DummyAgentManager([]), Portfolio(path=None), dry_run=True)
+
+    class _FallbackAgent:
+        def __init__(self) -> None:
+            self.last_details: dict[str, dict[str, Any]] = {}
+            self.last_fallback_used = False
+
+        async def discover_tokens(self, **kwargs):
+            self.last_fallback_used = True
+            return ["So11111111111111111111111111111111111111112"]
+
+    pipeline._discovery_agent = _FallbackAgent()
+
+    stage = asyncio.run(pipeline._run_discovery())
+
+    assert stage.fallback_used is True
+    assert stage.tokens == ["So11111111111111111111111111111111111111112"]
+
+    candidate_payloads = [
+        payload for topic, payload in events if topic == "x:discovery.candidates"
+    ]
+    assert candidate_payloads, "expected discovery candidate events"
+    for payload in candidate_payloads:
+        assert payload.get("fallback_used") is True
+
+
 def test_execution_skips_missing_price(monkeypatch, caplog):
     _install_torch_stub(monkeypatch)
     from solhunter_zero.swarm_pipeline import (

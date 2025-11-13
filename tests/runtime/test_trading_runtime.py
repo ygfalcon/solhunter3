@@ -638,6 +638,35 @@ async def test_runtime_ui_disabled_clears_env(monkeypatch):
     assert os.getenv("UI_PORT") is None
 
 
+def test_collect_status_includes_fallback_usage(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "0")
+    monkeypatch.setattr(runtime_module, "publish", lambda *a, **k: None)
+    runtime = TradingRuntime()
+
+    summary = {
+        "timestamp": "2024-01-01T00:00:00Z",
+        "timestamp_epoch": time.time() - 1.0,
+        "elapsed_s": 1.23,
+        "discovered_count": 2,
+        "tokens_discovered": ["TokA", "TokB"],
+        "tokens_used": ["TokA"],
+        "picked_tokens": ["TokA"],
+        "fallback_used": True,
+        "actions_executed": [],
+        "actions_count": 0,
+        "any_trade": False,
+        "errors": [],
+        "token_results": [],
+        "telemetry": {"discovery": {"limit": 4}},
+    }
+
+    asyncio.run(runtime._apply_iteration_summary(summary))
+
+    status = runtime._collect_status()
+    last_iteration = status.get("last_iteration", {})
+    assert last_iteration.get("fallback_used") is True
+
+
 @pytest.mark.anyio("asyncio")
 async def test_trading_runtime_ui_port_conflict_raises_friendly_error(monkeypatch):
     captured_instances: list[object] = []

@@ -1121,6 +1121,7 @@ class SwarmPipeline:
         cached_tokens = list(self._discovery_cache_tokens)
         cache_hit = False
         cache_refreshed = False
+        fallback_used = False
 
         if (
             self.discovery_cache_ttl > 0
@@ -1138,6 +1139,7 @@ class SwarmPipeline:
             )
         else:
             tokens: list[str] = []
+            agent_fallback_used = False
             try:
                 disc = self._ensure_discovery_agent()
                 tokens = await disc.discover_tokens(
@@ -1145,10 +1147,15 @@ class SwarmPipeline:
                     token_file=self.token_file,
                     method=self.discovery_method,
                 )
+                agent_fallback_used = bool(
+                    getattr(disc, "last_fallback_used", False)
+                )
             except Exception as exc:
                 publish("runtime.log", RuntimeLog(stage="discovery", detail=f"error:{exc}"))
                 log.exception("Discovery failed")
                 tokens = []
+
+            fallback_used = fallback_used or agent_fallback_used
 
             if tokens:
                 stage.discovered = list(tokens)
@@ -1180,10 +1187,12 @@ class SwarmPipeline:
                 "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
             ]
             stage.tokens = [canonical_mint(tok) for tok in stage.tokens]
-            stage.fallback_used = True
+            fallback_used = True
             publish("runtime.log", RuntimeLog(stage="discovery", detail="fallback"))
         else:
             stage.tokens = [canonical_mint(tok) for tok in stage.discovered]
+
+        stage.fallback_used = fallback_used
 
         if cached_tokens and stage.tokens:
             for tok in cached_tokens:

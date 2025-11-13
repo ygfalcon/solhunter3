@@ -257,6 +257,7 @@ class DiscoveryAgent:
         self.discord_feeds = self._split_env_list("DISCORD_FEEDS")
         self._config_error_warned = False
         self._config_error_event_reported = False
+        self.last_fallback_used: bool = False
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -313,6 +314,7 @@ class DiscoveryAgent:
         token_file: Optional[str] = None,
         method: Optional[str] = None,
     ) -> List[str]:
+        self.last_fallback_used = False
         now = time.time()
         ttl = self.cache_ttl
         method_override = method is not None
@@ -447,6 +449,7 @@ class DiscoveryAgent:
                 tokens = self._static_fallback_tokens()
             details = {}
             fallback_used = True
+            self.last_fallback_used = True
 
         self.last_tokens = tokens
         self.last_details = details
@@ -486,6 +489,9 @@ class DiscoveryAgent:
                 _CACHE["limit"] = self.limit
                 _CACHE["method"] = active_method
                 _CACHE["rpc_identity"] = current_rpc_identity
+
+        if fallback_used:
+            self.last_fallback_used = True
 
         return tokens
 
@@ -770,6 +776,7 @@ class DiscoveryAgent:
         return filtered
 
     def _fallback_tokens(self) -> List[str]:
+        self.last_fallback_used = True
         cached = list(_CACHE.get("tokens", [])) if isinstance(_CACHE.get("tokens"), list) else []
         if not cached:
             return []
@@ -797,6 +804,7 @@ class DiscoveryAgent:
         return result
 
     def _static_fallback_tokens(self) -> List[str]:
+        self.last_fallback_used = True
         logger.warning("DiscoveryAgent using static discovery fallback")
         result: List[str] = []
         for tok in _STATIC_FALLBACK[: self.limit]:

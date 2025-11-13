@@ -384,6 +384,7 @@ def test_discover_tokens_uses_fallback_when_config_invalid(monkeypatch, caplog):
     tokens = asyncio.run(run())
     assert tokens, "fallback tokens expected"
     assert tokens[0] == "So11111111111111111111111111111111111111112"
+    assert agent.last_fallback_used is True
     assert (
         "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled"
         in caplog.text
