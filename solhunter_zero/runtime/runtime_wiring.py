@@ -544,6 +544,7 @@ class RuntimeEventCollectors:
             "last_stage_ok": None,
             "last_stage_detail": None,
             "last_stage_ts": None,
+            "last_stage_elapsed": None,
         }
         self._topic_lock = threading.Lock()
         self._topic_activity: Dict[str, float] = {}
@@ -790,12 +791,29 @@ class RuntimeEventCollectors:
             ok = bool(payload.get("ok"))
             detail = payload.get("detail")
             now = time.time()
+            raw_timestamp = payload.get("timestamp")
+            stage_ts: float | None = None
+            if raw_timestamp is not None:
+                try:
+                    stage_ts = float(raw_timestamp)
+                except Exception:
+                    stage_ts = None
+            raw_elapsed = payload.get("elapsed")
+            stage_elapsed: float | None = None
+            if raw_elapsed is not None:
+                try:
+                    stage_elapsed = max(0.0, float(raw_elapsed))
+                except Exception:
+                    stage_elapsed = None
+            event_time = stage_ts if stage_ts is not None else now
             with self._status_lock:
                 info = self._status_info
                 info["last_stage"] = stage or None
                 info["last_stage_ok"] = ok
                 info["last_stage_detail"] = detail
-                info["last_stage_ts"] = now
+                info["last_stage_ts"] = event_time
+                if stage_elapsed is not None:
+                    info["last_stage_elapsed"] = stage_elapsed
                 if stage.startswith("bus:"):
                     if ok:
                         info["event_bus"] = True
@@ -1258,6 +1276,7 @@ class RuntimeEventCollectors:
             "last_stage_ok": info.get("last_stage_ok"),
             "last_stage_detail": info.get("last_stage_detail"),
             "last_stage_ts": info.get("last_stage_ts"),
+            "last_stage_elapsed": info.get("last_stage_elapsed"),
             "environment": (self._environment or "dev"),
             "workflow": workflow,
             "paused": bool(control.get("paused")),
@@ -1285,6 +1304,7 @@ class RuntimeEventCollectors:
             "last_stage_ok": info.get("last_stage_ok"),
             "last_stage_detail": info.get("last_stage_detail"),
             "last_stage_ts": info.get("last_stage_ts"),
+            "last_stage_elapsed": info.get("last_stage_elapsed"),
         }
 
     # Public provider accessors ------------------------------------------------

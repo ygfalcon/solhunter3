@@ -201,13 +201,26 @@ class DemoContext:
     def mark_runtime_ready(self) -> None:
         async def _mark() -> None:
             now = time.time()
+            later = now + 0.01
             event_bus.publish(
                 "runtime.stage_changed",
-                {"stage": "bus:ws", "ok": True, "detail": "connected", "ts": now},
+                {
+                    "stage": "bus:ws",
+                    "ok": True,
+                    "detail": "connected",
+                    "timestamp": now,
+                    "elapsed": 0.0,
+                },
             )
             event_bus.publish(
                 "runtime.stage_changed",
-                {"stage": "agents:event_runtime", "ok": True, "detail": "demo", "ts": now + 0.01},
+                {
+                    "stage": "agents:event_runtime",
+                    "ok": True,
+                    "detail": "demo",
+                    "timestamp": later,
+                    "elapsed": later - now,
+                },
             )
 
         self.loop.run_until_complete(_mark())

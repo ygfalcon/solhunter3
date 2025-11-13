@@ -215,6 +215,7 @@ class RuntimeOrchestrator:
         self._golden_enabled: bool = False
         self._ui_forwarder: _UIPanelForwarder | None = None
         self._stop_reason: str | None = None
+        self._start_time: float | None = time.time()
 
     @property
     def stop_reason(self) -> str | None:
@@ -350,12 +351,35 @@ class RuntimeOrchestrator:
                 log.warning("Error publishing UI URL to redis: %s", exc)
 
     async def _publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        timestamp = time.time()
+        if self._start_time is None:
+            self._start_time = timestamp
+        payload: dict[str, Any] = {
+            "stage": stage,
+            "ok": ok,
+            "detail": detail,
+            "timestamp": timestamp,
+        }
+        elapsed: float | None = None
+        if self._start_time is not None:
+            elapsed = max(0.0, timestamp - self._start_time)
+            payload["elapsed"] = elapsed
         try:
-            event_bus.publish("runtime.stage_changed", {"stage": stage, "ok": ok, "detail": detail})
+            event_bus.publish("runtime.stage_changed", payload)
         except Exception:
             pass
         if os.getenv("ORCH_VERBOSE", "").lower() in {"1", "true", "yes"}:
-            log.info("stage=%s ok=%s detail=%s", stage, ok, detail)
+            if elapsed is None:
+                log.info("stage=%s ok=%s detail=%s timestamp=%.3f", stage, ok, detail, timestamp)
+            else:
+                log.info(
+                    "stage=%s ok=%s detail=%s timestamp=%.3f elapsed=%.3f",
+                    stage,
+                    ok,
+                    detail,
+                    timestamp,
+                    elapsed,
+                )
 
     async def _ensure_ui_forwarder(self) -> None:
         if self._ui_forwarder is not None:
@@ -1149,6 +1173,7 @@ class RuntimeOrchestrator:
         await self._publish_stage("agents:event_runtime", True)
 
     async def start(self) -> None:
+        self._start_time = time.time()
         # Make orchestrator subscribe to control messages
         def _ctl(payload: dict) -> None:
             cmd = (payload or {}).get("cmd")
