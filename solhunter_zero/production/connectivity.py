@@ -70,6 +70,7 @@ class ConnectivityChecker:
         breaker_cooldown: float = 30.0,
     ) -> None:
         self.env = dict(env or os.environ)
+        self._refresh_environment(override=False)
         self.http_timeout = http_timeout or float(self.env.get("CONNECTIVITY_HTTP_TIMEOUT", "6"))
         self.redis_timeout = redis_timeout or float(self.env.get("CONNECTIVITY_REDIS_TIMEOUT", "3"))
         self.backoff_base = float(self.env.get("CONNECTIVITY_BACKOFF_BASE", "0.5"))
@@ -83,6 +84,18 @@ class ConnectivityChecker:
         self._metrics: MutableMapping[str, Dict[str, Any]] = defaultdict(
             lambda: {"latencies": [], "errors": Counter(), "statuses": Counter()}
         )
+        self.targets = self._build_targets()
+
+    def _refresh_environment(self, *, override: bool) -> None:
+        for key, value in os.environ.items():
+            if not (key.startswith("UI_") or key.startswith("CONNECTIVITY_")):
+                continue
+            if override or key not in self.env:
+                self.env[key] = value
+
+    def _refresh_targets_from_env(self) -> None:
+        self._refresh_environment(override=True)
+        self.skip_ui_probes = self._env_flag("CONNECTIVITY_SKIP_UI_PROBES")
         self.targets = self._build_targets()
 
     def _env_flag(self, key: str) -> bool:
@@ -556,7 +569,8 @@ class ConnectivityChecker:
         reconnects = 0
         end_time = start + duration
         while time.monotonic() < end_time:
-            for target in self.targets:
+            self._refresh_targets_from_env()
+            for target in list(self.targets):
                 name = target["name"]
                 result: ConnectivityResult
                 if target["type"] == "http":

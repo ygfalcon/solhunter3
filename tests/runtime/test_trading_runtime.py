@@ -624,6 +624,8 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
     assert runtime.ui_port == 7123
     assert os.getenv("UI_PORT") == "7123"
     assert os.getenv("UI_HTTP_URL") == "http://0.0.0.0:7123"
+    assert os.getenv("UI_HEALTH_PATH") == "/ui/meta"
+    assert os.getenv("UI_HEALTH_URL") == "http://0.0.0.0:7123/ui/meta"
 
     ui_activity = [entry for entry in runtime.activity.snapshot() if entry["stage"] == "ui"]
     assert ui_activity
@@ -640,6 +642,8 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
         "UI_RL_WS_URL",
         "UI_LOG_WS_URL",
         "UI_HTTP_URL",
+        "UI_HEALTH_PATH",
+        "UI_HEALTH_URL",
     ):
         monkeypatch.delenv(key, raising=False)
 
