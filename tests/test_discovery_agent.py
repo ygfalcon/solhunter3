@@ -701,6 +701,62 @@ def test_fallback_results_do_not_populate_cache(monkeypatch):
     assert call_counter["value"] == 2
     assert discovery_mod._CACHE["tokens"] == []
     assert discovery_mod._CACHE["ts"] == 0.0
+    assert agent.last_details[first[0]]["fallback_reason"] == "cache"
+
+
+def test_merge_failure_cache_fallback_details(monkeypatch):
+    _reset_cache()
+
+    fallback_tokens = [VALID_MINT]
+
+    async def empty_mempool(self):
+        return [], {}
+
+    def fake_fallback_tokens(self):
+        return list(fallback_tokens)
+
+    def fake_static_fallback_tokens(self):
+        raise AssertionError("static fallback should not be used")
+
+    monkeypatch.setattr(DiscoveryAgent, "_collect_mempool", empty_mempool)
+    monkeypatch.setattr(DiscoveryAgent, "_fallback_tokens", fake_fallback_tokens)
+    monkeypatch.setattr(DiscoveryAgent, "_static_fallback_tokens", fake_static_fallback_tokens)
+
+    agent = DiscoveryAgent()
+
+    tokens, details = asyncio.run(agent._fallback_after_merge_failure())
+
+    assert tokens == fallback_tokens
+    assert details[tokens[0]]["fallback_reason"] == "cache"
+
+
+def test_merge_failure_static_fallback_details(monkeypatch):
+    _reset_cache()
+
+    fallback_tokens: list[str] = []
+    static_tokens = [VALID_MINT]
+    discovery_mod._CACHE["tokens"] = [VALID_MINT]
+
+    async def empty_mempool(self):
+        return [], {}
+
+    def fake_fallback_tokens(self):
+        return list(fallback_tokens)
+
+    def fake_static_fallback_tokens(self):
+        return list(static_tokens)
+
+    monkeypatch.setattr(DiscoveryAgent, "_collect_mempool", empty_mempool)
+    monkeypatch.setattr(DiscoveryAgent, "_fallback_tokens", fake_fallback_tokens)
+    monkeypatch.setattr(DiscoveryAgent, "_static_fallback_tokens", fake_static_fallback_tokens)
+
+    agent = DiscoveryAgent()
+
+    tokens, details = asyncio.run(agent._fallback_after_merge_failure())
+
+    assert tokens == static_tokens
+    assert details[tokens[0]]["fallback_reason"] == "static"
+    _reset_cache()
 
 
 def test_offline_discovery_skips_social_mentions(monkeypatch, caplog):
@@ -763,3 +819,5 @@ def test_offline_discovery_returns_static_fallback(monkeypatch, caplog):
     ][: agent.limit]
     assert tokens == expected
     assert "offline mode active" in caplog.text
+    assert tokens, "expected static fallback tokens"
+    assert agent.last_details[tokens[0]]["fallback_reason"] == "static"

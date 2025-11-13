@@ -361,12 +361,19 @@ class DiscoveryAgent:
                 details: Dict[str, Dict[str, Any]] = {}
             else:
                 tokens = self._fallback_tokens()
-                details = {}
+                fallback_reason = "cache" if tokens else ""
                 if tokens:
                     offline_source = "cache"
                 else:
                     offline_source = "static"
                     tokens = self._static_fallback_tokens()
+                    if tokens:
+                        fallback_reason = "static"
+                details = (
+                    self._annotate_fallback_details(tokens, None, reason=fallback_reason)
+                    if tokens and fallback_reason
+                    else {}
+                )
             tokens = self._normalise(tokens)
             tokens, details = await self._apply_social_mentions(
                 tokens, details, offline=True
@@ -455,10 +462,17 @@ class DiscoveryAgent:
 
         if not tokens:
             tokens = self._fallback_tokens()
+            fallback_reason = "cache" if tokens else ""
             if not tokens:
                 tokens = self._static_fallback_tokens()
-            details = {}
-            fallback_used = True
+                if tokens:
+                    fallback_reason = "static"
+            details = (
+                self._annotate_fallback_details(tokens, None, reason=fallback_reason)
+                if tokens and fallback_reason
+                else {}
+            )
+            fallback_used = bool(tokens)
 
         self.last_tokens = tokens
         self.last_details = details
@@ -750,11 +764,19 @@ class DiscoveryAgent:
 
         logger.warning("All discovery sources empty; returning fallback tokens")
         fallback_tokens = self._fallback_tokens()
+        fallback_reason = "cache" if fallback_tokens else ""
         cached = _CACHE.get("tokens")
         if not fallback_tokens and isinstance(cached, list) and cached:
             fallback_tokens = self._static_fallback_tokens()
+            if fallback_tokens:
+                fallback_reason = "static"
         fallback = [tok for tok in fallback_tokens if not self._should_skip_token(tok)]
-        return fallback, {}
+        details: Dict[str, Dict[str, Any]]
+        if fallback and fallback_reason:
+            details = self._annotate_fallback_details(fallback, None, reason=fallback_reason)
+        else:
+            details = {}
+        return fallback, details
 
     def _normalise(self, tokens: Iterable[Any]) -> List[str]:
         seen: set[str] = set()
@@ -835,6 +857,33 @@ class DiscoveryAgent:
             value = value.strip()
             return {value} if value else set()
         return set()
+
+    def _annotate_fallback_details(
+        self,
+        tokens: Iterable[str],
+        base_details: Optional[Dict[str, Dict[str, Any]]],
+        *,
+        reason: str,
+    ) -> Dict[str, Dict[str, Any]]:
+        annotated: Dict[str, Dict[str, Any]] = {
+            mint: dict(payload)
+            for mint, payload in (base_details or {}).items()
+            if isinstance(mint, str)
+        }
+        if not reason:
+            return annotated
+
+        for mint in tokens:
+            if not isinstance(mint, str):
+                continue
+            entry = dict(annotated.get(mint, {}))
+            entry["fallback_reason"] = reason
+            sources = self._source_set(entry.get("sources"))
+            sources.add("fallback")
+            entry["sources"] = sources
+            annotated[mint] = entry
+
+        return annotated
 
     async def _collect_social_mentions(self) -> Dict[str, Dict[str, Any]]:
         if self.social_limit == 0:
