@@ -1,3 +1,4 @@
+import json
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
@@ -119,3 +120,40 @@ def test_configure_runtime_logging_deduplicates_file_handlers(tmp_path):
         for handler in original_handlers:
             root.addHandler(handler)
         root.setLevel(original_level)
+
+
+def test_json_formatter_redacts_credentials_in_message_and_extra() -> None:
+    from solhunter_zero.logging_utils import JsonFormatter
+
+    raw_url = "redis://user:secret@cache.example:6380/2?ssl=true"
+    record = logging.LogRecord(
+        "test", logging.INFO, __file__, 10, "redis url %s", (raw_url,), None
+    )
+    record.redis_url = raw_url
+
+    formatter = JsonFormatter()
+    payload = json.loads(formatter.format(record))
+
+    redacted = "redis://****@cache.example:6380/2?ssl=true"
+    assert payload["msg"].endswith(redacted)
+    assert payload["redis_url"] == redacted
+    assert "secret" not in json.dumps(payload)
+
+
+def test_json_formatter_redacts_nested_structures() -> None:
+    from solhunter_zero.logging_utils import JsonFormatter
+
+    raw_url = "redis://user:password@cache.example:6379/1"
+    record = logging.LogRecord("test", logging.INFO, __file__, 20, "ok", (), None)
+    record.context = {
+        "primary": raw_url,
+        "replicas": [raw_url, "redis://cache.example:6379/1"],
+    }
+
+    formatter = JsonFormatter()
+    payload = json.loads(formatter.format(record))
+
+    assert payload["context"]["primary"] == "redis://****@cache.example:6379/1"
+    assert payload["context"]["replicas"][0] == "redis://****@cache.example:6379/1"
+    assert payload["context"]["replicas"][1] == "redis://cache.example:6379/1"
+    assert "password" not in json.dumps(payload)

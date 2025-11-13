@@ -4,13 +4,15 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler, WatchedFileHandler
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import urlparse
 
 from .paths import ROOT
 
@@ -56,6 +58,53 @@ class _UTCFormatter(logging.Formatter):
 _LOG_RECORD_RESERVED = set(logging.LogRecord(None, 0, "", 0, "", (), None).__dict__.keys())
 
 
+_URL_IN_TEXT_RE = re.compile(r"(?P<prefix>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/@\s]+@)")
+
+
+def _redact_url_for_log(value: str) -> str:
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return _URL_IN_TEXT_RE.sub(_redact_text_match, value)
+    if not parsed.netloc or "@" not in parsed.netloc:
+        return _URL_IN_TEXT_RE.sub(_redact_text_match, value)
+    _, _, host_segment = parsed.netloc.rpartition("@")
+    if not host_segment:
+        return _URL_IN_TEXT_RE.sub(_redact_text_match, value)
+    redacted_netloc = f"****@{host_segment}"
+    return parsed._replace(netloc=redacted_netloc).geturl()
+
+
+def _redact_text_match(match: re.Match[str]) -> str:
+    return match.group("prefix") + "****@"
+
+
+def _redact_text_for_log(value: str) -> str:
+    if "@" not in value or "://" not in value:
+        return value
+    redacted = _redact_url_for_log(value)
+    if redacted == value:
+        return _URL_IN_TEXT_RE.sub(_redact_text_match, value)
+    return redacted
+
+
+def _redact_for_log(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_text_for_log(value)
+    if isinstance(value, Mapping):
+        return {key: _redact_for_log(val) for key, val in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        factory = type(value)
+        redacted = [_redact_for_log(item) for item in value]
+        if factory is tuple:
+            return tuple(redacted)
+        try:
+            return factory(redacted)
+        except Exception:
+            return redacted
+    return value
+
+
 class JsonFormatter(logging.Formatter):
     """Structured logging formatter producing JSON payloads."""
 
@@ -66,7 +115,7 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "line": record.lineno,
-            "msg": record.getMessage(),
+            "msg": _redact_for_log(record.getMessage()),
             "process": record.process,
             "thread": record.threadName,
         }
@@ -79,7 +128,7 @@ class JsonFormatter(logging.Formatter):
         for key, value in record.__dict__.items():
             if key in payload or key.startswith("_") or key in _LOG_RECORD_RESERVED:
                 continue
-            payload[key] = value
+            payload[key] = _redact_for_log(value)
 
         if _ORJSON is not None:
             return _ORJSON.dumps(payload).decode()
