@@ -1438,10 +1438,42 @@ _WS_CHANNELS: dict[str, _WebsocketState] = {
     "logs": _WebsocketState("logs"),
 }
 
-# Tracks the most recent auto-generated websocket URLs that ``start_websockets``
-# injected into the environment. This allows future calls to refresh the values
-# when ports change while avoiding overwriting user-supplied configuration.
+# Tracks the most recent auto-generated websocket configuration that
+# ``start_websockets`` injected into the environment (URLs, ports, etc.). This
+# allows future calls to refresh the values when ports change while avoiding
+# overwriting user-supplied configuration.
 _AUTO_WS_ENV_VALUES: dict[str, str] = {}
+
+_WS_PORT_ENV_KEYS: dict[str, tuple[str, ...]] = {
+    "rl": ("UI_RL_WS_PORT",),
+    "events": ("UI_EVENT_WS_PORT",),
+    "logs": ("UI_LOG_WS_PORT",),
+}
+
+
+def _update_auto_env_value(key: str, value: str, descriptor: str) -> None:
+    existing = os.environ.get(key)
+    previous_auto = _AUTO_WS_ENV_VALUES.get(key)
+
+    if existing is None or (previous_auto is not None and existing == previous_auto):
+        os.environ[key] = value
+        _AUTO_WS_ENV_VALUES[key] = value
+        action = "set" if existing is None else "refreshed"
+        log.info(
+            "UI websocket env %s %s to auto-generated %s %s",
+            key,
+            action,
+            descriptor,
+            value,
+        )
+    else:
+        _AUTO_WS_ENV_VALUES.pop(key, None)
+        log.info(
+            "UI websocket env %s kept preconfigured value %s (auto-generated %s)",
+            key,
+            existing,
+            value,
+        )
 
 
 def _resolve_host() -> str:
@@ -2452,6 +2484,9 @@ def _start_channel(
                     _EVENT_WS_PORT = bound_port
                 else:
                     _LOG_WS_PORT = bound_port
+
+                for env_key in _WS_PORT_ENV_KEYS.get(channel, ()):  # pragma: no branch - fixed keys
+                    _update_auto_env_value(env_key, str(bound_port), "port")
                 if candidate_port == 0 and bound_port != previous_port:
                     log.info(
                         "%s websocket using dynamically assigned port %s", channel, bound_port
@@ -2584,24 +2619,7 @@ def start_websockets() -> dict[str, threading.Thread]:
         "UI_LOGS_WS": logs_url,
     }
     for key, value in defaults.items():
-        existing = os.environ.get(key)
-        previous_auto = _AUTO_WS_ENV_VALUES.get(key)
-
-        if existing is None or (previous_auto is not None and existing == previous_auto):
-            os.environ[key] = value
-            _AUTO_WS_ENV_VALUES[key] = value
-            action = "set" if existing is None else "refreshed"
-            log.info(
-                "UI websocket env %s %s to auto-generated URL %s", key, action, value
-            )
-        else:
-            _AUTO_WS_ENV_VALUES.pop(key, None)
-            log.info(
-                "UI websocket env %s kept preconfigured value %s (auto-generated %s)",
-                key,
-                existing,
-                value,
-            )
+        _update_auto_env_value(key, value, "URL")
     log.info(
         "UI websockets listening on rl=%s events=%s logs=%s",
         _RL_WS_PORT,
