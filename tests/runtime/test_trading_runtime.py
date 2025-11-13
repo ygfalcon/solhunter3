@@ -682,6 +682,49 @@ async def test_runtime_ui_disabled_clears_env(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+@pytest.mark.parametrize(
+    "env_key, env_value, expected_scheme",
+    [
+        ("UI_HTTP_SCHEME", "https", "https"),
+        ("UI_HTTP_SCHEME", "INVALID", "http"),
+        ("UI_SCHEME", "HTTPS", "https"),
+    ],
+)
+async def test_runtime_ui_respects_scheme_overrides(monkeypatch, env_key, env_value, expected_scheme):
+    class _DummyUIServer:
+        def __init__(self, state, *, host: str, port: int) -> None:  # noqa: ANN001
+            self.state = state
+            self.host = host
+            self.port = port
+            self.started = False
+
+        def start(self) -> None:
+            if self.port == 0:
+                self.port = 40123
+            self.started = True
+
+        def stop(self) -> None:
+            self.started = False
+
+    monkeypatch.setattr(runtime_module, "UIServer", _DummyUIServer)
+    monkeypatch.setattr(ui_module, "start_websockets", lambda: {})
+
+    monkeypatch.delenv("UI_HTTP_SCHEME", raising=False)
+    monkeypatch.delenv("UI_SCHEME", raising=False)
+    monkeypatch.setenv(env_key, env_value)
+
+    runtime = TradingRuntime(ui_host="0.0.0.0", ui_port=0)
+    try:
+        await runtime._start_ui()
+        http_url = os.getenv("UI_HTTP_URL")
+        health_url = os.getenv("UI_HEALTH_URL")
+        assert http_url is not None and http_url.startswith(f"{expected_scheme}://")
+        assert health_url is not None and health_url.startswith(f"{expected_scheme}://")
+    finally:
+        runtime._stop_ui()
+
+
+@pytest.mark.anyio("asyncio")
 async def test_trading_runtime_ui_port_conflict_raises_friendly_error(monkeypatch):
     captured_instances: list[object] = []
 

@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, MutableMapping
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import aiohttp
 import websockets
@@ -172,17 +172,48 @@ class ConnectivityChecker:
         if not self.skip_ui_probes:
             ui_http = env.get("UI_HEALTH_URL")
             if not ui_http:
-                host = env.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
-                if host in {"0.0.0.0", "::"}:
-                    host = "127.0.0.1"
-                port = env.get("UI_PORT", env.get("PORT", "5001") or "5001")
-                scheme = (env.get("UI_HTTP_SCHEME") or env.get("UI_SCHEME") or "http").strip().lower()
-                if scheme not in {"http", "https"}:
-                    scheme = "http"
                 path = env.get("UI_HEALTH_PATH") or "/health"
                 if not path.startswith("/"):
                     path = "/" + path
-                ui_http = f"{scheme}://{host}:{port}{path}"
+                base_http = (env.get("UI_HTTP_URL") or "").strip()
+                parsed_base = None
+                if base_http:
+                    try:
+                        parsed_base = urlsplit(base_http)
+                    except ValueError:
+                        parsed_base = None
+                scheme = (
+                    env.get("UI_HTTP_SCHEME")
+                    or env.get("UI_SCHEME")
+                    or (parsed_base.scheme if parsed_base is not None else "http")
+                    or "http"
+                )
+                scheme = (scheme or "http").strip().lower()
+                if scheme not in {"http", "https"}:
+                    scheme = "http"
+                host = env.get("UI_HOST")
+                if not host and parsed_base is not None:
+                    host = parsed_base.hostname
+                if not host:
+                    host = "127.0.0.1"
+                host = host or "127.0.0.1"
+                if host in {"0.0.0.0", "::"}:
+                    host = "127.0.0.1"
+                port = None
+                if parsed_base is not None and parsed_base.port:
+                    port = str(parsed_base.port)
+                if not port:
+                    port = env.get("UI_PORT") or env.get("PORT")
+                if not port:
+                    port = "5001"
+                if ":" in host and not host.startswith("["):
+                    host_component = f"[{host}]"
+                else:
+                    host_component = host
+                base_url = f"{scheme}://{host_component}"
+                if port:
+                    base_url = f"{base_url}:{port}"
+                ui_http = f"{base_url}{path}"
         if self.skip_ui_probes:
             logger.info("UI connectivity targets disabled via CONNECTIVITY_SKIP_UI_PROBES")
         if ui_ws:

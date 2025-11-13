@@ -55,6 +55,21 @@ def test_skip_ui_targets_via_env():
     assert "ui-http" not in names
 
 
+def test_connectivity_targets_use_canonical_ui_http_url():
+    checker = ConnectivityChecker(
+        env={
+            "UI_HTTP_URL": "https://0.0.0.0:8443",
+            "UI_HTTP_SCHEME": "https",
+            "UI_HOST": "0.0.0.0",
+            "UI_PORT": "5001",
+            "UI_HEALTH_PATH": "/ui/meta",
+        }
+    )
+
+    ui_target = next(target for target in checker.targets if target["name"] == "ui-http")
+    assert ui_target["url"] == "https://127.0.0.1:8443/ui/meta"
+
+
 def _make_ui_app():
     app = web.Application()
 
