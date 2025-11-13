@@ -516,3 +516,72 @@ def test_manifest_public_host_full_url(monkeypatch):
     assert manifest["logs_ws"] == "wss://public.example:8443/ws/logs"
     for channel in ("rl", "events", "logs"):
         assert manifest[f"{channel}_ws_available"] is True
+
+
+def _clear_ws_env(monkeypatch):
+    for key in (
+        "UI_EVENTS_WS",
+        "UI_EVENTS_WS_URL",
+        "UI_WS_URL",
+        "UI_RL_WS",
+        "UI_RL_WS_URL",
+        "UI_LOGS_WS",
+        "UI_LOG_WS_URL",
+        "UI_PUBLIC_HOST",
+        "PUBLIC_URL_HOST",
+        "UI_EXTERNAL_HOST",
+        "EVENT_BUS_URL",
+        "BROKER_WS_URLS",
+        "EVENT_BUS_PEERS",
+        "BROKER_URLS",
+        "BROKER_URLS_JSON",
+        "BROKER_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_manifest_prefers_event_bus_url(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+
+    for state in ui._WS_CHANNELS.values():
+        state.port = 0
+        state.host = None
+
+    ui._RL_WS_PORT = ui._RL_WS_PORT_DEFAULT
+    ui._EVENT_WS_PORT = ui._EVENT_WS_PORT_DEFAULT
+    ui._LOG_WS_PORT = ui._LOG_WS_PORT_DEFAULT
+
+    remote_url = "wss://bus.example:9443/ws"
+    monkeypatch.setenv("EVENT_BUS_URL", remote_url)
+
+    urls = ui.get_ws_urls()
+    assert urls["events"] == remote_url
+
+    manifest = ui.build_ui_manifest(None)
+    assert manifest["events_ws"] == "wss://bus.example:9443/ws/events"
+    assert manifest["events_ws_available"] is True
+
+
+def test_manifest_uses_broker_ws_urls(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+
+    for state in ui._WS_CHANNELS.values():
+        state.port = 0
+        state.host = None
+
+    ui._RL_WS_PORT = ui._RL_WS_PORT_DEFAULT
+    ui._EVENT_WS_PORT = ui._EVENT_WS_PORT_DEFAULT
+    ui._LOG_WS_PORT = ui._LOG_WS_PORT_DEFAULT
+
+    monkeypatch.setenv("BROKER_WS_URLS", " wss://bus.example:9443/ws , ws://backup:8779 ")
+
+    urls = ui.get_ws_urls()
+    assert urls["events"] == "wss://bus.example:9443/ws"
+
+    manifest = ui.build_ui_manifest(None)
+    assert manifest["events_ws"] == "wss://bus.example:9443/ws/events"
+    assert manifest["events_ws_available"] is True
