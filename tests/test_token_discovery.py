@@ -5,6 +5,41 @@ import pytest
 
 from aiohttp import ClientTimeout
 
+
+class _DummyResponse:
+    def __init__(self, status, *, text="", headers=None, reason=""):
+        self.status = status
+        self._text = text
+        self.headers = headers or {}
+        self.reason = reason
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self, *args, **kwargs):  # pragma: no cover - not expected in tests
+        raise AssertionError("json() should not be called on error responses")
+
+    async def text(self):
+        return self._text
+
+    def raise_for_status(self):  # pragma: no cover - not expected in tests
+        raise AssertionError("raise_for_status() should not be called for dummy error responses")
+
+
+class _DummySession:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    def get(self, *args, **kwargs):
+        if not self._responses:
+            raise AssertionError("No more dummy responses available")
+        response = self._responses.pop(0)
+        self._responses.append(response)
+        return response
+
 from solhunter_zero import token_discovery as td
 
 
@@ -119,6 +154,54 @@ def test_fetch_birdeye_tokens_missing_key_returns_empty(monkeypatch, caplog):
 
     assert tokens == []
     assert "BirdEye API key missing" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fetch_birdeye_tokens_raises_config_error_on_401(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "bad-key")
+
+    response = _DummyResponse(401, text="invalid api key", reason="Unauthorized")
+    session = _DummySession([response])
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    with pytest.raises(td.DiscoveryConfigurationError) as excinfo:
+        await td._fetch_birdeye_tokens(limit=5)
+
+    assert excinfo.value.source == "birdeye"
+    assert "401" in str(excinfo.value)
+    remediation = excinfo.value.remediation or ""
+    assert "api key" in remediation.lower()
+
+
+@pytest.mark.asyncio
+async def test_fetch_birdeye_tokens_raises_config_error_on_403(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "bad-key")
+
+    response = _DummyResponse(403, text="forbidden", reason="Forbidden")
+    session = _DummySession([response])
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    with pytest.raises(td.DiscoveryConfigurationError) as excinfo:
+        await td._fetch_birdeye_tokens(limit=5)
+
+    assert excinfo.value.source == "birdeye"
+    assert "403" in str(excinfo.value)
+    remediation = excinfo.value.remediation or ""
+    assert "access" in remediation.lower()
 
 
 @pytest.mark.asyncio
@@ -406,6 +489,41 @@ async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch,
     assert "So11111111111111111111111111111111111111112" in addresses
     assert "BirdEye discovery disabled" in caplog.text
     assert "Discovery candidates using fallback set" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_discover_candidates_falls_back_when_birdeye_config_error(monkeypatch, caplog):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", False)
+    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
+    monkeypatch.setattr(td, "_ENABLE_METEORA", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
+    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+    monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "configured")
+
+    async def fail_fetch(*, limit=None):
+        _ = limit
+        raise td.DiscoveryConfigurationError(
+            "birdeye",
+            "BirdEye request failed with HTTP 401: Unauthorized",
+            remediation="Verify BirdEye API key",
+        )
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fail_fetch)
+
+    batches: list[list[dict]] = []
+    with caplog.at_level("WARNING"):
+        async for batch in td.discover_candidates("https://rpc", limit=2):
+            batches.append(batch)
+            break
+
+    assert batches, "expected fallback batch"
+    final = batches[-1]
+    assert final, "fallback batch should contain entries"
+    assert any("fallback" in entry.get("sources", []) for entry in final)
+    assert "BirdEye discovery disabled due to configuration" in caplog.text
 
 
 def test_warm_cache_skips_without_birdeye_key(monkeypatch):
