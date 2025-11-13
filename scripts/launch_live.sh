@@ -151,7 +151,8 @@ ensure_virtualenv() {
       exit $EXIT_DEPS
     fi
     if ! "$PIP_BIN" check >/dev/null 2>&1; then
-      log_warn "Offline installation succeeded but dependency check still reports issues"
+      log_warn "Offline installation succeeded but dependency check still reports issues (see $DEPS_LOG for cached wheel details)"
+      exit $EXIT_DEPS
     fi
     return
   fi
