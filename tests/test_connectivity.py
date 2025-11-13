@@ -5,7 +5,7 @@ import pytest
 import websockets
 from aiohttp import web
 
-from solhunter_zero.production.connectivity import ConnectivityChecker
+from solhunter_zero.production.connectivity import ConnectivityChecker, ConnectivityResult
 
 
 @pytest.fixture
@@ -81,6 +81,38 @@ async def test_probe_ui_http_success():
         assert result.ok
     finally:
         await runner.cleanup()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_connectivity_soak_refreshes_ui_override(monkeypatch):
+    for key in ("UI_HEALTH_PATH", "UI_HEALTH_URL", "UI_HTTP_URL", "UI_HOST", "UI_PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+    checker = ConnectivityChecker(env={"UI_HOST": "127.0.0.1", "UI_PORT": "6311"})
+    initial_target = next(target for target in checker.targets if target["name"] == "ui-http")
+    assert initial_target["url"].endswith("/health")
+
+    monkeypatch.setenv("UI_HEALTH_PATH", "/ui/meta")
+
+    captured_urls: list[str] = []
+
+    async def _ok_http(name: str, url: str) -> ConnectivityResult:
+        captured_urls.append(url)
+        return ConnectivityResult(name=name, target=url, ok=True)
+
+    async def _ok_ws(name: str, url: str) -> ConnectivityResult:
+        return ConnectivityResult(name=name, target=url, ok=True)
+
+    async def _ok_redis(name: str, url: str) -> ConnectivityResult:
+        return ConnectivityResult(name=name, target=url, ok=True)
+
+    monkeypatch.setattr(checker, "_probe_http", _ok_http)
+    monkeypatch.setattr(checker, "_probe_ws", _ok_ws)
+    monkeypatch.setattr(checker, "_probe_redis", _ok_redis)
+
+    await checker.run_soak(duration=0.05, interval=0.01)
+
+    assert any(url.endswith("/ui/meta") for url in captured_urls)
 
 
 @pytest.mark.anyio("asyncio")

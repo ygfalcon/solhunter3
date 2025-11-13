@@ -997,6 +997,9 @@ class TradingRuntime:
         )
         http_url = f"http://{resolved_host}:{self.ui_port}"
         os.environ["UI_HTTP_URL"] = http_url
+        meta_path = "/ui/meta"
+        os.environ["UI_HEALTH_PATH"] = meta_path
+        os.environ["UI_HEALTH_URL"] = f"{http_url.rstrip('/')}{meta_path}"
 
         threads = ui.start_websockets()
         self.ui_ws_threads = threads
