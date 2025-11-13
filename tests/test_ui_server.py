@@ -3,6 +3,8 @@ import socket
 
 import pytest
 
+import solhunter_zero.ui as ui
+
 from solhunter_zero.ui import UIState, UIServer
 
 
@@ -39,3 +41,26 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         assert server.port != 0
     finally:
         server.stop()
+
+
+def test_ui_server_worker_bind_failure_surfaces_exception(monkeypatch) -> None:
+    state = UIState()
+
+    error = OSError(errno.EACCES, "permission denied")
+
+    def _failing_make_server(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(ui, "make_server", _failing_make_server)
+
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server.start()
+
+    message = str(excinfo.value)
+    assert "permission denied" in message
+    assert f"errno {errno.EACCES}" in message
+
+    assert server._server is None
+    assert server._thread is None or not server._thread.is_alive()

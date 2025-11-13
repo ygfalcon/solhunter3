@@ -20,7 +20,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -3626,74 +3626,109 @@ class UIServer:
         if self._thread and self._thread.is_alive():
             return
 
+        ready: Queue[BaseException | None] = Queue(maxsize=1)
+
+        def _serve() -> None:
+            server: BaseWSGIServer | None = None
+            reuse_enabled = False
+            try:
+                server = make_server(self.host, self.port, self.app)
+
+                sock = getattr(server, "socket", None)
+                if (
+                    sock is not None
+                    and hasattr(socket, "SOL_SOCKET")
+                    and hasattr(socket, "SO_REUSEADDR")
+                ):
+                    try:
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        reuse_enabled = True
+                    except OSError as exc:  # pragma: no cover - best effort
+                        log.debug(
+                            "Failed to enable SO_REUSEADDR on UI server socket: %s",
+                            exc,
+                        )
+
+                server.daemon_threads = True
+                self._server = server
+
+                try:
+                    bound_port = int(getattr(server, "server_port", self.port))
+                except (TypeError, ValueError):  # pragma: no cover - defensive guard
+                    bound_port = self.port
+                self.port = bound_port
+
+                if reuse_enabled:
+                    log.info(
+                        "UI server listening on %s:%s with SO_REUSEADDR enabled",
+                        self.host,
+                        bound_port,
+                    )
+
+                with contextlib.suppress(Exception):
+                    ready.put_nowait(None)
+
+                try:
+                    server.serve_forever()
+                except Exception:  # pragma: no cover - best effort logging
+                    log.exception("UI server crashed")
+            except BaseException as exc:
+                with contextlib.suppress(Exception):
+                    ready.put_nowait(exc)
+                if server is not None:
+                    with contextlib.suppress(Exception):
+                        server.shutdown()
+                    with contextlib.suppress(Exception):
+                        server.server_close()
+            finally:
+                self._server = None
+
+        thread = threading.Thread(target=_serve, name="ui-http-server", daemon=True)
+        self._thread = thread
+        thread.start()
+
+        ready_timeout_raw = os.getenv("UI_HTTP_READY_TIMEOUT", "5")
         try:
-            server = make_server(self.host, self.port, self.app)
-        except OSError as exc:
-            self._server = None
-            self._thread = None
-            errno_value = exc.errno if exc.errno is not None else "unknown"
-            details = exc.strerror or str(exc)
-            message = (
-                f"Failed to start UI server on {self.host}:{self.port} "
-                f"(errno {errno_value}): {details}"
+            ready_timeout = float(ready_timeout_raw or 5)
+        except (TypeError, ValueError):
+            log.warning(
+                "Invalid UI_HTTP_READY_TIMEOUT value %r; using default 5 seconds",
+                ready_timeout_raw,
             )
-            raise RuntimeError(message) from exc
-        except BaseException as exc:  # pragma: no cover - defensive guard
-            self._server = None
+            ready_timeout = 5.0
+
+        try:
+            result = ready.get(timeout=ready_timeout)
+        except Empty as exc:
             self._thread = None
-            if isinstance(exc, SystemExit) and isinstance(exc.__context__, OSError):
-                os_error = exc.__context__
-                errno_value = (
-                    os_error.errno if os_error.errno is not None else "unknown"
-                )
+            thread.join(timeout=2)
+            raise RuntimeError(
+                f"Timed out waiting for UI server to bind on {self.host}:{self.port}"
+            ) from exc
+
+        if isinstance(result, BaseException):
+            thread.join(timeout=2)
+            self._thread = None
+            if isinstance(result, SystemExit) and isinstance(result.__context__, OSError):
+                os_error = result.__context__
+                errno_value = os_error.errno if os_error.errno is not None else "unknown"
                 details = os_error.strerror or str(os_error)
                 message = (
                     f"Failed to start UI server on {self.host}:{self.port} "
                     f"(errno {errno_value}): {details}"
                 )
                 raise RuntimeError(message) from os_error
-            if isinstance(exc, SystemExit) and exc.__context__ is not None:
-                raise exc.__context__ from None  # type: ignore[misc]
-            raise
-
-        reuse_enabled = False
-        sock = getattr(server, "socket", None)
-        if sock is not None and hasattr(socket, "SOL_SOCKET") and hasattr(socket, "SO_REUSEADDR"):
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                reuse_enabled = True
-            except OSError as exc:  # pragma: no cover - best effort
-                log.debug(
-                    "Failed to enable SO_REUSEADDR on UI server socket: %s", exc
+            if isinstance(result, OSError):
+                errno_value = result.errno if result.errno is not None else "unknown"
+                details = result.strerror or str(result)
+                message = (
+                    f"Failed to start UI server on {self.host}:{self.port} "
+                    f"(errno {errno_value}): {details}"
                 )
-
-        server.daemon_threads = True
-        self._server = server
-        # When binding to port 0 the server chooses an available port. Capture the
-        # resolved value so callers can read it after ``start`` returns.
-        try:
-            bound_port = int(getattr(server, "server_port", self.port))
-        except (TypeError, ValueError):  # pragma: no cover - defensive guard
-            bound_port = self.port
-        self.port = bound_port
-
-        if reuse_enabled:
-            log.info(
-                "UI server listening on %s:%s with SO_REUSEADDR enabled",
-                self.host,
-                bound_port,
-            )
-
-        def _serve() -> None:
-            try:
-                server.serve_forever()
-            except Exception:  # pragma: no cover - best effort logging
-                log.exception("UI server crashed")
-            finally:
-                self._server = None
-
-        self._thread = threading.Thread(target=_serve, daemon=True)
-        self._thread.start()
+                raise RuntimeError(message) from result
+            if isinstance(result, SystemExit) and result.__context__ is not None:
+                raise result.__context__ from None  # type: ignore[misc]
+            raise result
 
     def stop(self) -> None:
         server = self._server
