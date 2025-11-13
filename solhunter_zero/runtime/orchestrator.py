@@ -1150,13 +1150,31 @@ class RuntimeOrchestrator:
         from ..agents.discovery import DiscoveryAgent
         from ..loop import _init_rl_training as _init_rl_training  # type: ignore
 
-        aruntime = AgentRuntime(agent_manager or AgentManager.from_default(), portfolio)
-        await aruntime.start()
-        execu = TradeExecutor(memory, portfolio)
-        execu.start()
-
-        self.handles.agent_runtime = aruntime
-        self.handles.trade_executor = execu
+        aruntime: AgentRuntime | None = None
+        execu: TradeExecutor | None = None
+        try:
+            aruntime = AgentRuntime(agent_manager or AgentManager.from_default(), portfolio)
+            await aruntime.start()
+            execu = TradeExecutor(memory, portfolio)
+            execu.start()
+        except Exception as exc:
+            detail = str(exc) or exc.__class__.__name__
+            if execu is not None:
+                with suppress(Exception):
+                    await execu.stop()
+            if aruntime is not None:
+                with suppress(Exception):
+                    await aruntime.stop()
+            self.handles.agent_runtime = None
+            self.handles.trade_executor = None
+            await self._publish_stage("agents:event_runtime", False, detail)
+            raise
+        else:
+            agent_count = len(getattr(agent_manager, "agents", []) or [])
+            detail = f"agents={agent_count}"
+            self.handles.agent_runtime = aruntime
+            self.handles.trade_executor = execu
+            await self._publish_stage("agents:event_runtime", True, detail)
 
         async def _discovery_loop():
             agent = DiscoveryAgent()
