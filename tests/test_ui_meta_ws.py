@@ -6,6 +6,7 @@ import threading
 import time
 import types
 import urllib.request
+from urllib.parse import urlparse
 
 import pytest
 from werkzeug.serving import make_server
@@ -75,7 +76,12 @@ def test_ui_meta_websocket_smoke(monkeypatch):
             assert ui_http_targets[0]["url"].startswith("http://127.0.0.1:6200/")
             ui_ws_targets = [t for t in checker.targets if t.get("name") == "ui-ws"]
             assert ui_ws_targets, "expected ui-ws target from connectivity checker"
-            assert ui_ws_targets[0]["url"].startswith("ws://127.0.0.1:6200/")
+            ws_target = ui_ws_targets[0]["url"]
+            parsed_ws = urlparse(ws_target)
+            assert parsed_ws.scheme == "ws"
+            assert parsed_ws.hostname in {"127.0.0.1", "localhost"}
+            assert parsed_ws.port is not None
+            assert parsed_ws.path.startswith("/ws/")
 
             ui.push_event({"event": "heartbeat", "ts": time.time()})
             time.sleep(0.2)

@@ -32,6 +32,7 @@ from . import event_bus
 from .health_runtime import resolve_rl_health_url
 from .production import load_production_env
 from .runtime_defaults import DEFAULT_UI_PORT
+from .url_helpers import as_websocket_url
 from .util import parse_bool_env
 
 try:  # pragma: no cover - optional dependency
@@ -100,22 +101,56 @@ def _select_first_url(*candidates: Any) -> str | None:
 
 
 def _discover_broker_url() -> str | None:
-    urls = getattr(event_bus, "_BROKER_URLS", None) or []
-    selected = _select_first_url(urls)
-    if selected:
-        return selected
-    env_urls = os.getenv("BROKER_URLS") or os.getenv("BROKER_URLS_JSON")
-    if env_urls:
-        parts = [part.strip() for part in env_urls.replace("[", "").replace("]", "").split(",")]
-        selected = _select_first_url([part for part in parts if part])
-        if selected:
-            return selected
-    single = os.getenv("BROKER_URL")
-    if single and single.strip():
-        return single.strip()
-    redis_env = os.getenv("REDIS_URL")
-    if redis_env and redis_env.strip():
-        return redis_env.strip()
+    """Infer a websocket broker URL from environment state."""
+
+    def _iter_candidates(value: object) -> Iterable[str]:
+        if value in (None, ""):
+            return []
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            parts: list[str] = []
+            if text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    stripped = text.strip("[]")
+                    parts = [segment.strip(" \"'") for segment in stripped.split(",")]
+                else:
+                    if isinstance(parsed, (list, tuple)):
+                        return [str(entry).strip() for entry in parsed if str(entry).strip()]
+                    stripped = text.strip("[]")
+                    parts = [segment.strip(" \"'") for segment in stripped.split(",")]
+            else:
+                parts = [segment.strip() for segment in text.split(",")]
+        elif isinstance(value, (set, list, tuple)):
+            parts = []
+            for entry in value:
+                if not entry:
+                    continue
+                if isinstance(entry, str):
+                    parts.extend(segment.strip() for segment in entry.split(","))
+                else:
+                    parts.append(str(entry).strip())
+        else:
+            parts = [str(value).strip()]
+        return [part for part in parts if part]
+
+    sources: Iterable[object] = (
+        getattr(event_bus, "_ENV_PEERS", None),
+        os.getenv("BROKER_WS_URLS"),
+        os.getenv("EVENT_BUS_PEERS"),
+        os.getenv("BROKER_URLS") or os.getenv("BROKER_URLS_JSON"),
+        os.getenv("BROKER_URL"),
+    )
+
+    for source in sources:
+        for candidate in _iter_candidates(source):
+            ws_candidate = as_websocket_url(candidate)
+            if ws_candidate and ws_candidate.startswith(("ws://", "wss://")):
+                return ws_candidate
+
     return None
 
 
