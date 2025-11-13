@@ -175,6 +175,80 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_stop_all_shuts_down_http_thread(monkeypatch):
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {},
+    )
+
+    server_started = threading.Event()
+    shutdown_called = threading.Event()
+    server_closed = threading.Event()
+
+    class DummyServer:
+        daemon_threads = True
+
+        def serve_forever(self) -> None:
+            server_started.set()
+            while not shutdown_called.wait(timeout=0.01):
+                continue
+
+        def shutdown(self) -> None:
+            shutdown_called.set()
+
+        def server_close(self) -> None:
+            server_closed.set()
+
+        def handle_request(self) -> None:
+            server_started.set()
+            shutdown_called.wait(timeout=0.01)
+
+    def make_dummy_server(_host: str, _port: int, _app: object) -> DummyServer:
+        return DummyServer()
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.make_server",
+        make_dummy_server,
+    )
+
+    orch = RuntimeOrchestrator(run_http=True)
+    await orch.start_ui()
+
+    assert server_started.wait(timeout=2.0), "expected HTTP server thread to start"
+    threads = orch.handles.ui_threads or {}
+    http_thread_info = threads.get("http") if isinstance(threads, dict) else None
+    assert isinstance(http_thread_info, dict)
+    http_thread = http_thread_info.get("thread")
+    assert isinstance(http_thread, threading.Thread)
+    assert http_thread.is_alive()
+
+    await orch.stop_all()
+
+    http_thread.join(timeout=2.0)
+    assert not http_thread.is_alive(), "HTTP thread should terminate after stop_all"
+    assert shutdown_called.is_set(), "shutdown() should be invoked on the HTTP server"
+    assert server_closed.is_set(), "server_close() should be invoked on the HTTP server"
+    assert not orch.handles.ui_threads
+    assert orch.handles.ui_server is None
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
     events: list[tuple[str, bool, str]] = []
     ready_calls: list[tuple[str, int]] = []

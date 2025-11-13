@@ -685,6 +685,29 @@ class RuntimeOrchestrator:
 
                     if shutdown_event.is_set():
                         return
+
+                    if hasattr(server, "handle_request"):
+                        try:
+                            current_timeout = float(getattr(server, "timeout", 0.5) or 0.5)
+                        except Exception:
+                            current_timeout = 0.5
+                        try:
+                            server.timeout = max(0.1, min(current_timeout, 0.5))
+                        except Exception:
+                            pass
+
+                        while not shutdown_event.is_set():
+                            try:
+                                server.handle_request()
+                            except OSError:
+                                if shutdown_event.is_set():
+                                    break
+                            except Exception:
+                                if shutdown_event.is_set():
+                                    break
+                                log.exception("UI HTTP server error while handling request")
+                        return
+
                     server.serve_forever()
                 except Exception:
                     with suppress(Exception):
@@ -1158,6 +1181,12 @@ class RuntimeOrchestrator:
             await close_session()
         except Exception:
             pass
+
+        server = self.handles.ui_server
+        if server is not None:
+            with suppress(Exception):
+                server.shutdown()
+                server.server_close()
 
         threads = self.handles.ui_threads or {}
         stop_ws = getattr(_ui_module, "stop_websockets", None)
