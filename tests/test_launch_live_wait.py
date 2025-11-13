@@ -371,6 +371,65 @@ def test_normalize_bus_configuration_canonicalizes_broker_url() -> None:
     assert "redis://localhost:6380/2" not in completed.stdout
 
 
+def test_run_preflight_invokes_micro_and_full(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    timestamp_fn = _extract_function(source, "timestamp")
+    log_info_fn = _extract_function(source, "log_info")
+    log_warn_fn = _extract_function(source, "log_warn")
+    run_preflight_fn = _extract_function(source, "run_preflight")
+
+    stub_root = tmp_path / "repo"
+    run_all = stub_root / "scripts" / "preflight" / "run_all.sh"
+    run_all.parent.mkdir(parents=True)
+
+    run_log = tmp_path / "invocations.log"
+    run_all.write_text(
+        dedent(
+            """
+            #!/usr/bin/env bash
+            set -euo pipefail
+            echo "mode=${MODE:-} micro=${MICRO_MODE:-}" >> "$RUN_LOG"
+            """
+        )
+    )
+    run_all.chmod(0o755)
+
+    bash_script = dedent(
+        """
+        set -euo pipefail
+        export RUN_LOG=%(run_log)s
+        ROOT_DIR=%(root)s
+        PREFLIGHT_RUNS=2
+        %(timestamp)s
+        %(log_info)s
+        %(log_warn)s
+        %(run_preflight)s
+        run_preflight paper
+        cat "$RUN_LOG"
+        """
+        % {
+            "run_log": shlex.quote(str(run_log)),
+            "root": shlex.quote(str(stub_root)),
+            "timestamp": timestamp_fn,
+            "log_info": log_info_fn,
+            "log_warn": log_warn_fn,
+            "run_preflight": run_preflight_fn,
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    entries = [line.strip() for line in completed.stdout.splitlines() if line.startswith("mode=")]
+    assert entries == ["mode=paper micro=1", "mode=paper micro=0"]
+
+
 def test_validate_env_file_handles_export(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()

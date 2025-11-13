@@ -1173,11 +1173,27 @@ if ! check_ui_health "$PAPER_LOG"; then
 fi
 
 run_preflight() {
-  MODE=paper MICRO_MODE=1 bash "$ROOT_DIR/scripts/preflight/run_all.sh"
+  local mode=$1
+  local -a micro_settings=(1 0)
+  local expected_runs=${#micro_settings[@]}
+
+  if [[ $PREFLIGHT_RUNS -ne $expected_runs ]]; then
+    log_warn "PREFLIGHT_RUNS=$PREFLIGHT_RUNS but expected $expected_runs passes for micro on/off"
+    return 1
+  fi
+
+  local idx=1
+  for micro in "${micro_settings[@]}"; do
+    log_info "Running preflight suite (mode=$mode micro=$micro pass $idx/$PREFLIGHT_RUNS)"
+    if ! MODE="$mode" MICRO_MODE="$micro" bash "$ROOT_DIR/scripts/preflight/run_all.sh"; then
+      return 1
+    fi
+    ((idx++))
+  done
 }
 
 log_info "Running preflight suite"
-if ! run_preflight; then
+if ! run_preflight "paper"; then
   log_warn "Preflight suite failed"
   exit $EXIT_PREFLIGHT
 fi
