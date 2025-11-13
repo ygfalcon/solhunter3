@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, MutableMapping
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 import websockets
@@ -122,6 +122,18 @@ class ConnectivityChecker:
             rest = f"{price_base.rstrip('/')}/v0/token-metadata"
         redis_url = env.get("REDIS_URL") or "redis://127.0.0.1:6379/1"
         ui_ws = None
+        fallback_host_raw = env.get("UI_HOST", "127.0.0.1")
+        fallback_host = (fallback_host_raw or "127.0.0.1").strip() or "127.0.0.1"
+        if fallback_host in {"0.0.0.0", "::"}:
+            fallback_host = "127.0.0.1"
+        fallback_port_str = env.get("UI_PORT", env.get("PORT", "5001") or "5001")
+        fallback_port_int: int | None = None
+        if fallback_port_str:
+            try:
+                fallback_port_int = int(str(fallback_port_str))
+            except (TypeError, ValueError):
+                fallback_port_int = None
+
         if not self.skip_ui_probes:
             ui_ws = (
                 env.get("UI_EVENTS_WS")
@@ -129,10 +141,8 @@ class ConnectivityChecker:
                 or env.get("UI_WS_URL")
             )
             if not ui_ws:
-                host = env.get("UI_HOST", "127.0.0.1")
-                if host in {"0.0.0.0", "::"}:
-                    host = "127.0.0.1"
-                port = env.get("UI_PORT", "5001")
+                host = fallback_host
+                port = fallback_port_str or "5001"
                 scheme = (env.get("UI_WS_SCHEME") or env.get("WS_SCHEME") or "ws").strip().lower()
                 if scheme not in {"ws", "wss"}:
                     scheme = "ws"
@@ -172,17 +182,20 @@ class ConnectivityChecker:
         if not self.skip_ui_probes:
             ui_http = env.get("UI_HEALTH_URL")
             if not ui_http:
-                host = env.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
-                if host in {"0.0.0.0", "::"}:
-                    host = "127.0.0.1"
-                port = env.get("UI_PORT", env.get("PORT", "5001") or "5001")
-                scheme = (env.get("UI_HTTP_SCHEME") or env.get("UI_SCHEME") or "http").strip().lower()
-                if scheme not in {"http", "https"}:
-                    scheme = "http"
+                base_http = env.get("UI_HTTP_URL")
                 path = env.get("UI_HEALTH_PATH") or "/health"
                 if not path.startswith("/"):
                     path = "/" + path
-                ui_http = f"{scheme}://{host}:{port}{path}"
+                if base_http:
+                    ui_http = f"{base_http.rstrip('/')}{path}"
+                else:
+                    scheme = (env.get("UI_HTTP_SCHEME") or env.get("UI_SCHEME") or "http").strip().lower()
+                    if scheme not in {"http", "https"}:
+                        scheme = "http"
+                    port = fallback_port_str or "5001"
+                    ui_http = f"{scheme}://{fallback_host}:{port}{path}"
+            if ui_http:
+                ui_http = _normalize_http_target(ui_http, fallback_host, fallback_port_int)
         if self.skip_ui_probes:
             logger.info("UI connectivity targets disabled via CONNECTIVITY_SKIP_UI_PROBES")
         if ui_ws:
@@ -633,3 +646,26 @@ class ConnectivityChecker:
             metrics=payload,
             reconnect_count=reconnects,
         )
+def _normalize_http_target(url: str, fallback_host: str, fallback_port: int | None) -> str:
+    try:
+        parsed = urlparse(url)
+    except Exception:  # pragma: no cover - defensive
+        return url
+    if not parsed.scheme or not parsed.netloc:
+        return url
+    host = parsed.hostname or fallback_host
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    port_value = parsed.port
+    if port_value is None and fallback_port:
+        port_value = fallback_port
+    netloc = host
+    if port_value:
+        netloc = f"{host}:{port_value}"
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth = f"{auth}:{parsed.password}"
+        netloc = f"{auth}@{netloc}"
+    return urlunparse(parsed._replace(netloc=netloc))
+

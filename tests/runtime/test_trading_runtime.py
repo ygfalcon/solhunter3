@@ -559,7 +559,16 @@ async def test_trading_runtime_preserves_configured_secure_bus_url(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
-async def test_runtime_websockets_use_public_host(monkeypatch):
+@pytest.mark.parametrize(
+    ("scheme_env", "expected_scheme"),
+    [
+        ({}, "http"),
+        ({"UI_HTTP_SCHEME": "https"}, "https"),
+        ({"UI_SCHEME": "HTTPS"}, "https"),
+        ({"UI_HTTP_SCHEME": "ftp"}, "http"),
+    ],
+)
+async def test_runtime_websockets_use_public_host(monkeypatch, scheme_env, expected_scheme):
     for key in (
         "UI_HOST",
         "UI_WS_HOST",
@@ -572,6 +581,12 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
         "UI_LOG_WS_URL",
     ):
         monkeypatch.delenv(key, raising=False)
+
+    for key in ("UI_HTTP_SCHEME", "UI_SCHEME"):
+        monkeypatch.delenv(key, raising=False)
+
+    for key, value in scheme_env.items():
+        monkeypatch.setenv(key, value)
 
     monkeypatch.setenv("UI_PUBLIC_HOST", "public.runtime.test")
 
@@ -623,13 +638,14 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
     assert captured_calls[-1]["ui_ws_host_env"] == "0.0.0.0"
     assert runtime.ui_port == 7123
     assert os.getenv("UI_PORT") == "7123"
-    assert os.getenv("UI_HTTP_URL") == "http://0.0.0.0:7123"
+    expected_base = f"{expected_scheme}://0.0.0.0:7123"
+    assert os.getenv("UI_HTTP_URL") == expected_base
     assert os.getenv("UI_HEALTH_PATH") == "/ui/meta"
-    assert os.getenv("UI_HEALTH_URL") == "http://0.0.0.0:7123/ui/meta"
+    assert os.getenv("UI_HEALTH_URL") == f"{expected_base}/ui/meta"
 
     ui_activity = [entry for entry in runtime.activity.snapshot() if entry["stage"] == "ui"]
     assert ui_activity
-    assert ui_activity[-1]["detail"] == "http://0.0.0.0:7123"
+    assert ui_activity[-1]["detail"] == expected_base
 
     manifest = ui_module.build_ui_manifest(None)
     assert manifest["events_ws"] == "ws://public.runtime.test:9100/ws/events"

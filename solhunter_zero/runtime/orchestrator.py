@@ -11,6 +11,7 @@ import signal
 import socket
 import sys
 import time
+from urllib.parse import urlparse, urlunparse
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -271,9 +272,39 @@ class RuntimeOrchestrator:
                 url_host = _ui_module._resolve_public_host(host)  # type: ignore[attr-defined]
             except Exception:  # pragma: no cover - defensive
                 url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-        scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
+        env_url = os.getenv("UI_HTTP_URL")
         ui_url: str | None = None
-        if port > 0:
+        if env_url:
+            ui_url = env_url
+            try:
+                parsed_env = urlparse(env_url)
+            except Exception:  # pragma: no cover - defensive
+                parsed_env = None
+            if parsed_env and parsed_env.scheme and parsed_env.netloc:
+                env_host = parsed_env.hostname or url_host
+                if env_host in {"0.0.0.0", "::"}:
+                    env_host = url_host
+                env_port: int | None = parsed_env.port
+                if env_port is None and port > 0:
+                    env_port = port
+                netloc = env_host
+                if env_port:
+                    netloc = f"{env_host}:{env_port}"
+                if parsed_env.username:
+                    auth = parsed_env.username
+                    if parsed_env.password:
+                        auth = f"{auth}:{parsed_env.password}"
+                    netloc = f"{auth}@{netloc}"
+                ui_url = urlunparse(parsed_env._replace(netloc=netloc))
+        elif port > 0:
+            raw_scheme = (
+                os.getenv("UI_HTTP_SCHEME")
+                or os.getenv("UI_SCHEME")
+                or "http"
+            )
+            scheme = (raw_scheme or "http").strip().lower()
+            if scheme not in {"http", "https"}:
+                scheme = "http"
             ui_url = f"{scheme}://{url_host}:{port}"
         ws_urls: dict[str, str] = {}
         if hasattr(_ui_module, "get_ws_urls"):

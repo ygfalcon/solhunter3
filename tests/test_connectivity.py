@@ -83,6 +83,29 @@ async def test_probe_ui_http_success():
         await runner.cleanup()
 
 
+def test_connectivity_targets_use_canonical_ui_http_url():
+    checker = ConnectivityChecker(
+        env={
+            "UI_HTTP_URL": "https://runtime.example.test:8443/base",
+            "UI_HEALTH_PATH": "status",
+        }
+    )
+    target = next(target for target in checker.targets if target["name"] == "ui-http")
+    assert target["url"] == "https://runtime.example.test:8443/base/status"
+
+
+def test_connectivity_targets_normalize_ui_http_host():
+    checker = ConnectivityChecker(
+        env={
+            "UI_HTTP_URL": "https://0.0.0.0:9443",
+            "UI_HEALTH_PATH": "/healthz",
+            "UI_HOST": "0.0.0.0",
+        }
+    )
+    target = next(target for target in checker.targets if target["name"] == "ui-http")
+    assert target["url"] == "https://127.0.0.1:9443/healthz"
+
+
 @pytest.mark.anyio("asyncio")
 async def test_connectivity_soak_refreshes_ui_override(monkeypatch):
     for key in ("UI_HEALTH_PATH", "UI_HEALTH_URL", "UI_HTTP_URL", "UI_HOST", "UI_PORT"):

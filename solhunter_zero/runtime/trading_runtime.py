@@ -1027,7 +1027,15 @@ class TradingRuntime:
         log.info(
             "TradingRuntime: UI host bound to %s (UI_HOST/UI_WS_HOST)", resolved_host
         )
-        http_url = f"http://{resolved_host}:{self.ui_port}"
+        raw_scheme = (
+            os.getenv("UI_HTTP_SCHEME")
+            or os.getenv("UI_SCHEME")
+            or "http"
+        )
+        scheme = (raw_scheme or "http").strip().lower()
+        if scheme not in {"http", "https"}:
+            scheme = "http"
+        http_url = f"{scheme}://{resolved_host}:{self.ui_port}"
         os.environ["UI_HTTP_URL"] = http_url
         meta_path = "/ui/meta"
         os.environ["UI_HEALTH_PATH"] = meta_path

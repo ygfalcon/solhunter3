@@ -495,6 +495,8 @@ def test_emit_ui_ready_uses_detected_host(monkeypatch, caplog, tmp_path):
         raising=False,
     )
 
+    monkeypatch.setenv("UI_HTTP_URL", "http://0.0.0.0:5000")
+
     orch = RuntimeOrchestrator(run_http=False)
     orch._emit_ui_ready("0.0.0.0", 5000)
 
@@ -503,6 +505,40 @@ def test_emit_ui_ready_uses_detected_host(monkeypatch, caplog, tmp_path):
     assert any(f"url=http://{detected_host}:5000" in message for message in readiness_logs)
     assert captured_urls == [f"http://{detected_host}:5000"]
     assert (tmp_path / "ui_url.txt").read_text(encoding="utf-8") == f"http://{detected_host}:5000"
+
+
+def test_emit_ui_ready_prefers_canonical_http_url(monkeypatch, caplog, tmp_path):
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setenv("UI_HTTP_URL", "https://runtime.canonical.test:8443")
+    captured_urls: list[str] = []
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._publish_ui_url_to_redis",
+        lambda url: captured_urls.append(url),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._runtime_artifact_dir",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module.get_ws_urls",
+        lambda request_host=None: {},
+        raising=False,
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+    orch._emit_ui_ready("127.0.0.1", 5000)
+
+    readiness_logs = [message for message in caplog.messages if message.startswith("UI_READY ")]
+    assert readiness_logs, "expected UI_READY log entry"
+    assert any(
+        "url=https://runtime.canonical.test:8443" in message for message in readiness_logs
+    )
+    assert captured_urls == ["https://runtime.canonical.test:8443"]
+    assert (
+        (tmp_path / "ui_url.txt").read_text(encoding="utf-8")
+        == "https://runtime.canonical.test:8443"
+    )
 
 
 def test_orchestrator_stops_on_resource_budget(monkeypatch):
