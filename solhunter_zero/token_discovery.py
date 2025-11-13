@@ -887,7 +887,7 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                     headers=_headers(),
                 )
                 async with request_cm as resp:
-                    if resp.status in (429, 503) or 500 <= resp.status < 600:
+                    if resp.status == 503 or 500 <= resp.status < 600:
                         logger.warning(
                             "BirdEye %s attempt=%s offset=%s backoff=%.2fs",
                             resp.status,
@@ -918,50 +918,41 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                         backoff = min(max(backoff * 2, delay), _BIRDEYE_BACKOFF_MAX)
                         continue
 
-                    if resp.status == 400:
-                        text = await resp.text()
-                        lower_text = text.lower()
-                        if any(marker in lower_text for marker in _BIRDEYE_THROTTLE_MARKERS):
-                            logger.warning(
-                                "BirdEye throttle %s attempt=%s offset=%s backoff=%.2fs: %s",
-                                resp.status,
-                                attempt,
-                                offset,
-                                backoff,
-                                text[:200],
-                            )
-                            delay = backoff
-                            retry_after = resp.headers.get("Retry-After")
-                            if retry_after:
-                                try:
-                                    ra_val = min(float(retry_after), _BIRDEYE_BACKOFF_MAX)
-                                    delay = max(delay, ra_val)
-                                except ValueError:
-                                    pass
-                            if attempt >= _BIRDEYE_RETRIES:
-                                if tokens:
-                                    logger.warning(
-                                        "BirdEye throttle %s after %s tokens; returning partial results",
-                                        resp.status,
-                                        len(tokens),
-                                    )
-                                    payload = None
-                                    break
-                                _cache_set(cache_key, [])
-                                return []
-                            await asyncio.sleep(delay)
-                            backoff = min(max(backoff * 2, delay), _BIRDEYE_BACKOFF_MAX)
-                            continue
+                    if 400 <= resp.status < 500:
+                        body_text = await resp.text()
+                        snippet = (body_text or "").strip().replace("\n", " ")[:200]
+                        lower_snippet = snippet.lower()
+                        reason = (getattr(resp, "reason", None) or "").strip()
+                        detail_parts = [part for part in (reason, snippet) if part]
+                        detail = ": ".join(detail_parts)
+                        message = f"BirdEye request failed with HTTP {resp.status}"
+                        if detail:
+                            message = f"{message}: {detail}"
 
-                        logger.warning(
-                            "BirdEye 400 at offset %s (params=%r): %s",
-                            offset,
-                            params,
-                            text[:200],
+                        if resp.status == 401:
+                            remediation = (
+                                "Verify the BirdEye API key is configured (BIRDEYE_API_KEY) and remains active."
+                            )
+                        elif resp.status == 403:
+                            remediation = (
+                                "Ensure the BirdEye API key has access to the token list endpoint and that IP restrictions allow this host."
+                            )
+                        elif resp.status == 429 or any(
+                            marker in lower_snippet for marker in _BIRDEYE_THROTTLE_MARKERS
+                        ):
+                            remediation = (
+                                "Wait for BirdEye rate limits to reset or reduce discovery frequency/upgrade the plan."
+                            )
+                        else:
+                            remediation = (
+                                "Check BirdEye API parameters and account status in the BirdEye dashboard."
+                            )
+
+                        raise DiscoveryConfigurationError(
+                            "birdeye",
+                            message,
+                            remediation=remediation,
                         )
-                        payload = None
-                        offset = _MAX_OFFSET
-                        break
 
                     resp.raise_for_status()
                     payload = await resp.json()
