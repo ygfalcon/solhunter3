@@ -517,6 +517,40 @@ def test_discover_tokens_includes_social_mentions(monkeypatch):
     assert agent.last_details[tokens[0]]["social_mentions"] == 4
 
 
+def test_social_mentions_filter_invalid_tokens_post_merge(monkeypatch):
+    _reset_cache()
+    agent = DiscoveryAgent()
+    agent.social_limit = 5
+
+    async def fake_collect_social(self):
+        return {
+            VALID_MINT: {
+                "social_mentions": 10,
+                "sources": {"social"},
+            },
+            "invalid-mint": {
+                "social_mentions": 99,
+                "sources": {"social"},
+            },
+        }
+
+    monkeypatch.setattr(DiscoveryAgent, "_collect_social_mentions", fake_collect_social)
+
+    tokens, details = asyncio.run(
+        agent._apply_social_mentions(
+            [VALID_MINT],
+            {VALID_MINT: {"sources": {"discovery"}}},
+        )
+    )
+
+    assert tokens == [VALID_MINT]
+    assert VALID_MINT in details
+    assert "invalid-mint" not in tokens
+    assert "invalid-mint" not in details
+    assert details[VALID_MINT]["social_mentions"] == 10
+    assert details[VALID_MINT]["sources"] == {"discovery", "social"}
+
+
 def test_discovery_cache_is_scoped_per_rpc(monkeypatch):
     _reset_cache()
     monkeypatch.setenv("SOLANA_RPC_URL", "https://mainnet.rpc.local")
