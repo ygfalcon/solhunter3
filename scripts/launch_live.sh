@@ -863,6 +863,50 @@ check_ui_health() {
     esac
   fi
   url=$(RUNTIME_LOG_PATH="$log" extract_ui_url)
+  local -a attempted_sources=("runtime log scrape")
+  local artifact_candidate=""
+  if [[ -z $url && -n ${ARTIFACT_DIR:-} ]]; then
+    local artifact_ui_path="$ARTIFACT_DIR/ui_url.txt"
+    attempted_sources+=("$artifact_ui_path")
+    artifact_candidate=$(ARTIFACT_UI_FILE="$artifact_ui_path" "$PYTHON_BIN" - <<'PY'
+import os
+import sys
+
+path = os.environ.get("ARTIFACT_UI_FILE")
+if not path or not os.path.exists(path):
+    sys.exit(0)
+
+with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+    value = handle.read().strip()
+
+if value:
+    print(value)
+PY
+    )
+    if [[ -n $artifact_candidate ]]; then
+      url=$artifact_candidate
+      log_info "UI readiness URL resolved via artifact file $artifact_ui_path"
+    fi
+  fi
+  if [[ -z $url && -n ${UI_HTTP_URL:-} ]]; then
+    attempted_sources+=("UI_HTTP_URL environment variable")
+    local env_candidate=""
+    env_candidate=$(UI_HEALTH_ENV_URL="$UI_HTTP_URL" "$PYTHON_BIN" - <<'PY'
+import os
+import sys
+
+value = os.environ.get("UI_HEALTH_ENV_URL", "")
+value = value.strip()
+
+if value:
+    print(value)
+PY
+    )
+    if [[ -n $env_candidate ]]; then
+      url=$env_candidate
+      log_info "UI readiness URL resolved via UI_HTTP_URL environment variable"
+    fi
+  fi
   if (( http_disabled == 0 )) && [[ -n $url ]]; then
     if [[ $url == "unavailable" ]]; then
       http_disabled=1
@@ -904,7 +948,8 @@ PY
     return 0
   fi
   if [[ -z $url ]]; then
-    log_warn "UI readiness URL not yet available for health check"
+    local IFS=", "
+    log_warn "UI readiness URL not yet available for health check (checked ${attempted_sources[*]})"
     return 1
   fi
   local target="${url%/}/ui/meta"
