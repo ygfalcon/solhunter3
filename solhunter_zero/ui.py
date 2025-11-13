@@ -3568,6 +3568,17 @@ class UIServer:
                 raise exc.__context__ from None  # type: ignore[misc]
             raise
 
+        reuse_enabled = False
+        sock = getattr(server, "socket", None)
+        if sock is not None and hasattr(socket, "SOL_SOCKET") and hasattr(socket, "SO_REUSEADDR"):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                reuse_enabled = True
+            except OSError as exc:  # pragma: no cover - best effort
+                log.debug(
+                    "Failed to enable SO_REUSEADDR on UI server socket: %s", exc
+                )
+
         server.daemon_threads = True
         self._server = server
         # When binding to port 0 the server chooses an available port. Capture the
@@ -3577,6 +3588,13 @@ class UIServer:
         except (TypeError, ValueError):  # pragma: no cover - defensive guard
             bound_port = self.port
         self.port = bound_port
+
+        if reuse_enabled:
+            log.info(
+                "UI server listening on %s:%s with SO_REUSEADDR enabled",
+                self.host,
+                bound_port,
+            )
 
         def _serve() -> None:
             try:
