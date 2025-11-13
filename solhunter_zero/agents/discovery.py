@@ -913,14 +913,26 @@ class DiscoveryAgent:
         if not social_details:
             return tokens, details or {}
 
-        base_details: Dict[str, Dict[str, Any]] = {
-            mint: dict(payload) for mint, payload in (details or {}).items()
-        }
+        base_details: Dict[str, Dict[str, Any]] = {}
+        for mint, payload in (details or {}).items():
+            key = str(mint)
+            canonical = canonical_mint(key)
+            if canonical and validate_mint(canonical):
+                key = canonical
+            base_details[key] = dict(payload)
         base_order = {mint: idx for idx, mint in enumerate(tokens)}
         new_order_index: Dict[str, int] = {}
 
+        social_tokens: List[str] = []
+
         for mint, payload in social_details.items():
-            entry = base_details.get(mint, {})
+            key = str(mint)
+            canonical = canonical_mint(key)
+            if canonical and validate_mint(canonical):
+                key = canonical
+            social_tokens.append(key)
+
+            entry = base_details.get(key, {})
             entry = dict(entry)
             sources = self._source_set(entry.get("sources"))
             sources.update(self._source_set(payload.get("sources")))
@@ -945,9 +957,9 @@ class DiscoveryAgent:
             if "social_samples" in payload and payload["social_samples"]:
                 entry["social_samples"] = list(payload["social_samples"])
 
-            base_details[mint] = entry
-            if mint not in base_order and mint not in new_order_index:
-                new_order_index[mint] = len(new_order_index)
+            base_details[key] = entry
+            if key not in base_order and key not in new_order_index:
+                new_order_index[key] = len(new_order_index)
 
         def _mention_count(mint: str) -> int:
             value = base_details.get(mint, {}).get("social_mentions")
@@ -956,7 +968,7 @@ class DiscoveryAgent:
             except (TypeError, ValueError):
                 return 0
 
-        all_tokens = list(dict.fromkeys(tokens + list(social_details)))
+        all_tokens = list(dict.fromkeys(tokens + social_tokens))
 
         def sort_key(mint: str) -> tuple[int, int, str]:
             mentions = _mention_count(mint)
@@ -970,6 +982,8 @@ class DiscoveryAgent:
 
         if self.limit:
             ranked_tokens = ranked_tokens[: self.limit]
+
+        ranked_tokens = self._normalise(ranked_tokens)
 
         final_details: Dict[str, Dict[str, Any]] = {
             mint: base_details[mint]
