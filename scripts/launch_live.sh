@@ -118,6 +118,25 @@ ensure_virtualenv() {
     offline_mode=0
   fi
 
+  local lockfiles=()
+  while IFS= read -r lockfile; do
+    lockfiles+=("$lockfile")
+  done < <(find "$ROOT_DIR" -maxdepth 1 -type f -name 'requirements*.lock' -print | sort)
+
+  local requirement_args=()
+  if (( ${#lockfiles[@]} )); then
+    local lock_names=()
+    for lockfile in "${lockfiles[@]}"; do
+      requirement_args+=(--require-hashes -r "$lockfile")
+      lock_names+=("$(basename "$lockfile")")
+    done
+    log_info "Using lock files for dependency installation: ${lock_names[*]}"
+  else
+    requirement_args+=(-r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-tests.txt" \
+      "jsonschema[format-nongpl]==4.23.0")
+    log_warn "No lock files found; falling back to editable requirements lists"
+  fi
+
   if (( offline_mode )); then
     log_warn "Offline mode detected; verifying Python dependencies without network access"
     if "$PIP_BIN" check >/dev/null 2>&1; then
@@ -143,8 +162,7 @@ ensure_virtualenv() {
   log_info "Installing Python dependencies (see $DEPS_LOG for details)"
   if (( offline_mode )); then
     {
-      "$PIP_BIN" install --no-index "${find_links[@]}" -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-tests.txt" \
-        "jsonschema[format-nongpl]==4.23.0"
+      "$PIP_BIN" install --no-index "${find_links[@]}" "${requirement_args[@]}"
     } 2>&1 | tee "$DEPS_LOG" >/dev/null
     if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
       log_warn "Failed to install Python dependencies (see $DEPS_LOG)"
@@ -158,11 +176,9 @@ ensure_virtualenv() {
   fi
 
   {
-    "$PIP_BIN" install -U pip setuptools wheel &&
-      "$PIP_BIN" install -U -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-tests.txt" \
-        "jsonschema[format-nongpl]==4.23.0"
+    "$PIP_BIN" install "${requirement_args[@]}"
   } 2>&1 | tee "$DEPS_LOG" >/dev/null
-  if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
+  if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
     log_warn "Failed to install Python dependencies (see $DEPS_LOG)"
     exit $EXIT_DEPS
   fi
