@@ -239,6 +239,7 @@ class DiscoveryAgent:
         self.last_details: Dict[str, Dict[str, Any]] = {}
         self.last_tokens: List[str] = []
         self.last_method: str | None = None
+        self.last_fallback_used: bool = False
         self.filter_prefix_11 = (
             os.getenv("DISCOVERY_FILTER_PREFIX_11", "1").strip().lower()
             in {"1", "true", "yes", "on"}
@@ -321,6 +322,7 @@ class DiscoveryAgent:
     ) -> List[str]:
         now = time.time()
         ttl = self.cache_ttl
+        self.last_fallback_used = False
         method_override = method is not None
         requested_method = resolve_discovery_method(method)
         if requested_method is None:
@@ -387,6 +389,7 @@ class DiscoveryAgent:
                 offline_source,
                 len(tokens),
             )
+            self.last_fallback_used = offline_source in {"cache", "static"}
             return tokens
         if cached_tokens and not identity_matches:
             logger.debug(
@@ -403,9 +406,11 @@ class DiscoveryAgent:
         ):
             if cache_limit and cache_limit >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
+                self.last_fallback_used = False
                 return cached_tokens[: self.limit]
             if len(cached_tokens) >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (limit=%s)", self.limit)
+                self.last_fallback_used = False
                 return cached_tokens[: self.limit]
 
         attempts = self.max_attempts
@@ -461,6 +466,7 @@ class DiscoveryAgent:
         self.last_tokens = tokens
         self.last_details = details
         self.last_method = active_method
+        self.last_fallback_used = fallback_used
 
         detail = f"yield={len(tokens)}"
         if self.limit:

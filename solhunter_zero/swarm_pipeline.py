@@ -1011,6 +1011,7 @@ class SwarmPipeline:
                             "discovered": len(discovery.discovered),
                             "scored": 0,
                             "limit": discovery.limit,
+                            "fallback_used": discovery.fallback_used,
                         }
                     },
                 }
@@ -1044,6 +1045,7 @@ class SwarmPipeline:
                     "discovered": len(discovery.discovered),
                     "scored": len(discovery.tokens),
                     "limit": discovery.limit,
+                    "fallback_used": discovery.fallback_used,
                 },
                 "evaluation": {
                     "workers": self.chunk_size,
@@ -1148,6 +1150,10 @@ class SwarmPipeline:
                     offline=self.offline,
                     token_file=self.token_file,
                     method=self.discovery_method,
+                )
+                stage.fallback_used = bool(
+                    stage.fallback_used
+                    or getattr(disc, "last_fallback_used", False)
                 )
             except Exception as exc:
                 publish("runtime.log", RuntimeLog(stage="discovery", detail=f"error:{exc}"))
