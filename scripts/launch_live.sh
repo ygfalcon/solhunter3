@@ -292,14 +292,43 @@ def _normalize_single_key(
 
 
 def _normalize_multi_key(
-    key: str, raw: str | None, *, force_db: int | None = None
+    key: str,
+    raw: str | None,
+    *,
+    force_db: int | None = None,
+    json_key: str | None = None,
 ) -> None:
-    if not raw:
+    json_parts: list[str] = []
+    if json_key:
+        json_raw = os.environ.get(json_key)
+        if json_raw:
+            try:
+                parsed_json = json.loads(json_raw)
+            except Exception:
+                errors.append(f"{json_key} must be a JSON array of Redis URLs")
+            else:
+                if not isinstance(parsed_json, list) or not all(
+                    isinstance(item, str) for item in parsed_json
+                ):
+                    errors.append(f"{json_key} must be a JSON array of Redis URLs")
+                else:
+                    json_parts.extend(item.strip() for item in parsed_json if item and item.strip())
+
+    if raw:
+        os.environ[key] = raw
+        parts = [segment.strip() for segment in raw.split(",") if segment.strip()]
+    else:
+        parts = []
+
+    parts = json_parts + parts
+    if not parts:
+        os.environ.pop(key, None)
+        if json_key:
+            os.environ.pop(json_key, None)
         return
-    os.environ[key] = raw
-    parts = [segment.strip() for segment in raw.split(",") if segment.strip()]
     canonical_parts: list[str] = []
     redacted_parts: list[str] = []
+    seen: set[str] = set()
     for part in parts:
         try:
             redis_parts = _canonical(part)
@@ -313,6 +342,9 @@ def _normalize_multi_key(
                 f"(export {key}=redis://localhost:6379/1 or update your env file)."
             )
         canonical = _format_url(redis_parts, db=canonical_db)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
         canonical_parts.append(canonical)
         redacted_parts.append(_format_url(redis_parts, db=canonical_db, redact=True))
         _record_target(canonical)
@@ -321,8 +353,13 @@ def _normalize_multi_key(
         os.environ[key] = canonical_value
         manifest[key] = canonical_value
         redacted_manifest[key] = ",".join(redacted_parts)
+        if json_key:
+            json_value = json.dumps(canonical_parts, separators=(",", ":"))
+            os.environ[json_key] = json_value
     else:
         os.environ.pop(key, None)
+        if json_key:
+            os.environ.pop(json_key, None)
 
 def _canonical(url: str) -> RedisURL:
     candidate = url if "://" in url else f"redis://{url}"
@@ -408,7 +445,12 @@ for key in redis_keys:
     _record_target(canonical)
 
 _normalize_single_key("BROKER_URL", os.environ.get("BROKER_URL"), force_db=1)
-_normalize_multi_key("BROKER_URLS", os.environ.get("BROKER_URLS"), force_db=1)
+_normalize_multi_key(
+    "BROKER_URLS",
+    os.environ.get("BROKER_URLS"),
+    force_db=1,
+    json_key="BROKER_URLS_JSON",
+)
 
 channel_keys = [
     "MINT_STREAM_BROKER_CHANNEL",
@@ -445,7 +487,7 @@ exports = {
     "EVENT_BUS_URL": bus_url,
     **manifest,
 }
-for key in ("BROKER_URL", "BROKER_URLS"):
+for key in ("BROKER_URL", "BROKER_URLS", "BROKER_URLS_JSON"):
     value = os.environ.get(key)
     if value:
         exports[key] = value

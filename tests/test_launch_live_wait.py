@@ -426,6 +426,7 @@ def test_normalize_bus_configuration_exports() -> None:
         export AMM_WATCH_REDIS_URL='cache.example:6380/1'
         export BROKER_URL='cache.example:6380/1'
         export BROKER_URLS='cache.example:6380/1 , cache.example:6380/1'
+        export BROKER_URLS_JSON='["cache.example:6380/1", "cache.example:6380/1"]'
         %(normalize)s
         normalize_bus_configuration
         """
@@ -458,7 +459,8 @@ def test_normalize_bus_configuration_exports() -> None:
     assert exports["MEMPOOL_STREAM_REDIS_URL"] == "redis://cache.example:6380/1"
     assert exports["AMM_WATCH_REDIS_URL"] == "redis://cache.example:6380/1"
     assert exports["BROKER_URL"] == "redis://cache.example:6380/1"
-    assert exports["BROKER_URLS"] == "redis://cache.example:6380/1,redis://cache.example:6380/1"
+    assert exports["BROKER_URLS"] == "redis://cache.example:6380/1"
+    assert exports["BROKER_URLS_JSON"] == '["redis://cache.example:6380/1"]'
     assert exports["MINT_STREAM_BROKER_CHANNEL"] == "test-channel"
     assert exports["MEMPOOL_STREAM_BROKER_CHANNEL"] == "test-channel"
     assert exports["AMM_WATCH_BROKER_CHANNEL"] == "test-channel"
@@ -553,6 +555,49 @@ def test_normalize_bus_configuration_canonicalizes_broker_url() -> None:
 
     assert "export BROKER_URL=redis://localhost:6380/1" in completed.stdout
     assert "redis://localhost:6380/2" not in completed.stdout
+
+
+def test_normalize_bus_configuration_accepts_broker_urls_json_only() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    normalize_fn = _extract_function(source, "normalize_bus_configuration")
+
+    bash_script = dedent(
+        """
+        set -euo pipefail
+        PYTHON_BIN=%(python)s
+        export REDIS_URL='cache.example:6380/1'
+        export MINT_STREAM_REDIS_URL='cache.example:6380/1'
+        export MEMPOOL_STREAM_REDIS_URL='cache.example:6380/1'
+        export AMM_WATCH_REDIS_URL='cache.example:6380/1'
+        export BROKER_URLS_JSON='[" cache.example:6380/1 ", "redis://cache.example:6380/1"]'
+        %(normalize)s
+        normalize_bus_configuration
+        """
+        % {
+            "python": shlex.quote(sys.executable),
+            "normalize": normalize_fn,
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=os.environ.copy(),
+    )
+
+    exports: dict[str, str] = {}
+    for line in completed.stdout.strip().splitlines():
+        assert line.startswith("export "), line
+        assignment = shlex.split(line[len("export "):])[0]
+        key, value = assignment.split("=", 1)
+        exports[key] = value
+
+    assert exports["BROKER_URLS"] == "redis://cache.example:6380/1"
+    assert exports["BROKER_URLS_JSON"] == '["redis://cache.example:6380/1"]'
 
 
 def test_run_preflight_invokes_micro_and_full(tmp_path: Path) -> None:
