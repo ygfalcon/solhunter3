@@ -1,6 +1,7 @@
 import asyncio
 import types
 
+import aiohttp
 import pytest
 
 from aiohttp import ClientTimeout
@@ -699,3 +700,106 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
 
     # The shared session requests should not close prematurely.
     addresses = {entry["address"] for entry in results}
+
+
+@pytest.mark.asyncio
+async def test_discover_candidates_shared_session_failure_falls_back(monkeypatch, caplog):
+    td._BIRDEYE_CACHE.clear()
+
+    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", True)
+    monkeypatch.setattr(td, "_ENABLE_METEORA", True)
+    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
+    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
+    monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return []
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.closed = False
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            self.closed = True
+
+    partial_session = FakeSession()
+    per_task_sessions: list[FakeSession] = []
+    call_state = {"count": 0}
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        call_state["count"] += 1
+        if call_state["count"] == 1:
+            err = RuntimeError("boom")
+            err.partial_session = partial_session
+            raise err
+        session = FakeSession()
+        per_task_sessions.append(session)
+        return session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+    assert td.get_session is fake_get_session
+
+    captured_sessions: list[aiohttp.ClientSession | None] = []
+
+    async def fake_dexscreener(*, session=None):
+        captured_sessions.append(session)
+        return [
+            {
+                "address": "DexSharedFailureMint",
+                "symbol": "DEX",
+                "name": "Dex Token",
+                "liquidity": 15000,
+                "volume": 22000,
+                "sources": ["dexscreener"],
+            }
+        ]
+
+    async def fake_meteora(*, session=None):
+        captured_sessions.append(session)
+        return [
+            {
+                "address": "MeteoraSharedFailureMint",
+                "symbol": "MT",
+                "name": "Meteora Token",
+                "liquidity": 9000,
+                "volume": 7000,
+                "sources": ["meteora"],
+            }
+        ]
+
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", fake_dexscreener)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", fake_meteora)
+
+    batches: list[list[dict]] = []
+    with caplog.at_level("WARNING"):
+        async for batch in td.discover_candidates("https://rpc", limit=4, mempool_threshold=0.0):
+            batches.append(batch)
+            if batch:
+                break
+
+    assert batches, "expected discovery batches"
+    final = batches[-1]
+    assert final, "expected candidates from fallback path"
+
+    addresses = {entry["address"] for entry in final}
+    assert "DexSharedFailureMint" in addresses
+    assert "MeteoraSharedFailureMint" in addresses
+
+    assert "Discovery shared session unavailable; falling back to per-task sessions" in caplog.text
+    assert partial_session.closed is True
+    assert partial_session.close_calls == 1
+
+    assert call_state["count"] >= 2
+    assert captured_sessions and all(sess is None for sess in captured_sessions)
+
+    for session in per_task_sessions:
+        # Fallback sessions are owned by individual tasks; ensure they were not closed here.
+        assert session.closed is False

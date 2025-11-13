@@ -1713,12 +1713,30 @@ def discover_candidates(
         return final
 
     async def _generator() -> AsyncIterator[List[TokenEntry]]:
+        async def _close_candidate_session(candidate: Any) -> None:
+            if candidate is None:
+                return
+            close = getattr(candidate, "close", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+
         shared_session_obj: aiohttp.ClientSession | None = None
         if shared_http_sources:
             try:
                 shared_session_obj = await get_session()
-            except TypeError:
-                shared_session_obj = await get_session()
+            except Exception as exc:
+                logger.warning(
+                    "Discovery shared session unavailable; falling back to per-task sessions: %s",
+                    exc,
+                )
+                for attr in ("partial_session", "session"):
+                    candidate = getattr(exc, attr, None)
+                    if candidate is not None:
+                        await _close_candidate_session(candidate)
+                shared_session_obj = None
 
         async def _run(
             shared_session: aiohttp.ClientSession | None,
