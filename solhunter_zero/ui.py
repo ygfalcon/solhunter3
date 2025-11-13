@@ -1369,6 +1369,8 @@ _RL_WS_PORT_DEFAULT = 0
 _EVENT_WS_PORT_DEFAULT = 0
 _LOG_WS_PORT_DEFAULT = 0
 _WS_QUEUE_DEFAULT = 512
+_WS_PING_INTERVAL_DEFAULT = 20.0
+_WS_PING_TIMEOUT_DEFAULT = 20.0
 _backlog_env = os.getenv("UI_WS_BACKLOG_MAX", "64")
 try:
     BACKLOG_MAX = int(_backlog_env or 64)
@@ -1533,6 +1535,23 @@ def _parse_positive_int(value: str | None, default: int) -> int:
         return default
     if parsed <= 0:
         log.warning("Non-positive integer %s not allowed; using default %s", parsed, default)
+        return default
+    return parsed
+
+
+def _parse_positive_float(value: str | None, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        log.warning("Invalid float value %r; using default %s", value, default)
+        return default
+    if not math.isfinite(parsed):
+        log.warning("Non-finite float %s not allowed; using default %s", parsed, default)
+        return default
+    if parsed <= 0:
+        log.warning("Non-positive float %s not allowed; using default %s", parsed, default)
         return default
     return parsed
 
@@ -2531,8 +2550,18 @@ def start_websockets() -> dict[str, threading.Thread]:
     threads: dict[str, threading.Thread] = {}
     host = _resolve_host()
     queue_size = _parse_positive_int(os.getenv("UI_WS_QUEUE_SIZE"), _WS_QUEUE_DEFAULT)
-    ping_interval = float(os.getenv("UI_WS_PING_INTERVAL", os.getenv("WS_PING_INTERVAL", "20")))
-    ping_timeout = float(os.getenv("UI_WS_PING_TIMEOUT", os.getenv("WS_PING_TIMEOUT", "20")))
+    ping_interval_raw = os.getenv("UI_WS_PING_INTERVAL")
+    if ping_interval_raw in (None, ""):
+        ping_interval_raw = os.getenv("WS_PING_INTERVAL")
+    ping_interval = _parse_positive_float(
+        ping_interval_raw, _WS_PING_INTERVAL_DEFAULT
+    )
+    ping_timeout_raw = os.getenv("UI_WS_PING_TIMEOUT")
+    if ping_timeout_raw in (None, ""):
+        ping_timeout_raw = os.getenv("WS_PING_TIMEOUT")
+    ping_timeout = _parse_positive_float(
+        ping_timeout_raw, _WS_PING_TIMEOUT_DEFAULT
+    )
     url_host = _resolve_public_host(host)
     scheme = _infer_ws_scheme()
 
