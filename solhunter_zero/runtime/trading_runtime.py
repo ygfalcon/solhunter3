@@ -995,7 +995,11 @@ class TradingRuntime:
             or os.getenv("UI_HOST")
             or "127.0.0.1"
         )
-        http_url = f"http://{resolved_host}:{self.ui_port}"
+        scheme_hint = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME")
+        scheme = (scheme_hint or "http").strip().lower()
+        if scheme not in {"http", "https"}:
+            scheme = "http"
+        http_url = f"{scheme}://{resolved_host}:{self.ui_port}"
         os.environ["UI_HTTP_URL"] = http_url
 
         threads = ui.start_websockets()

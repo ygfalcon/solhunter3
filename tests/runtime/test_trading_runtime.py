@@ -570,6 +570,8 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
         "UI_RL_WS_URL",
         "UI_LOGS_WS",
         "UI_LOG_WS_URL",
+        "UI_HTTP_SCHEME",
+        "UI_SCHEME",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -623,11 +625,15 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
     assert captured_calls[-1]["ui_ws_host_env"] == "0.0.0.0"
     assert runtime.ui_port == 7123
     assert os.getenv("UI_PORT") == "7123"
-    assert os.getenv("UI_HTTP_URL") == "http://0.0.0.0:7123"
+    expected_scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
+    expected_scheme = expected_scheme.strip().lower()
+    if expected_scheme not in {"http", "https"}:
+        expected_scheme = "http"
+    assert os.getenv("UI_HTTP_URL") == f"{expected_scheme}://0.0.0.0:7123"
 
     ui_activity = [entry for entry in runtime.activity.snapshot() if entry["stage"] == "ui"]
     assert ui_activity
-    assert ui_activity[-1]["detail"] == "http://0.0.0.0:7123"
+    assert ui_activity[-1]["detail"] == f"{expected_scheme}://0.0.0.0:7123"
 
     manifest = ui_module.build_ui_manifest(None)
     assert manifest["events_ws"] == "ws://public.runtime.test:9100/ws/events"
@@ -642,6 +648,51 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
         "UI_HTTP_URL",
     ):
         monkeypatch.delenv(key, raising=False)
+
+    if runtime.ui_server is not None:
+        runtime.ui_server.stop()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_runtime_http_url_respects_scheme_override(monkeypatch):
+    for key in (
+        "UI_HOST",
+        "UI_WS_HOST",
+        "UI_WS_URL",
+        "UI_EVENTS_WS_URL",
+        "UI_RL_WS_URL",
+        "UI_LOG_WS_URL",
+        "UI_SCHEME",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("UI_HTTP_SCHEME", "HTTPS")
+
+    monkeypatch.setattr(ui_module, "start_websockets", lambda: {})
+
+    class _DummyUIServer:
+        def __init__(self, _state, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.started = False
+
+    monkeypatch.setattr(runtime_module, "UIServer", _DummyUIServer)
+
+    runtime = TradingRuntime(ui_host="trading.test", ui_port=8443)
+
+    await runtime._start_ui()
+
+    assert os.getenv("UI_HTTP_URL") == "https://trading.test:8443"
+
+    ui_activity = [entry for entry in runtime.activity.snapshot() if entry["stage"] == "ui"]
+    assert ui_activity
+    assert ui_activity[-1]["detail"] == "https://trading.test:8443"
 
     if runtime.ui_server is not None:
         runtime.ui_server.stop()

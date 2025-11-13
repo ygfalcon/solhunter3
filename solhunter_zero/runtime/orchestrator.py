@@ -271,9 +271,9 @@ class RuntimeOrchestrator:
                 url_host = _ui_module._resolve_public_host(host)  # type: ignore[attr-defined]
             except Exception:  # pragma: no cover - defensive
                 url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-        scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
-        ui_url: str | None = None
-        if port > 0:
+        ui_url: str | None = os.getenv("UI_HTTP_URL")
+        if not ui_url and port > 0:
+            scheme = os.getenv("UI_HTTP_SCHEME") or os.getenv("UI_SCHEME") or "http"
             ui_url = f"{scheme}://{url_host}:{port}"
         ws_urls: dict[str, str] = {}
         if hasattr(_ui_module, "get_ws_urls"):

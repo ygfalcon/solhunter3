@@ -159,17 +159,31 @@ class ConnectivityChecker:
         if not self.skip_ui_probes:
             ui_http = env.get("UI_HEALTH_URL")
             if not ui_http:
-                host = env.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
-                if host in {"0.0.0.0", "::"}:
-                    host = "127.0.0.1"
-                port = env.get("UI_PORT", env.get("PORT", "5001") or "5001")
-                scheme = (env.get("UI_HTTP_SCHEME") or env.get("UI_SCHEME") or "http").strip().lower()
-                if scheme not in {"http", "https"}:
-                    scheme = "http"
+                base_url = env.get("UI_HTTP_URL")
                 path = env.get("UI_HEALTH_PATH") or "/health"
                 if not path.startswith("/"):
                     path = "/" + path
-                ui_http = f"{scheme}://{host}:{port}{path}"
+                if base_url:
+                    parsed_base = urlparse(base_url)
+                    scheme = parsed_base.scheme or "http"
+                    host = parsed_base.hostname or "127.0.0.1"
+                    port = parsed_base.port
+                    if port is None:
+                        port_env = env.get("UI_PORT") or env.get("PORT") or "5001"
+                        try:
+                            port = int(str(port_env))
+                        except Exception:  # pragma: no cover - defensive
+                            port = 5001
+                    ui_http = f"{scheme}://{host}:{port}{path}"
+                else:
+                    host = env.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
+                    if host in {"0.0.0.0", "::"}:
+                        host = "127.0.0.1"
+                    port = env.get("UI_PORT", env.get("PORT", "5001") or "5001")
+                    scheme = (env.get("UI_HTTP_SCHEME") or env.get("UI_SCHEME") or "http").strip().lower()
+                    if scheme not in {"http", "https"}:
+                        scheme = "http"
+                    ui_http = f"{scheme}://{host}:{port}{path}"
         if self.skip_ui_probes:
             logger.info("UI connectivity targets disabled via CONNECTIVITY_SKIP_UI_PROBES")
         if ui_ws:
