@@ -105,6 +105,22 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     assert any("birdeye" in r["sources"] for r in results)
 
 
+def test_fetch_birdeye_tokens_missing_key_returns_empty(monkeypatch, caplog):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "")
+
+    async def run():
+        return await td._fetch_birdeye_tokens(limit=5)
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.token_discovery"):
+        tokens = asyncio.run(run())
+
+    assert tokens == []
+    assert "BirdEye API key missing" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
     td._BIRDEYE_CACHE.clear()
