@@ -20,7 +20,8 @@ def anyio_backend() -> str:
 
 
 @pytest.mark.anyio("asyncio")
-async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
+async def test_orchestrator_reports_ui_ws_failure(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
     events: list[dict[str, object]] = []
 
     def capture_publish(topic, payload, *_args, **_kwargs):
@@ -65,6 +66,16 @@ async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
     ui_stage = ws_events[-1]
     assert ui_stage.get("ok") is False
     assert "boom" in str(ui_stage.get("detail"))
+
+    ws_logs = [message for message in caplog.messages if message.startswith("UI_WS_READY ")]
+    assert ws_logs, "expected UI_WS_READY log entry"
+    latest = ws_logs[-1]
+    assert "status=failed" in latest
+    assert "detail=" in latest and "boom" in latest
+
+    detail_logs = [message for message in caplog.messages if message.startswith("UI_WS_DETAIL ")]
+    assert detail_logs, "expected UI_WS_DETAIL log entry"
+    assert "boom" in detail_logs[-1]
 
 
 @pytest.mark.anyio("asyncio")
@@ -206,6 +217,51 @@ async def test_orchestrator_normalizes_ws_urls_on_wildcard_host(monkeypatch, cap
     assert "events_ws=ws://127.0.0.1:1111/events" in latest
     assert "logs_ws=ws://127.0.0.1:1111/logs" in latest
     assert "rl_ws=ws://127.0.0.1:1111/rl" in latest
+
+
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_emits_ready_when_ws_discovery_fails(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    def boom() -> dict[str, object]:
+        raise RuntimeError("discovery broke")
+
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=boom)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {"events": object()},
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+    await orch.start_ui()
+
+    assert orch.handles.ui_ws_status == "degraded"
+    assert "get_ws_urls failed" in orch.handles.ui_ws_detail
+
+    ws_logs = [message for message in caplog.messages if message.startswith("UI_WS_READY ")]
+    assert ws_logs, "expected UI_WS_READY log entry"
+    latest = ws_logs[-1]
+    assert "status=degraded" in latest
+    assert "detail=" in latest and "get_ws_urls failed" in latest
+
+    detail_logs = [message for message in caplog.messages if message.startswith("UI_WS_DETAIL ")]
+    assert detail_logs, "expected UI_WS_DETAIL log entry"
+    assert "get_ws_urls failed" in detail_logs[-1]
 
 
 @pytest.mark.anyio("asyncio")
