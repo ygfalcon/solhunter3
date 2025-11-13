@@ -11,6 +11,7 @@ import signal
 import socket
 import sys
 import time
+from collections.abc import Mapping
 from urllib.parse import urlsplit, urlunsplit
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
@@ -229,13 +230,13 @@ def _normalize_url_host_to_loopback(url: str | None) -> str | None:
     return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
-def _normalize_ws_urls(urls: dict[str, str] | None) -> dict[str, str]:
+def _normalize_ws_urls(urls: Mapping[str, str | None] | None) -> dict[str, str | None]:
     """Normalize websocket URLs by converting wildcard hosts to loopback."""
 
     if not urls:
         return {}
 
-    normalized: dict[str, str] = {}
+    normalized: dict[str, str | None] = {}
     for channel, value in urls.items():
         normalized[channel] = (
             _normalize_url_host_to_loopback(value) if isinstance(value, str) else value
@@ -243,11 +244,40 @@ def _normalize_ws_urls(urls: dict[str, str] | None) -> dict[str, str]:
     return normalized
 
 
+def _collect_ws_urls() -> tuple[dict[str, str | None], str]:
+    """Return websocket URLs from the UI module, guarding against failures."""
+
+    channels = ("events", "logs", "rl")
+    urls: dict[str, str | None] = {channel: None for channel in channels}
+    failure_detail = ""
+
+    if hasattr(_ui_module, "get_ws_urls"):
+        try:
+            raw_urls = _ui_module.get_ws_urls()  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - defensive logging
+            failure_detail = f"get_ws_urls failed: {exc}"
+            log.exception("Failed to resolve UI websocket URLs")
+        else:
+            if isinstance(raw_urls, Mapping):
+                normalized = _normalize_ws_urls(raw_urls)
+                for channel in channels:
+                    value = normalized.get(channel)
+                    if isinstance(value, str) and value:
+                        urls[channel] = value
+            else:  # pragma: no cover - unexpected return type
+                failure_detail = (
+                    f"get_ws_urls returned unsupported type: {type(raw_urls).__name__}"
+                )
+    return urls, failure_detail
+
+
 @dataclass
 class RuntimeHandles:
     ui_app: Any | None = None
     ui_threads: dict[str, Any] | None = None
     ui_server: Any | None = None
+    ui_ws_status: str = "unknown"
+    ui_ws_detail: str = ""
     bus_started: bool = False
     tasks: list[asyncio.Task] = field(default_factory=list)
     ui_state: Any | None = None
@@ -654,7 +684,8 @@ class RuntimeOrchestrator:
         threads: dict[str, Any] = {}
         ws_messages: list[str] = []
         ws_error: str | None = None
-        ws_detail = ""
+        ws_startup_detail = ""
+        ws_status = "ok"
         if callable(_start_ui_ws):
             class _WsCaptureHandler(logging.Handler):
                 def __init__(self) -> None:
@@ -706,10 +737,12 @@ class RuntimeOrchestrator:
                     detail_text_parts.append(text)
             failure_detail = "; ".join(detail_text_parts) or "websocket startup returned no threads"
             if ws_optional:
-                ws_detail = f"degraded: {failure_detail}"
+                ws_startup_detail = failure_detail
+                ws_status = "degraded"
                 ws_ok = True
             else:
-                ws_detail = failure_detail
+                ws_startup_detail = failure_detail
+                ws_status = "failed"
                 ws_ok = False
         else:
             detail_text_parts = []
@@ -717,50 +750,47 @@ class RuntimeOrchestrator:
                 text = (message or "").strip()
                 if text and text not in detail_text_parts:
                     detail_text_parts.append(text)
-            ws_detail = "; ".join(detail_text_parts)
+            ws_startup_detail = "; ".join(detail_text_parts)
             ws_ok = True
-        ws_urls: dict[str, str] = {}
-        if hasattr(_ui_module, "get_ws_urls"):
-            try:
-                ws_urls = _ui_module.get_ws_urls()  # type: ignore[attr-defined]
-            except Exception:
-                ws_urls = {}
-            else:
-                ws_urls = _normalize_ws_urls(ws_urls)
-                env_map = {
-                    "events": ("UI_EVENTS_WS", "UI_EVENTS_WS_URL", "UI_WS_URL"),
-                    "rl": ("UI_RL_WS", "UI_RL_WS_URL"),
-                    "logs": ("UI_LOGS_WS", "UI_LOG_WS_URL"),
-                }
-                for channel, keys in env_map.items():
-                    url = ws_urls.get(channel)
-                    if not url:
-                        continue
-                    for key in keys:
-                        os.environ.setdefault(key, url)
+        ws_urls, ws_url_detail = _collect_ws_urls()
+        if ws_url_detail and ws_status == "ok":
+            ws_status = "degraded"
+        env_map = {
+            "events": ("UI_EVENTS_WS", "UI_EVENTS_WS_URL", "UI_WS_URL"),
+            "rl": ("UI_RL_WS", "UI_RL_WS_URL"),
+            "logs": ("UI_LOGS_WS", "UI_LOG_WS_URL"),
+        }
+        for channel, keys in env_map.items():
+            url = ws_urls.get(channel)
+            if not url:
+                continue
+            for key in keys:
+                os.environ.setdefault(key, url)
         self.handles.ui_app = app
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
+        ws_detail_parts = [part for part in (ws_startup_detail, ws_url_detail) if part]
+        ws_detail = " | ".join(ws_detail_parts)
+        self.handles.ui_ws_status = ws_status
+        self.handles.ui_ws_detail = ws_detail
         await self._publish_stage("ui:ws", ws_ok, ws_detail)
+        rl_url = ws_urls.get("rl") or "-"
+        events_url = ws_urls.get("events") or "-"
+        logs_url = ws_urls.get("logs") or "-"
+        readiness_line = (
+            "UI_WS_READY "
+            f"status={ws_status} "
+            f"rl_ws={rl_url} "
+            f"events_ws={events_url} "
+            f"logs_ws={logs_url}"
+        )
+        if ws_detail:
+            readiness_line += f" detail={ws_detail}"
+        log.info(readiness_line)
+        if ws_status != "ok" and ws_detail:
+            log.warning("UI_WS_DETAIL detail=%s", ws_detail)
         if not ws_ok and not ws_optional:
             raise RuntimeError(f"UI websocket startup failed: {ws_detail or 'unknown error'}")
-        if ws_ok:
-            status = "ok"
-            if ws_detail.lower().startswith("degraded"):
-                status = "degraded"
-            rl_url = ws_urls.get("rl") or "-"
-            events_url = ws_urls.get("events") or "-"
-            logs_url = ws_urls.get("logs") or "-"
-            readiness_line = (
-                "UI_WS_READY "
-                f"status={status} "
-                f"rl_ws={rl_url} "
-                f"events_ws={events_url} "
-                f"logs_ws={logs_url}"
-            )
-            if ws_detail and status != "ok":
-                readiness_line += f" detail={ws_detail}"
-            log.info(readiness_line)
         http_disabled = parse_bool_env("UI_DISABLE_HTTP_SERVER", False)
 
         def _determine_host_and_requested_port() -> tuple[str, int]:
