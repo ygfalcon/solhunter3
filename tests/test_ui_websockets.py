@@ -124,6 +124,15 @@ def test_websocket_env_updates_after_rebind(monkeypatch):
         monkeypatch.setenv(key, value)
         ui._AUTO_WS_ENV_VALUES[key] = value
 
+    stale_ports = {
+        "UI_RL_WS_PORT": "1234",
+        "UI_EVENT_WS_PORT": "2345",
+        "UI_LOG_WS_PORT": "3456",
+    }
+    for key, value in stale_ports.items():
+        monkeypatch.setenv(key, value)
+        ui._AUTO_WS_ENV_VALUES[key] = value
+
     sock = socket.socket()
     sock.bind(("localhost", 8767))
     sock.listen(1)
@@ -146,6 +155,14 @@ def test_websocket_env_updates_after_rebind(monkeypatch):
         assert os.environ["UI_RL_WS"] == expected_rl
         assert os.environ["UI_LOG_WS_URL"] == expected_logs
         assert os.environ["UI_LOGS_WS"] == expected_logs
+
+        assert os.environ["UI_RL_WS_PORT"] == str(ui._RL_WS_PORT)
+        assert os.environ["UI_EVENT_WS_PORT"] == str(ui._EVENT_WS_PORT)
+        assert os.environ["UI_LOG_WS_PORT"] == str(ui._LOG_WS_PORT)
+
+        assert ui._AUTO_WS_ENV_VALUES["UI_RL_WS_PORT"] == str(ui._RL_WS_PORT)
+        assert ui._AUTO_WS_ENV_VALUES["UI_EVENT_WS_PORT"] == str(ui._EVENT_WS_PORT)
+        assert ui._AUTO_WS_ENV_VALUES["UI_LOG_WS_PORT"] == str(ui._LOG_WS_PORT)
     finally:
         sock.close()
         for loop in (ui.rl_ws_loop, ui.event_ws_loop, ui.log_ws_loop):
