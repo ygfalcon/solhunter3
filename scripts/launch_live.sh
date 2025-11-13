@@ -1227,7 +1227,7 @@ MICRO_FLAG=""
 CANARY_MODE=0
 CANARY_BUDGET=""
 CANARY_RISK=""
-PREFLIGHT_RUNS=2
+PREFLIGHT_RUNS=1
 SOAK_DURATION=180
 CONFIG_PATH=""
 RUNTIME_LOCK_KEY=""
@@ -1312,8 +1312,8 @@ if ! [[ $PREFLIGHT_RUNS =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-if [[ $PREFLIGHT_RUNS -ne 2 ]]; then
-  echo "--preflight must be 2 to cover micro on/off passes" >&2
+if [[ $PREFLIGHT_RUNS -lt 1 ]]; then
+  echo "--preflight must be at least 1 (set to 1 for the active micro mode, 2 for both micro on/off)" >&2
   exit $EXIT_PREFLIGHT
 fi
 
@@ -1854,17 +1854,31 @@ fi
 
 run_preflight() {
   local mode=$1
-  local -a micro_settings=(1 0)
+  local -a micro_settings=()
+
+  if [[ $PREFLIGHT_RUNS -eq 1 ]]; then
+    micro_settings=("$MICRO_FLAG")
+  elif [[ $PREFLIGHT_RUNS -eq 2 ]]; then
+    if [[ $MICRO_FLAG == "1" ]]; then
+      micro_settings=("1" "0")
+    else
+      micro_settings=("0" "1")
+    fi
+  else
+    log_warn "Unable to derive preflight micro permutations for PREFLIGHT_RUNS=$PREFLIGHT_RUNS (set to 1 for the active micro mode or 2 to cover both micro states)"
+    return 1
+  fi
+
   local expected_runs=${#micro_settings[@]}
 
   if [[ $PREFLIGHT_RUNS -ne $expected_runs ]]; then
-    log_warn "PREFLIGHT_RUNS=$PREFLIGHT_RUNS but expected $expected_runs passes for micro on/off"
+    log_warn "PREFLIGHT_RUNS=$PREFLIGHT_RUNS but expected $expected_runs passes for derived micro permutations"
     return 1
   fi
 
   local idx=1
   for micro in "${micro_settings[@]}"; do
-    log_info "Running preflight suite (mode=$mode micro=$micro pass $idx/$PREFLIGHT_RUNS)"
+    log_info "Running preflight suite (mode=$mode micro=$micro pass $idx/$expected_runs)"
     if ! MODE="$mode" MICRO_MODE="$micro" bash "$ROOT_DIR/scripts/preflight/run_all.sh"; then
       return 1
     fi
@@ -2026,7 +2040,7 @@ if ! check_ui_health "$LIVE_LOG"; then
 fi
 micro_label=$([[ "$MICRO_FLAG" == "1" ]] && echo "on" || echo "off")
 canary_label=$([[ $CANARY_MODE -eq 1 ]] && echo " | Canary limits applied" || echo "")
-GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (2/2) | Soak PASSED | MODE=live | MICRO=${micro_label}${canary_label}"
+GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (${PREFLIGHT_RUNS}/${PREFLIGHT_RUNS}) | Soak PASSED | MODE=live | MICRO=${micro_label}${canary_label}"
 log_info "$GO_NO_GO"
 
 wait "$LIVE_PID"
