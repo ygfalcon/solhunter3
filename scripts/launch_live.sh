@@ -468,30 +468,72 @@ PY
 }
 
 redis_health() {
-  if [[ -z ${REDIS_URL:-} ]]; then
-    return 0
-  fi
-  if command -v redis-cli >/dev/null 2>&1; then
-    redis-cli -u "$REDIS_URL" PING >/dev/null 2>&1
-  else
+  local -a redis_urls=()
+  mapfile -t redis_urls < <(
     "$PYTHON_BIN" - <<'PY'
 import os
-import asyncio
-from solhunter_zero.production import ConnectivityChecker
-async def _check():
-    checker = ConnectivityChecker()
-    try:
-        ok = await checker.check("redis")
-        if not ok:
-            raise SystemExit(1)
-    except AttributeError:
-        for target in checker.targets:
-            if target.get("name") == "redis":
-                result = await checker._probe_redis(target["name"], target["url"])
-                if not result.ok:
-                    raise SystemExit(1)
-asyncio.run(_check())
+from collections import OrderedDict
+
+keys = [
+    "REDIS_URL",
+    "MINT_STREAM_REDIS_URL",
+    "MEMPOOL_STREAM_REDIS_URL",
+    "AMM_WATCH_REDIS_URL",
+    "BROKER_URL",
+    "BROKER_URLS",
+]
+
+urls = OrderedDict()
+for key in keys:
+    raw = os.environ.get(key)
+    if not raw:
+        continue
+    for part in raw.split(","):
+        candidate = (part or "").strip()
+        if candidate:
+            urls.setdefault(candidate, None)
+
+print("\n".join(urls.keys()), end="")
 PY
+  )
+
+  if (( ${#redis_urls[@]} == 0 )); then
+    return 0
+  fi
+
+  local url
+  if command -v redis-cli >/dev/null 2>&1; then
+    for url in "${redis_urls[@]}"; do
+      if ! redis-cli -u "$url" PING >/dev/null 2>&1; then
+        return 1
+      fi
+    done
+  else
+    if ! "$PYTHON_BIN" - "${redis_urls[@]}" <<'PY'
+import asyncio
+import sys
+
+from solhunter_zero.production import ConnectivityChecker
+
+urls = sys.argv[1:]
+
+
+async def _check_all(targets):
+    checker = ConnectivityChecker()
+    probe = getattr(checker, "_probe_redis", None)
+    if probe is None:
+        raise SystemExit(1)
+    for idx, target in enumerate(targets, start=1):
+        result = await probe(f"redis-{idx}", target)
+        if not getattr(result, "ok", False):
+            raise SystemExit(1)
+
+
+asyncio.run(_check_all(urls))
+PY
+    then
+      return 1
+    fi
   fi
 }
 
