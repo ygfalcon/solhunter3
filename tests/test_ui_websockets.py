@@ -516,3 +516,30 @@ def test_manifest_public_host_full_url(monkeypatch):
     assert manifest["logs_ws"] == "wss://public.example:8443/ws/logs"
     for channel in ("rl", "events", "logs"):
         assert manifest[f"{channel}_ws_available"] is True
+
+
+def test_manifest_preserves_query_and_fragment(monkeypatch):
+    ui = _reload_ui_module()
+
+    for key in (
+        "UI_EVENTS_WS_URL",
+        "UI_WS_URL",
+        "UI_RL_WS_URL",
+        "UI_LOG_WS_URL",
+        "UI_PUBLIC_HOST",
+        "PUBLIC_URL_HOST",
+        "UI_EXTERNAL_HOST",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("UI_EVENTS_WS", "wss://events.example/ws/events?token=abc#frag")
+    monkeypatch.setenv("UI_RL_WS", "wss://rl.example/ws/rl?session=1")
+    monkeypatch.setenv("UI_LOGS_WS", "wss://logs.example/ws/logs#tail")
+
+    manifest = ui.build_ui_manifest(None)
+
+    assert manifest["events_ws"] == "wss://events.example/ws/events?token=abc#frag"
+    assert manifest["rl_ws"] == "wss://rl.example/ws/rl?session=1"
+    assert manifest["logs_ws"] == "wss://logs.example/ws/logs#tail"
+    for channel in ("rl", "events", "logs"):
+        assert manifest[f"{channel}_ws_available"] is True

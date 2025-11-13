@@ -141,6 +141,7 @@ def test_sanitize_priority_urls_normalizes():
         "mailto:foo@example.com",  # dropped
         "CHANGE_ME",  # placeholder
         "https://solscan.io/token/ABC?token=foo",  # query redaction
+        "https://api.example.com/v2/#section",  # fragment preserved
     ]
     cleaned = sanitize_priority_urls(urls)
     assert cleaned == [
@@ -148,6 +149,7 @@ def test_sanitize_priority_urls_normalizes():
         "https://api.example.com/v1",
         "http://example.com/v1",
         "https://solscan.io/token/ABC?token=REDACTED",
+        "https://api.example.com/v2#section",
     ]
 
 

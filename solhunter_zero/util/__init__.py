@@ -226,7 +226,17 @@ def _normalize_url(
     else:
         query = parts.query
 
-    return urlunsplit((scheme, netloc, norm_path.rstrip("/") if norm_path else "", query, ""))
+    fragment = parts.fragment or ""
+
+    return urlunsplit(
+        (
+            scheme,
+            netloc,
+            norm_path.rstrip("/") if norm_path else "",
+            query,
+            fragment,
+        )
+    )
 
 
 def sanitize_priority_urls(
