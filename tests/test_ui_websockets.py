@@ -7,6 +7,7 @@ import threading
 import sys
 import time
 import types
+from typing import Any
 
 import pytest
 
@@ -202,6 +203,69 @@ def test_websocket_env_preserves_preconfigured_url(monkeypatch):
                 loop.call_soon_threadsafe(loop.stop)
         for t in threads.values():
             t.join(timeout=1)
+
+
+def test_websocket_invalid_ping_values_use_defaults(monkeypatch, caplog):
+    ui = _reload_ui_module()
+
+    monkeypatch.setenv("UI_WS_PING_INTERVAL", "oops")
+    monkeypatch.setenv("UI_WS_PING_TIMEOUT", "bad")
+
+    captured: list[tuple[str, float, float]] = []
+    fallback_ports = {"rl": 8765, "events": 8766, "logs": 8767}
+
+    def _fake_start_channel(
+        channel: str,
+        *,
+        host: str,
+        port: int,
+        queue_size: int,
+        ping_interval: float,
+        ping_timeout: float,
+    ) -> Any:
+        captured.append((channel, ping_interval, ping_timeout))
+        assigned_port = port or fallback_ports[channel]
+        state = ui._WS_CHANNELS[channel]
+        state.loop = object()
+        state.host = host
+        state.port = assigned_port
+        if channel == "rl":
+            ui._RL_WS_PORT = assigned_port
+        elif channel == "events":
+            ui._EVENT_WS_PORT = assigned_port
+        else:
+            ui._LOG_WS_PORT = assigned_port
+        dummy_thread = types.SimpleNamespace(join=lambda timeout=None: None)
+        state.thread = dummy_thread
+        return dummy_thread
+
+    monkeypatch.setattr(ui, "_start_channel", _fake_start_channel)
+
+    with caplog.at_level(logging.WARNING):
+        threads = ui.start_websockets()
+
+    assert set(threads) == {"rl", "events", "logs"}
+    assert len(captured) == 3
+    for channel, interval, timeout in captured:
+        assert interval == ui._WS_PING_INTERVAL_DEFAULT
+        assert timeout == ui._WS_PING_TIMEOUT_DEFAULT
+
+    warning_messages = [record.getMessage() for record in caplog.records]
+    assert any("Invalid float value" in message for message in warning_messages)
+
+    for state in ui._WS_CHANNELS.values():
+        state.loop = None
+        state.thread = None
+        state.host = None
+        state.port = 0
+
+    ui._RL_WS_PORT = ui._RL_WS_PORT_DEFAULT
+    ui._EVENT_WS_PORT = ui._EVENT_WS_PORT_DEFAULT
+    ui._LOG_WS_PORT = ui._LOG_WS_PORT_DEFAULT
+
+    for key in list(ui._AUTO_WS_ENV_VALUES):
+        os.environ.pop(key, None)
+    ui._AUTO_WS_ENV_VALUES.clear()
 
 
 def test_enqueue_message_logs_warning_when_queue_full(caplog):
