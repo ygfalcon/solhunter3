@@ -1394,6 +1394,124 @@ print("\n".join(manifest))
 PY
 }
 
+check_live_keypair_paths() {
+  local keypair_report
+  if ! keypair_report=$("$PYTHON_BIN" - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
+FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+
+
+def _parse_bool(value):
+    if value is None:
+        return None
+    lowered = value.strip().lower()
+    if lowered in TRUE_VALUES:
+        return True
+    if lowered in FALSE_VALUES:
+        return False
+    return None
+
+
+def live_trading_requested():
+    for name in ("LIVE_TRADING_DISABLED", "PAPER_TRADING", "SHADOW_EXECUTOR_ONLY"):
+        state = _parse_bool(os.getenv(name))
+        if state:
+            return False
+    for name in ("MODE", "SOLHUNTER_MODE"):
+        raw = os.getenv(name)
+        if raw:
+            lowered = raw.strip().lower()
+            if lowered == "paper":
+                return False
+            if lowered == "live":
+                return True
+    return True
+
+
+if not live_trading_requested():
+    sys.exit(0)
+
+candidates = {}
+
+for source in ("KEYPAIR_PATH", "SOLANA_KEYPAIR"):
+    raw = os.getenv(source)
+    if not raw:
+        continue
+    path = Path(raw).expanduser()
+    candidates.setdefault(path, set()).add(source)
+
+config_path = os.getenv("CONFIG_PATH")
+if config_path:
+    try:
+        from solhunter_zero.config import load_config
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        print(f"Failed to import configuration loader: {exc}")
+        sys.exit(1)
+    try:
+        cfg = load_config(config_path)
+    except Exception as exc:
+        print(f"Failed to load config {config_path}: {exc}")
+        sys.exit(1)
+    value = cfg.get("solana_keypair")
+    if isinstance(value, str) and value.strip():
+        path = Path(value.strip()).expanduser()
+        candidates.setdefault(path, set()).add("config.solana_keypair")
+
+if not candidates:
+    print(
+        "Live trading requires a signing keypair. Set KEYPAIR_PATH to a readable keypair JSON "
+        "(for example ~/.config/solana/id.json)."
+    )
+    sys.exit(1)
+
+issues = []
+
+for path, labels in candidates.items():
+    try:
+        if not path.exists():
+            issues.append((path, labels, "does not exist"))
+            continue
+        if not path.is_file():
+            issues.append((path, labels, "is not a file"))
+            continue
+        if not os.access(path, os.R_OK):
+            issues.append((path, labels, "is not readable"))
+            continue
+    except OSError as exc:  # pragma: no cover - filesystem edge cases
+        issues.append((path, labels, f"is not accessible ({exc})"))
+
+if issues:
+    parts = []
+    for path, labels, reason in issues:
+        sources = ", ".join(sorted(labels))
+        parts.append(f"{sources} -> {path} {reason}")
+    message = (
+        "Live trading requires a readable signing keypair. "
+        + "; ".join(parts)
+        + ". Set KEYPAIR_PATH to a valid keypair JSON and ensure it exists with chmod 600 permissions."
+    )
+    print(message)
+    sys.exit(1)
+
+sys.exit(0)
+PY
+  ); then
+    if [[ -z $keypair_report ]]; then
+      keypair_report="Live trading requires a readable signing keypair. Set KEYPAIR_PATH to a valid keypair JSON and ensure it exists."
+    fi
+    while IFS= read -r line; do
+      if [[ -n $line ]]; then
+        log_warn "$line"
+      fi
+    done <<<"$keypair_report"
+    exit $EXIT_KEYS
+  fi
+}
+
 log_info "Validating environment file $ENV_FILE"
 if ! MANIFEST_RAW=$(validate_env_file); then
   exit $EXIT_KEYS
@@ -1403,6 +1521,8 @@ set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
+
+check_live_keypair_paths
 
 # Ensure Jupiter websocket uses the stats endpoint unless explicitly overridden.
 export JUPITER_WS_URL="${JUPITER_WS_URL:-wss://stats.jup.ag/ws}"
