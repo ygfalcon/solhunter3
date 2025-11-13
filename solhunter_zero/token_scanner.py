@@ -2094,6 +2094,79 @@ async def _helius_search_assets(
     return normalized
 
 
+def _materialize_cached_trending(requested: int) -> tuple[List[str], Dict[str, dict]]:
+    cached_mints = list(_LAST_TRENDING_RESULT.get("mints") or [])
+    if not cached_mints:
+        return [], {}
+
+    cached_meta = _LAST_TRENDING_RESULT.get("metadata") or {}
+    canonical_cached: List[str] = []
+    metadata: Dict[str, dict] = {}
+
+    for mint in cached_mints:
+        if not isinstance(mint, str):
+            continue
+        canonical = canonical_mint(mint)
+        if validate_mint(canonical):
+            canonical_cached.append(canonical)
+        else:
+            canonical_cached.append(mint)
+
+    for mint, meta in cached_meta.items():
+        if not isinstance(mint, str) or not isinstance(meta, dict):
+            continue
+        canonical = canonical_mint(mint)
+        target = canonical if validate_mint(canonical) else mint
+        metadata[target] = copy.deepcopy(meta)
+        metadata[target]["address"] = target
+
+    return canonical_cached[:requested], metadata
+
+
+def _materialize_static_trending(requested: int) -> tuple[List[str], Dict[str, dict]]:
+    defaults = [
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    ]
+    candidates: List[str] = list(STATIC_SEED_TOKENS)
+    candidates.extend(defaults)
+
+    fallback_valid: List[str] = []
+    seen: set[str] = set()
+    metadata: Dict[str, dict] = {}
+
+    for candidate in candidates:
+        canonical = (
+            candidate if candidate in STATIC_SEED_TOKENS else canonical_mint(candidate)
+        )
+        if not validate_mint(canonical) or canonical in seen:
+            continue
+        seen.add(canonical)
+        fallback_valid.append(canonical)
+        source = "static_env" if canonical in STATIC_SEED_TOKENS else "static"
+        entry = metadata.setdefault(
+            canonical,
+            {
+                "address": canonical,
+                "source": source,
+                "sources": [source],
+                "rank": len(metadata),
+            },
+        )
+        if isinstance(entry, dict):
+            _finalize_sources(entry)
+
+    return fallback_valid[:requested], metadata
+
+
+def _format_cooldown(ts: float) -> str:
+    if not ts:
+        return "n/a"
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+    except Exception:  # pragma: no cover - defensive
+        return "n/a"
+
+
 async def _scan_tokens_async_locked(
     *,
     rpc_url: str = DEFAULT_SOLANA_RPC,
@@ -2112,106 +2185,57 @@ async def _scan_tokens_async_locked(
     threshold = min(_PARTIAL_THRESHOLD, requested)
     api_key = api_key or ""
 
-    resolved_birdeye_key = _resolve_birdeye_key(api_key)
-    birdeye_allowed = _birdeye_enabled(resolved_birdeye_key) and _birdeye_trending_allowed()
-
-    now = time.time()
-
-    if _COOLDOWN_UNTIL and now >= _COOLDOWN_UNTIL:
-        _LAST_TRENDING_RESULT.pop("cooldown_reason", None)
-        _LAST_TRENDING_RESULT.pop("cooldown_until", None)
-
-    def _apply_cached() -> List[str]:
-        cached_mints = list(_LAST_TRENDING_RESULT.get("mints") or [])
-        if not cached_mints:
-            return []
-        TRENDING_METADATA.clear()
-        cached_meta = _LAST_TRENDING_RESULT.get("metadata") or {}
-        canonical_cached: List[str] = []
-        for mint in cached_mints:
-            if not isinstance(mint, str):
-                continue
-            canonical = canonical_mint(mint)
-            if validate_mint(canonical):
-                canonical_cached.append(canonical)
-            else:
-                canonical_cached.append(mint)
-        for mint, meta in cached_meta.items():
-            if not isinstance(mint, str) or not isinstance(meta, dict):
-                continue
-            canonical = canonical_mint(mint)
-            target = canonical if validate_mint(canonical) else mint
-            TRENDING_METADATA[target] = copy.deepcopy(meta)
-            TRENDING_METADATA[target]["address"] = target
-        return canonical_cached[:requested]
-
-    def _apply_static() -> List[str]:
-        TRENDING_METADATA.clear()
-        defaults = [
-            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-        ]
-        candidates: List[str] = list(STATIC_SEED_TOKENS)
-        candidates.extend(defaults)
-        fallback_valid: List[str] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            canonical = candidate if candidate in STATIC_SEED_TOKENS else canonical_mint(candidate)
-            if not validate_mint(canonical) or canonical in seen:
-                continue
-            seen.add(canonical)
-            fallback_valid.append(canonical)
-            source = "static_env" if canonical in STATIC_SEED_TOKENS else "static"
-            entry = TRENDING_METADATA.setdefault(
-                canonical,
-                {
-                    "address": canonical,
-                    "source": source,
-                    "sources": [source],
-                    "rank": len(TRENDING_METADATA),
-                },
-            )
-            if isinstance(entry, dict):
-                _finalize_sources(entry)
-        return fallback_valid[:requested]
-
-    def _format_cooldown(ts: float) -> str:
-        if not ts:
-            return "n/a"
-        try:
-            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
-        except Exception:  # pragma: no cover - defensive
-            return "n/a"
-
-    if _COOLDOWN_UNTIL and now < _COOLDOWN_UNTIL:
-        cached = _apply_cached()
-        if cached:
-            logger.warning(
-                "Trending fetch cooling down for %.1fs; returning cached set (%d tokens) (until=%s)",
-                max(0.0, _COOLDOWN_UNTIL - now),
-                len(cached),
-                _format_cooldown(_COOLDOWN_UNTIL),
-            )
-            _LAST_TRENDING_RESULT["timestamp"] = now
-            return cached
-        logger.warning(
-            "Trending fetch cooling down but cache empty; returning static fallback tokens (until=%s)",
-            _format_cooldown(_COOLDOWN_UNTIL),
-        )
-        return _apply_static()
-
-    last_ts = float(_LAST_TRENDING_RESULT.get("timestamp") or 0.0)
-    if _MIN_SCAN_INTERVAL and last_ts and (now - last_ts) < _MIN_SCAN_INTERVAL:
-        cached = _apply_cached()
-        if cached:
-            _LAST_TRENDING_RESULT["timestamp"] = now
-            return cached
-
-    mints: List[str] = []
-    TRENDING_METADATA.clear()
-    success = False
-
     forced_cooldown_reason: str | None = None
     forced_cooldown_seconds: float | None = None
+    success = False
+    failure = False
+
+    async with _STATE_LOCK:
+        now = time.time()
+        if _COOLDOWN_UNTIL and now >= _COOLDOWN_UNTIL:
+            _LAST_TRENDING_RESULT.pop("cooldown_reason", None)
+            _LAST_TRENDING_RESULT.pop("cooldown_until", None)
+
+        if _COOLDOWN_UNTIL and now < _COOLDOWN_UNTIL:
+            cached, cached_meta = _materialize_cached_trending(requested)
+            if cached:
+                logger.warning(
+                    "Trending fetch cooling down for %.1fs; returning cached set (%d tokens) (until=%s)",
+                    max(0.0, _COOLDOWN_UNTIL - now),
+                    len(cached),
+                    _format_cooldown(_COOLDOWN_UNTIL),
+                )
+                TRENDING_METADATA.clear()
+                TRENDING_METADATA.update(cached_meta)
+                _LAST_TRENDING_RESULT["timestamp"] = now
+                return cached
+            fallback, fallback_meta = _materialize_static_trending(requested)
+            logger.warning(
+                "Trending fetch cooling down but cache empty; returning static fallback tokens (until=%s)",
+                _format_cooldown(_COOLDOWN_UNTIL),
+            )
+            TRENDING_METADATA.clear()
+            TRENDING_METADATA.update(fallback_meta)
+            return fallback
+
+        last_ts = float(_LAST_TRENDING_RESULT.get("timestamp") or 0.0)
+        if _MIN_SCAN_INTERVAL and last_ts and (now - last_ts) < _MIN_SCAN_INTERVAL:
+            cached, cached_meta = _materialize_cached_trending(requested)
+            if cached:
+                TRENDING_METADATA.clear()
+                TRENDING_METADATA.update(cached_meta)
+                _LAST_TRENDING_RESULT["timestamp"] = now
+                return cached
+
+        resolved_birdeye_key = _resolve_birdeye_key(api_key)
+        birdeye_allowed = _birdeye_enabled(resolved_birdeye_key) and _birdeye_trending_allowed()
+        snapshot = {
+            "resolved_birdeye_key": resolved_birdeye_key,
+            "birdeye_allowed": birdeye_allowed,
+        }
+
+    metadata: Dict[str, dict] = {}
+    mints: List[str] = []
 
     timeout = aiohttp.ClientTimeout(total=12, connect=4, sock_read=8)
     connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=60)
@@ -2220,12 +2244,14 @@ async def _scan_tokens_async_locked(
         connector=connector,
         headers=DEFAULT_HEADERS,
     ) as session:
-        birdeye_key = resolved_birdeye_key if birdeye_allowed else None
+        resolved_birdeye_key = snapshot["resolved_birdeye_key"]
+        birdeye_allowed = snapshot["birdeye_allowed"]
+
         try:
             seed_candidates = await _collect_trending_seeds(
                 session,
                 limit=requested,
-                birdeye_api_key=birdeye_key,
+                birdeye_api_key=resolved_birdeye_key if birdeye_allowed else None,
                 rpc_url=os.getenv("SOLANA_RPC_URL", DEFAULT_SOLANA_RPC),
             )
         except BirdeyeThrottleError as exc:
@@ -2289,7 +2315,7 @@ async def _scan_tokens_async_locked(
             if not mint:
                 continue
             if mint in mints:
-                existing = TRENDING_METADATA.setdefault(mint, dict(item))
+                existing = metadata.setdefault(mint, dict(item))
                 if isinstance(existing, dict):
                     sources = existing.setdefault("sources", [])
                     if not isinstance(sources, list):
@@ -2348,7 +2374,7 @@ async def _scan_tokens_async_locked(
                 not meta.get("name")
                 or not meta.get("symbol")
                 or "decimals" not in meta
-                ):
+            ):
                 solscan_meta = await _solscan_enrich(
                     session,
                     mint,
@@ -2369,8 +2395,8 @@ async def _scan_tokens_async_locked(
                     _finalize_sources(meta)
                     details = _ensure_metadata(meta)
                     details.setdefault("solscan", solscan_meta)
-            meta.setdefault("rank", len(TRENDING_METADATA))
-            TRENDING_METADATA[mint] = meta
+            meta.setdefault("rank", len(metadata))
+            metadata[mint] = meta
             if len(mints) >= requested:
                 break
         if mints:
@@ -2392,7 +2418,7 @@ async def _scan_tokens_async_locked(
                     if not mint:
                         continue
                     if mint in mints:
-                        existing_meta = TRENDING_METADATA.get(mint)
+                        existing_meta = metadata.get(mint)
                         if isinstance(existing_meta, dict):
                             sources = existing_meta.setdefault("sources", [])
                             if not isinstance(sources, list):
@@ -2432,8 +2458,8 @@ async def _scan_tokens_async_locked(
                     incoming_meta = entry.get("metadata")
                     if isinstance(incoming_meta, dict):
                         meta_store["helius"] = incoming_meta
-                    meta.setdefault("rank", len(TRENDING_METADATA))
-                    TRENDING_METADATA[mint] = meta
+                    meta.setdefault("rank", len(metadata))
+                    metadata[mint] = meta
                     mints.append(mint)
                     if len(mints) >= requested:
                         break
@@ -2506,7 +2532,7 @@ async def _scan_tokens_async_locked(
                 if not mint:
                     continue
                 if mint in mints:
-                    existing = TRENDING_METADATA.setdefault(
+                    existing = metadata.setdefault(
                         mint,
                         {
                             "address": mint,
@@ -2528,13 +2554,13 @@ async def _scan_tokens_async_locked(
                         _finalize_sources(existing)
                     continue
                 mints.append(mint)
-                TRENDING_METADATA[mint] = {
+                metadata[mint] = {
                     "address": mint,
                     "source": "birdeye",
                     "sources": ["birdeye"],
-                    "rank": len(TRENDING_METADATA),
+                    "rank": len(metadata),
                 }
-                _finalize_sources(TRENDING_METADATA[mint])
+                _finalize_sources(metadata[mint])
                 success = True
             offset += len(batch)
             if _ALLOW_PARTIAL_RESULTS and len(mints) >= threshold:
@@ -2548,11 +2574,7 @@ async def _scan_tokens_async_locked(
                 break
             if len(batch) < page_size or len(mints) >= requested:
                 break
-            # Gentle pacing to respect Birdeye rate limits (60 req/min)
             await asyncio.sleep(_BIRDEYE_PAGE_DELAY)
-
-        result: List[str]
-        failure = False
 
         if mints:
             unique_mints: List[str] = []
@@ -2564,7 +2586,7 @@ async def _scan_tokens_async_locked(
             mints = sorted(
                 unique_mints,
                 key=lambda a: (
-                    TRENDING_METADATA.get(a, {}).get("rank", 0),
+                    metadata.get(a, {}).get("rank", 0),
                     a,
                 ),
             )
@@ -2584,7 +2606,7 @@ async def _scan_tokens_async_locked(
                     "address": address,
                     "source": "helius_search",
                     "sources": ["helius_search"],
-                    "rank": len(TRENDING_METADATA),
+                    "rank": len(metadata),
                 }
                 raw = item.get("raw")
                 if isinstance(raw, dict):
@@ -2611,7 +2633,7 @@ async def _scan_tokens_async_locked(
                         _finalize_sources(meta)
                         details = _ensure_metadata(meta)
                         details.setdefault("solscan", solscan_meta)
-                TRENDING_METADATA[address] = meta
+                metadata[address] = meta
                 if len(mints) >= requested:
                     break
             if mints:
@@ -2629,7 +2651,7 @@ async def _scan_tokens_async_locked(
                 if not mint or mint in mints:
                     continue
                 mints.append(mint)
-                TRENDING_METADATA[mint] = meta
+                metadata[mint] = meta
                 if len(mints) >= requested:
                     break
             if pump_tokens:
@@ -2638,53 +2660,67 @@ async def _scan_tokens_async_locked(
                 if forced_cooldown_reason == "seed-empty":
                     forced_cooldown_reason = None
 
-        if not mints:
-            cached = _apply_cached()
+    if not mints:
+        failure = True
+
+    result = mints[:requested]
+
+    post_now = time.time()
+
+    async with _STATE_LOCK:
+        final_metadata = metadata
+        final_result = result
+
+        if not final_result:
+            cached, cached_meta = _materialize_cached_trending(requested)
             if cached:
                 logger.info("Trending lookup empty; serving cached set of %d tokens", len(cached))
-                result = cached
+                final_result = cached
+                final_metadata = cached_meta
             else:
                 logger.warning("Trending lookup empty; using static fallback tokens")
-                result = _apply_static()
+                final_result, final_metadata = _materialize_static_trending(requested)
             failure = True
-        else:
-            result = mints[:requested]
 
-        if TRENDING_METADATA:
-            for meta in TRENDING_METADATA.values():
+        if final_metadata:
+            for meta in final_metadata.values():
                 if isinstance(meta, dict):
                     _finalize_sources(meta)
 
-        if result:
-            _LAST_TRENDING_RESULT["mints"] = list(result)
-            _LAST_TRENDING_RESULT["metadata"] = copy.deepcopy(TRENDING_METADATA)
-            _LAST_TRENDING_RESULT["timestamp"] = now
+        TRENDING_METADATA.clear()
+        TRENDING_METADATA.update(final_metadata)
+
+        if final_result:
+            _LAST_TRENDING_RESULT["mints"] = list(final_result)
+            _LAST_TRENDING_RESULT["metadata"] = copy.deepcopy(final_metadata)
+            _LAST_TRENDING_RESULT["timestamp"] = post_now
+        else:
+            _LAST_TRENDING_RESULT.pop("mints", None)
+            _LAST_TRENDING_RESULT.pop("metadata", None)
 
         cooldown_reason_to_set: str | None = None
         if forced_cooldown_reason:
             _FAILURE_COUNT = _FAILURE_THRESHOLD
             cooldown_window = forced_cooldown_seconds or _FAILURE_COOLDOWN
-            _COOLDOWN_UNTIL = now + cooldown_window
+            _COOLDOWN_UNTIL = post_now + cooldown_window
             cooldown_reason_to_set = forced_cooldown_reason
-            cooldown_iso = _format_cooldown(_COOLDOWN_UNTIL)
             logger.warning(
                 "Trending scan entering cooldown for %.1fs (reason=%s, until=%s)",
                 cooldown_window,
                 forced_cooldown_reason,
-                cooldown_iso,
+                _format_cooldown(_COOLDOWN_UNTIL),
             )
         elif failure or not success:
             _FAILURE_COUNT += 1
             if _FAILURE_COUNT >= _FAILURE_THRESHOLD:
                 cooldown_window = _FAILURE_COOLDOWN
-                _COOLDOWN_UNTIL = now + cooldown_window
+                _COOLDOWN_UNTIL = post_now + cooldown_window
                 cooldown_reason_to_set = "failure"
-                cooldown_iso = _format_cooldown(_COOLDOWN_UNTIL)
                 logger.warning(
                     "Trending scan entering cooldown for %.1fs (reason=%s, until=%s)",
                     cooldown_window,
                     cooldown_reason_to_set,
-                    cooldown_iso,
+                    _format_cooldown(_COOLDOWN_UNTIL),
                 )
         else:
             _FAILURE_COUNT = 0
@@ -2699,7 +2735,7 @@ async def _scan_tokens_async_locked(
         cooldown_status = _LAST_TRENDING_RESULT.get("cooldown_reason") or "none"
         cooldown_until = _LAST_TRENDING_RESULT.get("cooldown_until")
         ttl_remaining = (
-            max(0.0, float(cooldown_until) - now)
+            max(0.0, float(cooldown_until) - post_now)
             if isinstance(cooldown_until, (int, float)) and cooldown_status != "none"
             else 0.0
         )
@@ -2710,16 +2746,18 @@ async def _scan_tokens_async_locked(
         )
         logger.info(
             "Trending scan result: %d/%d requested (partial=%s, fast_mode=%s, cooldown=%s, ttl=%.1fs, until=%s)",
-            len(result),
+            len(final_result),
             requested,
-            "yes" if len(result) < requested else "no",
+            "yes" if len(final_result) < requested else "no",
             FAST_MODE,
             cooldown_status,
             ttl_remaining,
             cooldown_iso,
         )
 
-        return result
+        return final_result
+
+
 
 
 async def scan_tokens_async(
@@ -2729,14 +2767,13 @@ async def scan_tokens_async(
     enrich: bool = True,
     api_key: str | None = None,
 ) -> List[str]:
-    """Thread-safe wrapper that serialises access to trending state."""
-    async with _STATE_LOCK:
-        return await _scan_tokens_async_locked(
-            rpc_url=rpc_url,
-            limit=limit,
-            enrich=enrich,
-            api_key=api_key,
-        )
+    """Trending lookup entry point with cooperative concurrency."""
+    return await _scan_tokens_async_locked(
+        rpc_url=rpc_url,
+        limit=limit,
+        enrich=enrich,
+        api_key=api_key,
+    )
 
 
 async def _rpc_get_multiple_accounts(
