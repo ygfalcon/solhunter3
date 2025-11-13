@@ -691,7 +691,30 @@ class RuntimeOrchestrator:
 
                     if shutdown_event.is_set():
                         return
-                    server.serve_forever()
+
+                    # ``BaseWSGIServer`` inherits ``socketserver.BaseServer`` which uses the
+                    # ``timeout`` attribute to determine how long ``handle_request`` blocks.
+                    # Configure a short timeout so the loop can poll ``shutdown_event``
+                    # frequently even when idle.
+                    try:
+                        timeout_value = float(getattr(server, "timeout", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        timeout_value = 0.0
+                    if timeout_value <= 0 or timeout_value > 0.5:
+                        with suppress(Exception):
+                            setattr(server, "timeout", 0.5)
+
+                    while not shutdown_event.is_set():
+                        try:
+                            server.handle_request()
+                        except OSError:
+                            if shutdown_event.is_set():
+                                break
+                            raise
+                        except Exception:
+                            if shutdown_event.is_set():
+                                break
+                            raise
                 except Exception:
                     with suppress(Exception):
                         port_queue.put(sys.exc_info()[1] or RuntimeError("ui serve failed"))
@@ -1194,6 +1217,13 @@ class RuntimeOrchestrator:
             await close_session()
         except Exception:
             pass
+
+        server = getattr(self.handles, "ui_server", None)
+        if server is not None:
+            with suppress(Exception):
+                server.shutdown()
+            with suppress(Exception):
+                server.server_close()
 
         threads = self.handles.ui_threads or {}
         stop_ws = getattr(_ui_module, "stop_websockets", None)
