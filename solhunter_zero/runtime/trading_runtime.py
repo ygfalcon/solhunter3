@@ -995,6 +995,11 @@ class TradingRuntime:
             or os.getenv("UI_HOST")
             or "127.0.0.1"
         )
+        os.environ["UI_HOST"] = resolved_host
+        os.environ["UI_WS_HOST"] = resolved_host
+        log.info(
+            "TradingRuntime: UI host bound to %s (UI_HOST/UI_WS_HOST)", resolved_host
+        )
         http_url = f"http://{resolved_host}:{self.ui_port}"
         os.environ["UI_HTTP_URL"] = http_url
         meta_path = "/ui/meta"
