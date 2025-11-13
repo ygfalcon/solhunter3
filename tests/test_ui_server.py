@@ -39,6 +39,7 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         assert server._thread.is_alive()
         assert server.port == server._server.server_port
         assert server.port != 0
+        assert server.serve_forever_started.wait(timeout=server.ready_timeout)
     finally:
         server.stop()
 

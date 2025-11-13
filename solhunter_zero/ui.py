@@ -3621,12 +3621,15 @@ class UIServer:
         self.app = create_app(state)
         self._thread: Optional[threading.Thread] = None
         self._server: Optional[BaseWSGIServer] = None
+        self._serve_forever_started = threading.Event()
+        self._ready_timeout = 5.0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
 
         ready: Queue[BaseException | None] = Queue(maxsize=1)
+        self._serve_forever_started.clear()
 
         def _serve() -> None:
             server: BaseWSGIServer | None = None
@@ -3669,6 +3672,7 @@ class UIServer:
                     ready.put_nowait(None)
 
                 try:
+                    self._serve_forever_started.set()
                     server.serve_forever()
                 except Exception:  # pragma: no cover - best effort logging
                     log.exception("UI server crashed")
@@ -3696,6 +3700,8 @@ class UIServer:
                 ready_timeout_raw,
             )
             ready_timeout = 5.0
+
+        self._ready_timeout = ready_timeout
 
         try:
             result = ready.get(timeout=ready_timeout)
@@ -3741,6 +3747,15 @@ class UIServer:
             self._thread.join(timeout=2)
         self._thread = None
         self._server = None
+        self._serve_forever_started.clear()
+
+    @property
+    def serve_forever_started(self) -> threading.Event:
+        return self._serve_forever_started
+
+    @property
+    def ready_timeout(self) -> float:
+        return self._ready_timeout
         stop_websockets()
 
 
@@ -3875,7 +3890,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     _seed_state_from_snapshots(state, args.snapshot_dir)
 
     server = UIServer(state, host=args.host, port=args.port)
-    server.start()
+    try:
+        server.start()
+        if not server.serve_forever_started.wait(timeout=server.ready_timeout):
+            raise TimeoutError(
+                f"Timed out waiting for UI server on {args.host}:{args.port} "
+                f"to enter serve_forever() after {server.ready_timeout:.1f} seconds"
+            )
+    except BaseException as exc:
+        print(f"Failed to start UI server: {exc}", file=sys.stderr, flush=True)
+        server.stop()
+        raise SystemExit(1) from exc
+
     url = f"http://{args.host}:{args.port}"
     print(f"Solsniper Zero UI listening on {url}", flush=True)
     if args.snapshot_dir:
