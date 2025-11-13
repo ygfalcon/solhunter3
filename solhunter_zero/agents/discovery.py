@@ -205,7 +205,7 @@ class DiscoveryAgent:
         )
         if not self.birdeye_api_key:
             logger.warning(
-                "BIRDEYE_API_KEY missing; discovery will fall back to static tokens"
+                "BIRDEYE_API_KEY missing; BirdEye discovery disabled. Mempool and DEX sources remain active."
             )
         limit = resolve_discovery_limit(default=60)
         if limit < MIN_DISCOVERY_LIMIT:
@@ -256,14 +256,10 @@ class DiscoveryAgent:
         self.news_feeds = self._split_env_list("NEWS_FEEDS")
         self.twitter_feeds = self._split_env_list("TWITTER_FEEDS")
         self.discord_feeds = self._split_env_list("DISCORD_FEEDS")
-        # These flags behave like latches for configuration issues. Once we log a
-        # warning to the Python logger we keep ``_config_error_warned`` latched to
-        # avoid noisy duplicate messages. The runtime event published via
-        # ``_config_error_event_reported`` is allowed to fire again after the
-        # configuration recovers so operators are notified if the problem
-        # returns.
-        self._config_error_warned = False
-        self._config_error_event_reported = False
+        # Track whether we have already logged a warning about BirdEye being
+        # disabled so we avoid noisy duplicate messages when discovery runs in a
+        # tight loop.
+        self._birdeye_notice_logged = False
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -421,19 +417,19 @@ class DiscoveryAgent:
         mempool_enabled = True
         if mempool_flag is not None:
             mempool_enabled = mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
-        config_error = not (self.birdeye_api_key or "").strip() and not mempool_enabled
         fallback_used = False
-        self._config_error_active = config_error
 
-        if config_error and not self._config_error_warned:
-            logger.warning(
-                "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled; discovery will rely on cached/static seeds",
-            )
-            self._config_error_warned = True
-        elif not config_error:
-            # Reset the event latch after the configuration recovers so that
-            # subsequent regressions publish another warning event.
-            self._config_error_event_reported = False
+        birdeye_configured = bool((self.birdeye_api_key or "").strip())
+        if not birdeye_configured and not self._birdeye_notice_logged:
+            if mempool_enabled:
+                logger.warning(
+                    "BirdEye API key missing; continuing discovery with mempool and DEX sources."
+                )
+            else:
+                logger.warning(
+                    "BirdEye API key missing and mempool discovery disabled; continuing with DEX and cached/static discovery sources."
+                )
+            self._birdeye_notice_logged = True
 
         for attempt in range(attempts):
             tokens, details = await self._discover_once(
@@ -478,22 +474,6 @@ class DiscoveryAgent:
         logger.info(
             "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
         )
-
-        if config_error and not self._config_error_event_reported:
-            warning_detail = "config_error=birdeye_missing_mempool_disabled"
-            publish(
-                "runtime.log",
-                RuntimeLog(
-                    stage="discovery",
-                    detail=warning_detail,
-                    level="WARN",
-                ),
-            )
-            if fallback_used:
-                logger.warning(
-                    "DiscoveryAgent using fallback tokens because BirdEye API key is missing and DISCOVERY_ENABLE_MEMPOOL is disabled"
-                )
-            self._config_error_event_reported = True
 
         if ttl > 0 and tokens and not fallback_used:
             async with _CACHE_LOCK:

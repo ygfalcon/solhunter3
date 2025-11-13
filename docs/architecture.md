@@ -147,8 +147,8 @@ class MyAgent(BaseAgent):
   consistent execution and penalises high-volatility or low‑sample strategies,
   ensuring the hive mind leans into agents that deliver reliable alpha.
 - **Token discovery fallback** — the default `websocket` discovery mode uses
-  BirdEye when `BIRDEYE_API_KEY` is set and automatically falls back to
-  on-chain scanning if the key is missing.
+  BirdEye when `BIRDEYE_API_KEY` is set and continues with mempool, DEX and
+  on-chain scanning when the key is missing.
 - **Discovery ranking** — tokens from trending APIs, mempool events and on-chain
   scans are combined, deduplicated and sorted by volume and liquidity.
 - **Web UI polling** — the browser polls `/positions`, `/trades`, `/roi`,

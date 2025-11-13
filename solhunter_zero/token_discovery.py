@@ -807,21 +807,11 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
     global _BIRDEYE_DISABLED_INFO
     if not api_key:
         if not _BIRDEYE_DISABLED_INFO:
-            message = (
-                "Discovery sources disabled: set BIRDEYE_API_KEY or enable DISCOVERY_ENABLE_MEMPOOL to restore BirdEye/mempool inputs."
+            logger.warning(
+                "BirdEye API key missing; BirdEye discovery disabled. Remaining discovery sources continue to operate."
             )
-            if _ENABLE_MEMPOOL:
-                logger.info(message)
-            else:
-                logger.warning(message)
             _BIRDEYE_DISABLED_INFO = True
         logger.debug("BirdEye API key missing; skipping BirdEye discovery")
-        if not _ENABLE_MEMPOOL:
-            raise DiscoveryConfigurationError(
-                "birdeye",
-                "BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled",
-                remediation="Set BIRDEYE_API_KEY or enable DISCOVERY_ENABLE_MEMPOOL",
-            )
         return []
 
     cache_key = _current_cache_key()
