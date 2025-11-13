@@ -418,6 +418,103 @@ while True:
 PY
 }
 
+wait_for_ui_socket_release() {
+  "$PYTHON_BIN" - <<'PY'
+import ipaddress
+import os
+import socket
+import time
+
+DEFAULT_TIMEOUT = 30.0
+
+
+def _read_timeout(raw: str | None) -> float:
+    if not raw:
+        return DEFAULT_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT
+    return max(value, 0.0)
+
+
+def _read_port(raw: str | None) -> int | None:
+    if raw is None:
+        return None
+    candidate = str(raw).strip()
+    if not candidate:
+        return None
+    try:
+        port = int(candidate)
+    except ValueError:
+        return None
+    return port if port > 0 else None
+
+
+def _is_local_host(hostname: str) -> bool:
+    normalized = (hostname or "").strip().lower()
+    if not normalized or normalized in {"localhost", "127.0.0.1"}:
+        return True
+    if normalized in {"0.0.0.0", "::"}:
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_loopback
+
+
+def _probe_host(hostname: str) -> str:
+    normalized = (hostname or "").strip()
+    if not normalized or normalized == "0.0.0.0":
+        return "127.0.0.1"
+    if normalized == "::":
+        return "::1"
+    return normalized
+
+
+host = os.environ.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
+port = _read_port(os.environ.get("UI_PORT", "5001"))
+timeout = _read_timeout(os.environ.get("UI_SOCKET_RELEASE_TIMEOUT"))
+
+if port is None:
+    raw_port = os.environ.get("UI_PORT") or "0"
+    print(f"free {host} {raw_port} disabled")
+    raise SystemExit(0)
+
+if not _is_local_host(host):
+    print(f"free {host} {port} remote")
+    raise SystemExit(0)
+
+
+def port_busy() -> bool:
+    try:
+        with socket.create_connection((_probe_host(host), port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+deadline = time.monotonic() + timeout
+sleep_interval = 1.0
+max_sleep = 5.0
+
+while True:
+    if not port_busy():
+        print(f"free {host} {port}")
+        break
+
+    now = time.monotonic()
+    if now >= deadline:
+        print(f"busy {host} {port}")
+        break
+
+    remaining = max(deadline - now, 0.0)
+    time.sleep(min(sleep_interval, remaining))
+    sleep_interval = min(sleep_interval * 1.5, max_sleep)
+PY
+}
+
 acquire_runtime_lock() {
   local output
   output=$("$PYTHON_BIN" - <<'PY'
@@ -952,6 +1049,29 @@ else
   else
     log_info "Event bus port ${SOCKET_HOST}:${SOCKET_PORT} ready"
   fi
+fi
+
+UI_SOCKET_STATE_RAW=$(wait_for_ui_socket_release)
+read -r UI_SOCKET_STATE UI_SOCKET_HOST UI_SOCKET_PORT UI_SOCKET_REASON <<<"$UI_SOCKET_STATE_RAW"
+UI_SOCKET_HOST=${UI_SOCKET_HOST:-${UI_HOST:-127.0.0.1}}
+UI_SOCKET_PORT=${UI_SOCKET_PORT:-${UI_PORT:-5001}}
+UI_SOCKET_REASON=${UI_SOCKET_REASON:-}
+if [[ $UI_SOCKET_STATE == "busy" ]]; then
+  log_warn "UI port ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} is still in use after the grace window; aborting launch"
+  log_warn "Hint: terminate the process bound to ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} or adjust UI_HOST/UI_PORT before retrying"
+  exit $EXIT_SOCKET
+else
+  case $UI_SOCKET_REASON in
+    remote)
+      log_info "UI port ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} ready (remote endpoint; skipping local socket release verification)"
+      ;;
+    disabled)
+      log_info "UI port ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} check skipped (UI port disabled)"
+      ;;
+    *)
+      log_info "UI port ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} ready"
+      ;;
+  esac
 fi
 
 log_info "Ensuring Redis availability"
