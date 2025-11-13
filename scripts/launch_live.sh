@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Environment overrides:
+#   LAUNCH_LIVE_SKIP_PIP    Skip dependency installation and reuse the existing
+#                           virtual environment (useful for pre-provisioned or
+#                           fully offline setups).
+
 timestamp() {
   date '+%Y-%m-%dT%H:%M:%S%z'
 }
@@ -13,6 +18,37 @@ log_info() {
 log_warn() {
   local msg=$*
   printf '[%s] [launch_live][warn] %s\n' "$(timestamp)" "$msg" >&2
+}
+
+detect_pip_online() {
+  if [[ -n ${PIP_NO_INDEX:-} ]]; then
+    return 1
+  fi
+  if compgen -G "$ROOT_DIR/requirements*.lock" >/dev/null 2>&1; then
+    return 1
+  fi
+  python3 - <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+def check(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+hosts = [
+    ("pypi.org", 443),
+    ("files.pythonhosted.org", 443),
+]
+
+for host, port in hosts:
+    if check(host, port):
+        sys.exit(0)
+
+sys.exit(1)
+PY
 }
 
 EXIT_KEYS=1
@@ -67,7 +103,54 @@ ensure_virtualenv() {
   # shellcheck disable=SC1090
   source "$VENV_DIR/bin/activate"
   DEPS_LOG="$LOG_DIR/deps_install.log"
+  if [[ -n ${LAUNCH_LIVE_SKIP_PIP:-} ]]; then
+    log_info "LAUNCH_LIVE_SKIP_PIP is set; skipping Python dependency installation"
+    return
+  fi
+
+  local offline_mode=1
+  if detect_pip_online; then
+    offline_mode=0
+  fi
+
+  if (( offline_mode )); then
+    log_warn "Offline mode detected; verifying Python dependencies without network access"
+    if "$PIP_BIN" check >/dev/null 2>&1; then
+      log_info "Python dependencies already satisfied; skipping pip install"
+      return
+    fi
+    log_warn "Dependency check failed; attempting offline installation from cached wheels"
+  fi
+
+  local find_links=()
+  if (( offline_mode )); then
+    local pip_cache_dir
+    pip_cache_dir=$("$PIP_BIN" cache dir 2>/dev/null || true)
+    if [[ -n $pip_cache_dir ]]; then
+      if [[ -d $pip_cache_dir/wheels ]]; then
+        find_links+=(--find-links "$pip_cache_dir/wheels")
+      elif [[ -d $pip_cache_dir ]]; then
+        find_links+=(--find-links "$pip_cache_dir")
+      fi
+    fi
+  fi
+
   log_info "Installing Python dependencies (see $DEPS_LOG for details)"
+  if (( offline_mode )); then
+    {
+      "$PIP_BIN" install --no-index "${find_links[@]}" -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-tests.txt" \
+        "jsonschema[format-nongpl]==4.23.0"
+    } 2>&1 | tee "$DEPS_LOG" >/dev/null
+    if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
+      log_warn "Failed to install Python dependencies (see $DEPS_LOG)"
+      exit $EXIT_DEPS
+    fi
+    if ! "$PIP_BIN" check >/dev/null 2>&1; then
+      log_warn "Offline installation succeeded but dependency check still reports issues"
+    fi
+    return
+  fi
+
   {
     "$PIP_BIN" install -U pip setuptools wheel &&
       "$PIP_BIN" install -U -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-tests.txt" \
