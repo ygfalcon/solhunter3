@@ -838,6 +838,30 @@ async def test_start_agents_aborts_when_wallet_verification_fails(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_start_agents_reports_startup_failure(monkeypatch):
+    published: list[tuple[str, bool, str]] = []
+
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        published.append((stage, ok, detail))
+
+    async def failing_startup(*_args, **_kwargs):
+        raise RuntimeError("startup exploded")
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.perform_startup_async", failing_startup
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await orch.start_agents()
+
+    assert "startup exploded" in str(excinfo.value)
+    assert ("agents:startup", False, "startup exploded") in published
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_errors_when_default_agents_missing(monkeypatch, caplog):
     caplog.set_level("ERROR")
 
