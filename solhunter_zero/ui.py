@@ -65,6 +65,23 @@ else:  # pragma: no cover - metrics optional
     _WS_QUEUE_DROP_TOTAL = None
 
 
+def _ensure_env_default(name: str, default: str) -> None:
+    """Apply a default environment variable when it is not already set."""
+
+    current = os.environ.get(name)
+    if current is None or not str(current).strip():
+        os.environ[name] = default
+        log.debug("Environment default %s=%s applied", name, default)
+        return
+
+    log.info(
+        "Environment variable %s already set to %s; skipping default %s",
+        name,
+        current,
+        default,
+    )
+
+
 def _bootstrap_ui_environment() -> None:
     """Ensure the live trading environment defaults are loaded once."""
 
@@ -73,9 +90,9 @@ def _bootstrap_ui_environment() -> None:
         return
 
     load_production_env()
-    os.environ.setdefault("SOLHUNTER_MODE", "live")
-    os.environ.setdefault("BROKER_CHANNEL", "solhunter-events-v3")
-    os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")
+    _ensure_env_default("SOLHUNTER_MODE", "live")
+    _ensure_env_default("BROKER_CHANNEL", "solhunter-events-v3")
+    _ensure_env_default("REDIS_URL", "redis://localhost:6379/1")
     _ENV_BOOTSTRAPPED = True
 
 
