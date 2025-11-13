@@ -212,7 +212,20 @@ class DiscoveryStage:
         """Persist the upstream cursor so discovery can resume on restart."""
 
         if self._kv:
-            await self._kv.set(discovery_cursor_key(), cursor)
+            try:
+                await self._kv.set(discovery_cursor_key(), cursor)
+            except Exception:  # pragma: no cover - defensive
+                log.exception("Failed to persist discovery cursor")
+                was_open = self._breaker.is_open
+                self._record_failure()
+                breaker_opened = not was_open and self._breaker.is_open
+                if not breaker_opened:
+                    cooldown = getattr(self._breaker, "cooldown_sec", 0.0)
+                    if cooldown <= 0:
+                        cooldown = 60.0
+                    self._breaker.open_for(cooldown)
+                    if not was_open and self._breaker.is_open:
+                        self._metrics.breaker_openings += 1
 
     async def load_cursor(self) -> str | None:
         if not self._kv:
