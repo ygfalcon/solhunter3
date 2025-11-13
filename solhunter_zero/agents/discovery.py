@@ -7,7 +7,7 @@ import logging
 import os
 import time
 import urllib.parse
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Mapping
 
 from .. import config
 from ..token_aliases import canonical_mint, validate_mint
@@ -27,6 +27,7 @@ from ..scanner_onchain import scan_tokens_onchain
 from ..schemas import RuntimeLog
 from ..news import fetch_token_mentions_async
 from ..url_helpers import as_websocket_url
+from ..token_discovery import compute_score_from_features, get_scoring_context
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ _CACHE: dict[str, object] = {
     "limit": 0,
     "method": "",
     "rpc_identity": "",
+    "details": {},
 }
 
 _CACHE_LOCK = asyncio.Lock()
@@ -281,6 +283,126 @@ class DiscoveryAgent:
     # ------------------------------------------------------------------
     # Internal wiring helpers
     # ------------------------------------------------------------------
+    async def _cache_snapshot(
+        self,
+    ) -> tuple[List[str], Dict[str, Dict[str, Any]], float, int, str, str]:
+        async with _CACHE_LOCK:
+            tokens_raw = _CACHE.get("tokens")
+            details_raw = _CACHE.get("details")
+            cache_ts = float(_CACHE.get("ts", 0.0))
+            cache_limit = int(_CACHE.get("limit", 0))
+            cache_method = str(_CACHE.get("method") or "").lower()
+            cache_identity = str(_CACHE.get("rpc_identity") or "")
+
+        tokens = list(tokens_raw) if isinstance(tokens_raw, list) else []
+        details = self._normalise_cache_details(details_raw)
+        return tokens, details, cache_ts, cache_limit, cache_method, cache_identity
+
+    @staticmethod
+    def _normalise_cache_details(payload: Any) -> Dict[str, Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return {}
+
+        normalised: Dict[str, Dict[str, Any]] = {}
+        for key, raw in payload.items():
+            if not isinstance(key, str) or not isinstance(raw, dict):
+                continue
+            canonical = canonical_mint(key)
+            if not canonical or not validate_mint(canonical):
+                continue
+            entry = dict(raw)
+            entry.pop("cached", None)
+            entry.pop("cache_stale", None)
+            normalised[canonical] = entry
+        return normalised
+
+    def _prepare_cache_details(
+        self, details: Dict[str, Dict[str, Any]] | None
+    ) -> Dict[str, Dict[str, Any]]:
+        if not details:
+            return {}
+
+        payload: Dict[str, Dict[str, Any]] = {}
+        for key, raw in details.items():
+            if not isinstance(key, str) or not isinstance(raw, dict):
+                continue
+            canonical = canonical_mint(key)
+            if not canonical or not validate_mint(canonical):
+                continue
+            entry = dict(raw)
+            entry.pop("cached", None)
+            entry.pop("cache_stale", None)
+            sources = self._source_set(entry.get("sources"))
+            if "sources" in entry:
+                entry["sources"] = sorted(sources) if sources else []
+            payload[canonical] = entry
+        return payload
+
+    def _hydrate_cached_details(
+        self,
+        payload: Dict[str, Dict[str, Any]] | None,
+        *,
+        stale: bool,
+        tokens: Iterable[str] | None = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        if not payload:
+            return {}
+
+        wanted: set[str] | None = None
+        if tokens is not None:
+            wanted = set()
+            for token in tokens:
+                if not isinstance(token, str):
+                    continue
+                canonical = canonical_mint(token)
+                if canonical and validate_mint(canonical):
+                    wanted.add(canonical)
+
+        try:
+            bias, weights = get_scoring_context()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.debug("Failed to load scoring weights: %s", exc)
+            bias = None
+            weights = None
+
+        hydrated: Dict[str, Dict[str, Any]] = {}
+        for key, raw in payload.items():
+            if not isinstance(key, str) or not isinstance(raw, dict):
+                continue
+            canonical = canonical_mint(key)
+            if not canonical or not validate_mint(canonical):
+                continue
+            if wanted is not None and canonical not in wanted:
+                continue
+            entry = dict(raw)
+            sources = self._source_set(entry.get("sources"))
+            sources.add("cache")
+            if stale:
+                sources.add("cache:stale")
+            entry["sources"] = sources
+            entry["cached"] = True
+            entry["cache_stale"] = bool(stale)
+
+            features = entry.get("score_features")
+            if isinstance(features, Mapping) and bias is not None and weights is not None:
+                try:
+                    score, breakdown, top = compute_score_from_features(
+                        features,
+                        bias=bias,
+                        weights=weights,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.debug(
+                        "Failed to recompute cached score for %s: %s", canonical, exc
+                    )
+                else:
+                    entry["score"] = float(score)
+                    entry["score_breakdown"] = breakdown
+                    entry["top_features"] = top
+
+            hydrated[canonical] = entry
+        return hydrated
+
     def _resolve_ws_url(self) -> Optional[str]:
         """Derive and cache a websocket RPC endpoint."""
 
@@ -333,22 +455,26 @@ class DiscoveryAgent:
         else:
             active_method = requested_method
         current_rpc_identity = _rpc_identity(self.rpc_url)
-        async with _CACHE_LOCK:
-            cached_tokens_raw = _CACHE.get("tokens")
-            cache_limit = int(_CACHE.get("limit", 0))
-            cached_method = (_CACHE.get("method") or "").lower()
-            cached_identity = str(_CACHE.get("rpc_identity") or "")
-            cache_ts = float(_CACHE.get("ts", 0.0))
-
-        cached_tokens = (
-            list(cached_tokens_raw)
-            if isinstance(cached_tokens_raw, list)
-            else []
-        )
+        (
+            cached_tokens,
+            cached_details_payload,
+            cache_ts,
+            cache_limit,
+            cached_method,
+            cached_identity,
+        ) = await self._cache_snapshot()
         identity_matches = bool(
             (not cached_identity and not current_rpc_identity)
             or cached_identity == current_rpc_identity
         )
+        cache_age = now - cache_ts if cache_ts > 0.0 else float("inf")
+        cache_stale = ttl <= 0 or cache_age >= ttl
+        cache_method_matches = (
+            not method_override
+            or cached_method == active_method
+            or not cached_method
+        )
+        consider_cache = bool(cached_tokens) and cache_method_matches and identity_matches
         if offline and not method_override:
             offline_source = "fallback"
             if token_file:
@@ -362,17 +488,27 @@ class DiscoveryAgent:
             else:
                 tokens = self._fallback_tokens()
                 fallback_reason = "cache" if tokens else ""
+                base_details: Dict[str, Dict[str, Any]] = {}
                 if tokens:
                     offline_source = "cache"
+                    base_details = self._hydrate_cached_details(
+                        cached_details_payload,
+                        stale=cache_stale,
+                        tokens=tokens,
+                    )
                 else:
                     offline_source = "static"
                     tokens = self._static_fallback_tokens()
                     if tokens:
                         fallback_reason = "static"
                 details = (
-                    self._annotate_fallback_details(tokens, None, reason=fallback_reason)
+                    self._annotate_fallback_details(
+                        tokens,
+                        base_details or None,
+                        reason=fallback_reason,
+                    )
                     if tokens and fallback_reason
-                    else {}
+                    else base_details if base_details else {}
                 )
             tokens = self._normalise(tokens)
             tokens, details = await self._apply_social_mentions(
@@ -401,21 +537,32 @@ class DiscoveryAgent:
                 cached_identity,
                 current_rpc_identity,
             )
-        if (
-            ttl > 0
-            and cached_tokens
-            and now - cache_ts < ttl
-            and (not method_override or cached_method == active_method or not cached_method)
-            and identity_matches
-        ):
+        cache_ready = (
+            consider_cache
+            and not cache_stale
+            and (
+                (cache_limit and cache_limit >= self.limit)
+                or len(cached_tokens) >= self.limit
+            )
+        )
+        if cache_ready:
+            payload = cached_tokens[: self.limit]
+            details = self._hydrate_cached_details(
+                cached_details_payload,
+                stale=False,
+                tokens=payload,
+            )
             if cache_limit and cache_limit >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
-                self.last_fallback_used = False
-                return cached_tokens[: self.limit]
-            if len(cached_tokens) >= self.limit:
-                logger.debug("DiscoveryAgent: returning cached tokens (limit=%s)", self.limit)
-                self.last_fallback_used = False
-                return cached_tokens[: self.limit]
+            else:
+                logger.debug(
+                    "DiscoveryAgent: returning cached tokens (limit=%s)", self.limit
+                )
+            self.last_tokens = list(payload)
+            self.last_details = details
+            self.last_method = cached_method or active_method
+            self.last_fallback_used = False
+            return list(payload)
 
         attempts = self.max_attempts
         details: Dict[str, Dict[str, Any]] = {}
@@ -463,14 +610,21 @@ class DiscoveryAgent:
         if not tokens:
             tokens = self._fallback_tokens()
             fallback_reason = "cache" if tokens else ""
+            base_details: Dict[str, Dict[str, Any]] = {}
+            if tokens and fallback_reason == "cache":
+                base_details = self._hydrate_cached_details(
+                    cached_details_payload,
+                    stale=cache_stale,
+                    tokens=tokens,
+                )
             if not tokens:
                 tokens = self._static_fallback_tokens()
                 if tokens:
                     fallback_reason = "static"
             details = (
-                self._annotate_fallback_details(tokens, None, reason=fallback_reason)
+                self._annotate_fallback_details(tokens, base_details, reason=fallback_reason)
                 if tokens and fallback_reason
-                else {}
+                else base_details if base_details else {}
             )
             fallback_used = bool(tokens)
 
@@ -497,6 +651,7 @@ class DiscoveryAgent:
                 _CACHE["limit"] = self.limit
                 _CACHE["method"] = active_method
                 _CACHE["rpc_identity"] = current_rpc_identity
+                _CACHE["details"] = self._prepare_cache_details(details)
         elif fallback_used:
             async with _CACHE_LOCK:
                 # Mark the cache as expired so the next call performs live discovery.
@@ -765,17 +920,38 @@ class DiscoveryAgent:
         logger.warning("All discovery sources empty; returning fallback tokens")
         fallback_tokens = self._fallback_tokens()
         fallback_reason = "cache" if fallback_tokens else ""
-        cached = _CACHE.get("tokens")
-        if not fallback_tokens and isinstance(cached, list) and cached:
-            fallback_tokens = self._static_fallback_tokens()
-            if fallback_tokens:
-                fallback_reason = "static"
+        base_details: Dict[str, Dict[str, Any]] = {}
+        if fallback_tokens and fallback_reason == "cache":
+            (
+                _,
+                cached_details_payload,
+                cache_ts,
+                _cache_limit,
+                _cache_method,
+                _cache_identity,
+            ) = await self._cache_snapshot()
+            cache_age = time.time() - cache_ts if cache_ts > 0.0 else float("inf")
+            cache_stale = self.cache_ttl <= 0 or cache_age >= self.cache_ttl
+            base_details = self._hydrate_cached_details(
+                cached_details_payload,
+                stale=cache_stale,
+                tokens=fallback_tokens,
+            )
+        elif not fallback_tokens:
+            cached_tokens, _, _, _, _, _ = await self._cache_snapshot()
+            if cached_tokens:
+                fallback_tokens = self._static_fallback_tokens()
+                if fallback_tokens:
+                    fallback_reason = "static"
         fallback = [tok for tok in fallback_tokens if not self._should_skip_token(tok)]
-        details: Dict[str, Dict[str, Any]]
         if fallback and fallback_reason:
-            details = self._annotate_fallback_details(fallback, None, reason=fallback_reason)
+            details = self._annotate_fallback_details(
+                fallback,
+                base_details or None,
+                reason=fallback_reason,
+            )
         else:
-            details = {}
+            details = base_details if base_details else {}
         return fallback, details
 
     def _normalise(self, tokens: Iterable[Any]) -> List[str]:
