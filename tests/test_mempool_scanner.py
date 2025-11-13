@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import pytest
 
 import types
 import sys
@@ -463,6 +464,41 @@ def test_stream_ranked_with_depth(monkeypatch):
 
     first, second = asyncio.run(run())
     assert second["combined_score"] > first["combined_score"]
+
+
+def test_stream_ranked_with_depth_timeout(monkeypatch):
+    closed = False
+
+    async def fake_gen(url, **_):
+        nonlocal closed
+        try:
+            yield {
+                "address": "tok1",
+                "combined_score": 1.0,
+                "momentum": 1.0,
+                "whale_activity": 0.0,
+            }
+            await asyncio.Event().wait()
+        finally:
+            closed = True
+
+    monkeypatch.setattr(mp_scanner, "stream_ranked_mempool_tokens", fake_gen)
+    monkeypatch.setattr(mp_scanner, "MEMPOOL_DEPTH_STREAM_TIMEOUT", 0.05)
+
+    import solhunter_zero.order_book_ws as obws
+
+    monkeypatch.setattr(obws, "snapshot", lambda _t: (5.0, 0.0, 0.0))
+
+    async def run():
+        gen = mp_scanner.stream_ranked_mempool_tokens_with_depth("rpc")
+        first = await asyncio.wait_for(anext(gen), timeout=0.1)
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(gen), timeout=0.2)
+        return first
+
+    first = asyncio.run(run())
+    assert first["depth"] == 5.0
+    assert closed is True
 
 
 def test_default_concurrency(monkeypatch):
