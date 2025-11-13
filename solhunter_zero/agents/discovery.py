@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 import time
@@ -518,31 +519,33 @@ class DiscoveryAgent:
                 kwargs["limit"] = self.limit
             if self.ws_url:
                 kwargs["ws_url"] = self.ws_url
-            call_kwargs = dict(kwargs)
+            try:
+                signature = inspect.signature(merge_sources)
+            except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+                logger.debug("Failed to inspect merge_sources signature: %s", exc)
+                supported_params = set(kwargs)
+            else:
+                supported_params = {
+                    name
+                    for name, param in signature.parameters.items()
+                    if name != "rpc_url"
+                    and param.kind
+                    in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)
+                }
+            call_kwargs = {
+                name: value
+                for name, value in kwargs.items()
+                if name in supported_params
+            }
             merge_error = False
-            results: Any = []
-            while True:
-                try:
-                    try:
-                        results = await merge_sources(self.rpc_url, **call_kwargs)
-                        break
-                    except TypeError as exc:
-                        message = str(exc)
-                        handled = False
-                        for key in ("ws_url", "limit"):
-                            if key in call_kwargs and key in message:
-                                call_kwargs.pop(key, None)
-                                handled = True
-                                break
-                        if not handled:
-                            raise
-                except TypeError:
-                    raise
-                except Exception as exc:
-                    merge_error = True
-                    logger.warning("Websocket merge failed: %s", exc)
-                    results = []
-                    break
+            try:
+                results = await merge_sources(self.rpc_url, **call_kwargs)
+            except TypeError:
+                raise
+            except Exception as exc:
+                merge_error = True
+                logger.warning("Websocket merge failed: %s", exc)
+                results = []
             if isinstance(results, list) and len(results) > self.limit:
                 results = results[: self.limit]
             if merge_error:
