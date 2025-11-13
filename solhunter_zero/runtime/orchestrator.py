@@ -504,6 +504,7 @@ class RuntimeOrchestrator:
         threads: dict[str, Any] = {}
         ws_messages: list[str] = []
         ws_error: str | None = None
+        ws_detail = ""
         if callable(_start_ui_ws):
             class _WsCaptureHandler(logging.Handler):
                 def __init__(self) -> None:
@@ -590,6 +591,8 @@ class RuntimeOrchestrator:
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
         await self._publish_stage("ui:ws", ws_ok, ws_detail)
+        if not ws_ok and not ws_optional:
+            raise RuntimeError(f"UI websocket startup failed: {ws_detail or 'unknown error'}")
         if ws_ok:
             status = "ok"
             if ws_detail.lower().startswith("degraded"):
@@ -622,7 +625,10 @@ class RuntimeOrchestrator:
                 requested_port = 0
             return host, requested_port
 
-        if self.run_http and not http_disabled:
+        http_detail = ""
+        http_ok = True
+        http_required = self.run_http and not http_disabled
+        if http_required:
             # Start Flask server in a background thread using werkzeug only if available.
             import threading
 
@@ -729,9 +735,14 @@ class RuntimeOrchestrator:
                     False,
                     "ui server did not report readiness within timeout",
                 )
+                http_ok = False
+                http_detail = "ui server did not report readiness within timeout"
             else:
                 if isinstance(result, Exception):
-                    await self._publish_stage("ui:http", False, str(result))
+                    detail_text = str(result) or result.__class__.__name__
+                    await self._publish_stage("ui:http", False, detail_text)
+                    http_ok = False
+                    http_detail = detail_text
                 else:
                     actual_port = str(result)
                     ready_wait = min(5.0, wait_timeout)
@@ -742,6 +753,8 @@ class RuntimeOrchestrator:
                         True,
                         f"host={os.getenv('UI_HOST','127.0.0.1')} port={actual_port}",
                     )
+                    http_ok = True
+                    http_detail = f"host={os.getenv('UI_HOST','127.0.0.1')} port={actual_port}"
             threads["http"] = {
                 "thread": t,
                 "shutdown_event": shutdown_event,
@@ -762,6 +775,11 @@ class RuntimeOrchestrator:
                 True,
                 f"disabled host={host} port={port_detail}",
             )
+            http_ok = True
+            http_detail = f"disabled host={host} port={port_detail}"
+
+        if http_required and not http_ok:
+            raise RuntimeError(f"UI HTTP server failed: {http_detail or 'unknown error'}")
 
     async def start_agents(self) -> None:
         # Use existing startup path to ensure consistent connectivity + depth_service

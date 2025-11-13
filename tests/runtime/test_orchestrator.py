@@ -4,6 +4,7 @@ import threading
 import time
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -55,13 +56,60 @@ async def test_orchestrator_reports_ui_ws_failure(monkeypatch):
     )
 
     orch = RuntimeOrchestrator(run_http=False)
-    await orch.start_ui()
+    with pytest.raises(RuntimeError) as excinfo:
+        await orch.start_ui()
+    assert "UI websocket startup failed" in str(excinfo.value)
 
     ws_events = [event for event in events if event.get("stage") == "ui:ws"]
     assert ws_events, "expected ui:ws stage emission"
     ui_stage = ws_events[-1]
     assert ui_stage.get("ok") is False
     assert "boom" in str(ui_stage.get("detail"))
+
+
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_start_aborts_on_required_ws_failure(monkeypatch):
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.event_bus.subscribe",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    def fail_ws_start() -> dict[str, object]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        fail_ws_start,
+    )
+
+    start_bus = AsyncMock()
+    start_agents = AsyncMock()
+    monkeypatch.setattr(RuntimeOrchestrator, "start_bus", start_bus)
+    monkeypatch.setattr(RuntimeOrchestrator, "start_agents", start_agents)
+
+    orch = RuntimeOrchestrator(run_http=False)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await orch.start()
+
+    assert "UI websocket startup failed" in str(excinfo.value)
+    assert start_bus.await_count == 0
+    assert start_agents.await_count == 0
 
 
 @pytest.mark.anyio("asyncio")
@@ -132,7 +180,7 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
 
     monkeypatch.setattr(
         "solhunter_zero.runtime.orchestrator._start_ui_ws",
-        lambda: {},
+        lambda: {"events": object()},
     )
 
     shutdown_signal = threading.Event()
@@ -175,6 +223,72 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_orchestrator_start_aborts_on_http_failure(monkeypatch):
+    events: list[tuple[str, bool, str]] = []
+
+    async def fake_publish_stage(self, stage: str, ok: bool, detail: str = "") -> None:
+        events.append((stage, ok, detail))
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_publish_stage", fake_publish_stage)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.event_bus.subscribe",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {"events": object()},
+    )
+
+    def failing_make_server(_host: str, _port: int, _app: object) -> object:
+        raise RuntimeError("http boom")
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.make_server",
+        failing_make_server,
+    )
+
+    start_bus = AsyncMock()
+    start_agents = AsyncMock()
+    monkeypatch.setattr(RuntimeOrchestrator, "start_bus", start_bus)
+    monkeypatch.setattr(RuntimeOrchestrator, "start_agents", start_agents)
+
+    orch = RuntimeOrchestrator(run_http=True)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await orch.start()
+
+    assert "UI HTTP server failed" in str(excinfo.value)
+    assert start_bus.await_count == 0
+    assert start_agents.await_count == 0
+
+    http_events = [event for event in events if event[0] == "ui:http"]
+    assert http_events, "expected ui:http stage emission"
+    assert http_events[-1][1] is False
+    assert "http boom" in http_events[-1][2]
+
+    threads = orch.handles.ui_threads or {}
+    http_thread_info = threads.get("http") if isinstance(threads, dict) else None
+    if isinstance(http_thread_info, dict):
+        thread_obj = http_thread_info.get("thread")
+        if isinstance(thread_obj, threading.Thread):
+            thread_obj.join(timeout=1)
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
     events: list[tuple[str, bool, str]] = []
     ready_calls: list[tuple[str, int]] = []
@@ -204,7 +318,7 @@ async def test_orchestrator_emits_ready_when_http_disabled(monkeypatch):
     )
     monkeypatch.setattr(
         "solhunter_zero.runtime.orchestrator._start_ui_ws",
-        lambda: {},
+        lambda: {"events": object()},
     )
 
     orch = RuntimeOrchestrator(run_http=True)
