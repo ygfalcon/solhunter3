@@ -321,6 +321,76 @@ async def test_orchestrator_http_wait_allows_other_coroutines(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_orchestrator_emits_stage_on_task_failure(monkeypatch):
+    events: list[dict[str, object]] = []
+
+    def capture_publish(topic, payload, *_args, **_kwargs):
+        if topic == "runtime.stage_changed":
+            events.append(payload)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.event_bus.publish",
+        capture_publish,
+    )
+
+    stop_all = AsyncMock()
+    monkeypatch.setattr(RuntimeOrchestrator, "stop_all", stop_all)
+
+    orch = RuntimeOrchestrator(run_http=False)
+
+    async def failing_trading_loop() -> None:
+        raise RuntimeError("trade boom")
+
+    async def failing_discovery_loop() -> None:
+        raise RuntimeError("discovery boom")
+
+    trade_task = asyncio.create_task(failing_trading_loop(), name="trading_loop")
+    discovery_task = asyncio.create_task(
+        failing_discovery_loop(), name="discovery_loop"
+    )
+
+    orch._register_task(trade_task)
+    orch._register_task(discovery_task)
+
+    async def _wait_for(predicate, timeout: float = 1.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            await asyncio.sleep(0)
+        assert predicate(), "condition not met before timeout"
+
+    await _wait_for(
+        lambda: any(
+            event.get("stage") == "agents:loop" and event.get("ok") is False
+            for event in events
+        )
+    )
+    await _wait_for(
+        lambda: any(
+            event.get("stage") == "discovery:loop" and event.get("ok") is False
+            for event in events
+        )
+    )
+
+    trade_events = [
+        event
+        for event in events
+        if event.get("stage") == "agents:loop" and event.get("ok") is False
+    ]
+    assert trade_events, "expected agents:loop failure event"
+    assert "trade boom" in str(trade_events[-1].get("detail"))
+
+    discovery_events = [
+        event
+        for event in events
+        if event.get("stage") == "discovery:loop" and event.get("ok") is False
+    ]
+    assert discovery_events, "expected discovery:loop failure event"
+    assert "discovery boom" in str(discovery_events[-1].get("detail"))
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_start_aborts_on_http_failure(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
@@ -623,6 +693,7 @@ def test_orchestrator_stops_on_resource_budget(monkeypatch):
         assert "cpu" in orch.stop_reason
         assert orch._closed is True
         assert any(stage == "runtime:resource_exit" for stage, _, _ in events)
+        assert any(stage == "agents:loop" and not ok for stage, ok, _ in events)
         assert any(stage == "stop_all" for stage, _, _ in events)
 
     asyncio.run(runner())
