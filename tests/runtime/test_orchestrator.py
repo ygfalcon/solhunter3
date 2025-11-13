@@ -155,6 +155,60 @@ async def test_orchestrator_logs_ui_ws_ready(monkeypatch, caplog):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_orchestrator_normalizes_ws_urls_on_wildcard_host(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    monkeypatch.setenv("UI_HOST", "0.0.0.0")
+
+    ws_urls = {
+        "events": "ws://0.0.0.0:1111/events",
+        "logs": "ws://0.0.0.0:1111/logs",
+        "rl": "ws://0.0.0.0:1111/rl",
+    }
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: ws_urls)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    for key in (
+        "UI_EVENTS_WS",
+        "UI_EVENTS_WS_URL",
+        "UI_WS_URL",
+        "UI_RL_WS",
+        "UI_RL_WS_URL",
+        "UI_LOGS_WS",
+        "UI_LOG_WS_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {"events": object()},
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+    await orch.start_ui()
+
+    ws_logs = [message for message in caplog.messages if message.startswith("UI_WS_READY ")]
+    assert ws_logs, "expected UI_WS_READY log entry"
+    latest = ws_logs[-1]
+    assert "events_ws=ws://127.0.0.1:1111/events" in latest
+    assert "logs_ws=ws://127.0.0.1:1111/logs" in latest
+    assert "rl_ws=ws://127.0.0.1:1111/rl" in latest
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 
@@ -591,6 +645,59 @@ def test_emit_ui_ready_respects_canonical_ui_http_url(monkeypatch, caplog, tmp_p
     assert readiness_logs, "expected UI_READY log entry"
     expected_url = f"https://{detected_host}:8443"
     assert any(f"url={expected_url}" in message for message in readiness_logs)
+    assert captured_urls == [expected_url]
+    assert (tmp_path / "ui_url.txt").read_text(encoding="utf-8") == expected_url
+
+
+def test_emit_ui_ready_normalizes_wildcard_urls(monkeypatch, caplog, tmp_path):
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setenv("UI_HOST", "0.0.0.0")
+    for key in ("UI_PUBLIC_HOST", "PUBLIC_URL_HOST", "UI_EXTERNAL_HOST"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("UI_HTTP_URL", raising=False)
+    monkeypatch.delenv("UI_HTTP_SCHEME", raising=False)
+
+    monkeypatch.setattr(
+        "solhunter_zero.ui.socket.getfqdn", lambda: "", raising=False
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.ui.socket.gethostname", lambda: "", raising=False
+    )
+
+    ws_urls = {
+        "events": "ws://0.0.0.0:6000/events",
+        "logs": "ws://0.0.0.0:6001/logs",
+        "rl": "ws://0.0.0.0:6002/rl",
+    }
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module.get_ws_urls",
+        lambda request_host=None: ws_urls,
+        raising=False,
+    )
+
+    captured_urls: list[str] = []
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._publish_ui_url_to_redis",
+        lambda url: captured_urls.append(url),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._runtime_artifact_dir",
+        lambda: tmp_path,
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+    orch._emit_ui_ready("0.0.0.0", 5000)
+
+    readiness_logs = [message for message in caplog.messages if message.startswith("UI_READY ")]
+    assert readiness_logs, "expected UI_READY log entry"
+    latest = readiness_logs[-1]
+    assert "events_ws=ws://127.0.0.1:6000/events" in latest
+    assert "logs_ws=ws://127.0.0.1:6001/logs" in latest
+    assert "rl_ws=ws://127.0.0.1:6002/rl" in latest
+
+    expected_url = "http://127.0.0.1:5000"
     assert captured_urls == [expected_url]
     assert (tmp_path / "ui_url.txt").read_text(encoding="utf-8") == expected_url
 
