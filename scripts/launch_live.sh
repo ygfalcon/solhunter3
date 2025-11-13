@@ -495,6 +495,68 @@ PY
   fi
 }
 
+run_connectivity_probes() {
+  "$PYTHON_BIN" - <<'PY'
+import asyncio
+import os
+import sys
+
+from solhunter_zero.production import ConnectivityChecker
+
+
+REQUIRED_TARGETS = [
+    ("redis", "Redis"),
+    ("solana-rpc", "Solana RPC"),
+    ("solana-ws", "Solana WebSocket"),
+    ("event-bus", "Event bus"),
+]
+
+
+def _format_result(label: str, result) -> str:
+    if result is None:
+        return f"{label}: missing target"
+    status = "OK" if result.ok else f"FAIL ({result.error or result.status or result.status_code})"
+    latency = f"{result.latency_ms:.1f} ms" if result.latency_ms is not None else "n/a"
+    return f"{label}: {status} → {result.target} ({latency})"
+
+
+async def _run() -> None:
+    checker = ConnectivityChecker()
+    results = await checker.check_all()
+    lookup = {result.name: result for result in results}
+
+    bus_url = os.environ.get("EVENT_BUS_URL")
+    bus_result = None
+    if bus_url:
+        try:
+            bus_result = await checker._probe_ws("event-bus", bus_url)
+        except AttributeError as exc:  # pragma: no cover - defensive
+            print(f"ConnectivityChecker missing WebSocket probe support: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        lookup["event-bus"] = bus_result
+    else:
+        lookup.setdefault("event-bus", None)
+
+    failures: list[str] = []
+    for key, label in REQUIRED_TARGETS:
+        result = lookup.get(key)
+        print(_format_result(label, result))
+        if result is None:
+            failures.append(f"{label} connectivity probe skipped (no target configured)")
+            continue
+        if not result.ok:
+            reason = result.error or result.status or "unavailable"
+            failures.append(f"{label} connectivity check failed: {reason} ({result.target})")
+
+    if failures:
+        print("\n".join(failures), file=sys.stderr)
+        raise SystemExit(1)
+
+
+asyncio.run(_run())
+PY
+}
+
 wait_for_socket_release() {
   "$PYTHON_BIN" - <<'PY'
 import ipaddress
@@ -1220,6 +1282,18 @@ if ! eval "$BUS_EXPORTS"; then
   exit $EXIT_KEYS
 fi
 log_info "RUNTIME_MANIFEST channel=$BROKER_CHANNEL redis=$REDIS_URL mint_stream=$MINT_STREAM_REDIS_URL mempool=$MEMPOOL_STREAM_REDIS_URL amm_watch=$AMM_WATCH_REDIS_URL bus=$EVENT_BUS_URL"
+
+log_info "Running connectivity probes"
+if ! CONNECTIVITY_REPORT=$(run_connectivity_probes 2>&1); then
+  log_warn "Connectivity probes failed:\n$CONNECTIVITY_REPORT"
+  exit $EXIT_CONNECTIVITY
+fi
+while IFS= read -r line; do
+  if [[ -n $line ]]; then
+    log_info "Connectivity probe: $line"
+  fi
+done <<<"$CONNECTIVITY_REPORT"
+log_info "Connectivity probes succeeded"
 
 SOCKET_STATE_RAW=$(wait_for_socket_release)
 read -r SOCKET_STATE SOCKET_HOST SOCKET_PORT SOCKET_REMOTE <<<"$SOCKET_STATE_RAW"
