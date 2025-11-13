@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
@@ -29,6 +30,31 @@ def _active_state() -> ui.UIState:
     state = ui._get_active_ui_state()
     assert state is not None
     return state
+
+
+def test_bootstrap_ui_environment_respects_existing(monkeypatch, caplog):
+    monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
+    monkeypatch.setenv("SOLHUNTER_MODE", "paper")
+    monkeypatch.setenv("BROKER_CHANNEL", "custom-channel")
+    monkeypatch.setenv("REDIS_URL", "redis://example")
+
+    caplog.set_level(logging.INFO, logger="solhunter_zero.ui")
+    ui._bootstrap_ui_environment()
+
+    try:
+        assert os.environ["SOLHUNTER_MODE"] == "paper"
+        assert os.environ["BROKER_CHANNEL"] == "custom-channel"
+        assert os.environ["REDIS_URL"] == "redis://example"
+
+        skip_messages = [
+            record
+            for record in caplog.records
+            if record.name == "solhunter_zero.ui"
+            and "skipping default" in record.getMessage()
+        ]
+        assert len(skip_messages) == 3
+    finally:
+        ui._teardown_ui_environment()
 
 
 def test_create_app_proxy_fix_opt_in(monkeypatch):
