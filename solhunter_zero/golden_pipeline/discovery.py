@@ -111,15 +111,27 @@ class DiscoveryStage:
                     deduped = True
                 elif self._kv:
                     key = discovery_seen_key(candidate.mint)
-                    stored = await self._kv.set_if_absent(
-                        key,
-                        "1",
-                        ttl=self._dedupe_ttl,
-                    )
-                    if not stored:
+                    stored: bool | None = None
+                    try:
+                        stored = await self._kv.set_if_absent(
+                            key,
+                            "1",
+                            ttl=self._dedupe_ttl,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Persistent dedupe store rejected key %s", key
+                        )
+                        self._record_failure()
+                        self._breaker.open_for(self._breaker.cooldown_sec)
+                    if stored is False:
                         deduped = True
-                    else:
                         self._seen.add(candidate.mint, self._dedupe_ttl)
+                    elif stored:
+                        self._seen.add(candidate.mint, self._dedupe_ttl)
+                    else:
+                        if not self._seen.add(candidate.mint, self._dedupe_ttl):
+                            deduped = True
                 else:
                     if not self._seen.add(candidate.mint, self._dedupe_ttl):
                         deduped = True
