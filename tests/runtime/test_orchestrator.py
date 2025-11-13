@@ -5,6 +5,8 @@ import time
 import types
 from pathlib import Path
 
+from contextlib import suppress
+
 import pytest
 
 import tests.runtime.test_trading_runtime  # ensure optional deps stubbed
@@ -172,6 +174,93 @@ async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
         thread_obj = http_thread_info.get("thread")
         if isinstance(thread_obj, threading.Thread):
             thread_obj.join(timeout=1)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_http_waits_do_not_block_event_loop(monkeypatch):
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {},
+    )
+
+    shutdown_signal = threading.Event()
+
+    class DummyServer:
+        daemon_threads = True
+
+        def serve_forever(self) -> None:
+            shutdown_signal.wait()
+
+        def shutdown(self) -> None:
+            shutdown_signal.set()
+
+        def server_close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.make_server",
+        lambda _host, _port, _app: DummyServer(),
+    )
+
+    emit_called = threading.Event()
+    release_emit = threading.Event()
+
+    def blocking_emit(self, host: str, port: int) -> None:
+        emit_called.set()
+        release_emit.wait(timeout=5.0)
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_emit_ui_ready", blocking_emit)
+
+    loop_marker = asyncio.Event()
+
+    async def background_task() -> None:
+        await asyncio.sleep(0.01)
+        loop_marker.set()
+
+    orch = RuntimeOrchestrator(run_http=True)
+    start_task = asyncio.create_task(orch.start_ui())
+    bg_task: asyncio.Task[None] | None = None
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(emit_called.wait, 1.0), timeout=2.0)
+        bg_task = asyncio.create_task(background_task())
+        await asyncio.wait_for(loop_marker.wait(), timeout=0.5)
+        release_emit.set()
+        await asyncio.wait_for(start_task, timeout=2.0)
+        if bg_task is not None:
+            await bg_task
+    finally:
+        release_emit.set()
+        shutdown_signal.set()
+        threads = orch.handles.ui_threads or {}
+        http_thread_info = threads.get("http") if isinstance(threads, dict) else None
+        if isinstance(http_thread_info, dict):
+            thread_obj = http_thread_info.get("thread")
+            if isinstance(thread_obj, threading.Thread):
+                thread_obj.join(timeout=1)
+        if bg_task is not None:
+            with suppress(asyncio.CancelledError):
+                if not bg_task.done():
+                    bg_task.cancel()
+                await bg_task
+        with suppress(asyncio.CancelledError):
+            if not start_task.done():
+                start_task.cancel()
+            await start_task
 
 
 @pytest.mark.anyio("asyncio")

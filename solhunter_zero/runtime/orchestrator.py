@@ -709,6 +709,15 @@ class RuntimeOrchestrator:
             )
             t.start()
             actual_port: str | None = None
+
+            def _cleanup_http_thread() -> None:
+                shutdown_event.set()
+                with suppress(Exception):
+                    if self.handles.ui_server is not None:
+                        self.handles.ui_server.shutdown()
+                if t.is_alive():
+                    with suppress(Exception):
+                        t.join(timeout=1)
             try:
                 wait_env = os.getenv("UI_HTTP_START_TIMEOUT", "30")
                 try:
@@ -717,18 +726,17 @@ class RuntimeOrchestrator:
                     wait_timeout = 30.0
                 if wait_timeout <= 0:
                     wait_timeout = 30.0
-                result = port_queue.get(timeout=wait_timeout)
-            except Empty:
-                shutdown_event.set()
-                with suppress(Exception):
-                    if self.handles.ui_server is not None:
-                        self.handles.ui_server.shutdown()
-                t.join(timeout=1)
-                await self._publish_stage(
-                    "ui:http",
-                    False,
-                    "ui server did not report readiness within timeout",
-                )
+                try:
+                    result = await asyncio.to_thread(port_queue.get, True, wait_timeout)
+                except Empty:
+                    raise TimeoutError("ui server did not report readiness within timeout")
+            except asyncio.CancelledError:
+                _cleanup_http_thread()
+                raise
+            except TimeoutError as exc:
+                _cleanup_http_thread()
+                await self._publish_stage("ui:http", False, str(exc))
+                raise
             else:
                 if isinstance(result, Exception):
                     await self._publish_stage("ui:http", False, str(result))
@@ -736,7 +744,16 @@ class RuntimeOrchestrator:
                     actual_port = str(result)
                     ready_wait = min(5.0, wait_timeout)
                     if ready_wait > 0:
-                        ready_event.wait(timeout=ready_wait)
+                        try:
+                            ready_ok = await asyncio.to_thread(ready_event.wait, ready_wait)
+                        except asyncio.CancelledError:
+                            _cleanup_http_thread()
+                            raise
+                        if not ready_ok:
+                            detail = "ui server readiness event timed out"
+                            _cleanup_http_thread()
+                            await self._publish_stage("ui:http", False, detail)
+                            raise TimeoutError(detail)
                     await self._publish_stage(
                         "ui:http",
                         True,
