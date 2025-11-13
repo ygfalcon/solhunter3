@@ -85,6 +85,11 @@ LOG_DIR="$ARTIFACT_DIR/logs"
 mkdir -p "$ARTIFACT_DIR" "$LOG_DIR"
 log_info "Runtime artifacts will be written to $ARTIFACT_DIR (logs in $LOG_DIR)"
 
+RUNTIME_CACHE_DIR="$RUNTIME_ARTIFACT_ROOT/.cache"
+RUNTIME_FS_LOCK="$RUNTIME_CACHE_DIR/runtime.lock"
+RUNTIME_LOCK_ATTEMPTED=0
+RUNTIME_LOCK_ACQUIRED=0
+
 # Ensure the repository root is always importable when invoking helper scripts.
 # "launch_live.sh" may be executed before the package is installed (e.g. from a
 # fresh clone), so python invocations need the project root on PYTHONPATH so
@@ -1279,6 +1284,15 @@ register_child() {
 
 cleanup() {
   release_runtime_lock
+  if (( RUNTIME_LOCK_ATTEMPTED == 1 && RUNTIME_LOCK_ACQUIRED == 0 )); then
+    if [[ -e $RUNTIME_FS_LOCK ]]; then
+      if rm -f "$RUNTIME_FS_LOCK"; then
+        log_info "Removed stale runtime filesystem lock ($RUNTIME_FS_LOCK)"
+      else
+        log_warn "Runtime filesystem lock $RUNTIME_FS_LOCK could not be removed automatically; remove it manually if the runtime is not running"
+      fi
+    fi
+  fi
   if [[ -z ${CHILD_PIDS+x} ]]; then
     return
   fi
@@ -1290,10 +1304,13 @@ cleanup() {
   done
 }
 
-acquire_runtime_lock
 trap cleanup EXIT
 trap 'cleanup; exit $EXIT_HEALTH' ERR
 trap 'cleanup; exit 0' INT TERM
+
+RUNTIME_LOCK_ATTEMPTED=1
+acquire_runtime_lock
+RUNTIME_LOCK_ACQUIRED=1
 
 ORIG_SOLHUNTER_MODE=${SOLHUNTER_MODE-}
 ORIG_MODE=${MODE-}
