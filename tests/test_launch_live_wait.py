@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import socket
@@ -463,6 +464,59 @@ def test_normalize_bus_configuration_exports() -> None:
     assert exports["MEMPOOL_STREAM_BROKER_CHANNEL"] == "test-channel"
     assert exports["AMM_WATCH_BROKER_CHANNEL"] == "test-channel"
     assert "RUNTIME_MANIFEST channel=test-channel" in completed.stderr
+
+
+def test_normalize_bus_configuration_uses_json_urls() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    normalize_fn = _extract_function(source, "normalize_bus_configuration")
+
+    json_urls = json.dumps(
+        ["redis://cache.example:6380/1", "redis://cache.example:6380/1"]
+    )
+
+    bash_script = dedent(
+        """
+        set -euo pipefail
+        PYTHON_BIN=%(python)s
+        export BROKER_CHANNEL='json-channel'
+        export REDIS_URL='cache.example:6380/1'
+        export MINT_STREAM_REDIS_URL='cache.example:6380/1'
+        export MEMPOOL_STREAM_REDIS_URL='cache.example:6380/1'
+        export AMM_WATCH_REDIS_URL='cache.example:6380/1'
+        export BROKER_URL='cache.example:6380/1'
+        export BROKER_URLS_JSON=%(json)s
+        %(normalize)s
+        normalize_bus_configuration
+        """
+        % {
+            "python": shlex.quote(sys.executable),
+            "json": shlex.quote(json_urls),
+            "normalize": normalize_fn,
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=os.environ.copy(),
+    )
+
+    exports: dict[str, str] = {}
+    for line in completed.stdout.strip().splitlines():
+        assert line.startswith("export "), line
+        assignment = shlex.split(line[len("export "):])[0]
+        key, value = assignment.split("=", 1)
+        exports[key] = value
+
+    assert exports["EVENT_BUS_URL"] == "redis://cache.example:6380/1"
+    assert exports["BROKER_URLS"] == (
+        "redis://cache.example:6380/1,redis://cache.example:6380/1"
+    )
+    assert "bus=redis://cache.example:6380/1" in completed.stderr
 
 
 def test_normalize_bus_configuration_preserves_credentials_and_redacts_logs() -> None:
