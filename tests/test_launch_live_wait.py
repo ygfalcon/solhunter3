@@ -279,6 +279,81 @@ def test_wait_for_socket_release_skips_remote_hosts() -> None:
     assert "free example.com 8779 remote" in completed.stdout
 
 
+def test_launch_live_ui_port_busy_exit() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "wait_for_ui_socket_release")
+    )
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_sock.bind(("127.0.0.1", 0))
+        server_sock.listen(1)
+        host, port = server_sock.getsockname()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHON_BIN": sys.executable,
+                "UI_HOST": host,
+                "UI_PORT": str(port),
+                "UI_SOCKET_RELEASE_TIMEOUT": "0",
+            }
+        )
+
+        bash_script = (
+            "set -euo pipefail\n"
+            "EXIT_SOCKET=7\n"
+            + functions
+            + dedent(
+                """
+        UI_SOCKET_STATE_RAW=$(wait_for_ui_socket_release)
+        read -r UI_SOCKET_STATE UI_SOCKET_HOST UI_SOCKET_PORT UI_SOCKET_REASON <<<"$UI_SOCKET_STATE_RAW"
+        UI_SOCKET_HOST=${UI_SOCKET_HOST:-${UI_HOST:-127.0.0.1}}
+        UI_SOCKET_PORT=${UI_SOCKET_PORT:-${UI_PORT:-5001}}
+        UI_SOCKET_REASON=${UI_SOCKET_REASON:-}
+        if [[ $UI_SOCKET_STATE == "busy" ]]; then
+          log_warn "UI port ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} is still in use after the grace window; aborting launch"
+          log_warn "Hint: terminate the process bound to ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} or adjust UI_HOST/UI_PORT before retrying"
+          exit $EXIT_SOCKET
+        else
+          case $UI_SOCKET_REASON in
+            remote)
+              log_info "UI port ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} ready (remote endpoint; skipping local socket release verification)"
+              ;;
+            disabled)
+              log_info "UI port ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} check skipped (UI port disabled)"
+              ;;
+            *)
+              log_info "UI port ${UI_SOCKET_HOST}:${UI_SOCKET_PORT} ready"
+              ;;
+          esac
+        fi
+        """
+            )
+        )
+
+        completed = subprocess.run(
+            ["bash", "-c", bash_script],
+            check=False,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert completed.returncode == 7
+        assert "UI port" in completed.stderr
+        assert "Hint: terminate the process bound" in completed.stderr
+    finally:
+        server_sock.close()
+
+
 def test_normalize_bus_configuration_exports() -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
