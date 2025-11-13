@@ -26,8 +26,13 @@ from ..scanner_onchain import scan_tokens_onchain
 from ..schemas import RuntimeLog
 from ..news import fetch_token_mentions_async
 from ..url_helpers import as_websocket_url
+from ..util import parse_bool_env
 
 logger = logging.getLogger(__name__)
+
+
+class DiscoveryConfigurationError(RuntimeError):
+    """Raised when discovery cannot proceed due to invalid configuration."""
 
 
 def resolve_discovery_limit(*, default: int = 60) -> int:
@@ -303,6 +308,22 @@ class DiscoveryAgent:
     def _as_websocket_url(url: Optional[str]) -> Optional[str]:
         return as_websocket_url(url)
 
+    @staticmethod
+    def _paper_mode_active() -> bool:
+        candidates = (
+            os.getenv("MODE"),
+            os.getenv("RUNTIME_MODE"),
+            os.getenv("TRADING_MODE"),
+            os.getenv("SOLHUNTER_MODE"),
+        )
+        for candidate in candidates:
+            if not candidate:
+                continue
+            mode = candidate.strip().lower()
+            if mode in {"paper", "paper_trading", "paper-trading"}:
+                return True
+        return parse_bool_env("PAPER_TRADING", False)
+
     # ------------------------------------------------------------------
     # Core discovery API
     # ------------------------------------------------------------------
@@ -414,11 +435,21 @@ class DiscoveryAgent:
         fallback_used = False
         self._config_error_active = config_error
 
-        if config_error and not self._config_error_warned:
-            logger.warning(
-                "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled; discovery will rely on cached/static seeds",
-            )
-            self._config_error_warned = True
+        paper_mode = self._paper_mode_active()
+        if config_error:
+            if offline or paper_mode:
+                if not self._config_error_warned:
+                    logger.warning(
+                        "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled; discovery will rely on cached/static seeds",
+                    )
+                    self._config_error_warned = True
+            else:
+                message = (
+                    "DiscoveryAgent configuration invalid: BirdEye API key missing while DISCOVERY_ENABLE_MEMPOOL is disabled; live discovery requires either mempool access or a BirdEye API key"
+                )
+                logger.error(message)
+                self._config_error_warned = True
+                raise DiscoveryConfigurationError(message)
 
         for attempt in range(attempts):
             tokens, details = await self._discover_once(
@@ -980,6 +1011,7 @@ class DiscoveryAgent:
 __all__ = [
     "DISCOVERY_METHODS",
     "DEFAULT_DISCOVERY_METHOD",
+    "DiscoveryConfigurationError",
     "DiscoveryAgent",
     "merge_sources",
     "resolve_discovery_method",

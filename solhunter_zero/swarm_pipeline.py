@@ -18,7 +18,7 @@ import math
 import os
 import time
 
-from .agents.discovery import DiscoveryAgent
+from .agents.discovery import DiscoveryAgent, DiscoveryConfigurationError
 from .agent_manager import AgentManager
 from .event_bus import publish
 from .schemas import ActionExecuted, RuntimeLog
@@ -1145,6 +1145,10 @@ class SwarmPipeline:
                     token_file=self.token_file,
                     method=self.discovery_method,
                 )
+            except DiscoveryConfigurationError as exc:
+                publish("runtime.log", RuntimeLog(stage="discovery", detail=f"error:{exc}"))
+                log.error("Discovery failed due to configuration error: %s", exc)
+                raise
             except Exception as exc:
                 publish("runtime.log", RuntimeLog(stage="discovery", detail=f"error:{exc}"))
                 log.exception("Discovery failed")

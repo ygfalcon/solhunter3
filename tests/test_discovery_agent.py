@@ -3,6 +3,8 @@ import sys
 import time
 import types
 
+import pytest
+
 if "base58" not in sys.modules:
     def _fake_b58decode(value):
         if not isinstance(value, str):
@@ -348,10 +350,59 @@ def test_discover_tokens_recovers_from_merge_exception(monkeypatch, caplog):
     assert "Websocket merge yielded no tokens" in caplog.text
 
 
-def test_discover_tokens_uses_fallback_when_config_invalid(monkeypatch, caplog):
+def test_discover_tokens_config_error_live_mode_raises(monkeypatch, caplog):
+    from solhunter_zero.agents.discovery import DiscoveryConfigurationError
+
     _reset_cache()
-    monkeypatch.setenv("BIRDEYE_API_KEY", "")
+    for key in ("BIRDEYE_API_KEY", "DISCOVERY_ENABLE_MEMPOOL", "MODE", "RUNTIME_MODE", "TRADING_MODE", "SOLHUNTER_MODE", "PAPER_TRADING"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("DISCOVERY_ENABLE_MEMPOOL", "0")
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
+
+    async def fake_scan(*_, **__):
+        return []
+
+    async def passthrough_enrich(tokens, rpc_url=None):
+        return list(tokens)
+
+    monkeypatch.setattr("solhunter_zero.agents.discovery.scan_tokens_async", fake_scan)
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.enrich_tokens_async", passthrough_enrich
+    )
+
+    agent = DiscoveryAgent()
+    agent.birdeye_api_key = ""
+    agent._config_error_warned = False
+
+    async def run():
+        with caplog.at_level("ERROR"):
+            with pytest.raises(DiscoveryConfigurationError):
+                await agent.discover_tokens()
+
+    asyncio.run(run())
+    assert "DiscoveryAgent configuration invalid" in caplog.text
+
+
+def test_discover_tokens_config_error_offline_falls_back(monkeypatch):
+    _reset_cache()
+    for key in ("BIRDEYE_API_KEY", "DISCOVERY_ENABLE_MEMPOOL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DISCOVERY_ENABLE_MEMPOOL", "0")
+
+    agent = DiscoveryAgent()
+    agent.birdeye_api_key = ""
+
+    tokens = asyncio.run(agent.discover_tokens(offline=True))
+    assert tokens, "offline fallback tokens expected"
+    assert tokens[0] == "So11111111111111111111111111111111111111112"
+
+
+def test_discover_tokens_config_error_paper_mode_falls_back(monkeypatch, caplog):
+    _reset_cache()
+    for key in ("BIRDEYE_API_KEY", "DISCOVERY_ENABLE_MEMPOOL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DISCOVERY_ENABLE_MEMPOOL", "0")
+    monkeypatch.setenv("PAPER_TRADING", "1")
     monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
 
     async def fake_scan(*_, **__):
@@ -365,9 +416,7 @@ def test_discover_tokens_uses_fallback_when_config_invalid(monkeypatch, caplog):
     def fake_publish(topic, payload):
         publish_calls.append((topic, payload))
 
-    monkeypatch.setattr(
-        "solhunter_zero.agents.discovery.scan_tokens_async", fake_scan
-    )
+    monkeypatch.setattr("solhunter_zero.agents.discovery.scan_tokens_async", fake_scan)
     monkeypatch.setattr(
         "solhunter_zero.agents.discovery.enrich_tokens_async", passthrough_enrich
     )
