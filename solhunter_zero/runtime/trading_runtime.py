@@ -400,6 +400,23 @@ class TradingRuntime:
             return
         os.environ["UI_PORT"] = str(port)
 
+    @staticmethod
+    def _clear_ui_env() -> None:
+        """Remove UI-related URLs from the environment."""
+
+        for key in (
+            "UI_HTTP_URL",
+            "UI_HEALTH_URL",
+            "UI_WS_URL",
+            "UI_EVENTS_WS",
+            "UI_EVENTS_WS_URL",
+            "UI_RL_WS",
+            "UI_RL_WS_URL",
+            "UI_LOGS_WS",
+            "UI_LOG_WS_URL",
+        ):
+            os.environ.pop(key, None)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -459,9 +476,6 @@ class TradingRuntime:
         self.stop_event.set()
         self.activity.add("runtime", "stopping")
 
-        ui_ws_started = bool(self._ui_ws_started_here and self.ui_ws_threads)
-        self._ui_ws_started_here = False
-
         if self._golden_service is not None:
             with contextlib.suppress(Exception):
                 await self._golden_service.stop()
@@ -500,15 +514,7 @@ class TradingRuntime:
             self.bus_started = False
             self.status.event_bus = False
 
-        if self.ui_server:
-            self.ui_server.stop()
-            self.ui_server = None
-
-        self._set_ui_port_env(None)
-
-        if ui_ws_started:
-            stop_websockets()
-        self.ui_ws_threads = None
+        self._stop_ui()
 
         if self.rl_task is not None:
             if self.rl_task in tasks_to_cancel:
@@ -535,6 +541,25 @@ class TradingRuntime:
         self.status.rl_daemon = False
 
         self.activity.add("runtime", "stopped")
+
+    def _stop_ui(self) -> None:
+        """Stop UI services and clear exported environment state."""
+
+        ui_ws_started = bool(self._ui_ws_started_here and self.ui_ws_threads)
+        self._ui_ws_started_here = False
+
+        if self.ui_server:
+            with contextlib.suppress(Exception):
+                self.ui_server.stop()
+        self.ui_server = None
+
+        self._set_ui_port_env(None)
+        self._clear_ui_env()
+
+        if ui_ws_started:
+            with contextlib.suppress(Exception):
+                stop_websockets()
+        self.ui_ws_threads = None
 
     # ------------------------------------------------------------------
     # Preparation helpers
@@ -962,6 +987,7 @@ class TradingRuntime:
 
         if not self._ui_enabled:
             self.ui_server = None
+            self._clear_ui_env()
             log.info("TradingRuntime: UI disabled via UI_ENABLED")
             return
 
@@ -976,6 +1002,7 @@ class TradingRuntime:
                 self.ui_server = None
                 self.ui_ws_threads = None
                 self._set_ui_port_env(None)
+                self._clear_ui_env()
             conflict_message = (
                 f"Unable to start UI server on {self.ui_host}:{self.ui_port}. "
                 "Another process may already be using the port."
