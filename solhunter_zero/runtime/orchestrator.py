@@ -917,6 +917,7 @@ class RuntimeOrchestrator:
 
     async def start_agents(self) -> None:
         # Use existing startup path to ensure consistent connectivity + depth_service
+        await self._publish_stage("agents:startup", False, "starting")
         try:
             cfg, runtime_cfg, proc = await perform_startup_async(
                 self.config_path, offline=False, dry_run=False
@@ -926,6 +927,7 @@ class RuntimeOrchestrator:
             await self._publish_stage("agents:startup", False, detail)
             raise
         else:
+            self.handles.depth_proc = proc
             detail_parts: list[str] = []
             if isinstance(cfg, dict):
                 selected_name = (
@@ -940,7 +942,6 @@ class RuntimeOrchestrator:
                 detail_parts.append(f"depth_pid={depth_pid}")
             detail = " ".join(detail_parts)
             await self._publish_stage("agents:startup", True, detail)
-        self.handles.depth_proc = proc
 
         flags = get_feature_flags()
         if flags.mode == "paper":
