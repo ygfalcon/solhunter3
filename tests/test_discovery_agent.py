@@ -3,6 +3,8 @@ import sys
 import time
 import types
 
+import pytest
+
 if "base58" not in sys.modules:
     def _fake_b58decode(value):
         if not isinstance(value, str):
@@ -24,6 +26,14 @@ def _reset_cache():
     discovery_mod._CACHE.update(
         {"tokens": [], "ts": 0.0, "limit": 0, "method": "", "rpc_identity": ""}
     )
+
+
+@pytest.fixture(autouse=True)
+def _stub_fallback_probe(monkeypatch):
+    async def _fake_probe(_rpc_url, mints):
+        return set(mints), set()
+
+    monkeypatch.setattr(discovery_mod, "_probe_mint_accounts", _fake_probe)
 
 
 async def fake_stream(url, **_):
@@ -246,7 +256,7 @@ def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
     async def fake_mempool(self):
         return [], {}
 
-    def fake_fallback(self):
+    async def fake_fallback(self):
         return []
 
     monkeypatch.setattr(
@@ -709,10 +719,10 @@ def test_fallback_results_do_not_populate_cache(monkeypatch):
         call_counter["value"] += 1
         return [], {}
 
-    def fake_fallback_tokens(self):
+    async def fake_fallback_tokens(self):
         return list(fallback_tokens)
 
-    def fake_static_fallback_tokens(self):
+    async def fake_static_fallback_tokens(self):
         raise AssertionError("static fallback should not be used when fallback tokens exist")
 
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", fail_discover_once)
@@ -746,10 +756,10 @@ def test_merge_failure_cache_fallback_details(monkeypatch):
     async def empty_mempool(self):
         return [], {}
 
-    def fake_fallback_tokens(self):
+    async def fake_fallback_tokens(self):
         return list(fallback_tokens)
 
-    def fake_static_fallback_tokens(self):
+    async def fake_static_fallback_tokens(self):
         raise AssertionError("static fallback should not be used")
 
     monkeypatch.setattr(DiscoveryAgent, "_collect_mempool", empty_mempool)
@@ -774,10 +784,10 @@ def test_merge_failure_static_fallback_details(monkeypatch):
     async def empty_mempool(self):
         return [], {}
 
-    def fake_fallback_tokens(self):
+    async def fake_fallback_tokens(self):
         return list(fallback_tokens)
 
-    def fake_static_fallback_tokens(self):
+    async def fake_static_fallback_tokens(self):
         return list(static_tokens)
 
     monkeypatch.setattr(DiscoveryAgent, "_collect_mempool", empty_mempool)

@@ -7,10 +7,13 @@ import logging
 import os
 import time
 import urllib.parse
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import aiohttp
 
 from .. import config
 from ..token_aliases import canonical_mint, validate_mint
+from ..util.mints import is_valid_solana_mint
 from ..discovery import (
     _MEMPOOL_TIMEOUT,
     _MEMPOOL_TIMEOUT_RETRIES,
@@ -97,6 +100,58 @@ _CACHE: dict[str, object] = {
 }
 
 _CACHE_LOCK = asyncio.Lock()
+
+
+def _chunked(items: Sequence[str], size: int) -> Iterable[Sequence[str]]:
+    for idx in range(0, len(items), size):
+        yield items[idx : idx + size]
+
+
+async def _probe_mint_accounts(
+    rpc_url: str,
+    mints: Sequence[str],
+) -> Tuple[set[str], set[str]]:
+    if not mints:
+        return set(), set()
+
+    target = rpc_url.strip() or DEFAULT_SOLANA_RPC
+    timeout = aiohttp.ClientTimeout(total=6.0, connect=2.0, sock_read=4.0)
+    connector = aiohttp.TCPConnector(limit=8, ttl_dns_cache=60)
+    existing: set[str] = set()
+    unknown: set[str] = set()
+
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        for chunk in _chunked(list(mints), 99):
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "fallback-probe",
+                "method": "getMultipleAccounts",
+                "params": [list(chunk), {"encoding": "base64"}],
+            }
+            try:
+                async with session.post(target, json=payload) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+            except Exception as exc:  # pragma: no cover - network failures
+                logger.debug(
+                    "Fallback account probe chunk failed via %s: %s", target, exc
+                )
+                unknown.update(chunk)
+                continue
+
+            result = ((data or {}).get("result") or {}).get("value") or []
+            if not isinstance(result, list):
+                unknown.update(chunk)
+                continue
+
+            for mint, info in zip(chunk, result):
+                if info:
+                    existing.add(mint)
+
+            if len(result) < len(chunk):
+                unknown.update(chunk[len(result) :])
+
+    return existing, unknown
 
 
 def _rpc_identity(url: Optional[str]) -> str:
@@ -360,13 +415,13 @@ class DiscoveryAgent:
                     tokens = []
                 details: Dict[str, Dict[str, Any]] = {}
             else:
-                tokens = self._fallback_tokens()
+                tokens = await self._fallback_tokens()
                 fallback_reason = "cache" if tokens else ""
                 if tokens:
                     offline_source = "cache"
                 else:
                     offline_source = "static"
-                    tokens = self._static_fallback_tokens()
+                    tokens = await self._static_fallback_tokens()
                     if tokens:
                         fallback_reason = "static"
                 details = (
@@ -461,10 +516,10 @@ class DiscoveryAgent:
                 await asyncio.sleep(self.backoff)
 
         if not tokens:
-            tokens = self._fallback_tokens()
+            tokens = await self._fallback_tokens()
             fallback_reason = "cache" if tokens else ""
             if not tokens:
-                tokens = self._static_fallback_tokens()
+                tokens = await self._static_fallback_tokens()
                 if tokens:
                     fallback_reason = "static"
             details = (
@@ -763,11 +818,11 @@ class DiscoveryAgent:
             return mem_tokens, mem_details
 
         logger.warning("All discovery sources empty; returning fallback tokens")
-        fallback_tokens = self._fallback_tokens()
+        fallback_tokens = await self._fallback_tokens()
         fallback_reason = "cache" if fallback_tokens else ""
         cached = _CACHE.get("tokens")
         if not fallback_tokens and isinstance(cached, list) and cached:
-            fallback_tokens = self._static_fallback_tokens()
+            fallback_tokens = await self._static_fallback_tokens()
             if fallback_tokens:
                 fallback_reason = "static"
         fallback = [tok for tok in fallback_tokens if not self._should_skip_token(tok)]
@@ -797,7 +852,44 @@ class DiscoveryAgent:
                 break
         return filtered
 
-    def _fallback_tokens(self) -> List[str]:
+    async def _filter_existing_fallbacks(
+        self, tokens: Iterable[str]
+    ) -> List[str]:
+        seen: set[str] = set()
+        canonical_tokens: List[str] = []
+        for tok in tokens:
+            canonical = canonical_mint(tok)
+            if not canonical or canonical in seen:
+                continue
+            if not validate_mint(canonical):
+                continue
+            if not is_valid_solana_mint(canonical):
+                continue
+            seen.add(canonical)
+            canonical_tokens.append(canonical)
+
+        if not canonical_tokens:
+            return []
+
+        try:
+            existing, unknown = await _probe_mint_accounts(
+                self.rpc_url, canonical_tokens
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Fallback mint probe failed: %s", exc)
+            filtered = canonical_tokens
+        else:
+            if existing or unknown:
+                allowed = existing | unknown
+                filtered = [mint for mint in canonical_tokens if mint in allowed]
+            else:
+                filtered = canonical_tokens
+
+        if self.limit:
+            return filtered[: self.limit]
+        return filtered
+
+    async def _fallback_tokens(self) -> List[str]:
         cached = list(_CACHE.get("tokens", [])) if isinstance(_CACHE.get("tokens"), list) else []
         if not cached:
             return []
@@ -817,21 +909,11 @@ class DiscoveryAgent:
             return []
 
         logger.warning("DiscoveryAgent falling back to cached tokens (%d)", len(cached))
-        result: List[str] = []
-        for tok in cached[: self.limit]:
-            canonical = canonical_mint(tok)
-            if validate_mint(canonical):
-                result.append(canonical)
-        return result
+        return await self._filter_existing_fallbacks(cached)
 
-    def _static_fallback_tokens(self) -> List[str]:
+    async def _static_fallback_tokens(self) -> List[str]:
         logger.warning("DiscoveryAgent using static discovery fallback")
-        result: List[str] = []
-        for tok in _STATIC_FALLBACK[: self.limit]:
-            canonical = canonical_mint(tok)
-            if validate_mint(canonical):
-                result.append(canonical)
-        return result
+        return await self._filter_existing_fallbacks(_STATIC_FALLBACK)
 
     def _should_skip_token(self, token: str) -> bool:
         if not self.filter_prefix_11:
