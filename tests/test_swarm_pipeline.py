@@ -469,6 +469,48 @@ def test_discovery_publishes_candidates(monkeypatch):
     assert detail_payload_b["extra"] == {"nested": "value"}
 
 
+def test_discovery_agent_fallback_flag_propagates(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
+
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    def _capture(topic, payload):
+        captured.append((topic, payload))
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", _capture)
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline._score_token",
+        lambda token, pf: 1.0,
+    )
+
+    pipeline = SwarmPipeline(_DummyAgentManager([]), Portfolio(path=None), dry_run=True)
+    fallback_token = "9h2CpiF6s6z8NmexFzCZVjJPEYhYzu3n6PvJEa3TBUnx"
+
+    class _FallbackAgent:
+        def __init__(self) -> None:
+            self.last_details: dict[str, dict[str, Any]] = {}
+            self.last_fallback_used = False
+
+        async def discover_tokens(self, **kwargs):
+            self.last_details = {fallback_token: {}}
+            self.last_fallback_used = True
+            return [fallback_token]
+
+    pipeline._discovery_agent = _FallbackAgent()
+
+    stage = asyncio.run(pipeline._run_discovery())
+
+    assert stage.tokens == [fallback_token]
+    assert stage.fallback_used is True
+
+    candidate_payloads = [
+        payload for topic, payload in captured if topic == "x:discovery.candidates"
+    ]
+    assert candidate_payloads
+    assert all(payload["mint"] == fallback_token for payload in candidate_payloads)
+    assert all(payload["fallback_used"] is True for payload in candidate_payloads)
+
+
 def test_execution_skips_missing_price(monkeypatch, caplog):
     _install_torch_stub(monkeypatch)
     from solhunter_zero.swarm_pipeline import (

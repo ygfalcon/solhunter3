@@ -146,6 +146,30 @@ async def test_discovery_recent_endpoint_returns_tokens(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_status_exposes_fallback_flag(monkeypatch):
+    monkeypatch.setenv("UI_ENABLED", "0")
+    runtime = TradingRuntime()
+
+    snapshot = {
+        "timestamp": "2024-01-01T00:00:00Z",
+        "timestamp_epoch": time.time(),
+        "actions_count": 0,
+        "discovered_count": 0,
+        "fallback_used": True,
+        "elapsed_s": 1.23,
+    }
+
+    with runtime._iteration_lock:
+        runtime._last_iteration = dict(snapshot)
+        runtime._last_iteration_errors = []
+        runtime._last_actions = []
+        runtime._last_iteration_elapsed = snapshot["elapsed_s"]
+
+    status = runtime._collect_status()
+    assert status["last_iteration"]["fallback_used"] is True
+
+
+@pytest.mark.anyio("asyncio")
 async def test_market_panel_renders_pipeline_keys(monkeypatch):
     monkeypatch.setenv("UI_ENABLED", "0")
     runtime = TradingRuntime()
