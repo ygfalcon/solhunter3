@@ -223,6 +223,8 @@ message RuntimeStageChanged {
   string stage = 1;
   bool ok = 2;
   string detail = 3;
+  double timestamp = 4;
+  double elapsed = 5;
 }
 
 message ScalarMetric {

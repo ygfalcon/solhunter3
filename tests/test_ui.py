@@ -1,6 +1,7 @@
 import json
 import os
 import asyncio
+import time
 from typing import Any, Dict, Iterable
 
 import pytest
@@ -207,10 +208,35 @@ def test_health_endpoint(monkeypatch, client):
             await handler(payload)
 
     async def drive():
-        await emit("runtime.stage_changed", {"stage": "bus:verify", "ok": True})
-        await emit("runtime.stage_changed", {"stage": "agents:loop", "ok": True})
+        base = time.time()
+        await emit(
+            "runtime.stage_changed",
+            {
+                "stage": "bus:verify",
+                "ok": True,
+                "timestamp": base,
+                "elapsed": 0.0,
+            },
+        )
+        await emit(
+            "runtime.stage_changed",
+            {
+                "stage": "agents:loop",
+                "ok": True,
+                "timestamp": base + 0.1,
+                "elapsed": 0.1,
+            },
+        )
         await emit("heartbeat", {"service": "trading_loop"})
-        await emit("runtime.stage_changed", {"stage": "runtime:stopping", "ok": True})
+        await emit(
+            "runtime.stage_changed",
+            {
+                "stage": "runtime:stopping",
+                "ok": True,
+                "timestamp": base + 0.2,
+                "elapsed": 0.2,
+            },
+        )
 
     try:
         asyncio.run(drive())
