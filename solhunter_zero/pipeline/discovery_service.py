@@ -149,11 +149,13 @@ class DiscoveryService:
                 tokens = await self._fetch()
                 fresh = self._last_fetch_fresh
                 await self._emit_tokens(tokens, fresh=fresh)
+                if fresh and tokens:
+                    self._current_backoff = 0.0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 log.exception("DiscoveryService failure: %s", exc)
-            await asyncio.sleep(self.interval)
+            await asyncio.sleep(max(self.interval, self._current_backoff))
 
     async def _fetch(self, *, agent: DiscoveryAgent | None = None) -> list[str]:
         now = time.time()
