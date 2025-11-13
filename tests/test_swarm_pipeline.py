@@ -10,6 +10,7 @@ import pytest
 
 from solhunter_zero import prices
 from solhunter_zero.portfolio import Portfolio, Position
+from solhunter_zero.token_aliases import validate_mint
 
 
 @pytest.fixture(autouse=True)
@@ -364,6 +365,45 @@ def test_discovery_refreshes_cache(monkeypatch):
     assert "TokC" in stage.tokens
     assert pipeline._discovery_cache_tokens[0] == "TokC"
     assert pipeline._discovery_cache_expiry > time.time()
+
+
+def test_discovery_filters_invalid_last_tokens(monkeypatch):
+    from solhunter_zero.swarm_pipeline import SwarmPipeline
+
+    monkeypatch.setattr("solhunter_zero.swarm_pipeline.publish", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "solhunter_zero.swarm_pipeline._score_token",
+        lambda token, pf: 1.0,
+    )
+
+    class _StubAgent:
+        async def discover_tokens(self, **kwargs):
+            return []
+
+    state = types.SimpleNamespace(
+        last_tokens=[None, "", "   bad token   ", "NotBase58!", 12345]
+    )
+    pipeline = SwarmPipeline(
+        _DummyAgentManager([]),
+        Portfolio(path=None),
+        dry_run=True,
+        state=state,
+    )
+    pipeline._discovery_agent = _StubAgent()
+
+    stage = asyncio.run(pipeline._run_discovery())
+
+    assert stage.discovered == []
+    assert stage.fallback_used is True
+    expected_defaults = {
+        "So11111111111111111111111111111111111111112",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+    }
+    assert set(stage.tokens) == expected_defaults
+    assert all(validate_mint(tok) for tok in stage.tokens)
+    assert "NotBase58!" not in stage.tokens
 
 
 def test_discovery_publishes_candidates(monkeypatch):

@@ -28,7 +28,7 @@ from .lru import TTLCache
 from .execution import EventExecutor
 from .agents.price_utils import resolve_price
 from .prices import update_price_cache
-from .token_aliases import canonical_mint
+from .token_aliases import canonical_mint, validate_mint
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .agent_manager import EvaluationContext
@@ -809,6 +809,8 @@ class SwarmPipeline:
             candidate = canonical_mint(token.strip())
             if not candidate or candidate in seen:
                 continue
+            if not validate_mint(candidate):
+                continue
             ordered.append(candidate)
             seen.add(candidate)
 
@@ -818,6 +820,8 @@ class SwarmPipeline:
         for token in self._discovery_cache_tokens:
             canonical = canonical_mint(token)
             if not canonical or canonical in seen:
+                continue
+            if not validate_mint(canonical):
                 continue
             ordered.append(canonical)
             seen.add(canonical)
@@ -830,7 +834,7 @@ class SwarmPipeline:
         merged_scores: Dict[str, float] = {}
         for tok, value in self._discovery_cache_scores.items():
             canonical = canonical_mint(tok)
-            if not canonical:
+            if not canonical or not validate_mint(canonical):
                 continue
             try:
                 numeric = float(value)
@@ -844,7 +848,7 @@ class SwarmPipeline:
                 if not isinstance(tok, str):
                     continue
                 canonical = canonical_mint(tok)
-                if not canonical:
+                if not canonical or not validate_mint(canonical):
                     continue
                 try:
                     numeric = float(value)
@@ -1166,28 +1170,41 @@ class SwarmPipeline:
             except Exception:
                 last_tokens = []
             if last_tokens:
-                stage.discovered = [
-                    canonical_mint(str(tok))
-                    for tok in last_tokens
-                    if isinstance(tok, str) and tok
-                ]
+                validated_tokens: list[str] = []
+                for tok in last_tokens:
+                    if not isinstance(tok, str) or not tok:
+                        continue
+                    canonical_tok = canonical_mint(str(tok))
+                    if canonical_tok and validate_mint(canonical_tok):
+                        validated_tokens.append(canonical_tok)
+                stage.discovered = validated_tokens
 
         if not stage.discovered:
-            stage.tokens = [
+            fallback_tokens = [
                 "So11111111111111111111111111111111111111112",
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
                 "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
                 "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
             ]
-            stage.tokens = [canonical_mint(tok) for tok in stage.tokens]
+            stage.tokens = []
+            for tok in fallback_tokens:
+                canonical_tok = canonical_mint(tok)
+                if canonical_tok and validate_mint(canonical_tok):
+                    stage.tokens.append(canonical_tok)
             stage.fallback_used = True
             publish("runtime.log", RuntimeLog(stage="discovery", detail="fallback"))
         else:
-            stage.tokens = [canonical_mint(tok) for tok in stage.discovered]
+            stage.tokens = []
+            for tok in stage.discovered:
+                canonical_tok = canonical_mint(tok)
+                if canonical_tok and validate_mint(canonical_tok):
+                    stage.tokens.append(canonical_tok)
 
         if cached_tokens and stage.tokens:
             for tok in cached_tokens:
                 canonical_tok = canonical_mint(tok)
+                if not canonical_tok or not validate_mint(canonical_tok):
+                    continue
                 if canonical_tok not in stage.tokens:
                     stage.tokens.append(canonical_tok)
                     if 0 < self.discovery_cache_limit <= len(stage.tokens):
@@ -1196,6 +1213,8 @@ class SwarmPipeline:
         if getattr(self.portfolio, "balances", None):
             for tok in getattr(self.portfolio, "balances").keys():
                 canonical_tok = canonical_mint(tok)
+                if not canonical_tok or not validate_mint(canonical_tok):
+                    continue
                 if canonical_tok not in stage.tokens:
                     stage.tokens.append(canonical_tok)
                     if 0 < self.discovery_cache_limit <= len(stage.tokens):
