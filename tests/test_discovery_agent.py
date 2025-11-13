@@ -15,6 +15,7 @@ if "base58" not in sys.modules:
 
 from solhunter_zero.agents import discovery as discovery_mod
 from solhunter_zero.agents.discovery import DiscoveryAgent
+from solhunter_zero import token_discovery
 
 
 VALID_MINT = "So11111111111111111111111111111111111111112"
@@ -610,6 +611,87 @@ def test_discover_tokens_concurrent_cached_reads(monkeypatch):
     assert results[0] == [VALID_MINT]
     assert results[1] == [VALID_MINT]
     assert discovery_mod._CACHE["tokens"] == [VALID_MINT]
+
+
+def test_cached_tokens_rehydrate_details(monkeypatch):
+    _reset_cache()
+
+    async def runner() -> tuple[list[str], DiscoveryAgent]:
+        agent = DiscoveryAgent()
+        agent.cache_ttl = 60.0
+        agent.last_details = {VALID_MINT: {"score": 0.42}}
+
+        now = time.time()
+        identity = discovery_mod._rpc_identity(agent.rpc_url)
+
+        async with discovery_mod._CACHE_LOCK:
+            discovery_mod._CACHE.update(
+                {
+                    "tokens": [VALID_MINT],
+                    "ts": now,
+                    "limit": agent.limit,
+                    "method": agent.default_method
+                    or discovery_mod.DEFAULT_DISCOVERY_METHOD,
+                    "rpc_identity": identity,
+                }
+            )
+
+        tokens = await agent.discover_tokens()
+        return tokens, agent
+
+    tokens, agent = asyncio.run(runner())
+
+    assert tokens == [VALID_MINT]
+    detail = agent.last_details[VALID_MINT]
+    assert detail["score"] == 0.42
+    assert detail["detail_cached"] is True
+    assert detail["detail_stale"] is False
+    assert detail["score_weights"] == token_discovery._SCORING_WEIGHTS
+    assert detail["score_bias"] == token_discovery._SCORING_BIAS
+
+
+def test_expired_cache_marks_details_stale(monkeypatch):
+    _reset_cache()
+
+    async def runner() -> tuple[list[str], DiscoveryAgent]:
+        agent = DiscoveryAgent()
+        agent.cache_ttl = 1.0
+        agent.max_attempts = 1
+        agent.last_details = {VALID_MINT: {"score": 0.9}}
+
+        identity = discovery_mod._rpc_identity(agent.rpc_url)
+        old_ts = time.time() - 600.0
+
+        async with discovery_mod._CACHE_LOCK:
+            discovery_mod._CACHE.update(
+                {
+                    "tokens": [VALID_MINT],
+                    "ts": old_ts,
+                    "limit": agent.limit,
+                    "method": agent.default_method
+                    or discovery_mod.DEFAULT_DISCOVERY_METHOD,
+                    "rpc_identity": identity,
+                }
+            )
+
+        async def always_empty(self, *, method, offline, token_file):
+            del method, offline, token_file
+            return [], {}
+
+        monkeypatch.setattr(DiscoveryAgent, "_discover_once", always_empty)
+
+        tokens = await agent.discover_tokens()
+        return tokens, agent
+
+    tokens, agent = asyncio.run(runner())
+
+    assert tokens == [VALID_MINT]
+    detail = agent.last_details[VALID_MINT]
+    assert detail["score"] == 0.9
+    assert detail["detail_cached"] is True
+    assert detail["detail_stale"] is True
+    assert detail["score_weights"] == token_discovery._SCORING_WEIGHTS
+    assert detail["score_bias"] == token_discovery._SCORING_BIAS
 
 
 def test_fallback_results_do_not_populate_cache(monkeypatch):

@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
 from .. import config
 from ..token_aliases import canonical_mint, validate_mint
+from ..token_discovery import _load_scoring_weights
 from ..discovery import (
     _MEMPOOL_TIMEOUT,
     _MEMPOOL_TIMEOUT_RETRIES,
@@ -262,6 +263,47 @@ class DiscoveryAgent:
         self._birdeye_notice_logged = False
 
     # ------------------------------------------------------------------
+    # Detail hydration helpers
+    # ------------------------------------------------------------------
+    def _hydrate_details_for_tokens(
+        self,
+        tokens: Iterable[str],
+        details: Optional[Dict[str, Dict[str, Any]]],
+        *,
+        stale: bool,
+        cached: bool,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return a normalised ``last_details`` payload for ``tokens``."""
+
+        bias, weights = _load_scoring_weights()
+        weight_snapshot = dict(weights)
+
+        hydrated: Dict[str, Dict[str, Any]] = {}
+        source_details = details or {}
+
+        for token in tokens:
+            canonical = canonical_mint(token) if isinstance(token, str) else ""
+            if not canonical or not validate_mint(canonical):
+                continue
+
+            base_detail: Dict[str, Any] = {}
+            if isinstance(source_details, dict):
+                for key in (canonical, token):
+                    payload = source_details.get(key)
+                    if isinstance(payload, dict):
+                        base_detail = dict(payload)
+                        break
+
+            entry = dict(base_detail)
+            entry["score_weights"] = dict(weight_snapshot)
+            entry["score_bias"] = bias
+            entry["detail_cached"] = bool(cached)
+            entry["detail_stale"] = bool(stale)
+            hydrated[canonical] = entry
+
+        return hydrated
+
+    # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
     def stream_mempool_events(
@@ -350,6 +392,7 @@ class DiscoveryAgent:
         )
         if offline and not method_override:
             offline_source = "fallback"
+            cached_details = {mint: dict(payload) for mint, payload in self.last_details.items()}
             if token_file:
                 try:
                     tokens = scan_tokens_from_file(token_file, limit=self.limit)
@@ -357,10 +400,9 @@ class DiscoveryAgent:
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.warning("Failed to read token_file %s: %s", token_file, exc)
                     tokens = []
-                details: Dict[str, Dict[str, Any]] = {}
+                cached_details = {}
             else:
                 tokens = self._fallback_tokens()
-                details = {}
                 if tokens:
                     offline_source = "cache"
                 else:
@@ -368,12 +410,23 @@ class DiscoveryAgent:
                     tokens = self._static_fallback_tokens()
             tokens = self._normalise(tokens)
             tokens, details = await self._apply_social_mentions(
-                tokens, details, offline=True
+                tokens, cached_details, offline=True
             )
             if self.limit:
                 tokens = tokens[: self.limit]
+            combined_details: Dict[str, Dict[str, Any]] = {}
+            for source in (cached_details, details or {}):
+                for key, value in source.items():
+                    if isinstance(value, dict):
+                        combined_details[key] = dict(value)
+            hydrated_details = self._hydrate_details_for_tokens(
+                tokens,
+                combined_details,
+                stale=True,
+                cached=True,
+            )
             self.last_tokens = tokens
-            self.last_details = details
+            self.last_details = hydrated_details
             self.last_method = "offline"
             detail = f"yield={len(tokens)}"
             if self.limit:
@@ -402,12 +455,32 @@ class DiscoveryAgent:
         ):
             if cache_limit and cache_limit >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (ttl=%s)", ttl)
+                selected = cached_tokens[: self.limit]
+                hydrated = self._hydrate_details_for_tokens(
+                    selected,
+                    self.last_details,
+                    stale=False,
+                    cached=True,
+                )
+                self.last_tokens = selected
+                self.last_details = hydrated
+                self.last_method = cached_method or active_method
                 self.last_fallback_used = False
-                return cached_tokens[: self.limit]
+                return selected
             if len(cached_tokens) >= self.limit:
                 logger.debug("DiscoveryAgent: returning cached tokens (limit=%s)", self.limit)
+                selected = cached_tokens[: self.limit]
+                hydrated = self._hydrate_details_for_tokens(
+                    selected,
+                    self.last_details,
+                    stale=False,
+                    cached=True,
+                )
+                self.last_tokens = selected
+                self.last_details = hydrated
+                self.last_method = cached_method or active_method
                 self.last_fallback_used = False
-                return cached_tokens[: self.limit]
+                return selected
 
         attempts = self.max_attempts
         details: Dict[str, Dict[str, Any]] = {}
@@ -453,11 +526,36 @@ class DiscoveryAgent:
                 await asyncio.sleep(self.backoff)
 
         if not tokens:
+            previous_details = {
+                mint: dict(payload)
+                for mint, payload in self.last_details.items()
+                if isinstance(payload, dict)
+            }
             tokens = self._fallback_tokens()
-            if not tokens:
+            if tokens:
+                details = self._hydrate_details_for_tokens(
+                    tokens,
+                    previous_details,
+                    stale=True,
+                    cached=True,
+                )
+                fallback_used = True
+            else:
                 tokens = self._static_fallback_tokens()
-            details = {}
-            fallback_used = True
+                details = self._hydrate_details_for_tokens(
+                    tokens,
+                    previous_details,
+                    stale=True,
+                    cached=True,
+                )
+                fallback_used = True
+        else:
+            details = self._hydrate_details_for_tokens(
+                tokens,
+                details,
+                stale=False,
+                cached=False,
+            )
 
         self.last_tokens = tokens
         self.last_details = details
