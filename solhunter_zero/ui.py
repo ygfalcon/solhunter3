@@ -49,6 +49,7 @@ UI_SCHEMA_VERSION: int = 3
 _UI_META_CACHE_TTL = 1.0
 _ui_meta_cache: tuple[float, Dict[str, Any]] | None = None
 _active_ui_state: "UIState" | None = None
+_ACTIVE_UI_STATE_LOCK = threading.Lock()
 _ENV_BOOTSTRAPPED = False
 _ACTIVE_HTTP_SERVERS: WeakSet["UIServer"] = WeakSet()
 
@@ -80,11 +81,13 @@ def _bootstrap_ui_environment() -> None:
 
 def _set_active_ui_state(state: "UIState" | None) -> None:
     global _active_ui_state
-    _active_ui_state = state
+    with _ACTIVE_UI_STATE_LOCK:
+        _active_ui_state = state
 
 
 def _get_active_ui_state() -> "UIState" | None:
-    return _active_ui_state
+    with _ACTIVE_UI_STATE_LOCK:
+        return _active_ui_state
 
 
 def _teardown_ui_environment() -> None:

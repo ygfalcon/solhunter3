@@ -1,6 +1,7 @@
+import asyncio
 import json
 import os
-import asyncio
+import threading
 import time
 from typing import Any, Dict, Iterable
 
@@ -38,6 +39,58 @@ def test_create_app_proxy_fix_opt_in(monkeypatch):
         assert isinstance(app.wsgi_app, ProxyFix)
     finally:
         ui._set_active_ui_state(previous_state)
+
+
+def test_active_state_not_overwritten_mid_request(monkeypatch):
+    monkeypatch.setattr(ui, "_ui_meta_cache", None)
+
+    live_state = ui.UIState()
+    live_state.run_state_provider = lambda: {"mode": "live"}
+    ui._set_active_ui_state(live_state)
+
+    request_entered = threading.Event()
+    release_request = threading.Event()
+    setter_started = threading.Event()
+    setter_finished = threading.Event()
+
+    def blocking_get_active_state():
+        with ui._ACTIVE_UI_STATE_LOCK:
+            request_entered.set()
+            release_request.wait(timeout=1)
+            return ui._active_ui_state
+
+    monkeypatch.setattr(ui, "_get_active_ui_state", blocking_get_active_state)
+
+    meta_holder: Dict[str, Any] = {}
+
+    def request_meta_snapshot():
+        meta_holder["meta"] = ui.get_ui_meta_snapshot(force=True)
+
+    request_thread = threading.Thread(target=request_meta_snapshot)
+    request_thread.start()
+    assert request_entered.wait(timeout=1)
+
+    def set_paper_state():
+        setter_started.set()
+        paper_state = ui.UIState()
+        paper_state.run_state_provider = lambda: {"mode": "paper"}
+        ui._set_active_ui_state(paper_state)
+        setter_finished.set()
+
+    setter_thread = threading.Thread(target=set_paper_state)
+    setter_thread.start()
+    assert setter_started.wait(timeout=1)
+    time.sleep(0.05)
+    assert not setter_finished.is_set()
+
+    release_request.set()
+    request_thread.join(timeout=1)
+    setter_thread.join(timeout=1)
+    assert not request_thread.is_alive()
+    assert not setter_thread.is_alive()
+    assert setter_finished.is_set()
+
+    assert meta_holder["meta"]["run_state"]["mode"] == "live"
 
 
 def test_run_state_endpoint(client, monkeypatch):
