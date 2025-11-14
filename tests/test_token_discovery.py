@@ -62,6 +62,21 @@ def test_token_discovery_importable_under_pytest():
     assert reloaded is td
 
 
+def test_compute_feature_vector_handles_minimal_entry(monkeypatch):
+    _configure_env(monkeypatch, TRENDING_MIN_LIQUIDITY_USD="100")
+
+    entry = {"liquidity": 50}
+    mempool_snapshot = None
+
+    below_threshold = td._compute_feature_vector(entry, mempool_snapshot)
+    assert below_threshold["sellable"] == 0.0
+    assert below_threshold["mempool_pressure"] == 0.0
+
+    entry["liquidity"] = 150
+    above_threshold = td._compute_feature_vector(entry, mempool_snapshot)
+    assert above_threshold["sellable"] == 1.0
+
+
 @pytest.mark.anyio("asyncio")
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()
