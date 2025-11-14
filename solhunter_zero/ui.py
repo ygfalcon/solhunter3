@@ -4185,28 +4185,38 @@ def main(argv: Sequence[str] | None = None) -> None:
     _seed_state_from_snapshots(state, args.snapshot_dir)
 
     server = UIServer(state, host=args.host, port=args.port)
+    ws_threads: dict[str, threading.Thread] | None = None
     try:
-        server.start()
-        if not server.serve_forever_started.wait(timeout=server.ready_timeout):
-            raise TimeoutError(
-                f"Timed out waiting for UI server on {args.host}:{args.port} "
-                f"to enter serve_forever() after {server.ready_timeout:.1f} seconds"
-            )
-    except BaseException as exc:
-        print(f"Failed to start UI server: {exc}", file=sys.stderr, flush=True)
-        server.stop()
-        raise SystemExit(1) from exc
+        try:
+            server.start()
+            if not server.serve_forever_started.wait(timeout=server.ready_timeout):
+                raise TimeoutError(
+                    f"Timed out waiting for UI server on {args.host}:{args.port} "
+                    f"to enter serve_forever() after {server.ready_timeout:.1f} seconds"
+                )
+        except BaseException as exc:
+            print(f"Failed to start UI server: {exc}", file=sys.stderr, flush=True)
+            raise SystemExit(1) from exc
 
-    url = f"http://{args.host}:{args.port}"
-    print(f"Solsniper Zero UI listening on {url}", flush=True)
-    if args.snapshot_dir:
-        print(f"Seeded UI state from {args.snapshot_dir}", flush=True)
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Stopping SolHunter UI server...", flush=True)
+        try:
+            ws_threads = start_websockets()
+        except BaseException as exc:
+            print(f"Failed to start UI websockets: {exc}", file=sys.stderr, flush=True)
+            raise SystemExit(1) from exc
+
+        url = f"http://{args.host}:{args.port}"
+        print(f"Solsniper Zero UI listening on {url}", flush=True)
+        if args.snapshot_dir:
+            print(f"Seeded UI state from {args.snapshot_dir}", flush=True)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("Stopping SolHunter UI server...", flush=True)
     finally:
+        if ws_threads is not None:
+            with contextlib.suppress(Exception):
+                stop_websockets()
         server.stop()
 
 
