@@ -33,5 +33,5 @@ Accept: application/json
 
 ## Testing endpoint command
 ```bash
-curl -s "${PUMP_LEADERBOARD_URL:-https://pump.fun/api/trending}"
+curl -s "${PUMP_FUN_TRENDING:-${PUMP_LEADERBOARD_URL:-https://pump.fun/api/trending}}"
 ```

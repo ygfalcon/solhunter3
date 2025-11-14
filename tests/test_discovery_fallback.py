@@ -11,6 +11,26 @@ def _reset_state(token_scanner):
     token_scanner._NEXT_DAS_REQUEST_AT = 0.0
 
 
+def test_pump_trending_url_prefers_new_env(monkeypatch):
+    monkeypatch.setenv("PUMP_FUN_TRENDING", "https://example.com/new")
+    monkeypatch.setenv("PUMP_LEADERBOARD_URL", "https://example.com/old")
+
+    import solhunter_zero.token_scanner as token_scanner
+
+    token_scanner = importlib.reload(token_scanner)
+    assert token_scanner._resolve_pump_trending_url() == "https://example.com/new"
+
+
+def test_pump_trending_url_defaults_when_missing(monkeypatch):
+    monkeypatch.delenv("PUMP_FUN_TRENDING", raising=False)
+    monkeypatch.delenv("PUMP_LEADERBOARD_URL", raising=False)
+
+    import solhunter_zero.token_scanner as token_scanner
+
+    token_scanner = importlib.reload(token_scanner)
+    assert token_scanner._resolve_pump_trending_url() == "https://pump.fun/api/trending"
+
+
 def test_scan_tokens_uses_pump_fallback_when_dex_disabled(monkeypatch):
     monkeypatch.setenv("DEXSCREENER_DISABLED", "1")
     monkeypatch.setenv("USE_DAS_DISCOVERY", "0")

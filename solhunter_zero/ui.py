@@ -1223,7 +1223,11 @@ def _provider_status_snapshot() -> Dict[str, Dict[str, Any]]:
             base_url=url or None,
         )
 
-    pump_url = (_env_or_default("PUMP_LEADERBOARD_URL") or "").strip()
+    pump_url = (
+        (_env_or_default("PUMP_FUN_TRENDING") or "").strip()
+        or (_env_or_default("PUMP_LEADERBOARD_URL") or "").strip()
+        or "https://pump.fun/api/trending"
+    )
     enabled = bool(pump_url)
     providers["pump_fun"] = _entry(
         enabled=enabled,

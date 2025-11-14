@@ -59,6 +59,16 @@ def _resolve_trending_rpc_url(explicit: str | None) -> str:
             return env_value
     return DEFAULT_SOLANA_RPC
 
+
+def _resolve_pump_trending_url() -> str:
+    """Resolve the Pump.fun trending endpoint with fallbacks."""
+
+    if PUMP_FUN_TRENDING_URL:
+        return PUMP_FUN_TRENDING_URL
+    if PUMP_LEADERBOARD_URL:
+        return PUMP_LEADERBOARD_URL
+    return DEFAULT_PUMPFUN_TRENDING_URL
+
 BIRDEYE_BASE = "https://api.birdeye.so"
 
 HELIUS_BASE = os.getenv("HELIUS_PRICE_BASE_URL", "https://api.helius.xyz")
@@ -67,9 +77,9 @@ SOLSCAN_META_URL = os.getenv(
     "SOLSCAN_META_URL", "https://pro-api.solscan.io/v1.0/token/meta"
 )
 SOLSCAN_API_KEY = (os.getenv("SOLSCAN_API_KEY") or "").strip() or None
-PUMP_LEADERBOARD_URL = os.getenv(
-    "PUMP_LEADERBOARD_URL", "https://pumpportal.fun/api/leaderboard"
-)
+DEFAULT_PUMPFUN_TRENDING_URL = "https://pump.fun/api/trending"
+PUMP_FUN_TRENDING_URL = (os.getenv("PUMP_FUN_TRENDING") or "").strip()
+PUMP_LEADERBOARD_URL = (os.getenv("PUMP_LEADERBOARD_URL") or "").strip()
 
 
 def _extract_helius_key() -> str:
@@ -1690,7 +1700,7 @@ async def _pump_trending(
 ) -> List[Dict[str, Any]]:
     """Return trending Pump.fun tokens when DAS is unavailable."""
 
-    url = PUMP_LEADERBOARD_URL.strip()
+    url = _resolve_pump_trending_url().strip()
     if not url or limit <= 0:
         return []
 
