@@ -881,6 +881,7 @@ PY
 }
 
 acquire_runtime_lock() {
+  stop_runtime_lock_refresher
   local output
   output=$("$PYTHON_BIN" - <<'PY'
 import json
@@ -990,9 +991,17 @@ PY
     exit $EXIT_HEALTH
   fi
   log_info "Acquired runtime lock key=$RUNTIME_LOCK_KEY"
+  start_runtime_lock_refresher
+  if [[ -z ${RUNTIME_LOCK_REFRESH_PID:-} || $RUNTIME_LOCK_REFRESH_PID -le 0 ]]; then
+    log_warn "Runtime lock refresher did not start; lock TTL may expire early"
+  elif ! kill -0 "$RUNTIME_LOCK_REFRESH_PID" >/dev/null 2>&1; then
+    log_warn "Runtime lock refresher exited prematurely (pid=$RUNTIME_LOCK_REFRESH_PID)"
+    RUNTIME_LOCK_REFRESH_PID=0
+  fi
 }
 
 release_runtime_lock() {
+  stop_runtime_lock_refresher
   if [[ -z ${RUNTIME_LOCK_KEY:-} || -z ${RUNTIME_LOCK_TOKEN:-} ]]; then
     return
   fi
