@@ -180,6 +180,16 @@ def test_merge_candidate_entry_strips_mint_whitespace(monkeypatch):
     assert entry_clean["sources"] == {"source-a", "source-b"}
 
 
+def test_compute_feature_vector_converts_staleness_to_ms(monkeypatch):
+    monkeypatch.setattr(td.time, "time", lambda: 200.0)
+
+    entry = {"asof": 100.0}
+
+    features = td._compute_feature_vector(entry, None)
+
+    assert features["staleness_ms"] == pytest.approx(100_000.0)
+
+
 @pytest.mark.anyio("asyncio")
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()

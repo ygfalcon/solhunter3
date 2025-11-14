@@ -7,7 +7,7 @@ weights:
   oracle_present: 0.45
   sellable: 0.4
   mempool_pressure: 2.4
-  staleness_ms: -0.3
+  staleness_ms: -0.000005
 momentum:
   top_n_active: 250
   weights:

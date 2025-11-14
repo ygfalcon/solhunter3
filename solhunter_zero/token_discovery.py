@@ -761,12 +761,12 @@ def _compute_feature_vector(
             entry.get("score_mp") or entry.get("mempool_score")
         )
     asof = entry.get("asof") or entry.get("updated_at") or discovered_at
-    staleness_minutes = 0.0
+    staleness_ms = 0.0
     if asof:
         try:
-            staleness_minutes = max(0.0, (now - float(asof)) / 60.0)
+            staleness_ms = max(0.0, (now - float(asof)) * 1000.0)
         except Exception:
-            staleness_minutes = 0.0
+            staleness_ms = 0.0
     features = {
         "liquidity_usd": float(liquidity_feature),
         "vol_1h_z": float(vol_feature),
@@ -775,7 +775,7 @@ def _compute_feature_vector(
         "oracle_present": float(oracle_present),
         "sellable": float(sellable),
         "mempool_pressure": float(max(0.0, mempool_pressure)),
-        "staleness_ms": float(staleness_minutes),
+        "staleness_ms": float(staleness_ms),
     }
     return features
 
