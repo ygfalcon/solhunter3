@@ -143,11 +143,11 @@ def run(
         code = 130
 
     if code == 0:
-        msg = "SolHunter Zero launch complete – system ready."
+        msg = "SolHunter launch complete – system ready."
         print(msg)
         log_startup(msg)
     else:
-        msg = f"SolHunter Zero startup failed with exit code {code}"
+        msg = f"SolHunter startup failed with exit code {code}"
         print(msg)
         log_startup(msg)
 

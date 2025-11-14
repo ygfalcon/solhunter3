@@ -86,7 +86,7 @@ def test_startup_mac_m1(monkeypatch, capsys):
     ]
     code = startup.run(args)
     out = capsys.readouterr().out
-    msg = "SolHunter Zero launch complete – system ready."
+    msg = "SolHunter launch complete – system ready."
     assert msg in out
     assert msg in logs
     assert code == 0
