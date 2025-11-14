@@ -69,9 +69,11 @@ def test_websocket_threads_bind():
     from solhunter_zero import ui
     importlib.reload(ui)
 
-    threads = ui.start_websockets()
+    ui.start_websockets()
     try:
-        for port in (8767, ui._EVENT_WS_PORT, 8768):
+        ports_to_check = (ui._RL_WS_PORT, ui._EVENT_WS_PORT, ui._LOG_WS_PORT)
+        assert all(port not in (None, 0) for port in ports_to_check)
+        for port in ports_to_check:
             for _ in range(50):
                 try:
                     with socket.create_connection(("localhost", port), timeout=0.1):
@@ -81,11 +83,7 @@ def test_websocket_threads_bind():
             else:
                 pytest.fail(f"port {port} did not bind")
     finally:
-        for loop in (ui.rl_ws_loop, ui.event_ws_loop, ui.log_ws_loop):
-            if loop is not None:
-                loop.call_soon_threadsafe(loop.stop)
-        for t in threads.values():
-            t.join(timeout=1)
+        ui.stop_websockets()
 
 
 @pytest.mark.timeout(30)
@@ -154,9 +152,22 @@ def test_websocket_env_updates_after_rebind(monkeypatch):
         "UI_LOG_WS_URL": "ws://stale/logs",
         "UI_LOGS_WS": "ws://stale/logs",
     }
+    channel_hints = {
+        "UI_WS_URL": "events",
+        "UI_EVENTS_WS_URL": "events",
+        "UI_EVENTS_WS": "events",
+        "UI_RL_WS_URL": "rl",
+        "UI_RL_WS": "rl",
+        "UI_LOG_WS_URL": "logs",
+        "UI_LOGS_WS": "logs",
+        "UI_RL_WS_PORT": "rl",
+        "UI_EVENT_WS_PORT": "events",
+        "UI_LOG_WS_PORT": "logs",
+    }
     for key, value in stale_urls.items():
         monkeypatch.setenv(key, value)
         ui._AUTO_WS_ENV_VALUES[key] = value
+        ui._AUTO_WS_ENV_CHANNELS[key] = channel_hints[key]
 
     stale_ports = {
         "UI_RL_WS_PORT": "1234",
@@ -166,13 +177,13 @@ def test_websocket_env_updates_after_rebind(monkeypatch):
     for key, value in stale_ports.items():
         monkeypatch.setenv(key, value)
         ui._AUTO_WS_ENV_VALUES[key] = value
+        ui._AUTO_WS_ENV_CHANNELS[key] = channel_hints[key]
 
     sock = socket.socket()
     sock.bind(("localhost", 8767))
     sock.listen(1)
-    threads: dict[str, threading.Thread] = {}
     try:
-        threads = ui.start_websockets()
+        ui.start_websockets()
         assert ui._RL_WS_PORT != 8767
 
         host = ui._WS_CHANNELS["events"].host or ui._resolve_host()
@@ -199,11 +210,12 @@ def test_websocket_env_updates_after_rebind(monkeypatch):
         assert ui._AUTO_WS_ENV_VALUES["UI_LOG_WS_PORT"] == str(ui._LOG_WS_PORT)
     finally:
         sock.close()
-        for loop in (ui.rl_ws_loop, ui.event_ws_loop, ui.log_ws_loop):
-            if loop is not None:
-                loop.call_soon_threadsafe(loop.stop)
-        for t in threads.values():
-            t.join(timeout=1)
+        ui.stop_websockets()
+
+    for key in list(stale_urls) + list(stale_ports):
+        assert key not in os.environ
+    assert not ui._AUTO_WS_ENV_VALUES
+    assert not ui._AUTO_WS_ENV_CHANNELS
 
 
 @pytest.mark.timeout(30)
@@ -402,6 +414,7 @@ def test_websocket_invalid_ping_values_use_defaults(monkeypatch, caplog):
     for key in list(ui._AUTO_WS_ENV_VALUES):
         os.environ.pop(key, None)
     ui._AUTO_WS_ENV_VALUES.clear()
+    ui._AUTO_WS_ENV_CHANNELS.clear()
 
 
 def test_start_channel_allows_slow_ready(monkeypatch):
