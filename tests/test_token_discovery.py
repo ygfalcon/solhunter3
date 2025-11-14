@@ -206,6 +206,97 @@ async def test_fetch_birdeye_tokens_raises_config_error_on_403(monkeypatch):
     assert "access" in remediation.lower()
 
 
+def test_fetch_birdeye_tokens_returns_partial_results_on_server_error(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "good-key")
+    monkeypatch.setattr(td, "_BIRDEYE_RETRIES", 1)
+    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
+    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    first_payload = {
+        "data": {
+            "tokens": [
+                {
+                    "address": "So11111111111111111111111111111111111111112",
+                    "symbol": "SOL",
+                    "name": "Solana",
+                    "liquidity": 100000,
+                    "v24hUSD": 50000,
+                    "price": 25.0,
+                    "v24hChangePercent": 1.2,
+                }
+            ],
+            "total": 200,
+        }
+    }
+
+    class DummySuccessResponse:
+        def __init__(self, payload):
+            self.status = 200
+            self._payload = payload
+            self.headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self, *args, **kwargs):
+            return self._payload
+
+    class DummyServerErrorResponse:
+        def __init__(self):
+            self.status = 503
+            self.headers = {"Retry-After": "0"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            raise aiohttp.ClientResponseError(None, (), status=self.status, message="Service Unavailable")
+
+        async def json(self, *args, **kwargs):  # pragma: no cover - not expected to be called
+            raise AssertionError("json() should not be called on server error response")
+
+    class DummySession:
+        def __init__(self):
+            self._calls = 0
+
+        def get(self, *args, **kwargs):
+            self._calls += 1
+            if self._calls == 1:
+                return DummySuccessResponse(first_payload)
+            if self._calls == 2:
+                return DummyServerErrorResponse()
+            raise AssertionError("Unexpected BirdEye request beyond retries")
+
+    session = DummySession()
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    async def run():
+        return await td._fetch_birdeye_tokens(limit=5)
+
+    results = asyncio.run(run())
+
+    assert len(results) == 1
+    assert results[0]["address"] == "So11111111111111111111111111111111111111112"
+    assert "birdeye" in results[0]["sources"]
+
+
 @pytest.mark.asyncio
 async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
     td._BIRDEYE_CACHE.clear()
