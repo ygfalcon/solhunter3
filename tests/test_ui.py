@@ -57,6 +57,19 @@ def test_bootstrap_ui_environment_respects_existing(monkeypatch, caplog):
         ui._teardown_ui_environment()
 
 
+def test_bootstrap_ui_environment_defaults_live(monkeypatch):
+    monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
+    monkeypatch.setattr(ui, "load_production_env", lambda: {})
+    for name in ("SOLHUNTER_MODE", "BROKER_CHANNEL", "REDIS_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+    ui._bootstrap_ui_environment()
+    try:
+        assert os.environ["SOLHUNTER_MODE"] == "live"
+    finally:
+        ui._teardown_ui_environment()
+
+
 def test_create_app_proxy_fix_opt_in(monkeypatch):
     monkeypatch.setenv("UI_PROXY_FIX", "1")
     previous_state = ui._get_active_ui_state()

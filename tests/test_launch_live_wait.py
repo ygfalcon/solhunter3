@@ -75,6 +75,20 @@ def _run_wait_for_ready(
     )
 
 
+def test_live_launch_exports_solhunter_mode() -> None:
+    """The live launch block must export SOLHUNTER_MODE alongside MODE."""
+
+    marker = "UI connectivity probes re-enabled for live launch"
+    start = _LAUNCH_LIVE_SOURCE.find(marker)
+    assert start != -1, "Failed to locate live-launch marker"
+    snippet = _LAUNCH_LIVE_SOURCE[start:]
+    solhunter_idx = snippet.find("export SOLHUNTER_MODE=live")
+    mode_idx = snippet.find("export MODE=live")
+    assert solhunter_idx != -1, "SOLHUNTER_MODE live export missing"
+    assert mode_idx != -1, "MODE live export missing"
+    assert solhunter_idx < mode_idx, "SOLHUNTER_MODE export should precede MODE export"
+
+
 def test_ensure_virtualenv_respects_skip_flag(tmp_path: Path) -> None:
     script_path = LAUNCH_LIVE_PATH
     source = script_path.read_text()

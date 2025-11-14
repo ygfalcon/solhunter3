@@ -104,6 +104,11 @@ RUNTIME_FS_LOCK="$RUNTIME_CACHE_DIR/runtime.lock"
 RUNTIME_LOCK_ATTEMPTED=0
 RUNTIME_LOCK_ACQUIRED=0
 RUNTIME_LOCK_REFRESH_PID=0
+LIVE_MODE_ENV_APPLIED=0
+LIVE_MODE_PREVIOUS=""
+LIVE_MODE_WAS_SET=0
+LIVE_SOLHUNTER_MODE_PREVIOUS=""
+LIVE_SOLHUNTER_MODE_WAS_SET=0
 
 export RUNTIME_LOCK_TTL_SECONDS="${RUNTIME_LOCK_TTL_SECONDS:-60}"
 export RUNTIME_LOCK_REFRESH_INTERVAL="${RUNTIME_LOCK_REFRESH_INTERVAL:-20}"
@@ -1873,6 +1878,19 @@ cleanup() {
       fi
     fi
   fi
+  if [[ ${LIVE_MODE_ENV_APPLIED:-0} -eq 1 ]]; then
+    if [[ ${LIVE_SOLHUNTER_MODE_WAS_SET:-0} -eq 1 ]]; then
+      export SOLHUNTER_MODE="$LIVE_SOLHUNTER_MODE_PREVIOUS"
+    else
+      unset SOLHUNTER_MODE
+    fi
+    if [[ ${LIVE_MODE_WAS_SET:-0} -eq 1 ]]; then
+      export MODE="$LIVE_MODE_PREVIOUS"
+    else
+      unset MODE
+    fi
+    LIVE_MODE_ENV_APPLIED=0
+  fi
   if [[ -z ${CHILD_PIDS+x} ]]; then
     return
   fi
@@ -2295,7 +2313,19 @@ log_info "Connectivity soak complete: $SOAK_RESULT"
 unset CONNECTIVITY_SKIP_UI_PROBES
 log_info "UI connectivity probes re-enabled for live launch"
 
+LIVE_SOLHUNTER_MODE_WAS_SET=0
+if [[ -n ${SOLHUNTER_MODE+x} ]]; then
+  LIVE_SOLHUNTER_MODE_PREVIOUS="$SOLHUNTER_MODE"
+  LIVE_SOLHUNTER_MODE_WAS_SET=1
+fi
+LIVE_MODE_WAS_SET=0
+if [[ -n ${MODE+x} ]]; then
+  LIVE_MODE_PREVIOUS="$MODE"
+  LIVE_MODE_WAS_SET=1
+fi
+export SOLHUNTER_MODE=live
 export MODE=live
+LIVE_MODE_ENV_APPLIED=1
 # keep env aligned with the flag we passed to the controller
 export MICRO_MODE="$MICRO_FLAG"
 if [[ $CANARY_MODE -eq 1 ]]; then

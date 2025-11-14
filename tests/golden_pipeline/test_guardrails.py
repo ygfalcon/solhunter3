@@ -343,6 +343,18 @@ def test_pipeline_requires_bus_in_live_mode(monkeypatch):
         GoldenPipeline(enrichment_fetcher=_fetcher)
 
 
+def test_pipeline_rejects_inmemory_bus_for_live_mode(monkeypatch):
+    monkeypatch.setenv("SOLHUNTER_MODE", "live")
+
+    async def _fetcher(mints):
+        return {}
+
+    with pytest.raises(SystemExit) as excinfo:
+        GoldenPipeline(enrichment_fetcher=_fetcher, bus=InMemoryBus())
+
+    assert excinfo.value.code == 78
+
+
 class _StubPortfolio:
     pass
 
