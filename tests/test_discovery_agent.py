@@ -1057,3 +1057,66 @@ def test_offline_discovery_returns_static_fallback(monkeypatch, caplog):
     assert "offline mode active" in caplog.text
     assert tokens, "expected static fallback tokens"
     assert agent.last_details[tokens[0]]["fallback_reason"] == "static"
+
+
+def test_offline_discovery_logs_fallback_reason(monkeypatch):
+    _reset_cache()
+    agent = DiscoveryAgent()
+
+    monkeypatch.setattr(agent, "_fallback_tokens", lambda: [VALID_MINT])
+    monkeypatch.setattr(agent, "_static_fallback_tokens", lambda: [])
+
+    async def passthrough_social(self, tokens, details, *, offline=False):
+        del self, offline
+        return tokens, details or {}
+
+    monkeypatch.setattr(DiscoveryAgent, "_apply_social_mentions", passthrough_social)
+
+    captured_details: list[str] = []
+
+    def capture_runtime_log(topic, payload):
+        if topic == "runtime.log":
+            captured_details.append(payload.detail)
+
+    monkeypatch.setattr(discovery_mod, "publish", capture_runtime_log)
+
+    tokens = asyncio.run(agent.discover_tokens(offline=True))
+
+    assert tokens == [VALID_MINT]
+    assert captured_details, "expected runtime.log entry"
+    assert any("fallback=cache" in entry for entry in captured_details)
+
+
+def test_discovery_logs_fallback_reason(monkeypatch):
+    _reset_cache()
+    agent = DiscoveryAgent()
+    agent.max_attempts = 1
+    agent.backoff = 0.0
+
+    async def no_tokens(self, *, method, offline, token_file):
+        del self, method, offline, token_file
+        return [], {}
+
+    async def passthrough_social(self, tokens, details, *, offline=False):
+        del self, offline
+        return tokens, details or {}
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", no_tokens)
+    monkeypatch.setattr(DiscoveryAgent, "_apply_social_mentions", passthrough_social)
+
+    monkeypatch.setattr(agent, "_fallback_tokens", lambda: [])
+    monkeypatch.setattr(agent, "_static_fallback_tokens", lambda: [VALID_MINT])
+
+    captured_details: list[str] = []
+
+    def capture_runtime_log(topic, payload):
+        if topic == "runtime.log":
+            captured_details.append(payload.detail)
+
+    monkeypatch.setattr(discovery_mod, "publish", capture_runtime_log)
+
+    tokens = asyncio.run(agent.discover_tokens())
+
+    assert tokens == [VALID_MINT]
+    assert captured_details, "expected runtime.log entry"
+    assert any("fallback=static" in entry for entry in captured_details)

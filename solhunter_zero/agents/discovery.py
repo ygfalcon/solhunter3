@@ -556,6 +556,7 @@ class DiscoveryAgent:
         consider_cache = bool(cached_tokens) and cache_method_matches and identity_matches
         if offline and not method_override:
             offline_source = "fallback"
+            fallback_reason = ""
             if token_file:
                 try:
                     tokens = scan_tokens_from_file(token_file, limit=self.limit)
@@ -602,6 +603,8 @@ class DiscoveryAgent:
             if self.limit:
                 detail = f"{detail}/{self.limit}"
             detail = f"{detail} method=offline source={offline_source}"
+            if fallback_reason:
+                detail = f"{detail} fallback={fallback_reason}"
             publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
             logger.info(
                 "DiscoveryAgent offline mode active (source=%s, count=%d)",
@@ -652,6 +655,7 @@ class DiscoveryAgent:
         if mempool_flag is not None:
             mempool_enabled = mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
         fallback_used = False
+        fallback_reason = ""
 
         birdeye_configured = bool((self.birdeye_api_key or "").strip())
         if not birdeye_configured and not self._birdeye_notice_logged:
@@ -718,6 +722,8 @@ class DiscoveryAgent:
         detail = f"{detail} method={active_method}"
         if self.limit and len(tokens) < self.limit:
             detail = f"{detail} partial"
+        if fallback_used and fallback_reason:
+            detail = f"{detail} fallback={fallback_reason}"
         publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
         logger.info(
             "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
