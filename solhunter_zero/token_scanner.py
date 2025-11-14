@@ -1717,7 +1717,8 @@ async def _pump_trending(
     for entry in payload:
         if not isinstance(entry, dict):
             continue
-        mint = _normalize_mint_candidate(entry.get("mint") or entry.get("tokenMint"))
+        raw_mint = entry.get("mint") or entry.get("tokenMint") or entry.get("tokenAddress")
+        mint = _normalize_mint_candidate(raw_mint)
         if not mint or mint in seen:
             continue
         seen.add(mint)
