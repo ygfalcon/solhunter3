@@ -618,10 +618,33 @@ PY
 }
 
 run_connectivity_probes() {
-  "$PYTHON_BIN" - <<'PY'
+  local loopback_grace="${CONNECTIVITY_LOOPBACK_GRACE:-0}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --grace-loopback)
+        loopback_grace=1
+        shift
+        ;;
+      --no-loopback-grace)
+        loopback_grace=0
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  CONNECTIVITY_LOOPBACK_GRACE="$loopback_grace" "$PYTHON_BIN" - <<'PY'
 import asyncio
 import os
 import sys
+import ipaddress
+from urllib.parse import urlsplit
 
 from solhunter_zero.production import ConnectivityChecker
 
@@ -634,12 +657,45 @@ REQUIRED_TARGETS = [
 ]
 
 
-def _format_result(label: str, result) -> str:
+def _flag(value: str | None) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_loopback_target(target: str | None) -> bool:
+    if not target:
+        return False
+    try:
+        parsed = urlsplit(target)
+    except Exception:  # pragma: no cover - defensive
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _format_result(label: str, result, *, override_status: str | None = None, note: str | None = None) -> str:
     if result is None:
         return f"{label}: missing target"
-    status = "OK" if result.ok else f"FAIL ({result.error or result.status or result.status_code})"
+    status: str
+    if override_status:
+        status = override_status
+    else:
+        status = "OK" if result.ok else f"FAIL ({result.error or result.status or result.status_code})"
     latency = f"{result.latency_ms:.1f} ms" if result.latency_ms is not None else "n/a"
-    return f"{label}: {status} → {result.target} ({latency})"
+    parts = [f"{label}: {status} → {result.target} ({latency})"]
+    if note:
+        parts.append(f"[{note}]")
+    return " ".join(parts)
 
 
 async def _run() -> None:
@@ -659,16 +715,32 @@ async def _run() -> None:
     else:
         lookup.setdefault("event-bus", None)
 
+    loopback_grace = _flag(os.environ.get("CONNECTIVITY_LOOPBACK_GRACE"))
     failures: list[str] = []
+    loopback_skips: list[str] = []
     for key, label in REQUIRED_TARGETS:
         result = lookup.get(key)
-        print(_format_result(label, result))
+        is_loopback = _is_loopback_target(getattr(result, "target", None))
+        override_status = None
+        note = None
+        if result is not None and not result.ok and loopback_grace and is_loopback:
+            override_status = "WARN"
+            note = "loopback target unreachable (deferred)"
+            loopback_skips.append(
+                f"{label} connectivity check deferred for loopback target: {result.target}"
+            )
+        print(_format_result(label, result, override_status=override_status, note=note))
         if result is None:
             failures.append(f"{label} connectivity probe skipped (no target configured)")
             continue
         if not result.ok:
+            if loopback_grace and is_loopback:
+                continue
             reason = result.error or result.status or "unavailable"
             failures.append(f"{label} connectivity check failed: {reason} ({result.target})")
+
+    for message in loopback_skips:
+        print(message, file=sys.stderr)
 
     if failures:
         print("\n".join(failures), file=sys.stderr)
@@ -1581,8 +1653,8 @@ if ! eval "$BUS_EXPORTS"; then
 fi
 log_info "RUNTIME_MANIFEST channel=$BROKER_CHANNEL redis=$REDIS_URL mint_stream=$MINT_STREAM_REDIS_URL mempool=$MEMPOOL_STREAM_REDIS_URL amm_watch=$AMM_WATCH_REDIS_URL bus=$EVENT_BUS_URL"
 
-log_info "Running connectivity probes"
-if ! CONNECTIVITY_REPORT=$(run_connectivity_probes 2>&1); then
+log_info "Running connectivity probes (pre-runtime)"
+if ! CONNECTIVITY_REPORT=$(run_connectivity_probes --grace-loopback 2>&1); then
   log_warn "Connectivity probes failed:\n$CONNECTIVITY_REPORT"
   exit $EXIT_CONNECTIVITY
 fi
@@ -1591,7 +1663,7 @@ while IFS= read -r line; do
     log_info "Connectivity probe: $line"
   fi
 done <<<"$CONNECTIVITY_REPORT"
-log_info "Connectivity probes succeeded"
+log_info "Connectivity probes succeeded (pre-runtime)"
 
 SOCKET_STATE_RAW=$(wait_for_socket_release)
 read -r SOCKET_STATE SOCKET_HOST SOCKET_PORT SOCKET_REMOTE <<<"$SOCKET_STATE_RAW"
@@ -1862,6 +1934,18 @@ if ! check_ui_health "$PAPER_LOG"; then
   log_warn "Paper runtime UI health check failed"
   exit $EXIT_HEALTH
 fi
+
+log_info "Re-running connectivity probes with paper runtime online"
+if ! CONNECTIVITY_REPORT=$(run_connectivity_probes 2>&1); then
+  log_warn "Connectivity probes failed after runtime start:\n$CONNECTIVITY_REPORT"
+  exit $EXIT_CONNECTIVITY
+fi
+while IFS= read -r line; do
+  if [[ -n $line ]]; then
+    log_info "Connectivity probe: $line"
+  fi
+done <<<"$CONNECTIVITY_REPORT"
+log_info "Connectivity probes succeeded with runtime online"
 
 run_preflight() {
   local mode=$1
