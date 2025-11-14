@@ -315,6 +315,17 @@ _SCORING_DEFAULT = {
         "sellable": 0.4,
         "mempool_pressure": 2.4,
         "staleness_ms": -0.3,
+        # Source-combination features encourage corroboration between
+        # independent feeds. Mempool + DEX activity is treated as the
+        # strongest confirmation that a token is both tradable and in
+        # demand, followed by aggregator corroboration.
+        "source_has_mempool": 0.35,
+        "source_has_dex": 0.25,
+        "source_has_aggregator": 0.15,
+        "source_mempool_and_dex": 0.65,
+        "source_mempool_and_aggregator": 0.45,
+        "source_aggregator_and_dex": 0.3,
+        "source_dex_count": 0.1,
     },
 }
 
@@ -685,13 +696,33 @@ def _sigmoid(value: float) -> float:
     return z / (1.0 + z)
 
 
-def _source_count(entry: Dict[str, Any]) -> int:
+_DEX_FEED_SOURCES = frozenset({"dexscreener", "raydium", "meteora", "dexlab", "orca"})
+_AGGREGATOR_SOURCES = frozenset({"birdeye", "trending"})
+
+
+def _source_set(entry: Mapping[str, Any]) -> set[str]:
     sources = entry.get("sources")
+    normalized: set[str] = set()
     if isinstance(sources, set):
-        return len(sources)
-    if isinstance(sources, (list, tuple)):
-        return len(set(sources))
-    return 0
+        candidates = sources
+    elif isinstance(sources, (list, tuple)):
+        candidates = sources
+    elif isinstance(sources, str) and sources:
+        candidates = [sources]
+    else:
+        candidates = []
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+        label = value.strip().lower()
+        if not label:
+            continue
+        normalized.add(label)
+    return normalized
+
+
+def _source_count(entry: Dict[str, Any]) -> int:
+    return len(_source_set(entry))
 
 
 def _compute_feature_vector(
@@ -718,7 +749,16 @@ def _compute_feature_vector(
             age_minutes = 0.0
     else:
         age_minutes = 0.0
-    source_diversity = float(_source_count(entry))
+    source_set = _source_set(entry)
+    source_diversity = float(len(source_set))
+    dex_sources = source_set & _DEX_FEED_SOURCES
+    aggregator_sources = source_set & _AGGREGATOR_SOURCES
+    has_mempool = 1.0 if "mempool" in source_set else 0.0
+    has_dex = 1.0 if dex_sources else 0.0
+    has_aggregator = 1.0 if aggregator_sources else 0.0
+    mempool_and_dex = 1.0 if has_mempool and has_dex else 0.0
+    mempool_and_aggregator = 1.0 if has_mempool and has_aggregator else 0.0
+    aggregator_and_dex = 1.0 if has_aggregator and has_dex else 0.0
     oracle_present = 0.0
     if entry.get("oracle") or entry.get("oracle_present"):
         oracle_present = 1.0
@@ -752,6 +792,13 @@ def _compute_feature_vector(
         "sellable": float(sellable),
         "mempool_pressure": float(max(0.0, mempool_pressure)),
         "staleness_ms": float(staleness_minutes),
+        "source_has_mempool": float(has_mempool),
+        "source_has_dex": float(has_dex),
+        "source_has_aggregator": float(has_aggregator),
+        "source_mempool_and_dex": float(mempool_and_dex),
+        "source_mempool_and_aggregator": float(mempool_and_aggregator),
+        "source_aggregator_and_dex": float(aggregator_and_dex),
+        "source_dex_count": float(len(dex_sources)),
     }
     return features
 

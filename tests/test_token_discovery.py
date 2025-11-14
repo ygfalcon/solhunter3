@@ -98,6 +98,37 @@ def test_compute_feature_vector_mempool_score_fallback(monkeypatch, caplog):
     assert "Failed to coerce numeric value" in caplog.text
 
 
+def test_compute_feature_vector_includes_source_combinations(monkeypatch):
+    _configure_env(monkeypatch, TRENDING_MIN_LIQUIDITY_USD="100")
+
+    entry = {
+        "liquidity": 500,
+        "sources": {"mempool", "dexscreener", "raydium", "birdeye"},
+    }
+    mempool_snapshot = {"score": 1.5}
+
+    features = td._compute_feature_vector(entry, mempool_snapshot)
+
+    assert features["source_has_mempool"] == 1.0
+    assert features["source_has_dex"] == 1.0
+    assert features["source_has_aggregator"] == 1.0
+    assert features["source_mempool_and_dex"] == 1.0
+    assert features["source_mempool_and_aggregator"] == 1.0
+    assert features["source_aggregator_and_dex"] == 1.0
+    assert features["source_dex_count"] == 2.0
+
+    entry_no_overlap = {"liquidity": 500, "sources": ["birdeye"]}
+    features_no_overlap = td._compute_feature_vector(entry_no_overlap, None)
+
+    assert features_no_overlap["source_has_mempool"] == 0.0
+    assert features_no_overlap["source_has_dex"] == 0.0
+    assert features_no_overlap["source_has_aggregator"] == 1.0
+    assert features_no_overlap["source_mempool_and_dex"] == 0.0
+    assert features_no_overlap["source_mempool_and_aggregator"] == 0.0
+    assert features_no_overlap["source_aggregator_and_dex"] == 0.0
+    assert features_no_overlap["source_dex_count"] == 0.0
+
+
 @pytest.mark.anyio("asyncio")
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()
