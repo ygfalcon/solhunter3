@@ -72,7 +72,8 @@ _BIRDEYE_TRENDING = "https://public-api.birdeye.so/defi/token_trending"
 _BIRDEYE_META_SINGLE = "https://public-api.birdeye.so/defi/v3/token/meta-data/single"
 _DEXSCREENER_TRENDING = "https://api.dexscreener.com/latest/dex/trending"
 _DEXSCREENER_TOKENS = "https://api.dexscreener.com/tokens/v1/solana/"
-_PUMPFUN_TRENDING = "https://pump.fun/api/trending"
+_PUMPFUN_TRENDING_DEFAULT = "https://pump.fun/api/trending"
+_PUMPFUN_TRENDING = _PUMPFUN_TRENDING_DEFAULT
 _NITTER_SEARCH = "https://nitter.net/search"
 _DEXTOOLS_POOL_META = "https://www.dextools.io/shared/data/pool/"
 
@@ -245,9 +246,15 @@ if Gauge is not None:  # pragma: no branch - optional metrics
         "Momentum circuit breaker consecutive failure count",
         labelnames=("host",),
     )
+    MOMENTUM_SOURCE_URL = Gauge(
+        "momentum_source_url",
+        "Configured upstream URL for momentum sources",
+        labelnames=("source", "url"),
+    )
 else:  # pragma: no cover - metrics optional
     MOMENTUM_BREAKER_STATE = None
     MOMENTUM_BREAKER_CONSECUTIVE_FAILURES = None
+    MOMENTUM_SOURCE_URL = None
 
 
 def _parse_bool(value: str | None) -> bool:
@@ -288,6 +295,27 @@ _LUNARCRUSH_HOST = (
     if _LUNARCRUSH_RATE_FREE
     else ""
 )
+
+
+def _resolve_host_from_url(url: str, fallback: str) -> str:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return fallback
+    if parsed.netloc:
+        return parsed.netloc
+    if parsed.path:
+        parts = parsed.path.split("/")
+        if parts and parts[0]:
+            return parts[0]
+    return fallback
+
+
+def _pumpfun_trending_url() -> str:
+    override = (os.getenv("PUMP_FUN_TRENDING") or "").strip()
+    if override:
+        return override
+    return _PUMPFUN_TRENDING
 
 
 def _record_breaker_open(host: str, duration: float) -> None:
@@ -583,6 +611,8 @@ class MomentumAgent:
         self._lunarcrush_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
         self._lunarcrush_history: Dict[str, tuple[float, float]] = {}
         self._stall_counts: Dict[str, int] = {}
+        self._pumpfun_url = ""
+        self._pumpfun_host = ""
         try:
             stall_env = os.getenv("MOMENTUM_LUNARCRUSH_STALL_TICKS")
             self._stall_threshold = max(
@@ -635,6 +665,7 @@ class MomentumAgent:
                     cooldown_sec=30.0,
                     on_open=_breaker_open_callback(self._lunarcrush_host),
                 )
+        self._configure_pumpfun_endpoint()
 
     @property
     def enabled(self) -> bool:
@@ -648,6 +679,42 @@ class MomentumAgent:
             self._lunarcrush_cache.clear()
             self._lunarcrush_history.clear()
             self._stall_counts.clear()
+        self._configure_pumpfun_endpoint()
+
+    def _configure_pumpfun_endpoint(self) -> None:
+        url = _pumpfun_trending_url()
+        host = _resolve_host_from_url(url, "pump.fun")
+        if url == self._pumpfun_url and host == self._pumpfun_host:
+            return
+        previous_url = self._pumpfun_url
+        self._pumpfun_url = url
+        self._pumpfun_host = host
+        self._ensure_host_registered(host)
+        if MOMENTUM_SOURCE_URL is not None:
+            if previous_url and previous_url != url:
+                try:
+                    MOMENTUM_SOURCE_URL.labels(source="pumpfun", url=previous_url).set(0.0)
+                except Exception:  # pragma: no cover - metrics optional
+                    pass
+            try:
+                MOMENTUM_SOURCE_URL.labels(source="pumpfun", url=url).set(1.0)
+            except Exception:  # pragma: no cover - metrics optional
+                pass
+        logger.info("Pump.fun trending endpoint configured: %s (host=%s)", url, host)
+
+    def _ensure_host_registered(self, host: str) -> None:
+        if not host:
+            return
+        if host not in self._limiters:
+            rate, burst = _HOST_RPS.get(host, _HOST_RPS.get("pump.fun", (3.0, 3)))
+            self._limiters[host] = TokenBucket(host, rate=rate, burst=burst)
+        if host not in self._breakers:
+            self._breakers[host] = CircuitBreaker(
+                threshold=3,
+                window_sec=30.0,
+                cooldown_sec=30.0,
+                on_open=_breaker_open_callback(host),
+            )
 
     def recent_ticks(self) -> Sequence[Mapping[str, MomentumComputation]]:
         """Return a snapshot of the last two momentum computations."""
@@ -1715,11 +1782,14 @@ class MomentumAgent:
         return result
 
     async def _fetch_pumpfun(self) -> Mapping[str, Mapping[str, Any]]:
-        cache_key = "pumpfun_trending"
+        self._configure_pumpfun_endpoint()
+        url = self._pumpfun_url or _pumpfun_trending_url()
+        host = self._pumpfun_host or _resolve_host_from_url(url, "pump.fun")
+        cache_key = f"pumpfun_trending::{host}"
         cached = self._cache_get(cache_key, ttl=_SOCIAL_CACHE_TTL_SEC)
         if cached is not None:
             return cached
-        payload = await self._request_json(_PUMPFUN_TRENDING, host="pump.fun")
+        payload = await self._request_json(url, host=host or "pump.fun")
         result: Dict[str, Dict[str, Any]] = {}
         if isinstance(payload, Mapping):
             data = payload.get("tokens") or payload.get("items") or payload.get("results")

@@ -1,7 +1,7 @@
 # Pump.fun Integration
 
 ## API base URL
-- Uses the public Pump.fun leaderboard at `https://pump.fun/api/trending`. The URL is configurable via `PUMP_FUN_TRENDING` or `PUMP_LEADERBOARD_URL` for discovery fallbacks.【F:solhunter_zero/golden_pipeline/momentum.py†L60-L108】【F:solhunter_zero/token_scanner.py†L175-L261】
+- Uses the public Pump.fun leaderboard at `https://pump.fun/api/trending`. The URL is configurable via `PUMP_FUN_TRENDING` or `PUMP_LEADERBOARD_URL` for discovery fallbacks, and the active selection is logged and exported via the `momentum_source_url` metric when overrides apply.【F:solhunter_zero/golden_pipeline/momentum.py†L60-L118】【F:solhunter_zero/golden_pipeline/momentum.py†L238-L257】【F:solhunter_zero/golden_pipeline/momentum.py†L668-L717】【F:solhunter_zero/token_scanner.py†L62-L118】
 
 ## Expected JSON payload
 - Responses provide a `tokens` array where each entry includes `tokenAddress`, `rank`, `score`/`pumpScore`, `buyersLastHour`, `tweetsLastHour`, and optional `sentiment`. These values feed the momentum calculator (`pump_intensity`, `pump_score`, buyer counts) and discovery metadata sources.【F:solhunter_zero/golden_pipeline/momentum.py†L1703-L1763】【F:solhunter_zero/token_scanner.py†L822-L1374】
