@@ -123,6 +123,7 @@ def _register_ui_server(server: "UIServer") -> None:
 def _unregister_ui_server(server: "UIServer") -> None:
     _ACTIVE_HTTP_SERVERS.discard(server)
     if not _ACTIVE_HTTP_SERVERS:
+        stop_websockets()
         _teardown_ui_environment()
 
 
@@ -4031,17 +4032,20 @@ class UIServer:
         _register_ui_server(self)
 
     def stop(self) -> None:
-        server = self._server
-        if server is not None:
-            with contextlib.suppress(Exception):
-                server.shutdown()
-            with contextlib.suppress(Exception):
-                server.server_close()
-        if self._thread:
-            self._thread.join(timeout=2)
-        self._thread = None
-        self._server = None
-        self._serve_forever_started.clear()
+        try:
+            server = self._server
+            if server is not None:
+                with contextlib.suppress(Exception):
+                    server.shutdown()
+                with contextlib.suppress(Exception):
+                    server.server_close()
+            if self._thread:
+                self._thread.join(timeout=2)
+            self._thread = None
+            self._server = None
+            self._serve_forever_started.clear()
+        finally:
+            _unregister_ui_server(self)
 
     @property
     def serve_forever_started(self) -> threading.Event:
@@ -4050,8 +4054,6 @@ class UIServer:
     @property
     def ready_timeout(self) -> float:
         return self._ready_timeout
-        stop_websockets()
-        _unregister_ui_server(self)
 
 
 def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
