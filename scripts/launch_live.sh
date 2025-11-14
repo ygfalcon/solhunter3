@@ -1074,9 +1074,10 @@ PY
   start_runtime_lock_refresher
   if [[ -z ${RUNTIME_LOCK_REFRESH_PID:-} || $RUNTIME_LOCK_REFRESH_PID -le 0 ]]; then
     log_warn "Runtime lock refresher did not start; lock TTL may expire early"
+    exit $EXIT_HEALTH
   elif ! kill -0 "$RUNTIME_LOCK_REFRESH_PID" >/dev/null 2>&1; then
     log_warn "Runtime lock refresher exited prematurely (pid=$RUNTIME_LOCK_REFRESH_PID)"
-    RUNTIME_LOCK_REFRESH_PID=0
+    exit $EXIT_HEALTH
   fi
 }
 
