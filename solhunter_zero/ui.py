@@ -55,6 +55,8 @@ _ACTIVE_HTTP_SERVERS: WeakSet["UIServer"] = WeakSet()
 
 _QUEUE_DROP_WARNING_INTERVAL = float(os.getenv("UI_QUEUE_DROP_WARNING_INTERVAL", "10") or 10.0)
 
+DEFAULT_UI_HTTP_READY_TIMEOUT = 15.0
+
 if Counter is not None:  # pragma: no branch - optional metrics
     _WS_QUEUE_DROP_TOTAL = Counter(
         "solhunter_ws_queue_drops_total",
@@ -3660,7 +3662,7 @@ class UIServer:
         self._thread: Optional[threading.Thread] = None
         self._server: Optional[BaseWSGIServer] = None
         self._serve_forever_started = threading.Event()
-        self._ready_timeout = 5.0
+        self._ready_timeout = DEFAULT_UI_HTTP_READY_TIMEOUT
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -3729,15 +3731,18 @@ class UIServer:
         self._thread = thread
         thread.start()
 
-        ready_timeout_raw = os.getenv("UI_HTTP_READY_TIMEOUT", "5")
+        ready_timeout_raw = os.getenv(
+            "UI_HTTP_READY_TIMEOUT", str(DEFAULT_UI_HTTP_READY_TIMEOUT)
+        )
         try:
-            ready_timeout = float(ready_timeout_raw or 5)
+            ready_timeout = float(ready_timeout_raw or DEFAULT_UI_HTTP_READY_TIMEOUT)
         except (TypeError, ValueError):
             log.warning(
-                "Invalid UI_HTTP_READY_TIMEOUT value %r; using default 5 seconds",
+                "Invalid UI_HTTP_READY_TIMEOUT value %r; using default %.1f seconds",
                 ready_timeout_raw,
+                DEFAULT_UI_HTTP_READY_TIMEOUT,
             )
-            ready_timeout = 5.0
+            ready_timeout = DEFAULT_UI_HTTP_READY_TIMEOUT
 
         self._ready_timeout = ready_timeout
 
