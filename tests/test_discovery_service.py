@@ -34,6 +34,57 @@ def test_emit_tokens_skips_reordered_batches():
     asyncio.run(runner())
 
 
+def test_emit_tokens_detects_metadata_changes():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        token = "So11111111111111111111111111111111111111112"
+        agent = types.SimpleNamespace(
+            last_method="unit-test",
+            last_details={token: {"price": 1.0}},
+        )
+        service = DiscoveryService(queue, emit_batch_size=10)
+        service._agent = agent
+
+        await service._emit_tokens([token], fresh=True)
+        first_batch = queue.get_nowait()
+        assert first_batch[0].metadata["price"] == 1.0
+
+        assert queue.qsize() == 0
+
+        agent.last_details[token]["price"] = 2.0
+
+        await service._emit_tokens([token], fresh=True)
+
+        assert queue.qsize() == 1
+        second_batch = queue.get_nowait()
+        assert second_batch[0].metadata["price"] == 2.0
+
+    asyncio.run(runner())
+
+
+def test_emit_tokens_ignores_metadata_changes_when_not_fresh():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        token = "So11111111111111111111111111111111111111112"
+        agent = types.SimpleNamespace(
+            last_method="unit-test",
+            last_details={token: {"price": 1.0}},
+        )
+        service = DiscoveryService(queue, emit_batch_size=10)
+        service._agent = agent
+
+        await service._emit_tokens([token], fresh=True)
+        queue.get_nowait()
+
+        agent.last_details[token]["price"] = 3.0
+
+        await service._emit_tokens([token], fresh=False)
+
+        assert queue.qsize() == 0
+
+    asyncio.run(runner())
+
+
 def test_empty_fetch_backoff_is_capped():
     async def runner() -> None:
         queue: asyncio.Queue[list] = asyncio.Queue()
