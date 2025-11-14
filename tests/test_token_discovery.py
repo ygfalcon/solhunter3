@@ -636,6 +636,132 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_discover_candidates_emits_category_metrics(monkeypatch, caplog):
+    td._BIRDEYE_CACHE.clear()
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="1",
+        DISCOVERY_ENABLE_DEXSCREENER="1",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    class FakeSession:
+        async def close(self):  # pragma: no cover - defensive
+            return None
+
+    fake_session = FakeSession()
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return fake_session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    aggregator_mint = "Agg111111111111111111111111111111111111111"
+    dex_mint = "Dex11111111111111111111111111111111111111111"
+    mempool_mint = "Mem111111111111111111111111111111111111111"
+
+    async def fake_birdeye(*, limit=None):
+        _ = limit
+        return [
+            {
+                "address": aggregator_mint,
+                "symbol": "AGG",
+                "name": "Aggregator Token",
+                "liquidity": 9000,
+                "volume": 12000,
+                "price": 1.2,
+            }
+        ]
+
+    async def fake_collect(*args, **kwargs):
+        return {
+            mempool_mint: {
+                "symbol": "MP",
+                "name": "Mempool Token",
+                "liquidity": 2500,
+                "volume": 1800,
+                "price": 0.45,
+            }
+        }
+
+    async def fake_dexscreener(*, session=None):
+        _ = session
+        return [
+            {
+                "address": dex_mint,
+                "symbol": "DEX",
+                "name": "Dex Token",
+                "liquidity": 8000,
+                "volume": 9500,
+            }
+        ]
+
+    async def fake_trending_tokens_async(*, limit=None):
+        _ = limit
+        return []
+
+    async def fake_meteora(*, session=None):
+        _ = session
+        return []
+
+    async def fake_dexlab(*, session=None):
+        _ = session
+        return []
+
+    async def fake_enrich(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_birdeye)
+    monkeypatch.setattr(td, "_collect_mempool_signals", fake_collect)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", fake_dexscreener)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", fake_meteora)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", fake_dexlab)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending_tokens_async)
+    monkeypatch.setattr(td, "_enrich_with_solscan", fake_enrich)
+
+    result = td.discover_candidates("https://rpc", limit=5, mempool_threshold=0.0)
+
+    batches: list[list[dict]] = []
+    with caplog.at_level("DEBUG", logger="solhunter_zero.token_discovery"):
+        async for batch in result:
+            batches.append(batch)
+
+    assert batches, "expected discovery batches"
+    final = batches[-1]
+    assert any(entry["address"] == aggregator_mint for entry in final)
+    assert any(entry["address"] == dex_mint for entry in final)
+    assert any(entry["address"] == mempool_mint for entry in final)
+
+    metrics = result.metrics
+    assert metrics["category_counts"] == {
+        "dex": 1,
+        "aggregator": 1,
+        "mempool": 1,
+    }
+
+    summary_message = ""
+    for record in caplog.records:
+        message = record.getMessage()
+        if "Discovery combine summary" in message:
+            summary_message = message
+            break
+
+    assert summary_message, "expected discovery summary log"
+    assert "'dex': 1" in summary_message
+    assert "'aggregator': 1" in summary_message
+    assert "'mempool': 1" in summary_message
+
+
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch, caplog):
     td._BIRDEYE_CACHE.clear()
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)

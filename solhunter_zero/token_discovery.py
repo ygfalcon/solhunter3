@@ -33,6 +33,12 @@ from .util.mints import is_valid_solana_mint
 
 logger = logging.getLogger(__name__)
 
+_SOURCE_CATEGORY_MAP: Dict[str, set[str]] = {
+    "dex": {"dexscreener", "raydium", "meteora", "dexlab", "orca"},
+    "aggregator": {"birdeye", "trending"},
+    "mempool": {"mempool"},
+}
+
 
 def _is_fast_mode() -> bool:
     return os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
@@ -810,6 +816,41 @@ def _normalize_venues_field(value: Any) -> set[str]:
                 if candidate:
                     venues.add(candidate)
     return venues
+
+
+def _normalize_sources_field(value: Any) -> set[str]:
+    sources: set[str] = set()
+    if isinstance(value, (set, frozenset)):
+        iterable = value
+    elif isinstance(value, (list, tuple)):
+        iterable = value
+    elif isinstance(value, str):
+        iterable = [value]
+    else:
+        iterable = []
+    for item in iterable:
+        if isinstance(item, str):
+            candidate = item.strip().lower()
+            if candidate:
+                sources.add(candidate)
+    return sources
+
+
+def _compute_category_coverage(entries: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    coverage = {category: 0 for category in _SOURCE_CATEGORY_MAP}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        categories: set[str] = set()
+        sources = _normalize_sources_field(entry.get("sources"))
+        if not sources:
+            continue
+        for category, labels in _SOURCE_CATEGORY_MAP.items():
+            if sources & labels:
+                categories.add(category)
+        for category in categories:
+            coverage[category] += 1
+    return coverage
 
 
 def _merge_orca_venues(
@@ -1850,11 +1891,13 @@ class _DiscoveryResult:
         agen: AsyncIterator[List[TokenEntry]],
         *,
         config_errors: List[DiscoveryConfigurationError] | None = None,
+        metrics: MutableMapping[str, Any] | None = None,
     ) -> None:
         self._agen = agen
         self._final: List[TokenEntry] | None = None
         self._consumed = False
         self._config_errors = config_errors if config_errors is not None else []
+        self._metrics: MutableMapping[str, Any] = metrics if metrics is not None else {}
 
     def __aiter__(self) -> AsyncIterator[List[TokenEntry]]:
         async def _iterate() -> AsyncIterator[List[TokenEntry]]:
@@ -1890,6 +1933,12 @@ class _DiscoveryResult:
         """Convenience accessor for the first configuration error, if any."""
 
         return self._config_errors[0] if self._config_errors else None
+
+    @property
+    def metrics(self) -> Dict[str, Any]:
+        """Return the latest discovery metrics snapshot."""
+
+        return dict(self._metrics)
 
 
 def discover_candidates(
@@ -1986,6 +2035,7 @@ def discover_candidates(
         return final
 
     config_errors: List[DiscoveryConfigurationError] = []
+    metrics: Dict[str, Any] = {}
 
     async def _generator() -> AsyncIterator[List[TokenEntry]]:
         async def _close_candidate_session(candidate: Any) -> None:
@@ -2099,6 +2149,29 @@ def discover_candidates(
 
             completed: set[asyncio.Task[Any]] = set()
             config_error: DiscoveryConfigurationError | None = None
+
+            def _update_metrics_from_snapshot(snapshot: Sequence[TokenEntry]) -> None:
+                top_value: float | None = None
+                if snapshot and isinstance(snapshot[0], Mapping):
+                    raw_top = snapshot[0].get("score")
+                    if isinstance(raw_top, (int, float)):
+                        top_value = float(raw_top)
+                metrics.clear()
+                metrics.update(
+                    {
+                        "source_counts": {
+                            "birdeye": len(bird_tokens),
+                            "mempool": len(mempool),
+                            "dexscreener": len(dexscreener_tokens),
+                            "raydium": len(raydium_tokens),
+                            "meteora": len(meteora_tokens),
+                            "dexlab": len(dexlab_tokens),
+                        },
+                        "final_count": len(snapshot),
+                        "top_score": top_value,
+                        "category_counts": _compute_category_coverage(snapshot),
+                    }
+                )
 
             async def _merge_result(label: str, result: Any) -> bool:
                 nonlocal mempool, bird_tokens, dexscreener_tokens, raydium_tokens
@@ -2296,6 +2369,7 @@ def discover_candidates(
                         snapshot = _snapshot(candidates, limit=limit)
                         last_snapshot = snapshot
                         emitted = True
+                        _update_metrics_from_snapshot(snapshot)
                         yield snapshot
             except asyncio.TimeoutError:
                 logger.warning(
@@ -2326,8 +2400,9 @@ def discover_candidates(
             final = _snapshot(candidates, limit=limit)
 
             top_score = final[0]["score"] if final and "score" in final[0] else None
+            summary_category_counts = _compute_category_coverage(final)
             logger.debug(
-                "Discovery combine summary bird=%s mempool=%s dexscreener=%s raydium=%s meteora=%s dexlab=%s final=%s top_score=%s",
+                "Discovery combine summary bird=%s mempool=%s dexscreener=%s raydium=%s meteora=%s dexlab=%s final=%s categories=%s top_score=%s",
                 len(bird_tokens),
                 len(mempool),
                 len(dexscreener_tokens),
@@ -2335,6 +2410,7 @@ def discover_candidates(
                 len(meteora_tokens),
                 len(dexlab_tokens),
                 len(final),
+                summary_category_counts,
                 f"{top_score:.4f}" if isinstance(top_score, (int, float)) else "n/a",
             )
 
@@ -2391,6 +2467,15 @@ def discover_candidates(
                             config_error or "none",
                         )
 
+            output_snapshot: List[TokenEntry]
+            if final:
+                output_snapshot = final
+            elif fallback_final:
+                output_snapshot = fallback_final
+            else:
+                output_snapshot = []
+            _update_metrics_from_snapshot(output_snapshot)
+
             if config_error and config_error not in config_errors:
                 config_errors.append(config_error)
 
@@ -2440,7 +2525,11 @@ def discover_candidates(
             async for batch in _run(None):
                 yield batch
 
-    return _DiscoveryResult(_generator(), config_errors=config_errors)
+    return _DiscoveryResult(
+        _generator(),
+        config_errors=config_errors,
+        metrics=metrics,
+    )
 
 
 def warm_cache(rpc_url: str, *, limit: int | None = None) -> None:
