@@ -24,6 +24,12 @@ CHECK_LIVE_KEYPAIR_SNIPPET = _extract_python_snippet(
 )
 
 
+VALIDATE_ENV_SNIPPET = _extract_python_snippet(
+    _LAUNCH_LIVE_SOURCE,
+    '"$PYTHON_BIN" - "$ENV_FILE" <<\'PY\'',
+)
+
+
 def test_launch_live_missing_config(tmp_path: Path) -> None:
     env_file = tmp_path / "env"
     env_file.write_text(f"PYTHONPATH={tmp_path / 'alt_pythonpath'}\n")
@@ -150,3 +156,33 @@ def test_launch_live_invalid_preflight_value(tmp_path: Path) -> None:
         "Invalid --preflight value '3'; set to 1 for the active micro mode or 2 to cover both micro states."
         in proc.stderr
     )
+
+
+def test_validate_env_allows_shell_expansion(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_file.write_text("DATA_DIR=${HOME}/.config\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, "-c", VALIDATE_ENV_SNIPPET, str(env_file)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "DATA_DIR" in completed.stdout
+
+
+def test_validate_env_rejects_placeholder_tokens(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_file.write_text("DATA_DIR=${REPLACE_ME}\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, "-c", VALIDATE_ENV_SNIPPET, str(env_file)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 1
+    assert "placeholder detected for DATA_DIR" in completed.stderr
