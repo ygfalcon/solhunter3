@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlparse, urlunparse
 from weakref import WeakSet
 
@@ -394,6 +394,32 @@ def _mask_env_value(value: Any) -> Any:
     return f"{stripped[:2]}…{stripped[-2:]}"
 
 
+_MASKED_ENV_PREFIXES: Tuple[str, ...] = (
+    "SOLHUNTER_",
+    "RISK",
+    "RPC",
+    "KEYPAIR",
+    "JITO",
+    "EVENT_BUS",
+    "EVENT_WS",
+    "BROKER",
+)
+
+_MASKED_ENV_EXPLICIT_KEYS: FrozenSet[str] = frozenset(
+    {
+        "UI_HOST",
+        "UI_PORT",
+        "UI_PUBLIC_HOST",
+        "UI_EXTERNAL_HOST",
+        "UI_WS_HOST",
+        "UI_WS_PORT",
+        "UI_EVENT_WS_PORT",
+        "UI_RL_WS_PORT",
+        "UI_LOG_WS_PORT",
+    }
+)
+
+
 def _masked_environment_snapshot() -> Dict[str, Any]:
     """Return a masked view of relevant runtime environment variables."""
 
@@ -401,11 +427,8 @@ def _masked_environment_snapshot() -> Dict[str, Any]:
     for key, value in sorted(os.environ.items()):
         upper_key = key.upper()
         if not (
-            upper_key.startswith("SOLHUNTER_")
-            or upper_key.startswith("RISK")
-            or upper_key.startswith("RPC")
-            or upper_key.startswith("KEYPAIR")
-            or upper_key.startswith("JITO")
+            upper_key in _MASKED_ENV_EXPLICIT_KEYS
+            or any(upper_key.startswith(prefix) for prefix in _MASKED_ENV_PREFIXES)
         ):
             continue
         snapshot[key] = _mask_env_value(value)
