@@ -95,7 +95,11 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
         ]
 
     monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
-    monkeypatch.setattr(td, "fetch_trending_tokens_async", lambda: [bird2, "trend_only"])
+    async def fake_trending(*, limit=None):
+        _ = limit
+        return [bird2, "trend_only"]
+
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
     monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
     _configure_env(
         monkeypatch,
@@ -153,6 +157,67 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     assert set(addresses) >= {bird1, bird2, mem_mint}
     assert results[0]["sources"] == ["mempool"]
     assert any("birdeye" in r["sources"] for r in results)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_discover_candidates_includes_trending_tokens(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    trend_mint = "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av"
+    observed_limits: list = []
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return []
+
+    async def fake_trending(*, limit=None):
+        observed_limits.append(limit)
+        return [trend_mint]
+
+    async def _no_tokens(*, session=None):
+        _ = session
+        return []
+
+    async def _noop_enrich(_candidates, *, addresses=None):
+        _ = (addresses,)
+        return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_raydium_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_enrich_with_solscan", _noop_enrich)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates("https://rpc", limit=2):
+        batches.append(batch)
+
+    assert observed_limits, "expected trending fetch to be invoked"
+    assert observed_limits[-1] == 2
+
+    final = batches[-1] if batches else []
+    assert final, "expected at least one candidate batch"
+
+    trend_entry = next((item for item in final if item["address"] == trend_mint), None)
+    assert trend_entry is not None, "trending mint should be merged into candidates"
+    assert "trending" in trend_entry["sources"]
 
 
 def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch, caplog):
