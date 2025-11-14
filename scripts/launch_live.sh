@@ -1533,14 +1533,15 @@ set -a
 source "$ENV_FILE"
 set +a
 
+if [[ -n $CONFIG_PATH ]]; then
+  validate_config_path "$CONFIG_PATH"
+  export CONFIG_PATH
+fi
+
 check_live_keypair_paths
 
 # Ensure Jupiter websocket uses the stats endpoint unless explicitly overridden.
 export JUPITER_WS_URL="${JUPITER_WS_URL:-wss://stats.jup.ag/ws}"
-
-if [[ -n $CONFIG_PATH ]]; then
-  export CONFIG_PATH
-fi
 
 PROVIDER_STATUS=""
 log_info "Checking configured provider credentials and connectivity"
