@@ -77,7 +77,12 @@ def test_ui_meta_websocket_smoke(monkeypatch):
             ui_ws_targets = [t for t in checker.targets if t.get("name") == "ui-ws"]
             assert ui_ws_targets, "expected ui-ws target from connectivity checker"
             ws_target = ui_ws_targets[0]["url"]
-            parsed_ws = urlparse(ws_target)
+            if isinstance(ws_target, dict):
+                candidate_url = ws_target.get("events") or next(iter(ws_target.values()), None)
+            else:
+                candidate_url = ws_target
+            assert candidate_url, "expected at least one websocket url"
+            parsed_ws = urlparse(candidate_url)
             assert parsed_ws.scheme == "ws"
             assert parsed_ws.hostname in {"127.0.0.1", "localhost"}
             assert parsed_ws.port is not None
