@@ -2267,7 +2267,12 @@ def _split_netloc(netloc: str | None) -> tuple[str | None, int | None, str | Non
     if not has_scheme:
         scheme = None
 
-    return parsed.hostname, parsed.port, scheme
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+
+    return parsed.hostname, port, scheme
 
 
 def _channel_path(channel: str) -> str:
