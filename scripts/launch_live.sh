@@ -111,6 +111,9 @@ LIVE_MODE_PREVIOUS=""
 LIVE_MODE_WAS_SET=0
 LIVE_SOLHUNTER_MODE_PREVIOUS=""
 LIVE_SOLHUNTER_MODE_WAS_SET=0
+SOLHUNTER_CONFIG_LINKED=0
+SOLHUNTER_CONFIG_PREVIOUS=""
+SOLHUNTER_CONFIG_WAS_SET=0
 
 export RUNTIME_LOCK_TTL_SECONDS="${RUNTIME_LOCK_TTL_SECONDS:-60}"
 export RUNTIME_LOCK_REFRESH_INTERVAL="${RUNTIME_LOCK_REFRESH_INTERVAL:-20}"
@@ -1811,7 +1814,15 @@ set +a
 ensure_repo_pythonpath
 
 if [[ -n $CONFIG_PATH ]]; then
+  # Propagate the runtime configuration file to downstream tooling via
+  # SOLHUNTER_CONFIG while remembering any prior value for cleanup.
   export CONFIG_PATH
+  SOLHUNTER_CONFIG_LINKED=1
+  if [[ -n ${SOLHUNTER_CONFIG+x} ]]; then
+    SOLHUNTER_CONFIG_WAS_SET=1
+    SOLHUNTER_CONFIG_PREVIOUS=$SOLHUNTER_CONFIG
+  fi
+  export SOLHUNTER_CONFIG="$CONFIG_PATH"
 fi
 
 check_live_keypair_paths
@@ -1960,6 +1971,15 @@ cleanup() {
       unset MODE
     fi
     LIVE_MODE_ENV_APPLIED=0
+  fi
+  if (( SOLHUNTER_CONFIG_LINKED == 1 )); then
+    # Restore the original SOLHUNTER_CONFIG value if we overrode it for runtime use.
+    if (( SOLHUNTER_CONFIG_WAS_SET == 1 )); then
+      export SOLHUNTER_CONFIG="$SOLHUNTER_CONFIG_PREVIOUS"
+    else
+      unset SOLHUNTER_CONFIG
+    fi
+    SOLHUNTER_CONFIG_LINKED=0
   fi
   if [[ -z ${CHILD_PIDS+x} ]]; then
     return
