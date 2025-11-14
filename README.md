@@ -136,6 +136,15 @@ python -m solhunter_zero.ui --selftest
 ```
 This runs the same checks the full orchestrator will rely on, but isolated—so failures are clean and actionable.
 
+### Standalone UI with realtime feeds
+```bash
+python -m solhunter_zero.ui --host 127.0.0.1 --port 5000
+```
+The CLI now starts the websocket broadcasters after the HTTP server binds, so the RL,
+runtime, and log streams are available when you launch the UI by itself. Install the
+[`websockets`](https://pypi.org/project/websockets/) package locally; startup exits
+with an error if realtime dependencies are missing so broken dashboards do not linger.
+
 ### Paper preflight smoke (dual-mode gate)
 Run the Redis-backed smoke harness against the staging stack to prove latency SLOs, duplicate suppression, and micro-mode gating before you promote a build:
 
