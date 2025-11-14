@@ -257,7 +257,29 @@ class DiscoveryAgent:
                 )
                 mempool_max_wait = DEFAULT_MEMPOOL_MAX_WAIT
         self.mempool_max_wait = max(float(mempool_max_wait), 0.0)
-        self.max_attempts = max(1, int(os.getenv("TOKEN_DISCOVERY_RETRIES", "2") or 2))
+        default_retries = 2
+        retries_env = os.getenv("TOKEN_DISCOVERY_RETRIES")
+        if retries_env in {None, ""}:
+            retries = default_retries
+        else:
+            try:
+                retries = int(retries_env)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid TOKEN_DISCOVERY_RETRIES=%r; using default %d",
+                    retries_env,
+                    default_retries,
+                )
+                retries = default_retries
+            else:
+                if retries < 1:
+                    logger.warning(
+                        "TOKEN_DISCOVERY_RETRIES=%r below minimum 1; using default %d",
+                        retries_env,
+                        default_retries,
+                    )
+                    retries = default_retries
+        self.max_attempts = retries
         self.mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
         env_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
         self.default_method = env_method or DEFAULT_DISCOVERY_METHOD
