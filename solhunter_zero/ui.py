@@ -33,6 +33,7 @@ from . import event_bus
 from .health_runtime import resolve_rl_health_url
 from .production import load_production_env
 from .runtime_defaults import DEFAULT_UI_PORT
+from .token_aliases import canonical_mint, validate_mint
 from .url_helpers import as_websocket_url
 from .util import parse_bool_env
 
@@ -453,6 +454,22 @@ def _price_provider_timeouts() -> Dict[str, int]:
     return timeouts
 
 
+def _normalized_mint(candidate: object | None) -> str | None:
+    """Return a canonical mint address when ``candidate`` is valid."""
+
+    if candidate is None:
+        return None
+    if not isinstance(candidate, str):
+        candidate = str(candidate)
+    candidate = candidate.strip()
+    if not candidate:
+        return None
+    normalized = canonical_mint(candidate)
+    if not normalized or not validate_mint(normalized):
+        return None
+    return normalized
+
+
 def _discover_seed_tokens() -> List[str]:
     try:
         from . import seed_token_publisher
@@ -463,14 +480,21 @@ def _discover_seed_tokens() -> List[str]:
             seed_tokens = seed_token_publisher.configured_seed_tokens()
         except Exception:
             seed_tokens = ()
-    tokens: List[str] = [str(token) for token in (seed_tokens or ()) if token]
+    tokens: List[str] = []
+    seen: Set[str] = set()
+    for token in seed_tokens or ():
+        normalized = _normalized_mint(token)
+        if normalized and normalized not in seen:
+            tokens.append(normalized)
+            seen.add(normalized)
     if not tokens:
         fallback = _env_or_default("SEED_TOKENS") or ""
         if fallback:
             for raw in str(fallback).split(","):
-                candidate = raw.strip()
-                if candidate:
+                candidate = _normalized_mint(raw)
+                if candidate and candidate not in seen:
                     tokens.append(candidate)
+                    seen.add(candidate)
     return tokens
 
 

@@ -8,6 +8,7 @@ import errno
 from urllib.parse import urlparse
 
 from .util import install_uvloop
+from .token_aliases import canonical_mint, validate_mint
 
 install_uvloop()
 
@@ -248,6 +249,19 @@ def _struct_to_python(message: Any) -> Dict[str, Any]:
     return message
 
 
+def _normalized_mint(candidate: object | None) -> str | None:
+    """Return a canonical mint for ``candidate`` when valid, else ``None``."""
+
+    if candidate is None:
+        return None
+    if not isinstance(candidate, str):
+        candidate = str(candidate)
+    normalized = canonical_mint(candidate)
+    if not normalized or not validate_mint(normalized):
+        return None
+    return normalized
+
+
 def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     root_context = payload if isinstance(payload, Mapping) else None
@@ -277,8 +291,10 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
             if key in {"topic", "tokens", "entries"}:
                 continue
             if key in {"mint", "token", "address"}:
-                if not dest.get("mint") and isinstance(value, str) and value.strip():
-                    dest["mint"] = value.strip()
+                if not dest.get("mint"):
+                    mint_value = _normalized_mint(value)
+                    if mint_value:
+                        dest["mint"] = mint_value
                 continue
             if key == "source":
                 if isinstance(value, str) and value.strip():
@@ -338,14 +354,20 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
         if isinstance(entry, Mapping):
             _merge(entry, data, extra)
         elif isinstance(entry, str):
-            if entry.strip():
-                data.setdefault("mint", entry.strip())
+            mint_value = _normalized_mint(entry)
+            if mint_value:
+                data.setdefault("mint", mint_value)
         elif entry is not None:
-            data.setdefault("mint", str(entry))
+            mint_value = _normalized_mint(entry)
+            if mint_value:
+                data.setdefault("mint", mint_value)
         mint = data.get("mint")
         if not mint:
             continue
-        data["mint"] = str(mint)
+        mint_value = _normalized_mint(mint)
+        if not mint_value:
+            continue
+        data["mint"] = mint_value
         source = data.get("source")
         if isinstance(source, str):
             data["source"] = source.strip()
