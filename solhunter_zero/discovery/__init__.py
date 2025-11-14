@@ -57,7 +57,7 @@ async def fetch_trending_tokens_async(limit: int | None = None) -> List[str]:
 
     size = max(1, int(limit or _DEFAULT_LIMIT))
     token_scanner = _token_scanner_module()
-    tokens = await token_scanner.scan_tokens_async(limit=size)
+    tokens = await token_scanner.scan_tokens_async(rpc_url=None, limit=size)
     cleaned, dropped = clean_candidate_mints(tokens, source="discovery:trending")
     if dropped:
         logger.warning(
