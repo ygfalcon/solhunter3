@@ -86,15 +86,47 @@ class Redis:
         _dump_state(data)
         return 1 if removed else 0
 
-    def eval(self, script, numkeys, key, token):  # noqa: D401
+    def ttl(self, key: str):  # noqa: D401
         data = _load_state()
         item = data["store"].get(key)
         if not item:
-            return 0
+            return -2
+        expires_at = item.get("expires_at")
+        if expires_at is None:
+            return -1
+        remaining = expires_at - time.time()
+        if remaining <= 0:
+            data["store"].pop(key, None)
+            _dump_state(data)
+            return -2
+        return int(remaining)
+
+    def eval(self, script, numkeys, key, token, *args):  # noqa: D401
+        data = _load_state()
+        item = data["store"].get(key)
+        if not item:
+            return -2 if "set" in script else 0
         try:
             payload = json.loads(item["value"])
         except Exception:
             payload = {}
+        if "redis.call('set'" in script:
+            if payload.get("token") != token:
+                return -3
+            try:
+                ttl_seconds = int(args[0]) if args else 60
+            except Exception:
+                ttl_seconds = 60
+            payload["ts"] = float(args[1]) if len(args) > 1 else time.time()
+            now = time.time()
+            data["store"][key] = {
+                "value": json.dumps(payload),
+                "expires_at": now + ttl_seconds,
+                "ex": ttl_seconds,
+                "stored_at": now,
+            }
+            _dump_state(data)
+            return int(self.ttl(key))
         if payload.get("token") == token:
             data["store"].pop(key, None)
             _dump_state(data)
@@ -312,3 +344,58 @@ def test_release_runtime_lock_requires_matching_token(tmp_path: Path) -> None:
 
     final_state = json.loads(state_path.read_text(encoding="utf-8"))
     assert key not in final_state["store"]
+
+
+def test_runtime_lock_refresher_keeps_ttl(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "acquire_runtime_lock")
+        + _extract_function(source, "release_runtime_lock")
+        + _extract_function(source, "start_runtime_lock_refresher")
+        + _extract_function(source, "stop_runtime_lock_refresher")
+        + _extract_function(source, "runtime_lock_ttl_check")
+    )
+
+    stub_root = _write_stub_redis(tmp_path)
+    env = _base_env(tmp_path, stub_root)
+    env.update(
+        {
+            "RUNTIME_LOCK_REFRESH_INTERVAL": "1",
+            "RUNTIME_LOCK_TTL_SECONDS": "5",
+        }
+    )
+
+    bash_script = "\n".join(
+        [
+            "set -euo pipefail",
+            functions,
+            "acquire_runtime_lock",
+            "start_runtime_lock_refresher",
+            "sleep 2",
+            "runtime_lock_ttl_check preflight",
+            "runtime_lock_ttl_check soak",
+            "stop_runtime_lock_refresher",
+            "release_runtime_lock",
+        ]
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    stdout = completed.stdout
+    assert "Runtime lock TTL during preflight" in stdout
+    assert "Runtime lock TTL during soak" in stdout
+
+    state_path = Path(env["REDIS_STATE_PATH"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["store"] == {}

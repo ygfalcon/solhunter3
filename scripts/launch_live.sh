@@ -89,6 +89,10 @@ RUNTIME_CACHE_DIR="$RUNTIME_ARTIFACT_ROOT/.cache"
 RUNTIME_FS_LOCK="$RUNTIME_CACHE_DIR/runtime.lock"
 RUNTIME_LOCK_ATTEMPTED=0
 RUNTIME_LOCK_ACQUIRED=0
+RUNTIME_LOCK_REFRESH_PID=0
+
+export RUNTIME_LOCK_TTL_SECONDS="${RUNTIME_LOCK_TTL_SECONDS:-60}"
+export RUNTIME_LOCK_REFRESH_INTERVAL="${RUNTIME_LOCK_REFRESH_INTERVAL:-20}"
 
 # Ensure the repository root is always importable when invoking helper scripts.
 # "launch_live.sh" may be executed before the package is installed (e.g. from a
@@ -871,7 +875,12 @@ key = f"solhunter:runtime:lock:{channel}"
 token = str(uuid.uuid4())
 host = socket.gethostname()
 pid = os.getpid()
-ttl_seconds = 60
+try:
+    ttl_seconds = int(os.environ.get("RUNTIME_LOCK_TTL_SECONDS", "60"))
+except ValueError:
+    ttl_seconds = 60
+if ttl_seconds <= 0:
+    ttl_seconds = 60
 payload = {
     "pid": pid,
     "channel": channel,
@@ -1008,6 +1017,101 @@ except Exception:
 PY
   RUNTIME_LOCK_KEY=""
   RUNTIME_LOCK_TOKEN=""
+}
+
+start_runtime_lock_refresher() {
+  if [[ -z ${RUNTIME_LOCK_KEY:-} || -z ${RUNTIME_LOCK_TOKEN:-} ]]; then
+    return
+  fi
+  if [[ -n ${RUNTIME_LOCK_REFRESH_PID:-} && $RUNTIME_LOCK_REFRESH_PID -gt 0 ]]; then
+    if kill -0 "$RUNTIME_LOCK_REFRESH_PID" >/dev/null 2>&1; then
+      return
+    fi
+  fi
+  log_info "Starting runtime lock refresher (interval ${RUNTIME_LOCK_REFRESH_INTERVAL}s, ttl ${RUNTIME_LOCK_TTL_SECONDS}s)"
+  (
+    export RUNTIME_LOCK_KEY
+    export RUNTIME_LOCK_TOKEN
+    export RUNTIME_LOCK_REFRESH_INTERVAL
+    export RUNTIME_LOCK_TTL_SECONDS
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/runtime_lock_refresher.py"
+  ) &
+  RUNTIME_LOCK_REFRESH_PID=$!
+}
+
+stop_runtime_lock_refresher() {
+  if [[ -z ${RUNTIME_LOCK_REFRESH_PID:-} ]]; then
+    return
+  fi
+  if (( RUNTIME_LOCK_REFRESH_PID <= 0 )); then
+    RUNTIME_LOCK_REFRESH_PID=0
+    return
+  fi
+  if kill -0 "$RUNTIME_LOCK_REFRESH_PID" >/dev/null 2>&1; then
+    kill "$RUNTIME_LOCK_REFRESH_PID" >/dev/null 2>&1 || true
+    wait "$RUNTIME_LOCK_REFRESH_PID" 2>/dev/null || true
+    log_info "Stopped runtime lock refresher (pid=$RUNTIME_LOCK_REFRESH_PID)"
+  fi
+  RUNTIME_LOCK_REFRESH_PID=0
+}
+
+runtime_lock_ttl_check() {
+  local context=${1:-unknown}
+  if [[ -z ${RUNTIME_LOCK_KEY:-} || -z ${RUNTIME_LOCK_TOKEN:-} ]]; then
+    return 0
+  fi
+  local output status=0
+  output=$(RUNTIME_LOCK_KEY="$RUNTIME_LOCK_KEY" \
+    RUNTIME_LOCK_TOKEN="$RUNTIME_LOCK_TOKEN" \
+    "$PYTHON_BIN" - <<'PY') || status=$?
+import json
+import os
+import sys
+
+try:
+    import redis  # type: ignore
+except Exception as exc:  # pragma: no cover - dependency issue
+    print(f"redis import failed: {exc}")
+    sys.exit(1)
+
+key = os.environ.get("RUNTIME_LOCK_KEY")
+token = os.environ.get("RUNTIME_LOCK_TOKEN")
+refresh_interval = float(os.environ.get("RUNTIME_LOCK_REFRESH_INTERVAL", "20"))
+redis_url = os.environ.get("REDIS_URL") or "redis://localhost:6379/1"
+
+client = redis.Redis.from_url(redis_url, socket_timeout=1.0)
+payload_raw = client.get(key)
+if not payload_raw:
+    print("runtime lock missing")
+    sys.exit(1)
+
+try:
+    payload = json.loads(payload_raw.decode("utf-8"))
+except Exception:
+    print("runtime lock payload decode failed")
+    sys.exit(1)
+
+if payload.get("token") != token:
+    print("runtime lock token mismatch")
+    sys.exit(1)
+
+ttl = client.ttl(key)
+if ttl is None or ttl < 0:
+    print("runtime lock ttl unavailable")
+    sys.exit(1)
+
+if ttl <= refresh_interval:
+    print(f"{ttl}")
+    sys.exit(1)
+
+print(f"{ttl}")
+PY
+  if (( status != 0 )); then
+    log_warn "Runtime lock TTL check failed during $context: $output"
+  else
+    log_info "Runtime lock TTL during $context: ${output}s (refresh interval ${RUNTIME_LOCK_REFRESH_INTERVAL}s)"
+  fi
+  return $status
 }
 
 extract_ui_url() {
@@ -1650,6 +1754,7 @@ register_child() {
 }
 
 cleanup() {
+  stop_runtime_lock_refresher
   release_runtime_lock
   if (( RUNTIME_LOCK_ATTEMPTED == 1 && RUNTIME_LOCK_ACQUIRED == 0 )); then
     if [[ -e $RUNTIME_FS_LOCK ]]; then
@@ -1898,6 +2003,7 @@ run_preflight() {
 }
 
 log_info "Running preflight suite"
+runtime_lock_ttl_check "preflight" || true
 if ! run_preflight "paper"; then
   log_warn "Preflight suite failed"
   exit $EXIT_PREFLIGHT
@@ -1911,6 +2017,7 @@ log_info "Paper runtime stopped after preflight"
 export CONNECTIVITY_SKIP_UI_PROBES=1
 log_info "Paper runtime offline; skipping UI connectivity probes during soak"
 log_info "Starting connectivity soak for ${SOAK_DURATION}s"
+runtime_lock_ttl_check "soak" || true
 connectivity_soak() {
   "$PYTHON_BIN" - <<'PY'
 import json
@@ -2018,6 +2125,7 @@ if ! validate_connectivity_soak "$SOAK_RESULT" "$SOAK_REPORT"; then
   exit $EXIT_CONNECTIVITY
 fi
 
+runtime_lock_ttl_check "post-soak" || true
 log_info "Connectivity soak complete: $SOAK_RESULT"
 unset CONNECTIVITY_SKIP_UI_PROBES
 log_info "UI connectivity probes re-enabled for live launch"
