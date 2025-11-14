@@ -182,6 +182,29 @@ def _base_env(tmp_path: Path, stub_root: Path) -> dict[str, str]:
     return env
 
 
+def _make_acquire_script(functions: str, *commands: str) -> str:
+    stubs = (
+        "stop_runtime_lock_refresher() { :; }",
+        "start_runtime_lock_refresher() { :; }",
+    )
+    parts = ["set -euo pipefail", functions, *stubs]
+    if commands:
+        parts.extend(commands)
+    else:
+        parts.append("acquire_runtime_lock")
+    return "\n".join(parts)
+
+
+def _make_release_script(functions: str, *commands: str) -> str:
+    stubs = ("stop_runtime_lock_refresher() { :; }",)
+    parts = ["set -euo pipefail", functions, *stubs]
+    if commands:
+        parts.extend(commands)
+    else:
+        parts.append("release_runtime_lock")
+    return "\n".join(parts)
+
+
 def test_acquire_runtime_lock_sets_ttl(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
@@ -195,7 +218,7 @@ def test_acquire_runtime_lock_sets_ttl(tmp_path: Path) -> None:
     stub_root = _write_stub_redis(tmp_path)
     env = _base_env(tmp_path, stub_root)
 
-    bash_script = "set -euo pipefail\n" + functions + "acquire_runtime_lock\n"
+    bash_script = _make_acquire_script(functions)
 
     completed = subprocess.run(
         ["bash", "-c", bash_script],
@@ -217,6 +240,56 @@ def test_acquire_runtime_lock_sets_ttl(tmp_path: Path) -> None:
     assert entry["ex"] == 60
     assert pytest.approx(60, rel=0.05) == entry["expires_at"] - entry["stored_at"]
     assert entry["expires_at"] > time.time()
+
+
+def test_acquire_runtime_lock_writes_filesystem_lock(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "acquire_runtime_lock")
+    )
+
+    stub_root = _write_stub_redis(tmp_path)
+    env = _base_env(tmp_path, stub_root)
+
+    lock_path = tmp_path / "runtime.lock"
+    env.update({"RUNTIME_FS_LOCK": str(lock_path)})
+
+    bash_script = _make_acquire_script(functions)
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    assert "Recorded runtime filesystem lock" in completed.stdout
+
+    state_path = Path(env["REDIS_STATE_PATH"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["store"], "expected runtime lock entry"
+    _, entry = next(iter(state["store"].items()))
+    token = json.loads(entry["value"])["token"]
+
+    assert lock_path.exists()
+    payload_text = lock_path.read_text(encoding="utf-8").strip()
+    assert payload_text
+
+    payload_parts = {}
+    for part in payload_text.split():
+        key, value = part.split("=", 1)
+        payload_parts[key] = value
+
+    assert set(payload_parts) == {"pid", "host", "token"}
+    assert payload_parts["token"] == token
+    assert payload_parts["host"] == socket.gethostname()
+    assert payload_parts["pid"].isdigit()
 
 
 def test_acquire_runtime_lock_takeover_on_host_mismatch(tmp_path: Path) -> None:
@@ -253,7 +326,7 @@ def test_acquire_runtime_lock_takeover_on_host_mismatch(tmp_path: Path) -> None:
     }
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
-    bash_script = "set -euo pipefail\n" + functions + "acquire_runtime_lock\n"
+    bash_script = _make_acquire_script(functions)
 
     completed = subprocess.run(
         ["bash", "-c", bash_script],
@@ -288,7 +361,7 @@ def test_release_runtime_lock_requires_matching_token(tmp_path: Path) -> None:
     stub_root = _write_stub_redis(tmp_path)
     env = _base_env(tmp_path, stub_root)
 
-    acquire_script = "set -euo pipefail\n" + acquire_functions + "acquire_runtime_lock\n"
+    acquire_script = _make_acquire_script(acquire_functions)
 
     subprocess.run(
         ["bash", "-c", acquire_script],
@@ -312,7 +385,7 @@ def test_release_runtime_lock_requires_matching_token(tmp_path: Path) -> None:
             "RUNTIME_LOCK_TOKEN": f"{correct_token}-bad",
         }
     )
-    release_script = "set -euo pipefail\n" + release_function + "release_runtime_lock\n"
+    release_script = _make_release_script(release_function)
 
     subprocess.run(
         ["bash", "-c", release_script],
