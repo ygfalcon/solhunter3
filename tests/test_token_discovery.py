@@ -529,10 +529,12 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
     monkeypatch.setattr(td, "_fetch_dexlab_tokens", fake_dexlab)
     monkeypatch.setattr(td, "_enrich_with_solscan", fake_enrich)
 
-    batches: list[list[dict]] = []
-    async for batch in td.discover_candidates(
+    result = td.discover_candidates(
         "https://rpc", limit=5, mempool_threshold=0.0
-    ):
+    )
+
+    batches: list[list[dict]] = []
+    async for batch in result:
         batches.append(batch)
 
     assert batches, "expected partial discovery batches"
@@ -570,9 +572,11 @@ async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch,
     )
     monkeypatch.setenv("BIRDEYE_API_KEY", "")
 
+    result = td.discover_candidates("https://rpc", limit=3)
+
     batches: list[list[dict]] = []
     with caplog.at_level("WARNING"):
-        async for batch in td.discover_candidates("https://rpc", limit=3):
+        async for batch in result:
             batches.append(batch)
             break
 
@@ -584,6 +588,11 @@ async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch,
     assert all("fallback" in item.get("sources", []) for item in final)
     assert "BirdEye discovery disabled" in caplog.text
     assert "using fallback set" in caplog.text
+    assert result.config_errors, "BirdEye configuration error should be surfaced"
+    error = result.primary_config_error
+    assert error is not None
+    assert error.source == "birdeye"
+    assert "API key missing" in str(error)
 
 
 @pytest.mark.anyio("asyncio")
@@ -611,9 +620,11 @@ async def test_discover_candidates_falls_back_when_birdeye_config_error(monkeypa
 
     monkeypatch.setattr(td, "_fetch_birdeye_tokens", fail_fetch)
 
+    result = td.discover_candidates("https://rpc", limit=2)
+
     batches: list[list[dict]] = []
     with caplog.at_level("WARNING"):
-        async for batch in td.discover_candidates("https://rpc", limit=2):
+        async for batch in result:
             batches.append(batch)
             break
 
@@ -622,6 +633,11 @@ async def test_discover_candidates_falls_back_when_birdeye_config_error(monkeypa
     assert final, "fallback batch should contain entries"
     assert any("fallback" in entry.get("sources", []) for entry in final)
     assert "BirdEye discovery disabled due to configuration" in caplog.text
+    assert result.config_errors, "BirdEye configuration error should be recorded"
+    error = result.primary_config_error
+    assert error is not None
+    assert error.source == "birdeye"
+    assert "HTTP 401" in str(error)
 
 
 def test_warm_cache_skips_without_birdeye_key(monkeypatch):

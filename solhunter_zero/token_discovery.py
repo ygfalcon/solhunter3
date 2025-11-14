@@ -1832,10 +1832,16 @@ async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, 
 class _DiscoveryResult:
     """Wrapper that is both awaitable and async iterable."""
 
-    def __init__(self, agen: AsyncIterator[List[TokenEntry]]) -> None:
+    def __init__(
+        self,
+        agen: AsyncIterator[List[TokenEntry]],
+        *,
+        config_errors: List[DiscoveryConfigurationError] | None = None,
+    ) -> None:
         self._agen = agen
         self._final: List[TokenEntry] | None = None
         self._consumed = False
+        self._config_errors = config_errors if config_errors is not None else []
 
     def __aiter__(self) -> AsyncIterator[List[TokenEntry]]:
         async def _iterate() -> AsyncIterator[List[TokenEntry]]:
@@ -1859,6 +1865,18 @@ class _DiscoveryResult:
                 final = batch
             self._final = final
         return list(self._final or [])
+
+    @property
+    def config_errors(self) -> Tuple[DiscoveryConfigurationError, ...]:
+        """Return BirdEye configuration errors observed during discovery."""
+
+        return tuple(self._config_errors)
+
+    @property
+    def primary_config_error(self) -> DiscoveryConfigurationError | None:
+        """Convenience accessor for the first configuration error, if any."""
+
+        return self._config_errors[0] if self._config_errors else None
 
 
 def discover_candidates(
@@ -1953,6 +1971,8 @@ def discover_candidates(
                 copy.pop(internal, None)
             final.append(copy)
         return final
+
+    config_errors: List[DiscoveryConfigurationError] = []
 
     async def _generator() -> AsyncIterator[List[TokenEntry]]:
         async def _close_candidate_session(candidate: Any) -> None:
@@ -2064,7 +2084,7 @@ def discover_candidates(
             async def _merge_result(label: str, result: Any) -> bool:
                 nonlocal mempool, bird_tokens, dexscreener_tokens, raydium_tokens
                 nonlocal meteora_tokens, dexlab_tokens
-                nonlocal config_error
+                nonlocal config_error, config_errors
                 lock = merge_locks[label]
                 async with lock:
                     changed = False
@@ -2072,6 +2092,8 @@ def discover_candidates(
                         if isinstance(result, Exception):
                             if isinstance(result, DiscoveryConfigurationError):
                                 config_error = result
+                                if result not in config_errors:
+                                    config_errors.append(result)
                                 logger.warning(
                                     "BirdEye discovery disabled due to configuration: %s",
                                     result,
@@ -2314,6 +2336,9 @@ def discover_candidates(
                             config_error or "none",
                         )
 
+            if config_error and config_error not in config_errors:
+                config_errors.append(config_error)
+
             if not emitted or final != last_snapshot:
                 if final:
                     yield final
@@ -2360,7 +2385,7 @@ def discover_candidates(
             async for batch in _run(None):
                 yield batch
 
-    return _DiscoveryResult(_generator())
+    return _DiscoveryResult(_generator(), config_errors=config_errors)
 
 
 def warm_cache(rpc_url: str, *, limit: int | None = None) -> None:

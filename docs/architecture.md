@@ -149,6 +149,11 @@ class MyAgent(BaseAgent):
 - **Token discovery fallback** — the default `websocket` discovery mode uses
   BirdEye when `BIRDEYE_API_KEY` is set and continues with mempool, DEX and
   on-chain scanning when the key is missing.
+- **BirdEye configuration signal** — when BirdEye access fails because the
+  key is missing or rejected, `discover_candidates` still emits fallback
+  batches but records the configuration error on the result via
+  `result.config_errors` / `result.primary_config_error` so the caller can
+  alert or fail fast while degraded sources keep running.
 - **Discovery ranking** — tokens from trending APIs, mempool events and on-chain
   scans are combined, deduplicated and sorted by volume and liquidity.
 - **Web UI polling** — the browser polls `/positions`, `/trades`, `/roi`,
