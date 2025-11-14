@@ -29,6 +29,7 @@ from .providers import orca as orca_provider
 from .providers import raydium as raydium_provider
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
+from .token_aliases import canonical_mint
 from .util.mints import is_valid_solana_mint
 
 logger = logging.getLogger(__name__)
@@ -844,6 +845,60 @@ def _merge_orca_venues(
             entry["pair_address"] = pool_addr
 
 
+def _normalize_candidate_address(raw: Any) -> tuple[str | None, str]:
+    """Return a canonical mint address and the raw representation."""
+
+    if raw is None:
+        return None, ""
+    if isinstance(raw, str):
+        text = raw.strip()
+    else:
+        text = str(raw).strip()
+    if not text:
+        return None, ""
+
+    # Canonicalise via runtime alias configuration before validation so that
+    # downstream consumers observe a stable mint identifier.
+    canonical = canonical_mint(text) or text
+    canonical = str(canonical).strip()
+    if canonical and is_valid_solana_mint(canonical):
+        return canonical, text
+    if text and is_valid_solana_mint(text):
+        return text, text
+    return None, text
+
+
+def _serializable_value(value: Any) -> Any:
+    """Return ``value`` converted into JSON-serialisable primitives."""
+
+    if isinstance(value, dict):
+        return {str(k): _serializable_value(v) for k, v in value.items()}
+    if isinstance(value, set):
+        return sorted(_serializable_value(v) for v in value)
+    if isinstance(value, (list, tuple)):
+        return [_serializable_value(v) for v in value]
+    return value
+
+
+def _prepare_source_metadata(
+    token: Mapping[str, Any] | None,
+    *,
+    canonical_address: str,
+    raw_address: str,
+) -> Dict[str, Any]:
+    """Extract a stable, serialisable metadata snapshot for ``source``."""
+
+    metadata: Dict[str, Any] = {}
+    if isinstance(token, Mapping):
+        for key, value in token.items():
+            if key in {"address", "mint"}:
+                continue
+            metadata[str(key)] = _serializable_value(value)
+    metadata["address"] = canonical_address
+    metadata["raw_address"] = raw_address
+    return metadata
+
+
 def _merge_candidate_entry(
     candidates: Dict[str, Dict[str, Any]],
     token: Dict[str, Any],
@@ -852,11 +907,10 @@ def _merge_candidate_entry(
     if not isinstance(token, dict):
         return None
     raw_address = token.get("address") or token.get("mint")
-    if not raw_address:
+    canonical_address, raw_text = _normalize_candidate_address(raw_address)
+    if not canonical_address:
         return None
-    address = str(raw_address)
-    if not is_valid_solana_mint(address):
-        return None
+    address = canonical_address
 
     liquidity = _coerce_numeric(
         token.get("liquidity")
@@ -895,6 +949,7 @@ def _merge_candidate_entry(
             "price_change": change,
             "sources": set(),
             "venues": set(incoming_venues),
+            "source_metadata": {},
         }
         if discovered_at is not None:
             entry["discovered_at"] = discovered_at
@@ -957,6 +1012,12 @@ def _merge_candidate_entry(
                 entry[extra_key] = token[extra_key]
 
     entry.setdefault("sources", set()).add(source)
+    source_meta = entry.setdefault("source_metadata", {})
+    source_meta[source] = _prepare_source_metadata(
+        token,
+        canonical_address=address,
+        raw_address=raw_text,
+    )
     return entry
 
 
@@ -1980,6 +2041,12 @@ def discover_candidates(
             else:
                 venues_list = []
             copy["venues"] = venues_list
+            meta_field = entry.get("source_metadata")
+            if isinstance(meta_field, dict):
+                copy["source_metadata"] = {
+                    str(key): _serializable_value(value)
+                    for key, value in meta_field.items()
+                }
             for internal in ("_stage_b_eligible", "score_breakdown"):
                 copy.pop(internal, None)
             final.append(copy)
@@ -2150,6 +2217,16 @@ def discover_candidates(
                                 continue
                             _enrich_with_orca(entry)
                             changed = True
+                            meta_map = entry.setdefault("source_metadata", {})
+                            meta_entry = meta_map.setdefault("mempool", {})
+                            for meta_key, meta_value in mp.items():
+                                if meta_key == "address":
+                                    continue
+                                meta_entry[str(meta_key)] = _serializable_value(meta_value)
+                            raw_addr = mp.get("address")
+                            if isinstance(raw_addr, str):
+                                meta_entry.setdefault("raw_address", raw_addr)
+                            meta_entry.setdefault("address", entry.get("address", ""))
                             for key in (
                                 "score",
                                 "momentum",

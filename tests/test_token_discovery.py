@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import types
 
@@ -1006,3 +1007,187 @@ async def test_discover_candidates_shared_session_failure_falls_back(monkeypatch
     for session in per_task_sessions:
         # Fallback sessions are owned by individual tasks; ensure they were not closed here.
         assert session.closed is False
+
+
+@pytest.mark.anyio("asyncio")
+async def test_stage_b_requires_multi_source_buckets(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    alias_mint = "A" * 32
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="1",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_SOLSCAN="1",
+        DISCOVERY_STAGE_B_THRESHOLD="1.1",
+        DISCOVERY_STAGE_B_MIN_SOURCES="2",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+
+    async def _no_tokens(*args, **kwargs):
+        return []
+
+    async def _no_trending(*, limit=None):
+        _ = limit
+        return []
+
+    async def fake_collect(rpc_url, threshold):
+        _ = (rpc_url, threshold)
+        return {
+            alias_mint: {
+                "address": alias_mint,
+                "score": 0.42,
+                "volume": 12_500,
+                "liquidity": 8_400,
+                "price": 1.01,
+                "momentum": 0.2,
+            }
+        }
+
+    solscan_requests: list[list[str]] = []
+
+    async def fake_solscan(candidates, *, addresses=None):
+        solscan_requests.append(list(addresses or []))
+        return None
+
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", _no_trending)
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_raydium_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_collect_mempool_signals", fake_collect)
+    monkeypatch.setattr(td, "_enrich_with_solscan", fake_solscan)
+
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates("https://rpc", limit=1, mempool_threshold=0.0):
+        batches.append(batch)
+
+    assert solscan_requests == []
+    assert batches, "expected at least one discovery batch"
+    final = batches[-1]
+    assert final and len(final) == 1
+
+    entry = final[0]
+    assert entry["address"] == alias_mint
+    assert entry["sources"] == ["mempool"]
+
+    metadata = entry.get("source_metadata")
+    assert isinstance(metadata, dict)
+    assert set(metadata) == {"mempool"}
+    mempool_meta = metadata["mempool"]
+    assert mempool_meta["raw_address"] == alias_mint
+    assert mempool_meta["address"] == alias_mint
+    assert mempool_meta["score"] == pytest.approx(0.42)
+    assert json.dumps(entry)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_stage_b_alias_canonicalisation_with_dex_confirmation(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    alias_mint = "A" * 32
+    canonical_mint = "B" * 32
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="1",
+        DISCOVERY_ENABLE_DEXSCREENER="1",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_SOLSCAN="1",
+        DISCOVERY_STAGE_B_THRESHOLD="1.1",
+        DISCOVERY_STAGE_B_MIN_SOURCES="2",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+
+    async def _no_tokens(*args, **kwargs):
+        return []
+
+    async def _no_trending(*, limit=None):
+        _ = limit
+        return []
+
+    async def fake_collect(rpc_url, threshold):
+        _ = (rpc_url, threshold)
+        return {
+            alias_mint: {
+                "address": alias_mint,
+                "score": 0.35,
+                "volume": 9_900,
+                "liquidity": 7_500,
+                "price": 1.0,
+            }
+        }
+
+    async def fake_dexscreener(*, session=None):
+        _ = session
+        return [
+            {
+                "address": canonical_mint,
+                "symbol": "ALC",
+                "name": "Alias Canon",
+                "liquidity": 15_000,
+                "volume": 13_000,
+                "price": 1.5,
+            }
+        ]
+
+    solscan_requests: list[list[str]] = []
+
+    async def fake_solscan(candidates, *, addresses=None):
+        solscan_requests.append(sorted(addresses or []))
+        return None
+
+    def fake_canonical(value: str | None) -> str:
+        if not value:
+            return ""
+        trimmed = str(value).strip()
+        return canonical_mint if trimmed == alias_mint else trimmed
+
+    monkeypatch.setattr(td, "canonical_mint", fake_canonical)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", _no_trending)
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_raydium_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_collect_mempool_signals", fake_collect)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", fake_dexscreener)
+    monkeypatch.setattr(td, "_enrich_with_solscan", fake_solscan)
+
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates("https://rpc", limit=2, mempool_threshold=0.0):
+        batches.append(batch)
+
+    assert solscan_requests == [[canonical_mint]]
+    assert batches, "expected staged discovery batches"
+    final = batches[-1]
+    assert final, "expected final batch"
+
+    entry = next(item for item in final if item["address"] == canonical_mint)
+    assert entry["sources"] == ["dexscreener", "mempool"]
+
+    metadata = entry.get("source_metadata")
+    assert isinstance(metadata, dict)
+    assert set(metadata) == {"dexscreener", "mempool"}
+    mempool_meta = metadata["mempool"]
+    dexs_meta = metadata["dexscreener"]
+
+    assert mempool_meta["raw_address"] == alias_mint
+    assert mempool_meta["address"] == canonical_mint
+    assert "score" in mempool_meta and mempool_meta["score"] == pytest.approx(0.35)
+    assert dexs_meta["raw_address"] == canonical_mint
+    assert dexs_meta["address"] == canonical_mint
+    assert dexs_meta["symbol"] == "ALC"
+    assert json.dumps(entry)
