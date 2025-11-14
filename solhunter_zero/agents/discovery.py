@@ -227,7 +227,21 @@ class DiscoveryAgent:
                 "Discovery limit set to 0; discovery will remain disabled",
             )
         self.limit = limit
-        self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
+        cache_ttl_env = os.getenv("DISCOVERY_CACHE_TTL")
+        cache_ttl_default = self._default_cache_ttl()
+        if cache_ttl_env in {None, ""}:
+            cache_ttl_value = cache_ttl_default
+        else:
+            try:
+                cache_ttl_value = float(cache_ttl_env)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid DISCOVERY_CACHE_TTL=%r; defaulting to %.1fs",
+                    cache_ttl_env,
+                    cache_ttl_default,
+                )
+                cache_ttl_value = cache_ttl_default
+        self.cache_ttl = max(0.0, float(cache_ttl_value))
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
         mempool_max_wait_env = os.getenv("DISCOVERY_MEMPOOL_MAX_WAIT")
         if mempool_max_wait_env in {None, ""}:
@@ -271,6 +285,31 @@ class DiscoveryAgent:
         # disabled so we avoid noisy duplicate messages when discovery runs in a
         # tight loop.
         self._birdeye_notice_logged = False
+
+    @classmethod
+    def _default_cache_ttl(cls) -> float:
+        base_default = 45.0
+        if not cls._fast_mode_enabled():
+            return base_default
+
+        fast_override = os.getenv("FAST_DISCOVERY_CACHE_TTL")
+        if fast_override in {None, ""}:
+            return base_default
+
+        try:
+            return max(0.0, float(fast_override))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid FAST_DISCOVERY_CACHE_TTL=%r; using %.1fs default",
+                fast_override,
+                base_default,
+            )
+            return base_default
+
+    @staticmethod
+    def _fast_mode_enabled() -> bool:
+        value = os.getenv("FAST_PIPELINE_MODE", "")
+        return value.strip().lower() in {"1", "true", "yes", "on"}
 
     # ------------------------------------------------------------------
     # Public helpers

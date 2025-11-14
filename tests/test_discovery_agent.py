@@ -68,6 +68,19 @@ def test_invalid_env_limit(monkeypatch, caplog):
     assert "Invalid DISCOVERY_LIMIT" in caplog.text
 
 
+def test_invalid_cache_ttl_env(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.delenv("FAST_PIPELINE_MODE", raising=False)
+    monkeypatch.delenv("FAST_DISCOVERY_CACHE_TTL", raising=False)
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "fast")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.cache_ttl == 45.0
+    assert "Invalid DISCOVERY_CACHE_TTL" in caplog.text
+
+
 def test_negative_env_limit(monkeypatch, caplog):
     _reset_cache()
     monkeypatch.setenv("DISCOVERY_LIMIT", "-5")
