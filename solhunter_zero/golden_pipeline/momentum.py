@@ -42,6 +42,7 @@ except Exception:  # pragma: no cover - metrics optional
     Histogram = None  # type: ignore
 
 from ..http import HostCircuitOpenError, get_session, host_request
+from ..pumpfun import normalize_pumpfun_payload
 from ..token_aliases import canonical_mint
 from .types import GoldenSnapshot
 from .utils import CircuitBreaker, clamp, now_ts
@@ -1721,25 +1722,14 @@ class MomentumAgent:
             return cached
         payload = await self._request_json(_PUMPFUN_TRENDING, host="pump.fun")
         result: Dict[str, Dict[str, Any]] = {}
-        if isinstance(payload, Mapping):
-            data = payload.get("tokens") or payload.get("items") or payload.get("results")
-            if isinstance(data, list):
-                for entry in data:
-                    if not isinstance(entry, Mapping):
-                        continue
-                    mint = entry.get("tokenAddress") or entry.get("address")
-                    if not isinstance(mint, str):
-                        continue
-                    mint = canonical_mint(mint)
-                    if not mint:
-                        continue
-                    result[mint] = {
-                        "rank": entry.get("rank"),
-                        "buyersLastHour": entry.get("buyersLastHour") or entry.get("buyers_last_hour"),
-                        "score": entry.get("score") or entry.get("pumpScore"),
-                        "tweetsLastHour": entry.get("tweetsLastHour") or entry.get("tweets_last_hour"),
-                        "sentiment": entry.get("sentiment"),
-                    }
+        for entry in normalize_pumpfun_payload(payload):
+            result[entry["mint"]] = {
+                "rank": entry.get("rank"),
+                "buyersLastHour": entry.get("buyers_last_hour"),
+                "score": entry.get("score"),
+                "tweetsLastHour": entry.get("tweets_last_hour"),
+                "sentiment": entry.get("sentiment"),
+            }
         self._cache_set(cache_key, result, ttl=_SOCIAL_CACHE_TTL_SEC)
         return result
 

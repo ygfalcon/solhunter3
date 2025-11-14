@@ -16,6 +16,7 @@ import aiohttp
 from . import prices
 from .discovery.mint_resolver import normalize_candidate
 from .logging_utils import warn_once_per
+from .pumpfun import normalize_pumpfun_payload
 from .token_aliases import canonical_mint, validate_mint
 from .clients.helius_das import (
     build_search_param_variants,
@@ -1708,19 +1709,14 @@ async def _pump_trending(
         logger.debug("Pump.fun trending request failed: %s", exc)
         return []
 
-    if not isinstance(payload, list):
+    entries = normalize_pumpfun_payload(payload)
+    if not entries:
         return []
 
     tokens: List[Dict[str, Any]] = []
-    seen: set[str] = set()
 
-    for entry in payload:
-        if not isinstance(entry, dict):
-            continue
-        mint = _normalize_mint_candidate(entry.get("mint") or entry.get("tokenMint"))
-        if not mint or mint in seen:
-            continue
-        seen.add(mint)
+    for entry in entries:
+        mint = entry["mint"]
         meta = {
             "address": mint,
             "source": "pumpfun",
@@ -1729,7 +1725,7 @@ async def _pump_trending(
         }
         name = entry.get("name")
         symbol = entry.get("symbol")
-        icon = entry.get("image_url") or entry.get("imageUrl")
+        icon = entry.get("icon")
         if isinstance(name, str):
             meta["name"] = name
         if isinstance(symbol, str):
@@ -1748,7 +1744,7 @@ async def _pump_trending(
                 "market_cap",
                 "price",
             )
-            if k in entry
+            if entry.get(k) is not None
         }
         _ensure_metadata(meta)["pumpfun"] = pump_meta
         _finalize_sources(meta)
