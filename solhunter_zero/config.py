@@ -195,6 +195,7 @@ ENV_VARS = {
     "event_batch_ms": "EVENT_BATCH_MS",
     "event_mmap_batch_ms": "EVENT_MMAP_BATCH_MS",
     "event_mmap_batch_size": "EVENT_MMAP_BATCH_SIZE",
+    "ui_ws_ready_timeout": "UI_WS_READY_TIMEOUT",
     "order_book_ws_url": "ORDER_BOOK_WS_URL",
     "depth_service": "DEPTH_SERVICE",
     "depth_max_restarts": "DEPTH_MAX_RESTARTS",

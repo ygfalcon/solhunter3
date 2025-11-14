@@ -290,6 +290,13 @@ def test_set_env_llm(monkeypatch):
     assert os.getenv("LLM_CONTEXT_LENGTH") == "64"
 
 
+def test_set_env_ui_ws_ready_timeout(monkeypatch):
+    cfg = {"ui_ws_ready_timeout": 42}
+    monkeypatch.delenv("UI_WS_READY_TIMEOUT", raising=False)
+    set_env_from_config(cfg)
+    assert os.getenv("UI_WS_READY_TIMEOUT") == "42"
+
+
 def test_set_env_from_config_booleans(monkeypatch):
     cfg = {
         "use_flash_loans": True,
