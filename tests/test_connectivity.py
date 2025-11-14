@@ -1,5 +1,7 @@
+import asyncio
 import json
 import types
+from pathlib import Path
 
 import pytest
 import websockets
@@ -18,24 +20,36 @@ async def test_probe_ui_ws_hello(monkeypatch):
     from solhunter_zero.production import connectivity as connectivity_mod
 
     class DummyWS:
+        def __init__(self, channel: str, *, fail: bool = False) -> None:
+            self.channel = channel
+            self.fail = fail
+
         async def ping(self) -> None:
-            return None
+            if self.fail:
+                raise RuntimeError("ping failed")
 
         async def recv(self) -> str:
-            return json.dumps({"channel": "events", "event": "hello"})
+            if self.fail:
+                raise asyncio.TimeoutError
+            return json.dumps({"channel": self.channel, "event": "hello"})
 
     class DummyConnect:
-        def __init__(self) -> None:
-            self.ws = DummyWS()
+        def __init__(self, channel: str, *, fail: bool = False) -> None:
+            self.channel = channel
+            self.fail = fail
 
         async def __aenter__(self) -> DummyWS:
-            return self.ws
+            if self.fail:
+                raise RuntimeError("connect failed")
+            return DummyWS(self.channel, fail=self.fail)
 
         async def __aexit__(self, exc_type, exc, tb) -> bool:
             return False
 
-    def dummy_connect(*_args, **_kwargs):
-        return DummyConnect()
+    def dummy_connect(url, *_args, **_kwargs):
+        if "rl" in url:
+            return DummyConnect("rl")
+        return DummyConnect("events")
 
     monkeypatch.setattr(
         connectivity_mod,
@@ -44,8 +58,95 @@ async def test_probe_ui_ws_hello(monkeypatch):
     )
 
     checker = ConnectivityChecker(env={})
-    result = await checker._probe_ws("ui-ws", "ws://example/ws/events")
+    urls = {"events": "ws://example/ws/events", "rl": "ws://example/ws/rl"}
+    result = await checker._probe_ws("ui-ws", urls)
     assert result.ok
+    assert result.status == "ok"
+    assert result.latency_ms is not None
+
+
+@pytest.mark.anyio("asyncio")
+async def test_probe_ui_ws_partial_outage(monkeypatch):
+    from solhunter_zero.production import connectivity as connectivity_mod
+
+    class DummyWS:
+        def __init__(self, channel: str, *, fail: bool = False) -> None:
+            self.channel = channel
+            self.fail = fail
+
+        async def ping(self) -> None:
+            if self.fail:
+                raise RuntimeError("ping failed")
+
+        async def recv(self) -> str:
+            if self.fail:
+                raise asyncio.TimeoutError
+            return json.dumps({"channel": self.channel, "event": "hello"})
+
+    class DummyConnect:
+        def __init__(self, channel: str, *, fail: bool = False) -> None:
+            self.channel = channel
+            self.fail = fail
+
+        async def __aenter__(self) -> DummyWS:
+            if self.fail:
+                raise RuntimeError("connect failed")
+            return DummyWS(self.channel, fail=self.fail)
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def dummy_connect(url, *_args, **_kwargs):
+        if "logs" in url:
+            return DummyConnect("logs", fail=True)
+        return DummyConnect("events")
+
+    monkeypatch.setattr(
+        connectivity_mod,
+        "websockets",
+        types.SimpleNamespace(connect=dummy_connect),
+    )
+
+    checker = ConnectivityChecker(env={})
+    urls = {
+        "events": "ws://example/ws/events",
+        "logs": "ws://example/ws/logs",
+    }
+    result = await checker._probe_ws("ui-ws", urls)
+    assert result.ok
+    assert result.status == "degraded"
+    assert result.error and "logs" in result.error
+
+
+@pytest.mark.anyio("asyncio")
+async def test_probe_ui_ws_total_outage(monkeypatch):
+    from solhunter_zero.production import connectivity as connectivity_mod
+
+    class DummyConnect:
+        def __init__(self, channel: str) -> None:
+            self.channel = channel
+
+        async def __aenter__(self):
+            raise RuntimeError("connect failed")
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def dummy_connect(url, *_args, **_kwargs):
+        return DummyConnect("events")
+
+    monkeypatch.setattr(
+        connectivity_mod,
+        "websockets",
+        types.SimpleNamespace(connect=dummy_connect),
+    )
+
+    checker = ConnectivityChecker(env={})
+    urls = {"events": "ws://example/ws/events"}
+    result = await checker._probe_ws("ui-ws", urls)
+    assert not result.ok
+    assert result.status == "error"
+    assert "events" in (result.error or "")
 
 
 def test_skip_ui_targets_via_env():
@@ -146,3 +247,36 @@ async def test_probe_ui_http_detects_event_bus_down():
         assert result.error and "event bus" in result.error
     finally:
         await runner.cleanup()
+
+
+def test_resolve_ui_ws_urls_prefers_runtime_log(tmp_path: Path):
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text(
+        "\n".join(
+            [
+                "[ts] other line",
+                "[ts] UI_WS_READY status=ok rl_ws=ws://localhost:9101/ws/rl events_ws=ws://localhost:9100/ws/events logs_ws=-",
+            ]
+        )
+    )
+    checker = ConnectivityChecker(env={"CONNECTIVITY_RUNTIME_LOG": str(log_path)})
+    urls = checker._resolve_ui_ws_urls()
+    assert urls["events"] == "ws://localhost:9100/ws/events"
+    assert urls["rl"] == "ws://localhost:9101/ws/rl"
+    assert "logs" not in urls
+
+
+def test_resolve_ui_ws_urls_falls_back_to_manifest(tmp_path: Path):
+    manifest_path = tmp_path / "ui_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "events_ws": "ws://127.0.0.1:9000/ws/events",
+                "logs_ws": "ws://127.0.0.1:9002/ws/logs",
+            }
+        )
+    )
+    checker = ConnectivityChecker(env={"CONNECTIVITY_UI_MANIFEST": str(manifest_path)})
+    urls = checker._resolve_ui_ws_urls()
+    assert urls["events"] == "ws://127.0.0.1:9000/ws/events"
+    assert urls["logs"] == "ws://127.0.0.1:9002/ws/logs"

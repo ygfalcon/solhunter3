@@ -107,6 +107,104 @@ class ConnectivityChecker:
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
     # ------------------------------------------------------------------
+    # Runtime websocket discovery helpers
+    # ------------------------------------------------------------------
+
+    def _runtime_log_paths(self) -> list[Path]:
+        candidates: list[Path] = []
+        override = self.env.get("CONNECTIVITY_RUNTIME_LOG") or self.env.get("RUNTIME_LOG_PATH")
+        if override:
+            candidates.append(Path(override))
+        else:
+            log_dir = Path(self.env.get("RUNTIME_LOG_DIR", "artifacts/logs"))
+            log_name = self.env.get("RUNTIME_LOG_NAME", "runtime.log")
+            candidates.append(log_dir / log_name)
+        return candidates
+
+    @staticmethod
+    def _parse_ws_ready_line(line: str) -> dict[str, str]:
+        if "UI_WS_READY" not in line:
+            return {}
+        fragments = line.strip().split()
+        urls: dict[str, str] = {}
+        for fragment in fragments:
+            if "=" not in fragment:
+                continue
+            key, value = fragment.split("=", 1)
+            key = key.strip()
+            value = value.strip().rstrip(",")
+            if key in {"rl_ws", "events_ws", "logs_ws"}:
+                if value and value not in {"-", "unavailable"}:
+                    urls[key[:-3]] = value
+        return urls
+
+    def _load_ws_urls_from_runtime_log(self) -> dict[str, str]:
+        for path in self._runtime_log_paths():
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    lines = handle.readlines()
+            except OSError:
+                continue
+            for raw_line in reversed(lines):
+                parsed = self._parse_ws_ready_line(raw_line)
+                if parsed:
+                    return parsed
+        return {}
+
+    def _manifest_paths(self) -> list[Path]:
+        candidates: list[Path] = []
+        override = self.env.get("CONNECTIVITY_UI_MANIFEST") or self.env.get("UI_MANIFEST_PATH")
+        if override:
+            candidates.append(Path(override))
+        candidates.append(Path("artifacts/prelaunch/ui_manifest.json"))
+        return candidates
+
+    def _load_ws_urls_from_manifest(self) -> dict[str, str]:
+        for path in self._manifest_paths():
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            try:
+                payload = json.loads(text)
+            except Exception:
+                continue
+            urls: dict[str, str] = {}
+            for channel in ("events", "rl", "logs"):
+                key = f"{channel}_ws"
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    urls[channel] = value
+            if urls:
+                return urls
+        return {}
+
+    def _resolve_ui_ws_urls(self) -> dict[str, str]:
+        urls = self._load_ws_urls_from_runtime_log()
+        if not urls:
+            urls = self._load_ws_urls_from_manifest()
+        env_map = {
+            "events": ("UI_EVENTS_WS", "UI_EVENTS_WS_URL", "UI_WS_URL"),
+            "rl": ("UI_RL_WS", "UI_RL_WS_URL"),
+            "logs": ("UI_LOGS_WS", "UI_LOG_WS_URL"),
+        }
+        for channel, keys in env_map.items():
+            if urls.get(channel):
+                continue
+            for key in keys:
+                value = self.env.get(key)
+                if value:
+                    urls[channel] = value
+                    break
+        for channel, keys in env_map.items():
+            value = urls.get(channel)
+            if not value:
+                continue
+            for key in keys:
+                self.env.setdefault(key, value)
+        return {channel: url for channel, url in urls.items() if isinstance(url, str) and url}
+
+    # ------------------------------------------------------------------
     # Target configuration
     # ------------------------------------------------------------------
 
@@ -121,14 +219,20 @@ class ConnectivityChecker:
             price_base = env.get("HELIUS_PRICE_BASE_URL") or "https://api.helius.xyz"
             rest = f"{price_base.rstrip('/')}/v0/token-metadata"
         redis_url = env.get("REDIS_URL") or "redis://127.0.0.1:6379/1"
-        ui_ws = None
+        ui_ws_map = self._resolve_ui_ws_urls()
+        ui_ws: str | Mapping[str, str] | None = None
+        if ui_ws_map:
+            ui_ws = ui_ws_map
         if not self.skip_ui_probes:
-            ui_ws = (
-                env.get("UI_EVENTS_WS")
-                or env.get("UI_EVENTS_WS_URL")
-                or env.get("UI_WS_URL")
-            )
-            if not ui_ws:
+            if ui_ws is None:
+                events_env = (
+                    env.get("UI_EVENTS_WS")
+                    or env.get("UI_EVENTS_WS_URL")
+                    or env.get("UI_WS_URL")
+                )
+                if events_env:
+                    ui_ws = {"events": events_env}
+            if ui_ws is None:
                 host = env.get("UI_HOST", "127.0.0.1")
                 if host in {"0.0.0.0", "::"}:
                     host = "127.0.0.1"
@@ -143,7 +247,7 @@ class ConnectivityChecker:
                     path = "/ws/events"
                 if not path.startswith("/"):
                     path = "/" + path.lstrip("/")
-                ui_ws = f"{scheme}://{host}:{port}{path}"
+                ui_ws = {"events": f"{scheme}://{host}:{port}{path}"}
         ws_gateway = env.get("GATEWAY_WS_URL") or env.get("WS_GATEWAY_URL")
         targets: list[dict[str, Any]] = []
         if rpc:
@@ -227,6 +331,116 @@ class ConnectivityChecker:
     # ------------------------------------------------------------------
     # Metrics helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalise_ui_ws_candidates(url: Any) -> list[tuple[str | None, str]]:
+        candidates: list[tuple[str | None, str]] = []
+        if isinstance(url, Mapping):
+            for key, value in url.items():
+                if isinstance(value, str) and value:
+                    candidates.append((str(key), value))
+        elif isinstance(url, (list, tuple, set)):
+            for value in url:
+                if isinstance(value, str) and value:
+                    candidates.append((None, value))
+        elif isinstance(url, str):
+            if url:
+                candidates.append((None, url))
+        return candidates
+
+    @staticmethod
+    def _format_ui_ws_target(candidates: Iterable[tuple[str | None, str]]) -> str:
+        parts = []
+        for channel, endpoint in candidates:
+            label = channel or "unknown"
+            parts.append(f"{label}={endpoint}")
+        return ", ".join(parts)
+
+    async def _handshake_ui_ws(self, url: str, *, expected_channel: str | None) -> float:
+        started = time.perf_counter()
+        async with websockets.connect(
+            url,
+            ping_interval=20,
+            ping_timeout=self.http_timeout,
+            close_timeout=self.http_timeout,
+        ) as ws:
+            await ws.ping()
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=self.redis_timeout)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("ui-hello-timeout") from exc
+            except Exception as exc:  # pragma: no cover - defensive
+                raise RuntimeError(f"ui-hello-error: {exc}") from exc
+            try:
+                payload = json.loads(raw)
+            except Exception as exc:
+                raise RuntimeError("ui-hello-invalid-json") from exc
+            if payload.get("event") != "hello":
+                raise RuntimeError("ui-hello-missing")
+            channel = payload.get("channel")
+            if expected_channel:
+                if channel != expected_channel:
+                    raise RuntimeError(f"ui-hello-channel-mismatch:{channel}")
+            else:
+                if channel not in {"events", "rl", "logs"}:
+                    raise RuntimeError("ui-hello-unknown-channel")
+            await asyncio.sleep(0.05)
+        latency = (time.perf_counter() - started) * 1000
+        return latency
+
+    async def _probe_ui_ws(self, name: str, url: Any) -> ConnectivityResult:
+        candidates = self._normalise_ui_ws_candidates(url)
+        if not candidates:
+            self._register_failure(name)
+            return ConnectivityResult(
+                name=name,
+                target="",
+                ok=False,
+                status="error",
+                error="no websocket urls",
+                attempts=0,
+            )
+        successes: list[tuple[str | None, float]] = []
+        errors: dict[str, str] = {}
+        for channel, endpoint in candidates:
+            label = channel or endpoint
+            try:
+                latency = await self._handshake_ui_ws(endpoint, expected_channel=channel)
+            except Exception as exc:
+                errors[label] = str(exc)
+                self._record_error(name, f"{label}:{exc.__class__.__name__}")
+            else:
+                self._record_latency(name, latency)
+                successes.append((channel, latency))
+        attempts = len(successes) + len(errors)
+        target_desc = self._format_ui_ws_target(candidates)
+        if successes:
+            latency_ms = min(lat for _, lat in successes)
+            status = "ok" if not errors else "degraded"
+            error_msg = None
+            if errors:
+                error_msg = "; ".join(f"{label}: {msg}" for label, msg in errors.items())
+            self._register_success(name)
+            return ConnectivityResult(
+                name=name,
+                target=target_desc,
+                ok=True,
+                latency_ms=latency_ms,
+                status=status,
+                error=error_msg,
+                attempts=attempts or 1,
+            )
+        self._register_failure(name)
+        error_msg = "; ".join(f"{label}: {msg}" for label, msg in errors.items()) or "no websocket channels succeeded"
+        return ConnectivityResult(
+            name=name,
+            target=target_desc,
+            ok=False,
+            latency_ms=None,
+            status="error",
+            error=error_msg,
+            attempts=attempts or 1,
+        )
 
     def _metrics_for(self, name: str) -> Dict[str, Any]:
         return self._metrics[name]
@@ -457,7 +671,10 @@ class ConnectivityChecker:
                 self._register_failure(name)
             return result
 
-    async def _probe_ws(self, name: str, url: str) -> ConnectivityResult:
+    async def _probe_ws(self, name: str, url: Any) -> ConnectivityResult:
+        if name == "ui-ws":
+            return await self._probe_ui_ws(name, url)
+
         async def attempt() -> ConnectivityResult:
             started = time.perf_counter()
             try:
@@ -468,22 +685,6 @@ class ConnectivityChecker:
                     close_timeout=self.http_timeout,
                 ) as ws:
                     await ws.ping()
-                    if name == "ui-ws":
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=self.redis_timeout)
-                        except asyncio.TimeoutError as exc:
-                            raise RuntimeError("ui-hello-timeout") from exc
-                        except Exception as exc:  # pragma: no cover - defensive
-                            raise RuntimeError(f"ui-hello-error: {exc}") from exc
-                        try:
-                            payload = json.loads(raw)
-                        except Exception as exc:
-                            raise RuntimeError("ui-hello-invalid-json") from exc
-                        if payload.get("event") != "hello":
-                            raise RuntimeError("ui-hello-missing")
-                        channel = payload.get("channel")
-                        if channel not in {"events", "rl", "logs"}:
-                            raise RuntimeError("ui-hello-unknown-channel")
                     await asyncio.sleep(0.1)
                     latency = (time.perf_counter() - started) * 1000
                     self._record_latency(name, latency)
