@@ -763,6 +763,32 @@ def _clear_ws_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+def test_get_ws_urls_brackets_ipv6_public_host(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+    monkeypatch.setenv("UI_PUBLIC_HOST", "::1")
+
+    ports = {"events": 8765, "rl": 8766, "logs": 8767}
+    original_state: dict[str, tuple[int, str | None]] = {}
+    for channel, state in ui._WS_CHANNELS.items():
+        original_state[channel] = (state.port, state.host)
+        state.port = ports[channel]
+        state.host = "::"
+
+    try:
+        urls = ui.get_ws_urls()
+    finally:
+        for channel, state in ui._WS_CHANNELS.items():
+            previous_port, previous_host = original_state[channel]
+            state.port = previous_port
+            state.host = previous_host
+
+    assert urls["events"] == f"ws://[::1]:{ports['events']}{ui._channel_path('events')}"
+    assert urls["rl"] == f"ws://[::1]:{ports['rl']}{ui._channel_path('rl')}"
+    assert urls["logs"] == f"ws://[::1]:{ports['logs']}{ui._channel_path('logs')}"
+
+
 def test_manifest_prefers_event_bus_url(monkeypatch):
     ui = _reload_ui_module()
 

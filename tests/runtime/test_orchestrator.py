@@ -1,4 +1,5 @@
 import asyncio
+import os
 import logging
 import threading
 import time
@@ -163,6 +164,69 @@ async def test_orchestrator_logs_ui_ws_ready(monkeypatch, caplog):
     assert "events_ws=ws://localhost:1111/events" in latest
     assert "logs_ws=ws://localhost:1111/logs" in latest
     assert "rl_ws=ws://localhost:1111/rl" in latest
+
+
+@pytest.mark.anyio("asyncio")
+async def test_orchestrator_brackets_ipv6_ws_urls(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    for key in (
+        "UI_EVENTS_WS",
+        "UI_EVENTS_WS_URL",
+        "UI_WS_URL",
+        "UI_RL_WS",
+        "UI_RL_WS_URL",
+        "UI_LOGS_WS",
+        "UI_LOG_WS_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    ws_urls = {
+        "events": "ws://::1:6000/events",
+        "logs": "ws://::1:6001/logs",
+        "rl": "ws://::1:6002/rl",
+    }
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: ws_urls)
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {"events": object()},
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+    await orch.start_ui()
+
+    expected_events = "ws://[::1]:6000/events"
+    expected_logs = "ws://[::1]:6001/logs"
+    expected_rl = "ws://[::1]:6002/rl"
+
+    assert os.environ["UI_EVENTS_WS_URL"] == expected_events
+    assert os.environ["UI_EVENTS_WS"] == expected_events
+    assert os.environ["UI_RL_WS_URL"] == expected_rl
+    assert os.environ["UI_RL_WS"] == expected_rl
+    assert os.environ["UI_LOG_WS_URL"] == expected_logs
+    assert os.environ["UI_LOGS_WS"] == expected_logs
+
+    ws_logs = [message for message in caplog.messages if message.startswith("UI_WS_READY ")]
+    assert ws_logs, "expected UI_WS_READY log entry"
+    latest = ws_logs[-1]
+    assert f"events_ws={expected_events}" in latest
+    assert f"logs_ws={expected_logs}" in latest
+    assert f"rl_ws={expected_rl}" in latest
 
 
 @pytest.mark.anyio("asyncio")

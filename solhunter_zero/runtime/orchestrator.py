@@ -199,6 +199,53 @@ def _loopback_host_for(host: str | None) -> str | None:
     return _WILDCARD_LOOPBACK_MAP.get(host, host)
 
 
+def _ensure_bracketed_ipv6_url(url: str | None) -> str | None:
+    if not url:
+        return url
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return url
+
+    raw_netloc = parsed.netloc
+    if not raw_netloc or "[" in raw_netloc or "]" in raw_netloc:
+        return url
+
+    userinfo = ""
+    host_port = raw_netloc
+    if "@" in host_port:
+        userinfo_part, host_port = host_port.rsplit("@", 1)
+        userinfo = f"{userinfo_part}@"
+
+    if ":" not in host_port:
+        return url
+
+    host_candidate, sep, port_candidate = host_port.rpartition(":")
+    if not sep:
+        return url
+    if not host_candidate:
+        return url
+
+    if host_candidate.endswith(":"):
+        host = host_port
+        port: str | None = None
+    else:
+        host = host_candidate
+        port = port_candidate if port_candidate.isdigit() else None
+        if port is None:
+            host = host_port
+
+    if ":" not in host:
+        return url
+
+    host_component = f"[{host}]"
+    if port is not None:
+        host_component = f"{host_component}:{port}"
+
+    netloc = f"{userinfo}{host_component}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
 def _normalize_url_host_to_loopback(url: str | None) -> str | None:
     """Return *url* with wildcard hosts replaced by loopback equivalents."""
 
@@ -238,9 +285,11 @@ def _normalize_ws_urls(urls: Mapping[str, str | None] | None) -> dict[str, str |
 
     normalized: dict[str, str | None] = {}
     for channel, value in urls.items():
-        normalized[channel] = (
-            _normalize_url_host_to_loopback(value) if isinstance(value, str) else value
-        )
+        if isinstance(value, str):
+            normalized_value = _normalize_url_host_to_loopback(value)
+            normalized[channel] = _ensure_bracketed_ipv6_url(normalized_value)
+        else:
+            normalized[channel] = value
     return normalized
 
 
@@ -431,9 +480,9 @@ class RuntimeOrchestrator:
         ws_urls = _normalize_ws_urls(ws_urls)
         if ui_url is not None:
             ui_url = _normalize_url_host_to_loopback(ui_url)
-        rl_url = ws_urls.get("rl") or "-"
-        events_url = ws_urls.get("events") or "-"
-        logs_url = ws_urls.get("logs") or "-"
+        rl_url = _ensure_bracketed_ipv6_url(ws_urls.get("rl")) or "-"
+        events_url = _ensure_bracketed_ipv6_url(ws_urls.get("events")) or "-"
+        logs_url = _ensure_bracketed_ipv6_url(ws_urls.get("logs")) or "-"
         readiness_line = (
             "UI_READY "
             f"url={ui_url if ui_url is not None else 'unavailable'} "

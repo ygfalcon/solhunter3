@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Callable, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
-from urllib.parse import parse_qs, urlparse, urlunparse
+from urllib.parse import parse_qs, urlparse, urlunparse, urlsplit, urlunsplit
 from weakref import WeakSet
 
 from flask import Flask, Request, Response, jsonify, render_template, request
@@ -1586,6 +1586,59 @@ def _update_auto_env_value(key: str, value: str, descriptor: str) -> None:
         )
 
 
+def _format_ws_host(host: str) -> str:
+    if ":" in host and "[" not in host and "]" not in host:
+        return f"[{host}]"
+    return host
+
+
+def _ensure_ipv6_brackets(url: str | None) -> str | None:
+    if not url:
+        return url
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return url
+
+    raw_netloc = parsed.netloc
+    if not raw_netloc or "[" in raw_netloc or "]" in raw_netloc:
+        return url
+
+    userinfo = ""
+    host_port = raw_netloc
+    if "@" in host_port:
+        userinfo_part, host_port = host_port.rsplit("@", 1)
+        userinfo = f"{userinfo_part}@"
+
+    if ":" not in host_port:
+        return url
+
+    host_candidate, sep, port_candidate = host_port.rpartition(":")
+    if not sep:
+        return url
+    if not host_candidate:
+        return url
+
+    if host_candidate.endswith(":"):
+        host = host_port
+        port: str | None = None
+    else:
+        host = host_candidate
+        port = port_candidate if port_candidate.isdigit() else None
+        if port is None:
+            host = host_port
+
+    if ":" not in host:
+        return url
+
+    host_component = _format_ws_host(host)
+    if port is not None:
+        host_component = f"{host_component}:{port}"
+
+    netloc = f"{userinfo}{host_component}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
 def _resolve_host() -> str:
     for key in _WS_HOST_ENV_KEYS:
         host = os.getenv(key)
@@ -2222,7 +2275,7 @@ def _normalize_ws_url(value: str | None) -> str | None:
     if not candidate:
         return None
     if candidate.startswith(("ws://", "wss://")):
-        return candidate
+        return _ensure_ipv6_brackets(candidate)
     return None
 
 
@@ -2355,6 +2408,7 @@ def get_ws_urls(request_host: str | None = None) -> dict[str, str | None]:
             state = _WS_CHANNELS.get(channel)
             host = state.host if state and state.host else _resolve_host()
             url_host = _resolve_public_host(host, request_host=request_host)
+            url_host_for_url = _format_ws_host(url_host)
             if channel == "rl":
                 port = state.port or _RL_WS_PORT
             elif channel == "events":
@@ -2366,7 +2420,7 @@ def get_ws_urls(request_host: str | None = None) -> dict[str, str | None]:
                 continue
             path = _channel_path(channel)
             scheme = _infer_ws_scheme()
-            resolved = f"{scheme}://{url_host}:{port}{path}"
+            resolved = f"{scheme}://{url_host_for_url}:{port}{path}"
         urls[channel] = resolved
     return urls
 
@@ -2934,6 +2988,7 @@ def start_websockets() -> dict[str, threading.Thread]:
             ping_timeout_raw, _WS_PING_TIMEOUT_DEFAULT
         )
         url_host = _resolve_public_host(host)
+        url_host_for_url = _format_ws_host(url_host)
         scheme = _infer_ws_scheme()
 
         rl_port = _resolve_port("UI_RL_WS_PORT", "RL_WS_PORT", default=_RL_WS_PORT_DEFAULT)
@@ -2970,9 +3025,9 @@ def start_websockets() -> dict[str, threading.Thread]:
                 _shutdown_state(state)
             raise
 
-        events_url = f"{scheme}://{url_host}:{_EVENT_WS_PORT}{_channel_path('events')}"
-        rl_url = f"{scheme}://{url_host}:{_RL_WS_PORT}{_channel_path('rl')}"
-        logs_url = f"{scheme}://{url_host}:{_LOG_WS_PORT}{_channel_path('logs')}"
+        events_url = f"{scheme}://{url_host_for_url}:{_EVENT_WS_PORT}{_channel_path('events')}"
+        rl_url = f"{scheme}://{url_host_for_url}:{_RL_WS_PORT}{_channel_path('rl')}"
+        logs_url = f"{scheme}://{url_host_for_url}:{_LOG_WS_PORT}{_channel_path('logs')}"
 
         defaults = {
             "UI_WS_URL": events_url,
