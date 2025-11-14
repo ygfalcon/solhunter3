@@ -537,6 +537,73 @@ async def test_trending_enrichment_populates_metrics(monkeypatch):
     assert entry.get("price") == pytest.approx(1.5)
 
 
+@pytest.mark.anyio("asyncio")
+async def test_trending_enrichment_refreshes_existing_birdeye_candidates(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    mint = "So11111111111111111111111111111111111111112"
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return [
+            {
+                "address": mint,
+                "name": "Bird Token",
+                "symbol": "BIRD",
+                "liquidity": 125000.0,
+                "volume": 98000.0,
+                "price": 0.42,
+                "sources": ["birdeye"],
+            }
+        ]
+
+    async def fake_trending(*, limit=None):
+        _ = limit
+        await asyncio.sleep(0.05)
+        return [mint]
+
+    async def _no_tokens(*, session=None):
+        _ = session
+        return []
+
+    async def _noop_enrich(_candidates, *, addresses=None):
+        _ = addresses
+        return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_raydium_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_enrich_with_solscan", _noop_enrich)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates("https://rpc", limit=1):
+        batches.append(batch)
+
+    assert len(batches) == 2, "trending enrichment should trigger a refreshed batch"
+    first, second = batches
+    assert first[0]["sources"] == ["birdeye"]
+    assert second[0]["sources"] == ["birdeye", "trending"]
+    assert "trending_signal" in second[0]["source_categories"]
+
+
 def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch, caplog):
     td._BIRDEYE_CACHE.clear()
     _configure_env(monkeypatch, DISCOVERY_ENABLE_MEMPOOL="0")
