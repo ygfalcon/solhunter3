@@ -3956,18 +3956,34 @@ class UIServer:
         self._thread = thread
         thread.start()
 
-        ready_timeout_raw = os.getenv(
-            "UI_HTTP_READY_TIMEOUT", str(DEFAULT_UI_HTTP_READY_TIMEOUT)
-        )
-        try:
-            ready_timeout = float(ready_timeout_raw or DEFAULT_UI_HTTP_READY_TIMEOUT)
-        except (TypeError, ValueError):
-            log.warning(
-                "Invalid UI_HTTP_READY_TIMEOUT value %r; using default %.1f seconds",
-                ready_timeout_raw,
-                DEFAULT_UI_HTTP_READY_TIMEOUT,
-            )
+        ready_timeout_raw = os.getenv("UI_HTTP_READY_TIMEOUT")
+        if ready_timeout_raw in (None, ""):
             ready_timeout = DEFAULT_UI_HTTP_READY_TIMEOUT
+        else:
+            try:
+                ready_timeout = float(ready_timeout_raw)
+            except (TypeError, ValueError):
+                log.warning(
+                    "Invalid UI_HTTP_READY_TIMEOUT value %r; using default %.1f seconds",
+                    ready_timeout_raw,
+                    DEFAULT_UI_HTTP_READY_TIMEOUT,
+                )
+                ready_timeout = DEFAULT_UI_HTTP_READY_TIMEOUT
+            else:
+                if not math.isfinite(ready_timeout):
+                    log.warning(
+                        "Non-finite UI_HTTP_READY_TIMEOUT %s; using default %.1f seconds",
+                        ready_timeout,
+                        DEFAULT_UI_HTTP_READY_TIMEOUT,
+                    )
+                    ready_timeout = DEFAULT_UI_HTTP_READY_TIMEOUT
+                elif ready_timeout <= 0:
+                    log.warning(
+                        "Non-positive UI_HTTP_READY_TIMEOUT %s; using default %.1f seconds",
+                        ready_timeout,
+                        DEFAULT_UI_HTTP_READY_TIMEOUT,
+                    )
+                    ready_timeout = DEFAULT_UI_HTTP_READY_TIMEOUT
 
         self._ready_timeout = ready_timeout
 

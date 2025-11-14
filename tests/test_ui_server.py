@@ -102,6 +102,36 @@ def test_ui_server_ready_timeout_override_handles_slow_start(monkeypatch) -> Non
         server.stop()
 
 
+def test_ui_server_ready_timeout_zero_uses_default(monkeypatch) -> None:
+    monkeypatch.setenv("UI_HTTP_READY_TIMEOUT", "0")
+    stop_event = _install_stub_server(monkeypatch, server_port=65432)
+
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    server.start()
+    try:
+        assert server.ready_timeout == pytest.approx(ui.DEFAULT_UI_HTTP_READY_TIMEOUT)
+    finally:
+        stop_event.set()
+        server.stop()
+
+
+def test_ui_server_ready_timeout_negative_uses_default(monkeypatch) -> None:
+    monkeypatch.setenv("UI_HTTP_READY_TIMEOUT", "-5")
+    stop_event = _install_stub_server(monkeypatch, server_port=65432)
+
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    server.start()
+    try:
+        assert server.ready_timeout == pytest.approx(ui.DEFAULT_UI_HTTP_READY_TIMEOUT)
+    finally:
+        stop_event.set()
+        server.stop()
+
+
 def test_ui_server_worker_bind_failure_surfaces_exception(monkeypatch) -> None:
     state = UIState()
 
