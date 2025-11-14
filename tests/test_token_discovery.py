@@ -734,6 +734,90 @@ async def test_fetch_birdeye_tokens_success_parses_payload(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_fetch_birdeye_tokens_cache_invalidation_on_limit_change(monkeypatch):
+    td._cache_clear()
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "good-key")
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    class _CountingSession:
+        def __init__(self, response):
+            self._response = response
+            self.call_count = 0
+
+        def set_response(self, response):
+            self._response = response
+
+        def get(self, *args, **kwargs):
+            self.call_count += 1
+            return self._response
+
+    class _NoopHostRequest:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def _host_request_stub(*_args, **_kwargs):
+        return _NoopHostRequest()
+
+    monkeypatch.setattr(td, "host_request", _host_request_stub)
+
+    def _make_token(idx: int) -> dict:
+        return {
+            "address": f"Mint{idx:02d}",
+            "symbol": f"T{idx:02d}",
+            "name": f"Token {idx:02d}",
+            "v24hUSD": 1000.0 + idx,
+            "liquidity": 500.0 + idx,
+            "price": 1.0 + idx / 100.0,
+            "v24hChangePercent": 2.5,
+        }
+
+    payload_small = {
+        "data": {"tokens": [_make_token(idx) for idx in range(3)], "total": 100}
+    }
+    payload_large = {
+        "data": {"tokens": [_make_token(idx) for idx in range(10, 15)], "total": 100}
+    }
+
+    small_response = _DummyResponse(200, json_data=payload_small)
+    large_response = _DummyResponse(200, json_data=payload_large)
+    session = _CountingSession(small_response)
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        DISCOVERY_MAX_TOKENS="10",
+        DISCOVERY_PAGE_SIZE="5",
+    )
+
+    first = await td._fetch_birdeye_tokens(limit=3)
+    calls_after_first = session.call_count
+    session.set_response(large_response)
+    second = await td._fetch_birdeye_tokens(limit=5)
+
+    assert session.call_count > calls_after_first
+    assert [token["address"] for token in first] == ["Mint00", "Mint01", "Mint02"]
+    assert [token["address"] for token in second] == [
+        "Mint10",
+        "Mint11",
+        "Mint12",
+        "Mint13",
+        "Mint14",
+    ]
+
+
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
