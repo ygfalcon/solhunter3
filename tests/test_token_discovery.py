@@ -57,6 +57,38 @@ def _configure_env(monkeypatch, **values):
     td.refresh_runtime_values()
 
 
+def test_current_cache_key_respects_fractional_thresholds(monkeypatch):
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_MIN_VOLUME_USD="123.45",
+        DISCOVERY_MIN_LIQUIDITY_USD="678.9",
+    )
+
+    base_key = td._current_cache_key()
+    assert base_key.startswith("tokens:123.45:678.9:")
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_MIN_VOLUME_USD="123.450001",
+        DISCOVERY_MIN_LIQUIDITY_USD="678.9",
+    )
+
+    volume_key = td._current_cache_key()
+    assert volume_key.startswith("tokens:123.450001:678.9:")
+    assert volume_key != base_key
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_MIN_VOLUME_USD="123.45",
+        DISCOVERY_MIN_LIQUIDITY_USD="678.91",
+    )
+
+    liquidity_key = td._current_cache_key()
+    assert liquidity_key.startswith("tokens:123.45:678.91:")
+    assert liquidity_key != base_key
+    assert liquidity_key != volume_key
+
+
 def test_merge_candidate_entry_tracks_source_categories(monkeypatch):
     monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
 

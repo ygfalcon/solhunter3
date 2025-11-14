@@ -632,8 +632,19 @@ def _cache_clear() -> None:
         _BIRDEYE_CACHE.clear()
 
 
+def _format_threshold(value: float) -> str:
+    """Return a stable string representation for cache threshold values."""
+
+    formatted = f"{float(value):.6f}"
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return formatted or "0"
+
+
 def _current_cache_key() -> str:
-    return f"tokens:{int(SETTINGS.min_volume)}:{int(SETTINGS.min_liquidity)}:{SETTINGS.page_limit}"
+    volume = _format_threshold(SETTINGS.min_volume)
+    liquidity = _format_threshold(SETTINGS.min_liquidity)
+    return f"tokens:{volume}:{liquidity}:{SETTINGS.page_limit}"
 
 
 def _make_timeout(value: Any) -> ClientTimeout | None:
