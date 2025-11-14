@@ -79,6 +79,28 @@ def test_negative_env_limit(monkeypatch, caplog):
     assert "below minimum" in caplog.text
 
 
+def test_invalid_retry_env(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "not-a-number")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.max_attempts == 2
+    assert "Invalid TOKEN_DISCOVERY_RETRIES" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "0")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.max_attempts == 2
+    assert "below minimum" in caplog.text
+
+    monkeypatch.delenv("TOKEN_DISCOVERY_RETRIES", raising=False)
+
+
 def test_zero_env_limit_disables_discovery(monkeypatch, caplog):
     _reset_cache()
     monkeypatch.setenv("DISCOVERY_LIMIT", "0")
