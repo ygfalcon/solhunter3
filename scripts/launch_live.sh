@@ -662,6 +662,8 @@ REQUIRED_TARGETS = [
     ("redis", "Redis"),
     ("solana-rpc", "Solana RPC"),
     ("solana-ws", "Solana WebSocket"),
+    ("helius-rest", "Helius REST"),
+    ("helius-das", "Helius DAS"),
     ("event-bus", "Event bus"),
 ]
 
