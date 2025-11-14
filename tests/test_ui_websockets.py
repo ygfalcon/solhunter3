@@ -841,6 +841,25 @@ def test_manifest_public_host_with_port(monkeypatch):
         assert manifest[f"{channel}_ws_available"] is True
 
 
+def test_manifest_preserves_query_and_fragment(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+
+    monkeypatch.setenv("EVENT_BUS_URL", "wss://bus.example/ws?auth=abc#token")
+    monkeypatch.setenv("UI_RL_WS", "wss://rl.example/ws?key=def#frag")
+    monkeypatch.setenv(
+        "UI_LOGS_WS",
+        "ws://logs.example/ws/logs?debug=true#tail",
+    )
+
+    manifest = ui.build_ui_manifest(None)
+
+    assert manifest["events_ws"] == "wss://bus.example/ws/events?auth=abc#token"
+    assert manifest["rl_ws"] == "wss://rl.example/ws/rl?key=def#frag"
+    assert manifest["logs_ws"] == "ws://logs.example/ws/logs?debug=true#tail"
+
+
 def _clear_ws_env(monkeypatch):
     for key in (
         "UI_EVENTS_WS",

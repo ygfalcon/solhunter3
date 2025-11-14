@@ -2455,7 +2455,16 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
             netloc = host or ""
             if port:
                 netloc = f"{host}:{port}"
-            manifest[f"{channel}_ws"] = urlunparse((scheme, netloc, path, "", "", ""))
+            manifest[f"{channel}_ws"] = urlunparse(
+                (
+                    scheme,
+                    netloc,
+                    path,
+                    parsed.params,
+                    parsed.query,
+                    parsed.fragment,
+                )
+            )
             manifest[f"{channel}_ws_available"] = True
         else:
             manifest[f"{channel}_ws"] = None
