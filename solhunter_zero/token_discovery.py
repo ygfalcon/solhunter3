@@ -564,6 +564,16 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
         entry["sources"] = entry_sources
         entry.setdefault("score", 0.0)
         entry.setdefault("_stage_b_eligible", False)
+        per_source = _normalize_per_source_map(entry.get("per_source"))
+        per_source.setdefault(
+            "cache",
+            {
+                "liquidity": float(_coerce_numeric(entry.get("liquidity"))),
+                "volume": float(_coerce_numeric(entry.get("volume"))),
+                "price": float(_coerce_numeric(entry.get("price"))),
+            },
+        )
+        entry["per_source"] = per_source
         fallback.append(entry)
         seen.add(address)
         if len(fallback) >= limit:
@@ -579,6 +589,13 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
             "sources": {"static"},
             "score": 0.0,
             "_stage_b_eligible": False,
+        }
+        entry["per_source"] = {
+            "static": {
+                "liquidity": float(_coerce_numeric(entry.get("liquidity"))),
+                "volume": float(_coerce_numeric(entry.get("volume"))),
+                "price": float(_coerce_numeric(entry.get("price"))),
+            }
         }
         fallback.append(entry)
         seen.add(address)
@@ -812,6 +829,31 @@ def _normalize_venues_field(value: Any) -> set[str]:
     return venues
 
 
+def _normalize_per_source_map(value: Any) -> Dict[str, Dict[str, float]]:
+    per_source: Dict[str, Dict[str, float]] = {}
+    if not isinstance(value, Mapping):
+        return per_source
+    for raw_source, raw_metrics in value.items():
+        if raw_source is None:
+            continue
+        source = str(raw_source).strip()
+        if not source:
+            continue
+        if isinstance(raw_metrics, Mapping):
+            per_source[source] = {
+                "liquidity": float(_coerce_numeric(raw_metrics.get("liquidity"))),
+                "volume": float(_coerce_numeric(raw_metrics.get("volume"))),
+                "price": float(_coerce_numeric(raw_metrics.get("price"))),
+            }
+        else:
+            per_source[source] = {
+                "liquidity": float(_coerce_numeric(raw_metrics)),
+                "volume": 0.0,
+                "price": 0.0,
+            }
+    return per_source
+
+
 def _merge_orca_venues(
     entry: Dict[str, Any], catalog: Mapping[str, Sequence[Mapping[str, Any]]]
 ) -> None:
@@ -884,6 +926,13 @@ def _merge_candidate_entry(
         or token.get("pairCreatedAt")
     )
 
+    source_key = str(source or "").strip() or str(source)
+    source_payload = {
+        "liquidity": float(liquidity),
+        "volume": float(volume),
+        "price": float(price),
+    }
+
     if entry is None:
         entry = {
             "address": address,
@@ -895,6 +944,7 @@ def _merge_candidate_entry(
             "price_change": change,
             "sources": set(),
             "venues": set(incoming_venues),
+            "per_source": {source_key: source_payload},
         }
         if discovered_at is not None:
             entry["discovered_at"] = discovered_at
@@ -956,7 +1006,18 @@ def _merge_candidate_entry(
             if extra_key in token and extra_key not in entry:
                 entry[extra_key] = token[extra_key]
 
-    entry.setdefault("sources", set()).add(source)
+    per_source_map = entry.get("per_source")
+    if isinstance(per_source_map, dict):
+        pass
+    elif isinstance(per_source_map, Mapping):
+        per_source_map = _normalize_per_source_map(per_source_map)
+        entry["per_source"] = per_source_map
+    else:
+        per_source_map = {}
+        entry["per_source"] = per_source_map
+    per_source_map[source_key] = source_payload
+
+    entry.setdefault("sources", set()).add(source_key)
     return entry
 
 
@@ -1291,6 +1352,13 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                     "price": price,
                     "price_change": change,
                     "sources": ["birdeye"],
+                    "per_source": {
+                        "birdeye": {
+                            "liquidity": float(liquidity),
+                            "volume": float(volume),
+                            "price": float(price),
+                        }
+                    },
                 },
             )
             # Aggregate max across pages
@@ -1298,6 +1366,13 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
             entry["volume"] = max(entry["volume"], volume)
             entry["price"] = price or entry.get("price", 0.0)
             entry["price_change"] = change
+            per_source = _normalize_per_source_map(entry.get("per_source"))
+            per_source["birdeye"] = {
+                "liquidity": float(entry["liquidity"]),
+                "volume": float(entry["volume"]),
+                "price": float(entry["price"]),
+            }
+            entry["per_source"] = per_source
             if len(tokens) >= effective_limit:
                 break
 
@@ -1980,6 +2055,7 @@ def discover_candidates(
             else:
                 venues_list = []
             copy["venues"] = venues_list
+            copy["per_source"] = _normalize_per_source_map(entry.get("per_source"))
             for internal in ("_stage_b_eligible", "score_breakdown"):
                 copy.pop(internal, None)
             final.append(copy)
@@ -2368,6 +2444,18 @@ def discover_candidates(
                     entry_copy["sources"] = source_set
                     entry_copy.setdefault("score", 0.0)
                     entry_copy.setdefault("_stage_b_eligible", False)
+                    per_source_map = _normalize_per_source_map(
+                        entry_copy.get("per_source")
+                    )
+                    per_source_map.setdefault(
+                        "fallback",
+                        {
+                            "liquidity": float(_coerce_numeric(entry_copy.get("liquidity"))),
+                            "volume": float(_coerce_numeric(entry_copy.get("volume"))),
+                            "price": float(_coerce_numeric(entry_copy.get("price"))),
+                        },
+                    )
+                    entry_copy["per_source"] = per_source_map
                     fallback_candidates[address] = entry_copy
 
                 if fallback_candidates:

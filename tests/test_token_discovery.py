@@ -628,6 +628,10 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
 
     dex_sources = set(addresses[dex_mint]["sources"])
     assert {"dexscreener", "meteora"}.issubset(dex_sources)
+    dex_per_source = addresses[dex_mint]["per_source"]
+    assert set(dex_per_source) == {"dexscreener", "meteora"}
+    assert dex_per_source["dexscreener"]["liquidity"] == pytest.approx(12000)
+    assert dex_per_source["meteora"]["volume"] == pytest.approx(3000)
 
     lab_entry = addresses[lab_mint]
     assert "dexlab" in lab_entry["sources"]
@@ -666,6 +670,7 @@ async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch,
     addresses = {item["address"] for item in final}
     assert "So11111111111111111111111111111111111111112" in addresses
     assert all("fallback" in item.get("sources", []) for item in final)
+    assert all("fallback" in item.get("per_source", {}) for item in final)
     assert "BirdEye discovery disabled" in caplog.text
     assert "using fallback set" in caplog.text
     assert result.config_errors, "BirdEye configuration error should be surfaced"
