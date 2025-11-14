@@ -16,6 +16,7 @@ from solhunter_zero.golden_pipeline.kv import InMemoryKeyValueStore
 from solhunter_zero.golden_pipeline.pipeline import GoldenPipeline
 from solhunter_zero.golden_pipeline.types import TokenSnapshot
 from solhunter_zero.runtime.runtime_wiring import initialise_runtime_wiring
+import solhunter_zero.ui as ui_module
 from solhunter_zero.ui import UIState, start_websockets, stop_websockets
 
 from tools.demo_payloads import (
@@ -277,6 +278,8 @@ class DemoContext:
 @pytest.fixture
 def demo_context(demo_tokens: Sequence[DemoToken]) -> Iterable[DemoContext]:
     event_bus.reset()
+    if ui_module.websockets is None:
+        pytest.skip("websockets dependency required for demo UI websockets")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     ui_state = UIState()

@@ -1,5 +1,6 @@
-import importlib
 import asyncio
+import builtins
+import importlib
 import logging
 import os
 import socket
@@ -12,6 +13,37 @@ from typing import Any
 
 import pytest
 
+
+def test_start_websockets_requires_dependency(monkeypatch):
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+
+    real_import = builtins.__import__
+
+    def _missing_websockets(name, globals=None, locals=None, fromlist=(), level=0):
+        if name.startswith("websockets"):
+            raise ImportError("websockets dependency not installed")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _missing_websockets)
+
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault(
+        "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet")
+    )
+    production_stub = types.ModuleType("solhunter_zero.production")
+    production_stub.load_production_env = lambda: None
+    monkeypatch.setitem(sys.modules, "solhunter_zero.production", production_stub)
+
+    sys.modules.pop("solhunter_zero.ui", None)
+    from solhunter_zero import ui
+
+    importlib.reload(ui)
+    assert ui.websockets is None
+
+    with pytest.raises(RuntimeError, match="UI websockets require"):
+        ui.start_websockets()
 
 @pytest.mark.timeout(30)
 def test_websocket_threads_bind():
@@ -599,8 +631,18 @@ def _reload_ui_module():
     sys.modules.setdefault("sqlparse", types.SimpleNamespace())
     sys.modules.setdefault(
         "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet"))
-    from solhunter_zero import ui
-    importlib.reload(ui)
+    production_stub = types.ModuleType("solhunter_zero.production")
+    production_stub.load_production_env = lambda: None
+    previous_production = sys.modules.get("solhunter_zero.production")
+    sys.modules["solhunter_zero.production"] = production_stub
+    try:
+        from solhunter_zero import ui
+        importlib.reload(ui)
+    finally:
+        if previous_production is not None:
+            sys.modules["solhunter_zero.production"] = previous_production
+        else:
+            sys.modules.pop("solhunter_zero.production", None)
     return ui
 
 
@@ -621,6 +663,15 @@ def test_manifest_omits_zero_ports():
         "RL_WS_PORT",
         "UI_LOG_WS_PORT",
         "LOG_WS_PORT",
+    ):
+        os.environ.pop(key, None)
+    for key in (
+        "EVENT_BUS_URL",
+        "BROKER_WS_URLS",
+        "EVENT_BUS_PEERS",
+        "BROKER_URLS",
+        "BROKER_URLS_JSON",
+        "BROKER_URL",
     ):
         os.environ.pop(key, None)
 
