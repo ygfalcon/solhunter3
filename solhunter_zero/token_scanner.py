@@ -1781,6 +1781,10 @@ async def _pump_trending(
                 "volume_5m",
                 "market_cap",
                 "price",
+                "score",
+                "buyers",
+                "tweets",
+                "sentiment",
             )
             if k in entry
         }
