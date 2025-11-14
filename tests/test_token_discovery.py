@@ -98,6 +98,79 @@ def test_compute_feature_vector_mempool_score_fallback(monkeypatch, caplog):
     assert "Failed to coerce numeric value" in caplog.text
 
 
+def test_merge_candidate_entry_weighted_consensus(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr(td.time, "time", lambda: now)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    address = "So11111111111111111111111111111111111111112"
+    candidates: dict[str, dict[str, float]] = {}
+
+    historical_token = {
+        "address": address,
+        "liquidity": 100_000,
+        "volume": 80_000,
+        "price": 3.5,
+        "asof": now - 6 * 3600,
+        "discovered_at": now - 6 * 3600,
+    }
+
+    entry = td._merge_candidate_entry(candidates, dict(historical_token), "dexlab")
+    assert entry is not None
+    assert entry["liquidity"] == pytest.approx(100_000)
+
+    fresh_token = {
+        "address": address,
+        "liquidity": 50_000,
+        "volume": 60_000,
+        "price": 1.2,
+        "asof": now - 300,
+        "discovered_at": now - 300,
+    }
+
+    entry = td._merge_candidate_entry(candidates, dict(fresh_token), "birdeye")
+    assert entry is not None
+    liquidity_samples = entry.get("_metric_samples", {}).get("liquidity", {})
+    liquidity_weighted = sum(
+        sample["value"] * sample["weight"] for sample in liquidity_samples.values()
+    )
+    liquidity_weight = sum(sample["weight"] for sample in liquidity_samples.values())
+    assert liquidity_weight > 0
+    assert entry["liquidity"] == pytest.approx(liquidity_weighted / liquidity_weight)
+    assert min(s["value"] for s in liquidity_samples.values()) < entry["liquidity"] < max(
+        s["value"] for s in liquidity_samples.values()
+    )
+
+    price_samples = entry.get("_metric_samples", {}).get("price", {})
+    price_weighted = sum(
+        sample["value"] * sample["weight"] for sample in price_samples.values()
+    )
+    price_weight = sum(sample["weight"] for sample in price_samples.values())
+    assert price_weight > 0
+    assert entry["price"] == pytest.approx(price_weighted / price_weight)
+    assert min(s["value"] for s in price_samples.values()) < entry["price"] < max(
+        s["value"] for s in price_samples.values()
+    )
+
+    spiky_token = {
+        "address": address,
+        "liquidity": 200_000,
+        "volume": 150_000,
+        "price": 10.0,
+        "asof": now - 30,
+        "discovered_at": now - 30,
+    }
+
+    entry = td._merge_candidate_entry(candidates, dict(spiky_token), "trending")
+    assert entry is not None
+    assert 50_000 < entry["liquidity"] < 200_000
+    assert 60_000 < entry["volume"] < 150_000
+    assert 1.2 < entry["price"] < 10.0
+    samples = entry.get("_metric_samples", {})
+    assert set(samples.get("liquidity", {})) == {"dexlab", "birdeye", "trending"}
+    assert set(entry.get("sources", set())) >= {"dexlab", "birdeye", "trending"}
+
+
 @pytest.mark.anyio("asyncio")
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()

@@ -34,6 +34,20 @@ from .util.mints import is_valid_solana_mint
 logger = logging.getLogger(__name__)
 
 
+_SOURCE_QUALITY_WEIGHTS: Mapping[str, float] = {
+    "birdeye": 1.4,
+    "dexscreener": 1.25,
+    "raydium": 1.15,
+    "meteora": 1.05,
+    "dexlab": 0.75,
+    "mempool": 0.9,
+    "trending": 0.5,
+}
+
+_CONSENSUS_DECAY_SECONDS = 3600.0
+_CONSENSUS_MIN_WEIGHT = 0.05
+
+
 def _is_fast_mode() -> bool:
     return os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 
@@ -844,6 +858,96 @@ def _merge_orca_venues(
             entry["pair_address"] = pool_addr
 
 
+def _extract_numeric_measurement(token: Mapping[str, Any], keys: Sequence[str]) -> float | None:
+    for key in keys:
+        if key not in token:
+            continue
+        value = token.get(key)
+        if value is None:
+            continue
+        try:
+            numeric = _coerce_numeric(value)
+        except Exception:
+            continue
+        return numeric
+    return None
+
+
+def _extract_measurement_timestamp(token: Mapping[str, Any]) -> float | None:
+    for key in (
+        "asof",
+        "updated_at",
+        "updatedAt",
+        "timestamp",
+        "ts",
+        "lastTradeTimestamp",
+        "lastTradeTime",
+        "lastTrade",
+        "lastTradeUnix",
+    ):
+        if key in token:
+            ts = _parse_timestamp(token.get(key))
+            if ts is not None:
+                return ts
+    return None
+
+
+def _compute_measurement_weight(
+    source: str, token: Mapping[str, Any], discovered_at: float | None
+) -> float:
+    base = _SOURCE_QUALITY_WEIGHTS.get(source.lower(), 1.0)
+    timestamp = _extract_measurement_timestamp(token)
+    if timestamp is None:
+        timestamp = discovered_at
+    if timestamp is None:
+        return max(_CONSENSUS_MIN_WEIGHT, base)
+    try:
+        age_seconds = max(0.0, time.time() - float(timestamp))
+    except Exception:
+        age_seconds = 0.0
+    recency_factor = math.exp(-age_seconds / _CONSENSUS_DECAY_SECONDS)
+    weight = base * recency_factor
+    if weight <= 0:
+        return _CONSENSUS_MIN_WEIGHT
+    return max(_CONSENSUS_MIN_WEIGHT, weight)
+
+
+def _update_consensus_metric(
+    entry: MutableMapping[str, Any],
+    metric: str,
+    value: float | None,
+    weight: float,
+    source: str,
+) -> None:
+    if value is None:
+        return
+    if weight <= 0:
+        return
+    if metric == "price" and value <= 0:
+        return
+    if metric in {"liquidity", "volume"} and value < 0:
+        return
+    samples = entry.setdefault("_metric_samples", {})
+    metric_samples = samples.setdefault(metric, {})
+    metric_samples[source] = {
+        "value": float(value),
+        "weight": float(weight),
+    }
+    total_weight = 0.0
+    weighted_total = 0.0
+    for sample in metric_samples.values():
+        sample_weight = float(sample.get("weight", 0.0))
+        sample_value = float(sample.get("value", 0.0))
+        if sample_weight <= 0:
+            continue
+        weighted_total += sample_value * sample_weight
+        total_weight += sample_weight
+    if total_weight <= 0:
+        return
+    consensus_value = weighted_total / total_weight
+    entry[metric] = consensus_value
+
+
 def _merge_candidate_entry(
     candidates: Dict[str, Dict[str, Any]],
     token: Dict[str, Any],
@@ -858,18 +962,15 @@ def _merge_candidate_entry(
     if not is_valid_solana_mint(address):
         return None
 
-    liquidity = _coerce_numeric(
-        token.get("liquidity")
-        or token.get("liquidity_usd")
-        or token.get("liquidityUsd")
+    liquidity = _extract_numeric_measurement(
+        token,
+        ("liquidity", "liquidity_usd", "liquidityUsd"),
     )
-    volume = _coerce_numeric(
-        token.get("volume")
-        or token.get("volume24h")
-        or token.get("volume_usd")
-        or token.get("volumeUsd")
+    volume = _extract_numeric_measurement(
+        token,
+        ("volume", "volume24h", "volume_usd", "volumeUsd"),
     )
-    price = _coerce_numeric(token.get("price") or token.get("price_usd"))
+    price = _extract_numeric_measurement(token, ("price", "price_usd"))
     change = _coerce_numeric(token.get("price_change") or token.get("change"))
 
     name = token.get("name") or token.get("tokenName")
@@ -889,9 +990,9 @@ def _merge_candidate_entry(
             "address": address,
             "symbol": str(symbol or ""),
             "name": str(name or symbol or address),
-            "liquidity": liquidity,
-            "volume": volume,
-            "price": price,
+            "liquidity": float(liquidity or 0.0),
+            "volume": float(volume or 0.0),
+            "price": float(price or 0.0),
             "price_change": change,
             "sources": set(),
             "venues": set(incoming_venues),
@@ -925,12 +1026,6 @@ def _merge_candidate_entry(
             entry["symbol"] = str(symbol)
         if name and (not entry.get("name") or entry.get("name") == entry.get("address")):
             entry["name"] = str(name)
-        entry["liquidity"] = max(
-            _coerce_numeric(entry.get("liquidity")), liquidity
-        )
-        entry["volume"] = max(_coerce_numeric(entry.get("volume")), volume)
-        if price > 0:
-            entry["price"] = price
         if change != 0:
             entry["price_change"] = change
         if incoming_venues:
@@ -955,6 +1050,11 @@ def _merge_candidate_entry(
         for extra_key in ("dex_pair_url", "pair_address", "pool_address", "quote_token"):
             if extra_key in token and extra_key not in entry:
                 entry[extra_key] = token[extra_key]
+
+    measurement_weight = _compute_measurement_weight(source, token, discovered_at)
+    _update_consensus_metric(entry, "liquidity", liquidity, measurement_weight, source)
+    _update_consensus_metric(entry, "volume", volume, measurement_weight, source)
+    _update_consensus_metric(entry, "price", price, measurement_weight, source)
 
     entry.setdefault("sources", set()).add(source)
     return entry
@@ -1980,7 +2080,7 @@ def discover_candidates(
             else:
                 venues_list = []
             copy["venues"] = venues_list
-            for internal in ("_stage_b_eligible", "score_breakdown"):
+            for internal in ("_stage_b_eligible", "score_breakdown", "_metric_samples"):
                 copy.pop(internal, None)
             final.append(copy)
         return final
