@@ -109,6 +109,7 @@ def _helius_headers(api_key: str) -> Dict[str, str]:
     return {"accept": "application/json", "x-api-key": api_key}
 
 __all__ = [
+    "fetch_birdeye_overview_async",
     "fetch_dex_metrics_async",
     "fetch_dex_metrics",
     "fetch_slippage_onchain_async",
@@ -303,6 +304,52 @@ async def _birdeye_ohlcv(session: aiohttp.ClientSession, mint: str, tf: str, lim
                 "v": _numeric(it.get("v") or it.get("volume"), 0.0),
             })
     return out
+
+
+async def fetch_birdeye_overview_async(
+    mint: str,
+    *,
+    session: aiohttp.ClientSession | None = None,
+) -> Dict[str, Any]:
+    """Return BirdEye price/volume/liquidity overview for ``mint``.
+
+    The coroutine reuses the shared HTTP session when provided and falls back
+    to :func:`get_session` otherwise. Invalid mint addresses return an empty
+    mapping.
+    """
+
+    canonical = _validated_mint(mint)
+    if canonical is None:
+        return {}
+
+    session_obj = session
+    if session_obj is None:
+        try:
+            session_obj = await get_session()
+        except Exception:
+            session_obj = None
+
+    if session_obj is None:
+        return {}
+
+    try:
+        price, change24h, volume24h, liquidity, holders, pool_count, decimals = (
+            await _birdeye_price_overview(session_obj, canonical)
+        )
+    except Exception:
+        return {}
+
+    result: Dict[str, Any] = {
+        "price": _numeric(price, 0.0),
+        "price_change": _numeric(change24h, 0.0),
+        "volume_24h": _numeric(volume24h, 0.0),
+        "liquidity_usd": _numeric(liquidity, 0.0),
+        "holders": _int_numeric(holders, 0),
+        "pool_count": _int_numeric(pool_count, 0),
+    }
+    if decimals is not None:
+        result["decimals"] = _int_numeric(decimals, 0)
+    return result
 
 
 def _metrics_has_data(metrics: Dict[str, Any] | None) -> bool:
