@@ -939,6 +939,41 @@ def test_fallback_results_do_not_populate_cache(monkeypatch):
     assert agent.last_details[first[0]]["fallback_reason"] == "cache"
 
 
+def test_cached_fallback_cycle_clears_cache(monkeypatch):
+    _reset_cache()
+
+    agent = DiscoveryAgent()
+    agent.max_attempts = 1
+
+    cached_identity = discovery_mod._rpc_identity(agent.rpc_url)
+    cached_tokens = [VALID_MINT]
+    cached_details = {VALID_MINT: {"fallback_reason": "cache"}}
+    cached_ts = time.time() - (agent.cache_ttl + 5.0)
+    discovery_mod._CACHE.update(
+        {
+            "tokens": list(cached_tokens),
+            "ts": cached_ts,
+            "limit": agent.limit,
+            "method": "websocket",
+            "rpc_identity": cached_identity,
+            "details": cached_details,
+        }
+    )
+
+    async def fail_discover_once(self, *, method, offline, token_file):
+        del method, offline, token_file
+        return [], {}
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fail_discover_once)
+
+    tokens = asyncio.run(agent.discover_tokens())
+
+    assert tokens == cached_tokens
+    assert agent.last_fallback_used is True
+    assert discovery_mod._CACHE["tokens"] == []
+    assert discovery_mod._CACHE["details"] == {}
+
+
 def test_merge_failure_cache_fallback_details(monkeypatch):
     _reset_cache()
 

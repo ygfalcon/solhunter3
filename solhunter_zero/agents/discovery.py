@@ -734,6 +734,8 @@ class DiscoveryAgent:
         elif fallback_used:
             async with _CACHE_LOCK:
                 # Mark the cache as expired so the next call performs live discovery.
+                _CACHE["tokens"] = []
+                _CACHE["details"] = {}
                 _CACHE["ts"] = 0.0
                 _CACHE["limit"] = 0
                 _CACHE["method"] = ""
