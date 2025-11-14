@@ -111,6 +111,8 @@ LIVE_MODE_PREVIOUS=""
 LIVE_MODE_WAS_SET=0
 LIVE_SOLHUNTER_MODE_PREVIOUS=""
 LIVE_SOLHUNTER_MODE_WAS_SET=0
+CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS=""
+CONNECTIVITY_SKIP_UI_PROBES_WAS_SET=0
 
 export RUNTIME_LOCK_TTL_SECONDS="${RUNTIME_LOCK_TTL_SECONDS:-60}"
 export RUNTIME_LOCK_REFRESH_INTERVAL="${RUNTIME_LOCK_REFRESH_INTERVAL:-20}"
@@ -2273,6 +2275,13 @@ kill "$PAPER_PID" >/dev/null 2>&1 || true
 wait "$PAPER_PID" 2>/dev/null || true
 log_info "Paper runtime stopped after preflight"
 
+# Preserve the caller's CONNECTIVITY_SKIP_UI_PROBES configuration while the
+# paper runtime is offline for the soak.
+CONNECTIVITY_SKIP_UI_PROBES_WAS_SET=0
+if [[ -n ${CONNECTIVITY_SKIP_UI_PROBES+x} ]]; then
+  CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS="$CONNECTIVITY_SKIP_UI_PROBES"
+  CONNECTIVITY_SKIP_UI_PROBES_WAS_SET=1
+fi
 export CONNECTIVITY_SKIP_UI_PROBES=1
 log_info "Paper runtime offline; skipping UI connectivity probes during soak"
 log_info "Starting connectivity soak for ${SOAK_DURATION}s"
@@ -2386,7 +2395,11 @@ fi
 
 runtime_lock_ttl_check "post-soak" || true
 log_info "Connectivity soak complete: $SOAK_RESULT"
-unset CONNECTIVITY_SKIP_UI_PROBES
+if (( CONNECTIVITY_SKIP_UI_PROBES_WAS_SET )); then
+  export CONNECTIVITY_SKIP_UI_PROBES="$CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS"
+else
+  unset CONNECTIVITY_SKIP_UI_PROBES
+fi
 log_info "UI connectivity probes re-enabled for live launch"
 
 LIVE_SOLHUNTER_MODE_WAS_SET=0
