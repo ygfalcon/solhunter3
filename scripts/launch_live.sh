@@ -684,7 +684,15 @@ def _runtime_bus_target(raw_url: str | None) -> tuple[str, int, str]:
     default = urlparse("ws://127.0.0.1:8779")
     parsed = urlparse(raw_url or default.geturl())
     host = parsed.hostname or default.hostname or "127.0.0.1"
-    port = parsed.port or default.port or 8779
+    scheme = (parsed.scheme or default.scheme or "ws").lower()
+    if parsed.port is not None:
+        port = parsed.port
+    elif scheme == "wss":
+        port = 443
+    elif scheme == "ws":
+        port = 80
+    else:
+        port = default.port or 8779
     if raw_url:
         display = raw_url
     else:
@@ -778,7 +786,15 @@ def _read_timeout(raw: str | None) -> float:
 bus_url = os.environ.get("EVENT_BUS_URL", "ws://127.0.0.1:8779")
 parsed = urlparse(bus_url)
 host = parsed.hostname or "127.0.0.1"
-port = parsed.port or 8779
+scheme = (parsed.scheme or "ws").lower()
+if parsed.port is not None:
+    port = parsed.port
+elif scheme == "wss":
+    port = 443
+elif scheme == "ws":
+    port = 80
+else:
+    port = 8779
 timeout = _read_timeout(os.environ.get("EVENT_BUS_RELEASE_TIMEOUT"))
 
 

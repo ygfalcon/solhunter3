@@ -49,6 +49,27 @@ WAIT_FOR_READY_SNIPPET = (
 )
 
 
+def _extract_python_function(source: str, name: str) -> str:
+    marker = f"def {name}"
+    start = source.find(marker)
+    if start == -1:
+        raise ValueError(f"Python function {name} not found in launch_live.sh")
+    remaining = source[start:]
+    lines = remaining.splitlines()
+    collected: list[str] = []
+    for idx, line in enumerate(lines):
+        if idx == 0:
+            collected.append(line)
+            continue
+        stripped = line.lstrip()
+        if stripped and not line.startswith(" ") and (
+            stripped.startswith("def ") or stripped.startswith("async def ")
+        ):
+            break
+        collected.append(line)
+    return "\n".join(collected) + "\n"
+
+
 def _run_wait_for_ready(
     tmp_path: Path,
     log_lines: list[str],
@@ -648,7 +669,19 @@ def test_wait_for_socket_release_skips_remote_hosts() -> None:
         env=env,
     )
 
-    assert "free example.com 8779 remote" in completed.stdout
+    assert "free example.com 443 remote" in completed.stdout
+
+
+def test_runtime_bus_target_defaults_wss_port() -> None:
+    source = _LAUNCH_LIVE_SOURCE
+    function_source = _extract_python_function(source, "_runtime_bus_target")
+    namespace: dict[str, object] = {}
+    exec("from urllib.parse import urlparse\n" + function_source, namespace)
+    runtime_bus_target = namespace["_runtime_bus_target"]
+    host, port, display = runtime_bus_target("wss://example.com/path")
+    assert host == "example.com"
+    assert port == 443
+    assert display == "wss://example.com/path"
 
 
 def test_launch_live_ui_port_busy_exit() -> None:
