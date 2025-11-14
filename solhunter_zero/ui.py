@@ -4184,6 +4184,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     state = UIState()
     _seed_state_from_snapshots(state, args.snapshot_dir)
 
+    websocket_error: BaseException | None = None
+    try:
+        start_websockets()
+    except BaseException as exc:  # pragma: no cover - optional dependency/runtime failure
+        websocket_error = exc
+
     server = UIServer(state, host=args.host, port=args.port)
     try:
         server.start()
@@ -4195,12 +4201,41 @@ def main(argv: Sequence[str] | None = None) -> None:
     except BaseException as exc:
         print(f"Failed to start UI server: {exc}", file=sys.stderr, flush=True)
         server.stop()
+        stop_websockets()
         raise SystemExit(1) from exc
 
-    url = f"http://{args.host}:{args.port}"
-    print(f"Solsniper Zero UI listening on {url}", flush=True)
+    _update_auto_env_value("UI_PORT", str(server.port), "port")
+
+    public_host, public_port = _resolve_public_host(server.host)
+    display_port = public_port if public_port not in (None, 0) else server.port
+    host_component = _format_host_for_url(public_host)
+    url = f"http://{host_component}:{display_port}"
+    print(f"SolHunter Zero UI listening on {url}", flush=True)
+    if (public_host, display_port) != (server.host, server.port):
+        print(
+            f"  (bound to {server.host}:{server.port})",
+            flush=True,
+        )
     if args.snapshot_dir:
         print(f"Seeded UI state from {args.snapshot_dir}", flush=True)
+
+    if websocket_error is not None:
+        print(
+            f"Websocket startup failed: {websocket_error}",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        ws_urls = {
+            name: url
+            for name, url in get_ws_urls().items()
+            if url
+        }
+        if ws_urls:
+            print("Websocket channels:", flush=True)
+            for name in sorted(ws_urls):
+                print(f"  {name}: {ws_urls[name]}", flush=True)
+
     try:
         while True:
             time.sleep(1)
@@ -4208,6 +4243,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         print("Stopping SolHunter UI server...", flush=True)
     finally:
         server.stop()
+        stop_websockets()
 
 
 if __name__ == "__main__":  # pragma: no cover

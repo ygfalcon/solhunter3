@@ -1,4 +1,5 @@
 import errno
+import re
 import socket
 import threading
 
@@ -186,3 +187,23 @@ def test_ui_server_stop_resets_environment_state() -> None:
 
     assert ui._get_active_ui_state() is None
     assert ui._ENV_BOOTSTRAPPED is False
+
+
+def test_ui_cli_dynamic_port_banner(monkeypatch, capfd) -> None:
+    monkeypatch.setattr(ui, "start_websockets", lambda: {})
+    monkeypatch.setattr(ui, "stop_websockets", lambda: None)
+
+    def _interrupt_sleep(_seconds: float) -> None:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(ui.time, "sleep", _interrupt_sleep)
+
+    ui.main(["--host", "127.0.0.1", "--port", "0"])
+
+    out, err = capfd.readouterr()
+    assert "SolHunter Zero UI listening on" in out
+    match = re.search(r"http://\[?127\.0\.0\.1\]?:([0-9]+)", out)
+    assert match is not None
+    bound_port = int(match.group(1))
+    assert bound_port != 0
+    assert err == ""
