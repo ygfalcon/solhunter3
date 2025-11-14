@@ -375,9 +375,16 @@ class RuntimeOrchestrator:
         url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
         if hasattr(_ui_module, "_resolve_public_host"):
             try:
-                url_host = _ui_module._resolve_public_host(host)  # type: ignore[attr-defined]
+                candidate = _ui_module._resolve_public_host(host)  # type: ignore[attr-defined]
             except Exception:  # pragma: no cover - defensive
                 url_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+            else:
+                if isinstance(candidate, tuple):
+                    candidate_host = candidate[0]
+                else:
+                    candidate_host = candidate
+                if isinstance(candidate_host, str) and candidate_host.strip():
+                    url_host = candidate_host.strip()
         raw_http_url = (os.getenv("UI_HTTP_URL") or "").strip()
         scheme = (
             os.getenv("UI_HTTP_SCHEME")

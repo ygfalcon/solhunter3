@@ -744,7 +744,7 @@ def test_emit_ui_ready_respects_canonical_ui_http_url(monkeypatch, caplog, tmp_p
     detected_host = "ui-runtime.example.test"
     monkeypatch.setattr(
         "solhunter_zero.runtime.orchestrator._ui_module._resolve_public_host",
-        lambda _host: detected_host,
+        lambda _host: (detected_host, None),
         raising=False,
     )
 

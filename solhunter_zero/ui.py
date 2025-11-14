@@ -1596,8 +1596,10 @@ def _resolve_host() -> str:
 
 def _resolve_public_host(
     bind_host: str | None = None, *, request_host: str | None = None
-) -> str:
+) -> tuple[str, int | None]:
     """Determine the hostname exposed to UI clients."""
+
+    unspecified = {"0.0.0.0", "::", "[::]"}
 
     def _clean(value: str | None) -> str | None:
         if value is None:
@@ -1605,25 +1607,34 @@ def _resolve_public_host(
         text = value.strip()
         return text or None
 
-    override = _clean(os.getenv("UI_PUBLIC_HOST"))
-    if override is None:
-        override = _clean(os.getenv("PUBLIC_URL_HOST"))
-    if override is None:
-        override = _clean(os.getenv("UI_EXTERNAL_HOST"))
+    def _extract_host_port(value: str | None) -> tuple[str | None, int | None]:
+        cleaned = _clean(value)
+        if not cleaned:
+            return None, None
+        host_only, port, _ = _split_netloc(cleaned)
+        host_candidate = _clean(host_only or cleaned)
+        if not host_candidate:
+            return None, None
+        return host_candidate, port
 
-    if override is not None:
-        return override
+    for env_key in ("UI_PUBLIC_HOST", "PUBLIC_URL_HOST", "UI_EXTERNAL_HOST"):
+        host_candidate, port_candidate = _extract_host_port(os.getenv(env_key))
+        if host_candidate and host_candidate not in unspecified:
+            return host_candidate, port_candidate
 
     bind = _clean(bind_host)
-    if bind and bind not in {"0.0.0.0", "::"}:
-        return bind
+    if bind and bind not in unspecified:
+        host_only, _, _ = _split_netloc(bind)
+        bind_host_candidate = _clean(host_only or bind)
+        if bind_host_candidate and bind_host_candidate not in unspecified:
+            return bind_host_candidate, None
 
     request_candidate = _clean(request_host)
     if request_candidate:
         host_only, _, _ = _split_netloc(request_candidate)
         request_candidate = _clean(host_only or request_candidate)
-        if request_candidate and request_candidate not in {"0.0.0.0", "::"}:
-            return request_candidate
+        if request_candidate and request_candidate not in unspecified:
+            return request_candidate, None
 
     hostname: str | None = None
     try:
@@ -1637,10 +1648,16 @@ def _resolve_public_host(
             hostname = None
 
     hostname = _clean(hostname)
-    if hostname and hostname not in {"0.0.0.0", "::"}:
-        return hostname
+    if hostname and hostname not in unspecified:
+        return hostname, None
 
-    return "127.0.0.1"
+    return "127.0.0.1", None
+
+
+def _format_host_for_url(host: str) -> str:
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
 
 
 def _parse_port(value: str | None, default: int) -> int:
@@ -2354,7 +2371,9 @@ def get_ws_urls(request_host: str | None = None) -> dict[str, str | None]:
         if not resolved:
             state = _WS_CHANNELS.get(channel)
             host = state.host if state and state.host else _resolve_host()
-            url_host = _resolve_public_host(host, request_host=request_host)
+            public_host, public_port = _resolve_public_host(
+                host, request_host=request_host
+            )
             if channel == "rl":
                 port = state.port or _RL_WS_PORT
             elif channel == "events":
@@ -2364,9 +2383,11 @@ def get_ws_urls(request_host: str | None = None) -> dict[str, str | None]:
             if not port:
                 urls[channel] = None
                 continue
+            display_port = public_port if public_port not in (None, 0) else port
             path = _channel_path(channel)
             scheme = _infer_ws_scheme()
-            resolved = f"{scheme}://{url_host}:{port}{path}"
+            host_component = _format_host_for_url(public_host)
+            resolved = f"{scheme}://{host_component}:{display_port}{path}"
         urls[channel] = resolved
     return urls
 
@@ -2933,7 +2954,8 @@ def start_websockets() -> dict[str, threading.Thread]:
         ping_timeout = _parse_positive_float(
             ping_timeout_raw, _WS_PING_TIMEOUT_DEFAULT
         )
-        url_host = _resolve_public_host(host)
+        public_host, public_port = _resolve_public_host(host)
+        host_component = _format_host_for_url(public_host)
         scheme = _infer_ws_scheme()
 
         rl_port = _resolve_port("UI_RL_WS_PORT", "RL_WS_PORT", default=_RL_WS_PORT_DEFAULT)
@@ -2970,9 +2992,15 @@ def start_websockets() -> dict[str, threading.Thread]:
                 _shutdown_state(state)
             raise
 
-        events_url = f"{scheme}://{url_host}:{_EVENT_WS_PORT}{_channel_path('events')}"
-        rl_url = f"{scheme}://{url_host}:{_RL_WS_PORT}{_channel_path('rl')}"
-        logs_url = f"{scheme}://{url_host}:{_LOG_WS_PORT}{_channel_path('logs')}"
+        events_display_port = (
+            public_port if public_port not in (None, 0) else _EVENT_WS_PORT
+        )
+        rl_display_port = public_port if public_port not in (None, 0) else _RL_WS_PORT
+        logs_display_port = public_port if public_port not in (None, 0) else _LOG_WS_PORT
+
+        events_url = f"{scheme}://{host_component}:{events_display_port}{_channel_path('events')}"
+        rl_url = f"{scheme}://{host_component}:{rl_display_port}{_channel_path('rl')}"
+        logs_url = f"{scheme}://{host_component}:{logs_display_port}{_channel_path('logs')}"
 
         defaults = {
             "UI_WS_URL": events_url,

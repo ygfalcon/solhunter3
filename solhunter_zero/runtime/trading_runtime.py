@@ -1033,8 +1033,16 @@ class TradingRuntime:
                 candidate = ui._resolve_public_host(resolved_host)  # type: ignore[attr-defined]
             except Exception:  # pragma: no cover - defensive fallback
                 candidate = None
-            if isinstance(candidate, str) and candidate.strip():
-                url_host = candidate.strip()
+            else:
+                candidate_host: str | None
+                if isinstance(candidate, tuple):
+                    candidate_host = candidate[0]
+                elif isinstance(candidate, str):
+                    candidate_host = candidate
+                else:  # pragma: no cover - defensive fallback
+                    candidate_host = None
+                if candidate_host and candidate_host.strip():
+                    url_host = candidate_host.strip()
         scheme = (
             os.getenv("UI_HTTP_SCHEME")
             or os.getenv("UI_SCHEME")
