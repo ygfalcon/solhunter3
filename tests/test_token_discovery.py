@@ -280,6 +280,110 @@ async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_fetch_birdeye_tokens_parses_payload_and_caches(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        DISCOVERY_PAGE_SIZE="2",
+    )
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "key")
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    assert td.SETTINGS.min_volume == 0
+    assert td.SETTINGS.min_liquidity == 0
+
+    payload = {
+        "data": {
+            "tokens": [
+                {
+                    "address": "MintBirdEyeAAA111111111111111111111111111",
+                    "symbol": "BIRD1",
+                    "name": "Bird One",
+                    "v24hUSD": "1000.5",
+                    "liquidity": "2000.75",
+                    "price": "1.2345",
+                    "v24hChangePercent": "4.56",
+                },
+                {
+                    "address": "MintBirdEyeBBB222222222222222222222222222",
+                    "symbol": "BIRD2",
+                    "name": "Bird Two",
+                    "v24hUSD": "500.25",
+                    "liquidity": "1500.25",
+                    "price": "0.9876",
+                    "v24hChangePercent": "-1.23",
+                },
+            ],
+            "total": 2,
+        }
+    }
+
+    class _JSONResponse:
+        status = 200
+        headers: dict = {}
+
+        def __init__(self, data):
+            self._data = data
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return self._data
+
+        def raise_for_status(self):
+            return None
+
+    class _JSONSession:
+        def __init__(self, data):
+            self._data = data
+            self.calls = 0
+
+        def get(self, url, *, params=None, headers=None):
+            self.calls += 1
+            assert headers is not None and headers.get("X-API-KEY") == "key"
+            assert params is not None and params.get("limit") == td.SETTINGS.page_limit
+            return _JSONResponse(self._data)
+
+    session = _JSONSession(payload)
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    first = await td._fetch_birdeye_tokens(limit=1)
+
+    assert session.calls == 1
+    assert first == [
+        {
+            "address": "MintBirdEyeAAA111111111111111111111111111",
+            "symbol": "BIRD1",
+            "name": "Bird One",
+            "liquidity": 2000.75,
+            "volume": 1000.5,
+            "price": 1.2345,
+            "price_change": 4.56,
+            "sources": ["birdeye"],
+        }
+    ]
+
+    second = await td._fetch_birdeye_tokens(limit=3)
+
+    assert second is first
+    assert session.calls == 1
+
+
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_reuses_shared_session(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
