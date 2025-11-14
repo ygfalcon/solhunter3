@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import time
@@ -126,6 +128,7 @@ class DiscoveryService:
         self._last_emitted_size: int = 0
         self._last_fetch_fresh: bool = True
         self._primed = False
+        self._last_metadata_fingerprints: Dict[str, str] = {}
 
     async def start(self) -> None:
         if self._task is None:
@@ -195,7 +198,11 @@ class DiscoveryService:
         self._apply_fetch_stats(tokens, fetch_ts)
         return list(tokens)
 
-    def _build_candidates(self, tokens: Iterable[str]) -> list[TokenCandidate]:
+    def _build_candidates(
+        self,
+        tokens: Iterable[str],
+        metadata_cache: Dict[str, Dict[str, Any]] | None = None,
+    ) -> list[TokenCandidate]:
         ts = time.time()
         result: list[TokenCandidate] = []
         dropped = 0
@@ -205,9 +212,16 @@ class DiscoveryService:
             if not validate_mint(canonical):
                 dropped += 1
                 continue
-            metadata = self._candidate_metadata(canonical)
+            base_metadata: Dict[str, Any] | None = None
+            if metadata_cache is not None:
+                base_metadata = metadata_cache.get(canonical)
+            if base_metadata is None:
+                base_metadata = self._candidate_metadata(canonical)
+            metadata = dict(base_metadata)
             if canonical != token:
                 metadata.setdefault("alias", token)
+            fingerprint = self._fingerprint_metadata(metadata)
+            self._last_metadata_fingerprints[canonical] = fingerprint
             result.append(
                 TokenCandidate(
                     token=canonical,
@@ -302,6 +316,36 @@ class DiscoveryService:
 
         return metadata
 
+    @staticmethod
+    def _normalize_metadata(value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            return {
+                str(key): DiscoveryService._normalize_metadata(val)
+                for key, val in sorted(value.items(), key=lambda item: str(item[0]))
+            }
+        if isinstance(value, list):
+            return [DiscoveryService._normalize_metadata(item) for item in value]
+        if isinstance(value, tuple):
+            return [DiscoveryService._normalize_metadata(item) for item in value]
+        if isinstance(value, (set, frozenset)):
+            return sorted(
+                (DiscoveryService._normalize_metadata(item) for item in value),
+                key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+            )
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8")
+            except UnicodeDecodeError:
+                return value.hex()
+        return str(value)
+
+    def _fingerprint_metadata(self, metadata: Dict[str, Any]) -> str:
+        normalized = self._normalize_metadata(metadata)
+        payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
         seq: list[str] = []
         dropped = 0
@@ -328,26 +372,59 @@ class DiscoveryService:
         same_as_last = (
             seq_size == self._last_emitted_size and seq_set == self._last_emitted_set
         )
-        if same_as_last:
-            if fresh:
-                # Refresh cached ordering and metadata while avoiding duplicate emits.
+        metadata_cache: Dict[str, Dict[str, Any]] | None = None
+        metadata_fingerprints: Dict[str, str] = {}
+        seq_to_emit: list[str]
+        if same_as_last and fresh:
+            metadata_cache = {}
+            changed_tokens: list[str] = []
+            for token in seq:
+                token_metadata = self._candidate_metadata(token)
+                metadata_cache[token] = token_metadata
+                fingerprint = self._fingerprint_metadata(dict(token_metadata))
+                metadata_fingerprints[token] = fingerprint
+                if fingerprint != self._last_metadata_fingerprints.get(token):
+                    changed_tokens.append(token)
+            if not changed_tokens:
                 self._last_emitted = list(seq)
                 self._last_emitted_set = seq_set
                 self._last_emitted_size = seq_size
+                self._last_metadata_fingerprints.update(metadata_fingerprints)
+                log.debug(
+                    "DiscoveryService skipping cached emission (%d tokens)", seq_size
+                )
+                return
+            seq_to_emit = list(changed_tokens)
+        elif same_as_last:
             log.debug(
                 "DiscoveryService skipping cached emission (%d tokens)", seq_size
             )
             return
+        else:
+            seq_to_emit = list(seq)
         total_enqueued = 0
-        for chunk in self._iter_chunks(seq, self._emit_batch_size):
-            batch = self._build_candidates(chunk)
+        for chunk in self._iter_chunks(seq_to_emit, self._emit_batch_size):
+            batch = self._build_candidates(chunk, metadata_cache=metadata_cache)
             if not batch:
                 continue
             await self.queue.put(batch)
             total_enqueued += len(batch)
             log.debug("DiscoveryService queued chunk of %d token(s)", len(batch))
         if total_enqueued:
-            log.info("DiscoveryService queued %d token(s) across %d chunk(s)", total_enqueued, max(1, (len(seq) + self._emit_batch_size - 1) // self._emit_batch_size))
+            chunk_count = max(
+                1, (len(seq_to_emit) + self._emit_batch_size - 1) // self._emit_batch_size
+            )
+            log.info(
+                "DiscoveryService queued %d token(s) across %d chunk(s)",
+                total_enqueued,
+                chunk_count,
+            )
+        if metadata_fingerprints:
+            self._last_metadata_fingerprints.update(metadata_fingerprints)
+        # Drop metadata fingerprints for tokens no longer present in the sequence.
+        for token in list(self._last_metadata_fingerprints):
+            if token not in seq_set:
+                self._last_metadata_fingerprints.pop(token, None)
         self._last_emitted = list(seq)
         self._last_emitted_set = seq_set
         self._last_emitted_size = seq_size
