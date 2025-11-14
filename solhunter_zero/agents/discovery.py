@@ -228,7 +228,17 @@ class DiscoveryAgent:
             )
         self.limit = limit
         self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
-        self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
+        raw_backoff = os.getenv("TOKEN_DISCOVERY_BACKOFF")
+        backoff_text = raw_backoff if raw_backoff else "1"
+        try:
+            parsed_backoff = float(backoff_text)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid TOKEN_DISCOVERY_BACKOFF=%r; defaulting to 1.0",
+                raw_backoff,
+            )
+            parsed_backoff = 1.0
+        self.backoff = max(0.0, parsed_backoff)
         mempool_max_wait_env = os.getenv("DISCOVERY_MEMPOOL_MAX_WAIT")
         if mempool_max_wait_env in {None, ""}:
             mempool_max_wait = DEFAULT_MEMPOOL_MAX_WAIT

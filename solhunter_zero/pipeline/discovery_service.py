@@ -32,6 +32,10 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
+DEFAULT_DISCOVERY_BACKOFF_FACTOR = 2.0
+DEFAULT_DISCOVERY_MAX_BACKOFF = 60.0
+
+
 class DiscoveryService:
     """Produce ``TokenCandidate`` batches for downstream scoring."""
 
@@ -42,8 +46,8 @@ class DiscoveryService:
         interval: float = 5.0,
         cache_ttl: float = 20.0,
         empty_cache_ttl: Optional[float] = None,
-        backoff_factor: float = 2.0,
-        max_backoff: Optional[float] = 60.0,
+        backoff_factor: float = DEFAULT_DISCOVERY_BACKOFF_FACTOR,
+        max_backoff: Optional[float] = DEFAULT_DISCOVERY_MAX_BACKOFF,
         limit: Optional[int] = None,
         offline: bool = False,
         token_file: Optional[str] = None,
@@ -56,7 +60,30 @@ class DiscoveryService:
         if empty_cache_ttl is None:
             empty_cache_ttl = self.cache_ttl
         self.empty_cache_ttl = max(0.0, float(empty_cache_ttl)) if empty_cache_ttl is not None else 0.0
-        self.backoff_factor = max(1.0, float(backoff_factor))
+        try:
+            parsed_backoff_factor = float(backoff_factor)
+        except (TypeError, ValueError):
+            log.warning(
+                "Invalid discovery backoff_factor=%r; defaulting to %.1f",
+                backoff_factor,
+                DEFAULT_DISCOVERY_BACKOFF_FACTOR,
+            )
+            parsed_backoff_factor = DEFAULT_DISCOVERY_BACKOFF_FACTOR
+        self.backoff_factor = max(1.0, parsed_backoff_factor)
+
+        sanitized_max_backoff: Optional[float]
+        if max_backoff is None:
+            sanitized_max_backoff = None
+        else:
+            try:
+                sanitized_max_backoff = float(max_backoff)
+            except (TypeError, ValueError):
+                log.warning(
+                    "Invalid discovery max_backoff=%r; defaulting to %.1f",
+                    max_backoff,
+                    DEFAULT_DISCOVERY_MAX_BACKOFF,
+                )
+                sanitized_max_backoff = DEFAULT_DISCOVERY_MAX_BACKOFF
 
         raw_max_backoff = os.getenv("DISCOVERY_MAX_BACKOFF")
         _env_backoff = object()
@@ -64,7 +91,7 @@ class DiscoveryService:
         if raw_max_backoff is not None:
             try:
                 parsed_backoff = float(raw_max_backoff)
-            except ValueError:
+            except (TypeError, ValueError):
                 log.warning("Invalid DISCOVERY_MAX_BACKOFF=%r; ignoring", raw_max_backoff)
             else:
                 if parsed_backoff <= 0:
@@ -76,7 +103,7 @@ class DiscoveryService:
         if env_max_backoff is not _env_backoff:
             effective_backoff = cast(Optional[float], env_max_backoff)
         else:
-            effective_backoff = max_backoff
+            effective_backoff = sanitized_max_backoff
 
         if effective_backoff is None:
             self.max_backoff = None

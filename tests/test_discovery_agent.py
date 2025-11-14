@@ -79,6 +79,17 @@ def test_negative_env_limit(monkeypatch, caplog):
     assert "below minimum" in caplog.text
 
 
+def test_invalid_env_backoff(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("TOKEN_DISCOVERY_BACKOFF", "fast")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.backoff == 1.0
+    assert "Invalid TOKEN_DISCOVERY_BACKOFF" in caplog.text
+
+
 def test_zero_env_limit_disables_discovery(monkeypatch, caplog):
     _reset_cache()
     monkeypatch.setenv("DISCOVERY_LIMIT", "0")

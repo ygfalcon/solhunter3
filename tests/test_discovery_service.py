@@ -142,6 +142,24 @@ def test_env_override_for_max_backoff():
     asyncio.run(runner())
 
 
+def test_env_override_for_max_backoff_invalid(monkeypatch, caplog):
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        monkeypatch.setenv("DISCOVERY_MAX_BACKOFF", "invalid")
+        with caplog.at_level("WARNING", logger="solhunter_zero.pipeline.discovery_service"):
+            service = DiscoveryService(
+                queue,
+                empty_cache_ttl=2.0,
+                backoff_factor=2.0,
+                max_backoff=15.0,
+            )
+        monkeypatch.delenv("DISCOVERY_MAX_BACKOFF", raising=False)
+        assert service.max_backoff == 15.0
+
+    asyncio.run(runner())
+    assert "Invalid DISCOVERY_MAX_BACKOFF" in caplog.text
+
+
 def test_failure_backoff_reuses_cooldown():
     async def runner() -> None:
         queue: asyncio.Queue[list] = asyncio.Queue()
