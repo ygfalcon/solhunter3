@@ -81,6 +81,9 @@ class DiscoveryService:
         else:
             capped = max(0.0, float(effective_backoff))
             self.max_backoff = None if capped == 0.0 else capped
+        if limit is not None and limit < 0:
+            log.warning("DiscoveryService limit %r below zero; disabling discovery", limit)
+            limit = 0
         self.limit = limit
         self.offline = offline
         self.token_file = token_file
@@ -125,9 +128,19 @@ class DiscoveryService:
         self._last_emitted_set: frozenset[str] = frozenset()
         self._last_emitted_size: int = 0
         self._last_fetch_fresh: bool = True
+        self._limit_disabled_logged = False
         self._primed = False
 
     async def start(self) -> None:
+        if self.limit == 0:
+            if not self._limit_disabled_logged:
+                log.info(
+                    "DiscoveryService disabled (DISCOVERY_LIMIT=0); discovery loop will not start",
+                )
+                self._limit_disabled_logged = True
+            self._stopped.set()
+            self._primed = True
+            return
         if self._task is None:
             if not self._primed:
                 await self._prime_startup_clones()
@@ -429,6 +442,9 @@ class DiscoveryService:
         self._last_fetch_fresh = False
 
     async def _prime_startup_clones(self) -> None:
+        if self.limit == 0:
+            log.info("DiscoveryService startup clones skipped (discovery disabled)")
+            return
         clones = max(1, int(self.startup_clones))
         log.info(
             "DiscoveryService priming discovery with %d startup clone(s)", clones
