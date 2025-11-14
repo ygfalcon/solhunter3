@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -22,6 +23,46 @@ CHECK_LIVE_KEYPAIR_SNIPPET = _extract_python_snippet(
     _LAUNCH_LIVE_SOURCE,
     'if ! keypair_report=$(CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" - <<\'PY\'',
 )
+
+
+def test_normalize_bus_configuration_strips_channel_whitespace() -> None:
+    snippet = _extract_python_snippet(
+        _LAUNCH_LIVE_SOURCE, "normalize_bus_configuration() {"
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BROKER_CHANNEL": "  padded-channel  ",
+            "PYTHONPATH": env.get("PYTHONPATH", ""),
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", snippet],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    )
+
+    exports: dict[str, str] = {}
+    for line in completed.stdout.strip().splitlines():
+        if not line:
+            continue
+        assert line.startswith("export "), line
+        assignment = shlex.split(line[len("export "):])[0]
+        key, value = assignment.split("=", 1)
+        exports[key] = value
+
+    assert exports["BROKER_CHANNEL"] == "padded-channel"
+    for key in (
+        "MINT_STREAM_BROKER_CHANNEL",
+        "MEMPOOL_STREAM_BROKER_CHANNEL",
+        "AMM_WATCH_BROKER_CHANNEL",
+    ):
+        assert exports[key] == "padded-channel"
 
 
 def test_launch_live_missing_config(tmp_path: Path) -> None:

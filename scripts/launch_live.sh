@@ -253,7 +253,13 @@ import shlex
 DEFAULT_REDIS = "redis://localhost:6379/1"
 DEFAULT_BUS = "ws://127.0.0.1:8779"
 
-channel = os.environ.setdefault("BROKER_CHANNEL", "solhunter-events-v3")
+raw_channel = os.environ.get("BROKER_CHANNEL")
+if raw_channel is None:
+    channel = "solhunter-events-v3"
+    os.environ.setdefault("BROKER_CHANNEL", channel)
+else:
+    channel = raw_channel.strip()
+    os.environ["BROKER_CHANNEL"] = channel
 explicit_event_bus = bool(os.environ.get("EVENT_BUS_URL"))
 if not explicit_event_bus:
     os.environ.setdefault("EVENT_BUS_URL", DEFAULT_BUS)
