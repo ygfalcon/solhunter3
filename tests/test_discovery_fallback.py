@@ -27,16 +27,46 @@ def test_scan_tokens_uses_pump_fallback_when_dex_disabled(monkeypatch):
     pump_mint = "H6yn7A6PRQT83wXWx3YpGHTKp21HBFA2wNrMESeiD7rq"
     flags = {"pump_calls": 0, "dex_calls": 0}
 
+    class DummyResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self, content_type=None):
+            return self._payload
+
+    class DummySession:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def get(self, url, params=None, timeout=None):
+            return DummyResponse(self._payload)
+
+    orig_pump_trending = token_scanner._pump_trending
+
     async def fake_pump(session, *, limit):
         flags["pump_calls"] += 1
-        return [
+        payload = [
             {
-                "address": pump_mint,
-                "source": "pumpfun",
-                "sources": ["pumpfun"],
-                "rank": 0,
+                "mint": pump_mint,
+                "name": "Test Coin",
+                "symbol": "TST",
+                "score": 42,
+                "buyers": 17,
+                "tweets": 99,
+                "sentiment": 0.75,
             }
         ]
+        dummy_session = DummySession(payload)
+        return await orig_pump_trending(dummy_session, limit=limit)
 
     async def track_dex(*args, **kwargs):
         flags["dex_calls"] += 1
@@ -60,6 +90,11 @@ def test_scan_tokens_uses_pump_fallback_when_dex_disabled(monkeypatch):
         )
         assert result == [pump_mint]
         assert token_scanner.TRENDING_METADATA[pump_mint]["source"] == "pumpfun"
+        pump_meta = token_scanner.TRENDING_METADATA[pump_mint]["metadata"]["pumpfun"]
+        assert pump_meta["score"] == 42
+        assert pump_meta["buyers"] == 17
+        assert pump_meta["tweets"] == 99
+        assert pump_meta["sentiment"] == 0.75
 
     asyncio.run(runner())
     assert flags["pump_calls"] == 1
