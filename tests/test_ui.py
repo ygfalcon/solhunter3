@@ -32,6 +32,14 @@ def _active_state() -> ui.UIState:
     return state
 
 
+def test_split_netloc_invalid_port():
+    host, port, scheme = ui._split_netloc("wss://example.com:notaport")
+
+    assert host == "example.com"
+    assert port is None
+    assert scheme == "wss"
+
+
 def test_bootstrap_ui_environment_respects_existing(monkeypatch, caplog):
     monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
     monkeypatch.setenv("SOLHUNTER_MODE", "paper")
