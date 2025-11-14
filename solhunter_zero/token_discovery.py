@@ -2422,6 +2422,13 @@ def discover_candidates(
                             if not address:
                                 continue
                             existed = address in candidates
+                            pre_sources: set[str]
+                            if existed:
+                                pre_sources = _normalize_string_collection(
+                                    candidates[address].get("sources")
+                                )
+                            else:
+                                pre_sources = set()
                             entry = _merge_candidate_entry(
                                 candidates,
                                 {
@@ -2433,7 +2440,10 @@ def discover_candidates(
                             )
                             if entry is None:
                                 continue
-                            if _register_source(entry, "trending"):
+                            post_sources = _normalize_string_collection(
+                                entry.get("sources")
+                            )
+                            if len(post_sources) > len(pre_sources):
                                 changed = True
                             if not existed:
                                 changed = True
