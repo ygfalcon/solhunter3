@@ -6,12 +6,33 @@ import os
 import time
 from typing import Any, Dict, Iterable, Optional
 
+try:  # pragma: no cover - optional dependency
+    from prometheus_client import Counter  # type: ignore
+except Exception:  # pragma: no cover - prometheus optional
+    Counter = None  # type: ignore
+
 from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
 from ..token_aliases import canonical_mint, validate_mint
 from .types import TokenCandidate
 
 log = logging.getLogger(__name__)
+
+
+if Counter is not None:  # pragma: no branch - optional metrics
+    DISCOVERY_QUEUE_BACKPRESSURE_TOTAL = Counter(
+        "discovery_queue_backpressure_total",
+        "Times discovery encountered a full downstream queue",
+        labelnames=("fresh",),
+    )
+    DISCOVERY_QUEUE_DROP_TOTAL = Counter(
+        "discovery_queue_drop_total",
+        "Token candidates dropped because the discovery queue was full",
+        labelnames=("fresh",),
+    )
+else:  # pragma: no cover - metrics optional
+    DISCOVERY_QUEUE_BACKPRESSURE_TOTAL = None
+    DISCOVERY_QUEUE_DROP_TOTAL = None
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -250,6 +271,22 @@ class DiscoveryService:
 
         return metadata
 
+    def _record_queue_backpressure(self, *, fresh: bool, dropped: int) -> None:
+        if DISCOVERY_QUEUE_BACKPRESSURE_TOTAL is not None:
+            try:
+                DISCOVERY_QUEUE_BACKPRESSURE_TOTAL.labels(
+                    fresh="true" if fresh else "false"
+                ).inc()
+            except Exception:  # pragma: no cover - defensive metrics guard
+                pass
+        if dropped > 0 and DISCOVERY_QUEUE_DROP_TOTAL is not None:
+            try:
+                DISCOVERY_QUEUE_DROP_TOTAL.labels(
+                    fresh="true" if fresh else "false"
+                ).inc(float(dropped))
+            except Exception:  # pragma: no cover - defensive metrics guard
+                pass
+
     async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
         seq: list[str] = []
         dropped = 0
@@ -277,15 +314,39 @@ class DiscoveryService:
             )
             return
         total_enqueued = 0
+        enqueued_chunks = 0
+        dropped_tokens = 0
+        dropped_chunks = 0
         for chunk in self._iter_chunks(seq, self._emit_batch_size):
             batch = self._build_candidates(chunk)
             if not batch:
                 continue
-            await self.queue.put(batch)
+            try:
+                self.queue.put_nowait(batch)
+            except asyncio.QueueFull:
+                dropped_tokens += len(batch)
+                dropped_chunks += 1
+                self._record_queue_backpressure(fresh=fresh, dropped=len(batch))
+                continue
             total_enqueued += len(batch)
+            enqueued_chunks += 1
             log.debug("DiscoveryService queued chunk of %d token(s)", len(batch))
         if total_enqueued:
-            log.info("DiscoveryService queued %d token(s) across %d chunk(s)", total_enqueued, max(1, (len(seq) + self._emit_batch_size - 1) // self._emit_batch_size))
+            log.info(
+                "DiscoveryService queued %d token(s) across %d chunk(s)",
+                total_enqueued,
+                enqueued_chunks or 1,
+            )
+        if dropped_tokens:
+            maxsize = getattr(self.queue, "maxsize", 0)
+            log.warning(
+                "DiscoveryService queue backpressure (pending=%d, max=%s, fresh=%s): dropped %d token(s) across %d chunk(s)",
+                self.queue.qsize(),
+                maxsize if maxsize > 0 else "unbounded",
+                fresh,
+                dropped_tokens,
+                dropped_chunks,
+            )
         self._last_emitted = list(seq)
 
     def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:

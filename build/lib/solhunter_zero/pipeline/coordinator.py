@@ -139,7 +139,7 @@ class PipelineCoordinator:
             asyncio.Queue[list[TokenCandidate]],
             self._build_queue(
                 "DISCOVERY_QUEUE_SIZE",
-                default=16,
+                default=64,
                 item_type=list[TokenCandidate],
             ),
         )
