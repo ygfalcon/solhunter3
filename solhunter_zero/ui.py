@@ -33,6 +33,7 @@ from . import event_bus
 from .health_runtime import resolve_rl_health_url
 from .production import load_production_env
 from .runtime_defaults import DEFAULT_UI_PORT
+from .token_aliases import normalize_mint_or_none
 from .url_helpers import as_websocket_url
 from .util import parse_bool_env
 
@@ -1834,14 +1835,62 @@ def _resolve_panels(panel_name: str) -> List[str]:
     return mapping.get(normalized, [normalized])
 
 
+_CANONICAL_MINT_FIELD_NAMES: Set[str] = frozenset(
+    (
+        "mint",
+        "mintaddress",
+        "token",
+        "tokenaddress",
+        "tokenmint",
+        "address",
+        "id",
+    )
+)
+
+
+def _canonicalize_mint_candidate(value: Any) -> Optional[str]:
+    if value is None or value is False:
+        return None
+    if isinstance(value, Mapping):
+        return None
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            candidate = _canonicalize_mint_candidate(item)
+            if candidate:
+                return candidate
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            text = value.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+    else:
+        text = str(value)
+    normalized = text.strip()
+    if not normalized:
+        return None
+    return normalize_mint_or_none(normalized)
+
+
+def _is_canonical_mint_field(field: Any) -> bool:
+    if not isinstance(field, str):
+        return False
+    normalized = field.strip().lower().replace("-", "").replace("_", "")
+    return normalized in _CANONICAL_MINT_FIELD_NAMES
+
+
 def _extract_mint_from_payload(data: Any, depth: int = 0) -> Optional[str]:
     if depth > 3:
         return None
+    candidate = _canonicalize_mint_candidate(data)
+    if candidate:
+        return candidate
     if isinstance(data, Mapping):
-        for key in ("mint", "token", "address", "id", "symbol"):
-            value = data.get(key)
-            if value:
-                return str(value)
+        for key, value in data.items():
+            if _is_canonical_mint_field(key):
+                candidate = _canonicalize_mint_candidate(value)
+                if candidate:
+                    return candidate
         for value in data.values():
             result = _extract_mint_from_payload(value, depth + 1)
             if result:
