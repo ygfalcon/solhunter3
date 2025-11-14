@@ -7,6 +7,8 @@ import logging
 import os
 import sys
 
+from collections.abc import Mapping
+
 from ..runtime_defaults import DEFAULT_UI_PORT
 from .. import ui
 from .trading_runtime import TradingRuntime
@@ -45,9 +47,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _announce_websocket_channels(threads: Mapping[str, object] | None = None) -> None:
+    """Print a summary of websocket channels that are currently available."""
+
+    summary_channels: list[str] = []
+    try:
+        urls = ui.get_ws_urls()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        log.warning("Failed to resolve UI websocket URLs: %s", exc)
+        urls = {}
+
+    preferred_order = ("events", "rl", "logs")
+    for name in preferred_order:
+        url = urls.get(name)
+        if isinstance(url, str) and url:
+            summary_channels.append(f"{name}={url}")
+        elif threads and name in threads:
+            summary_channels.append(f"{name}=bound")
+
+    for name, url in sorted(urls.items()):
+        if name in preferred_order:
+            continue
+        if isinstance(url, str) and url:
+            summary_channels.append(f"{name}={url}")
+
+    if summary_channels:
+        print("UI websocket channels: " + ", ".join(summary_channels), flush=True)
+    else:
+        print("UI websocket channels: none", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    ui.start_websockets()
+    threads = ui.start_websockets()
+    _announce_websocket_channels(threads)
     try:
         runtime = TradingRuntime(
             config_path=args.config,
