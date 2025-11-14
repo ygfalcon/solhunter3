@@ -841,6 +841,34 @@ def test_manifest_public_host_with_port(monkeypatch):
         assert manifest[f"{channel}_ws_available"] is True
 
 
+def test_manifest_public_host_ipv6(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+
+    for state in ui._WS_CHANNELS.values():
+        state.port = 0
+        state.host = None
+
+    ui._RL_WS_PORT = 9101
+    ui._EVENT_WS_PORT = 9100
+    ui._LOG_WS_PORT = 9102
+
+    monkeypatch.setenv("UI_PUBLIC_HOST", "http://[2001:db8::1]")
+
+    urls = ui.get_ws_urls()
+    assert urls["events"] == "ws://[2001:db8::1]:9100/ws/events"
+    assert urls["rl"] == "ws://[2001:db8::1]:9101/ws/rl"
+    assert urls["logs"] == "ws://[2001:db8::1]:9102/ws/logs"
+
+    manifest = ui.build_ui_manifest(None)
+    assert manifest["events_ws"] == "ws://[2001:db8::1]:9100/ws/events"
+    assert manifest["rl_ws"] == "ws://[2001:db8::1]:9101/ws/rl"
+    assert manifest["logs_ws"] == "ws://[2001:db8::1]:9102/ws/logs"
+    for channel in ("rl", "events", "logs"):
+        assert manifest[f"{channel}_ws_available"] is True
+
+
 def _clear_ws_env(monkeypatch):
     for key in (
         "UI_EVENTS_WS",
@@ -884,6 +912,33 @@ def test_manifest_prefers_event_bus_url(monkeypatch):
 
     manifest = ui.build_ui_manifest(None)
     assert manifest["events_ws"] == "wss://bus.example:9443/ws/events"
+    assert manifest["events_ws_available"] is True
+
+
+def test_manifest_preserves_query_and_fragment(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+
+    for state in ui._WS_CHANNELS.values():
+        state.port = 0
+        state.host = None
+
+    ui._RL_WS_PORT = ui._RL_WS_PORT_DEFAULT
+    ui._EVENT_WS_PORT = ui._EVENT_WS_PORT_DEFAULT
+    ui._LOG_WS_PORT = ui._LOG_WS_PORT_DEFAULT
+
+    remote_url = "wss://bus.example:9443/ws?token=abc#frag"
+    monkeypatch.setenv("EVENT_BUS_URL", remote_url)
+
+    urls = ui.get_ws_urls()
+    assert urls["events"] == remote_url
+
+    manifest = ui.build_ui_manifest(None)
+    assert (
+        manifest["events_ws"]
+        == "wss://bus.example:9443/ws/events?token=abc#frag"
+    )
     assert manifest["events_ws_available"] is True
 
 
