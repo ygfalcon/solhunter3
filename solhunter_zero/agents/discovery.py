@@ -291,14 +291,14 @@ class DiscoveryAgent:
             os.getenv("DISCOVERY_FILTER_PREFIX_11", "1").strip().lower()
             in {"1", "true", "yes", "on"}
         )
-        self.social_limit = max(
-            0, int(os.getenv("DISCOVERY_SOCIAL_LIMIT", "12") or 12)
+        self.social_limit = self._load_social_setting(
+            "DISCOVERY_SOCIAL_LIMIT", default=12, minimum=0
         )
-        self.social_min_mentions = max(
-            1, int(os.getenv("DISCOVERY_SOCIAL_MIN_MENTIONS", "2") or 2)
+        self.social_min_mentions = self._load_social_setting(
+            "DISCOVERY_SOCIAL_MIN_MENTIONS", default=2, minimum=1
         )
-        self.social_sample_limit = max(
-            1, int(os.getenv("DISCOVERY_SOCIAL_SAMPLE_LIMIT", "3") or 3)
+        self.social_sample_limit = self._load_social_setting(
+            "DISCOVERY_SOCIAL_SAMPLE_LIMIT", default=3, minimum=1
         )
         self.news_feeds = self._split_env_list("NEWS_FEEDS")
         self.twitter_feeds = self._split_env_list("TWITTER_FEEDS")
@@ -1094,6 +1094,40 @@ class DiscoveryAgent:
         if token in _FILTER_WHITELIST:
             return False
         return token.startswith("11") and len(token) >= 8
+
+    @staticmethod
+    def _load_social_setting(env_var: str, default: int, minimum: int) -> int:
+        fallback = max(default, minimum)
+        raw_value = os.getenv(env_var)
+        if raw_value is None:
+            return fallback
+
+        raw = raw_value.strip()
+        if not raw:
+            return fallback
+
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid %s=%r; using default %d",
+                env_var,
+                raw_value,
+                fallback,
+            )
+            return fallback
+
+        if value < minimum:
+            logger.warning(
+                "%s=%r below minimum (%d); using default %d",
+                env_var,
+                raw_value,
+                minimum,
+                fallback,
+            )
+            return fallback
+
+        return value
 
     @staticmethod
     def _split_env_list(name: str) -> List[str]:
