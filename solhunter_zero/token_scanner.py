@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -194,6 +195,27 @@ _TRENDING_MIN_LIQUIDITY = float(os.getenv("TRENDING_MIN_LIQUIDITY_USD", "7500") 
 _TRENDING_MIN_VOLUME = float(os.getenv("TRENDING_MIN_VOLUME_USD", "20000") or 20000.0)
 _MAX_DAS_CHUNK = max(1, int(os.getenv("DAS_TRENDING_CHUNK", "10") or 10))
 
+_PUMP_NUMERIC_FIELDS = {
+    "liquidity",
+    "volume_24h",
+    "volume_1h",
+    "volume_5m",
+    "market_cap",
+    "price",
+    "rank",
+    "score",
+    "pumpScore",
+    "buyersLastHour",
+    "tweetsLastHour",
+    "sentiment",
+}
+
+_PUMP_INTEGER_FIELDS = {
+    "rank",
+    "buyersLastHour",
+    "tweetsLastHour",
+}
+
 def _resolve_birdeye_key(candidate: str | None = None) -> str | None:
     key = (candidate or os.getenv("BIRDEYE_API_KEY") or "").strip()
     return key or None
@@ -370,6 +392,22 @@ def _coerce_float(value: Any) -> float | None:
         return float(text)
     except Exception:
         return None
+
+
+def _normalize_pump_value(key: str, value: Any | None) -> Any | None:
+    if value is None:
+        return None
+    if key in _PUMP_NUMERIC_FIELDS:
+        number = _coerce_float(value)
+        if number is None or not math.isfinite(number):
+            return None
+        if key in _PUMP_INTEGER_FIELDS and float(number).is_integer():
+            return int(number)
+        return float(number)
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return value
 
 
 def _nz_pos(value: Any) -> float:
@@ -1736,20 +1774,34 @@ async def _pump_trending(
             meta["symbol"] = symbol
         if isinstance(icon, str):
             meta["icon"] = icon
-        pump_meta = {
-            k: entry.get(k)
-            for k in (
-                "name",
-                "symbol",
-                "liquidity",
-                "volume_24h",
-                "volume_1h",
-                "volume_5m",
-                "market_cap",
-                "price",
-            )
-            if k in entry
-        }
+        pump_meta: Dict[str, Any] = {}
+        for target_key, source_keys in (
+            ("name", ("name",)),
+            ("symbol", ("symbol",)),
+            ("liquidity", ("liquidity",)),
+            ("volume_24h", ("volume_24h",)),
+            ("volume_1h", ("volume_1h",)),
+            ("volume_5m", ("volume_5m",)),
+            ("market_cap", ("market_cap",)),
+            ("price", ("price",)),
+            ("rank", ("rank",)),
+            ("score", ("score", "pumpScore")),
+            ("pumpScore", ("pumpScore",)),
+            ("buyersLastHour", ("buyersLastHour", "buyers_last_hour")),
+            ("tweetsLastHour", ("tweetsLastHour", "tweets_last_hour")),
+            ("sentiment", ("sentiment",)),
+        ):
+            raw_value: Any | None = None
+            for candidate_key in source_keys:
+                if candidate_key in entry:
+                    candidate_value = entry.get(candidate_key)
+                    if candidate_value is None:
+                        continue
+                    raw_value = candidate_value
+                    break
+            normalized = _normalize_pump_value(target_key, raw_value)
+            if normalized is not None:
+                pump_meta[target_key] = normalized
         _ensure_metadata(meta)["pumpfun"] = pump_meta
         _finalize_sources(meta)
         tokens.append(meta)
