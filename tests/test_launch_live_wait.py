@@ -439,7 +439,12 @@ def _start_meta_server(payload: dict[str, object]):
     return server
 
 
-def _run_health_check(tmp_path: Path, port: int) -> subprocess.CompletedProcess[str]:
+def _run_health_check(
+    tmp_path: Path,
+    port: int,
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
     functions = (
@@ -462,11 +467,15 @@ def _run_health_check(tmp_path: Path, port: int) -> subprocess.CompletedProcess[
         + f"check_ui_health '{log_path}'\n"
     )
 
+    env_vars = os.environ.copy()
+    if env:
+        env_vars.update(env)
     completed = subprocess.run(
         ["bash", "-c", bash_script],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        env=env_vars,
     )
     return completed
 
@@ -506,6 +515,54 @@ def test_check_ui_health_logs_loop_failure_strings(tmp_path: Path) -> None:
     assert "UI health payload reported issues" in completed.stderr
     assert "trading_loop='fail'" in completed.stderr
     assert "rl_ws='fail'" in completed.stderr
+
+
+def test_check_ui_health_flags_degraded_ws_without_opt_in(tmp_path: Path) -> None:
+    payload = {
+        "ok": "degraded",
+        "status": {
+            "ui": "ok",
+            "rl_ws": {"status": "degraded", "detail": "ws optional but not enabled"},
+            "events_ws": "connected",
+            "logs_ws": {"status": "degraded"},
+        },
+    }
+    server = _start_meta_server(payload)
+    try:
+        host, port = server.server_address
+        assert host == "127.0.0.1"
+        completed = _run_health_check(tmp_path, port)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 1
+    assert "UI health payload reported issues" in completed.stderr
+    assert "rl_ws={'status': 'degraded', 'detail': 'ws optional but not enabled'}" in completed.stderr
+    assert "logs_ws={'status': 'degraded'}" in completed.stderr
+
+
+def test_check_ui_health_allows_degraded_ws_with_opt_in(tmp_path: Path) -> None:
+    payload = {
+        "ok": "degraded",
+        "status": {
+            "ui": "ok",
+            "rl_ws": {"status": "degraded", "detail": "ws optional"},
+            "events_ws": "connected",
+            "logs_ws": {"status": "degraded"},
+        },
+    }
+    server = _start_meta_server(payload)
+    try:
+        host, port = server.server_address
+        assert host == "127.0.0.1"
+        completed = _run_health_check(tmp_path, port, env={"UI_WS_OPTIONAL": "1"})
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 0
+    assert "UI health payload reported issues" not in completed.stderr
 
 
 def test_wait_for_socket_release_backoff() -> None:

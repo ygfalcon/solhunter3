@@ -1366,7 +1366,21 @@ import urllib.error
 import urllib.request
 
 
-def _status_ok(value):
+def _allow_ws_degraded() -> bool:
+    for name in ("LAUNCH_LIVE_ALLOW_WS_DEGRADED", "UI_WS_OPTIONAL"):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        normalized = raw.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "enabled"}:
+            return True
+    return False
+
+
+ALLOW_WS_DEGRADED = _allow_ws_degraded()
+
+
+def _status_ok(value, *, allow_ws_degraded=ALLOW_WS_DEGRADED):
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -1379,12 +1393,14 @@ def _status_ok(value):
             return True
         if normalized in {"fail", "failed", "error", "inactive", "down", "false", "unavailable"}:
             return False
+        if "degrad" in normalized:
+            return bool(allow_ws_degraded)
         return True
     if isinstance(value, dict):
         if "ok" in value:
-            return _status_ok(value.get("ok"))
+            return _status_ok(value.get("ok"), allow_ws_degraded=allow_ws_degraded)
         if "status" in value:
-            return _status_ok(value.get("status"))
+            return _status_ok(value.get("status"), allow_ws_degraded=allow_ws_degraded)
     return bool(value)
 
 
