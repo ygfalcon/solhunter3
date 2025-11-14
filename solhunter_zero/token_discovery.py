@@ -344,14 +344,50 @@ def _resolve_birdeye_api_key() -> str:
     return api_key
 
 
+def _normalise_limit(limit: int | None) -> int:
+    """Coerce a user-supplied limit into the internal [1, _MAX_TOKENS] range."""
+
+    if limit is None:
+        return _MAX_TOKENS
+    try:
+        numeric = int(limit)
+    except (TypeError, ValueError):
+        return _MAX_TOKENS
+    if numeric <= 0:
+        return _MAX_TOKENS
+    return min(numeric, _MAX_TOKENS)
+
+
 def _cache_get(key: str) -> List[TokenEntry] | None:
     with _CACHE_LOCK:
         return _BIRDEYE_CACHE.get(key)
 
 
 def _cache_set(key: str, value: List[TokenEntry]) -> None:
+    """Persist BirdEye cache entries while preserving previously fetched tokens."""
+
+    normalised: List[TokenEntry] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        address = str(item.get("address") or "").strip()
+        if not address or address in seen:
+            continue
+        normalised.append(dict(item))
+        seen.add(address)
+
     with _CACHE_LOCK:
-        _BIRDEYE_CACHE.set(key, value)
+        existing = _BIRDEYE_CACHE.get(key) or []
+        for item in existing:
+            if not isinstance(item, Mapping):
+                continue
+            address = str(item.get("address") or "").strip()
+            if not address or address in seen:
+                continue
+            normalised.append(dict(item))
+            seen.add(address)
+        _BIRDEYE_CACHE.set(key, normalised)
 
 
 def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
@@ -360,8 +396,11 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
     seen: set[str] = set()
     fallback: List[TokenEntry] = []
 
-    cache_key = _current_cache_key()
+    effective_limit = _normalise_limit(limit)
+    api_key = _resolve_birdeye_api_key()
+    cache_key = _current_cache_key(limit=_MAX_TOKENS, api_key=api_key)
     cached = _cache_get(cache_key) or []
+
     for item in cached:
         if not isinstance(item, Mapping):
             continue
@@ -384,7 +423,7 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
         entry.setdefault("_stage_b_eligible", False)
         fallback.append(entry)
         seen.add(address)
-        if len(fallback) >= limit:
+        if len(fallback) >= effective_limit:
             return fallback
 
     for address, symbol, name in _STATIC_CANDIDATE_SEEDS:
@@ -400,7 +439,7 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
         }
         fallback.append(entry)
         seen.add(address)
-        if len(fallback) >= limit:
+        if len(fallback) >= effective_limit:
             break
 
     return fallback
@@ -454,8 +493,18 @@ def _cache_clear() -> None:
         _BIRDEYE_CACHE.clear()
 
 
-def _current_cache_key() -> str:
-    return f"tokens:{int(_MIN_VOLUME)}:{int(_MIN_LIQUIDITY)}:{_PAGE_LIMIT}"
+def _current_cache_key(*, limit: int | None = None, api_key: str | None = None) -> str:
+    """Return the cache key for BirdEye token lists."""
+
+    effective_limit = _normalise_limit(limit)
+    material = (api_key or "").strip()
+    if material:
+        api_key_hash = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    else:
+        api_key_hash = "anon"
+    return (
+        f"tokens:{effective_limit}:{int(_MIN_VOLUME)}:{int(_MIN_LIQUIDITY)}:{_PAGE_LIMIT}:{api_key_hash}"
+    )
 
 
 def _make_timeout(value: Any) -> ClientTimeout | None:
@@ -879,32 +928,25 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
             remediation="Set the BIRDEYE_API_KEY environment variable.",
         )
 
-    cache_key = _current_cache_key()
+    requested_limit = _normalise_limit(limit)
+    fetch_limit = _MAX_TOKENS
+    cache_key = _current_cache_key(limit=fetch_limit, api_key=api_key)
     cached = _cache_get(cache_key)
     if cached is not None:
-        return cached
+        return cached[:requested_limit]
 
     tokens: Dict[str, TokenEntry] = {}
     offset = 0
-    if limit is None:
-        effective_limit = _MAX_TOKENS
-    else:
-        try:
-            effective_limit = int(limit)
-        except (TypeError, ValueError):
-            effective_limit = _MAX_TOKENS
-    if effective_limit <= 0:
-        effective_limit = _MAX_TOKENS
-    effective_limit = min(effective_limit, _MAX_TOKENS)
-    target_count = max(int(effective_limit * _OVERFETCH_FACTOR), _PAGE_LIMIT)
+    target_count = max(int(fetch_limit * _OVERFETCH_FACTOR), _PAGE_LIMIT, fetch_limit)
     backoff = _BIRDEYE_BACKOFF
 
     logger.debug(
-        "BirdEye fetch start offset=%s limit=%s target=%s effective_limit=%s",
+        "BirdEye fetch start offset=%s limit=%s target=%s requested_limit=%s fetch_limit=%s",
         offset,
         _PAGE_LIMIT,
         target_count,
-        effective_limit,
+        requested_limit,
+        fetch_limit,
     )
 
     def _headers() -> dict:
@@ -1104,7 +1146,7 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                 entry["volume"] = max(entry["volume"], volume)
                 entry["price"] = price or entry.get("price", 0.0)
                 entry["price_change"] = change
-                if len(tokens) >= effective_limit:
+                if len(tokens) >= fetch_limit:
                     break
 
             offset += _PAGE_LIMIT
@@ -1118,20 +1160,22 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
             if total_int is not None and offset >= total_int:
                 break
 
-        if len(tokens) >= effective_limit:
+        if len(tokens) >= fetch_limit:
             break
 
         if len(tokens) <= initial_count:
             break
 
-    result = list(tokens.values())
-    _cache_set(cache_key, result)
-    if not result:
+    result_for_cache = list(tokens.values())
+    _cache_set(cache_key, result_for_cache)
+    if not result_for_cache:
         logger.warning("Token discovery: BirdEye returned no items after filtering.")
     logger.debug(
-        "BirdEye fetch complete total=%s cached=%s", len(result), bool(result)
+        "BirdEye fetch complete total=%s cached=%s",
+        len(result_for_cache),
+        bool(result_for_cache),
     )
-    return result
+    return result_for_cache[:requested_limit]
 
 
 async def _fetch_raydium_tokens(

@@ -206,6 +206,106 @@ async def test_fetch_birdeye_tokens_raises_config_error_on_403(monkeypatch):
     assert "access" in remediation.lower()
 
 
+def test_fetch_birdeye_tokens_reuses_cache_for_varying_limits(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    api_key = "test-key"
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: api_key)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    addresses = [
+        "So11111111111111111111111111111111111111112",
+        "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU",
+        "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "HnNkAnfS5YcTnYyH1Jq3eMu7C63c7fXZC3y3uP7AAgEJ",
+        "5Y3cPVyA7M2jqJxF1n8mHE2Lm5dtQLSdV1W1M2Pt7F5V",
+    ]
+
+    superset = [
+        {
+            "address": addr,
+            "symbol": f"SYM{i}",
+            "name": f"Token {i}",
+            "liquidity": 10_000 + i,
+            "volume": 20_000 + i,
+            "price": 1.0 + i,
+            "price_change": 0.1 * i,
+            "sources": ["birdeye"],
+        }
+        for i, addr in enumerate(addresses)
+    ]
+
+    cache_key = td._current_cache_key(limit=td._MAX_TOKENS, api_key=api_key)
+    td._cache_set(cache_key, superset)
+
+    async def fail_session(*, timeout=None):  # pragma: no cover - guard
+        raise AssertionError("network should not be used for cache hits")
+
+    monkeypatch.setattr(td, "get_session", fail_session)
+
+    async def run_test() -> None:
+        first = await td._fetch_birdeye_tokens(limit=2)
+        assert [item["address"] for item in first] == addresses[:2]
+
+        second = await td._fetch_birdeye_tokens(limit=5)
+        assert [item["address"] for item in second] == addresses[:5]
+
+    asyncio.run(run_test())
+
+
+def test_cache_set_preserves_superset():
+    td._BIRDEYE_CACHE.clear()
+
+    api_key = "another-key"
+    cache_key = td._current_cache_key(limit=td._MAX_TOKENS, api_key=api_key)
+
+    base_entries = [
+        {
+            "address": "So11111111111111111111111111111111111111112",
+            "symbol": "SOL",
+            "name": "Solana",
+            "liquidity": 100_000,
+            "volume": 200_000,
+            "price": 150.0,
+            "price_change": 1.0,
+            "sources": ["birdeye"],
+        },
+        {
+            "address": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+            "symbol": "JUP",
+            "name": "Jupiter",
+            "liquidity": 80_000,
+            "volume": 90_000,
+            "price": 1.2,
+            "price_change": -0.2,
+            "sources": ["birdeye"],
+        },
+    ]
+
+    extended = base_entries + [
+        {
+            "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "symbol": "USDC",
+            "name": "USD Coin",
+            "liquidity": 500_000,
+            "volume": 750_000,
+            "price": 1.0,
+            "price_change": 0.0,
+            "sources": ["birdeye"],
+        }
+    ]
+
+    td._cache_set(cache_key, base_entries)
+    td._cache_set(cache_key, extended)
+
+    cached = td._cache_get(cache_key)
+    assert cached is not None
+    assert {item["address"] for item in cached} == {
+        entry["address"] for entry in extended
+    }
+
+
 @pytest.mark.asyncio
 async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
     td._BIRDEYE_CACHE.clear()
