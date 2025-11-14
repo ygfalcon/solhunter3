@@ -623,13 +623,13 @@ async def test_runtime_websockets_use_public_host(monkeypatch):
     assert captured_calls[-1]["ui_ws_host_env"] == "0.0.0.0"
     assert runtime.ui_port == 7123
     assert os.getenv("UI_PORT") == "7123"
-    assert os.getenv("UI_HTTP_URL") == "http://0.0.0.0:7123"
+    assert os.getenv("UI_HTTP_URL") == "http://public.runtime.test:7123"
     assert os.getenv("UI_HEALTH_PATH") == "/ui/meta"
-    assert os.getenv("UI_HEALTH_URL") == "http://0.0.0.0:7123/ui/meta"
+    assert os.getenv("UI_HEALTH_URL") == "http://public.runtime.test:7123/ui/meta"
 
     ui_activity = [entry for entry in runtime.activity.snapshot() if entry["stage"] == "ui"]
     assert ui_activity
-    assert ui_activity[-1]["detail"] == "http://0.0.0.0:7123"
+    assert ui_activity[-1]["detail"] == "http://public.runtime.test:7123"
 
     manifest = ui_module.build_ui_manifest(None)
     assert manifest["events_ws"] == "ws://public.runtime.test:9100/ws/events"

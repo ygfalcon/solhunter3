@@ -1027,6 +1027,14 @@ class TradingRuntime:
         log.info(
             "TradingRuntime: UI host bound to %s (UI_HOST/UI_WS_HOST)", resolved_host
         )
+        url_host = resolved_host
+        if hasattr(ui, "_resolve_public_host"):
+            try:
+                candidate = ui._resolve_public_host(resolved_host)  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover - defensive fallback
+                candidate = None
+            if isinstance(candidate, str) and candidate.strip():
+                url_host = candidate.strip()
         scheme = (
             os.getenv("UI_HTTP_SCHEME")
             or os.getenv("UI_SCHEME")
@@ -1034,7 +1042,11 @@ class TradingRuntime:
         ).strip().lower()
         if scheme not in {"http", "https"}:
             scheme = "http"
-        http_url = f"{scheme}://{resolved_host}:{self.ui_port}"
+        if ":" in url_host and not url_host.startswith("["):
+            host_component = f"[{url_host}]"
+        else:
+            host_component = url_host
+        http_url = f"{scheme}://{host_component}:{self.ui_port}"
         os.environ["UI_HTTP_URL"] = http_url
         meta_path = "/ui/meta"
         os.environ["UI_HEALTH_PATH"] = meta_path
