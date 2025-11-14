@@ -8,6 +8,7 @@ import os
 import sys
 
 from ..runtime_defaults import DEFAULT_UI_PORT
+from .. import ui
 from .trading_runtime import TradingRuntime
 
 
@@ -46,15 +47,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    runtime = TradingRuntime(
-        config_path=args.config,
-        ui_host=args.ui_host,
-        ui_port=int(args.ui_port),
-        loop_delay=args.loop_delay,
-        min_delay=args.min_delay,
-        max_delay=args.max_delay,
-    )
-    runtime.run_forever()
+    ui.start_websockets()
+    try:
+        runtime = TradingRuntime(
+            config_path=args.config,
+            ui_host=args.ui_host,
+            ui_port=int(args.ui_port),
+            loop_delay=args.loop_delay,
+            min_delay=args.min_delay,
+            max_delay=args.max_delay,
+        )
+        runtime.run_forever()
+    finally:
+        ui.stop_websockets()
     return 0
 
 
