@@ -661,9 +661,20 @@ async def get_session(*, timeout: ClientTimeout | None = None) -> aiohttp.Client
     return await _shared_http_session()
 
 
-async def fetch_trending_tokens_async() -> List[str]:  # pragma: no cover - legacy hook
-    """Compatibility shim for older tests; returns no extra tokens."""
-    return []
+async def fetch_trending_tokens_async(limit: int | None = None) -> List[str]:
+    """Return trending token mint addresses discovered by the discovery module."""
+
+    try:
+        from . import discovery as _discovery_mod
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("Discovery module unavailable for trending fetch", exc_info=True)
+        return []
+
+    try:
+        return await _discovery_mod.fetch_trending_tokens_async(limit=limit)
+    except Exception:  # pragma: no cover - defensive fallback
+        logger.debug("Trending token fetch failed", exc_info=True)
+        return []
 
 
 def _sigmoid(value: float) -> float:
@@ -2011,6 +2022,9 @@ def discover_candidates(
                     logger.debug("Orca catalog unavailable: %s", exc)
                     orca_catalog = {}
             bird_task = asyncio.create_task(_fetch_birdeye_tokens(limit=limit))
+            trending_task = asyncio.create_task(
+                fetch_trending_tokens_async(limit=limit)
+            )
             mempool_task = (
                 asyncio.create_task(
                     _collect_mempool_signals(rpc_url, mempool_threshold)
@@ -2021,7 +2035,10 @@ def discover_candidates(
             if SETTINGS.enable_mempool and rpc_url:
                 logger.debug("Discovery mempool threshold=%.3f", mempool_threshold)
 
-            task_map: Dict[asyncio.Task[Any], str] = {bird_task: "bird"}
+            task_map: Dict[asyncio.Task[Any], str] = {
+                bird_task: "bird",
+                trending_task: "trending",
+            }
             if mempool_task is not None:
                 task_map[mempool_task] = "mempool"
             if SETTINGS.enable_dexscreener and SETTINGS.dexscreener_url:
@@ -2144,6 +2161,42 @@ def discover_candidates(
                                         entry[key] = float(val)
                                     except Exception:
                                         pass
+                        return changed
+                    if label == "trending":
+                        if isinstance(result, Exception):
+                            logger.debug("Trending discovery unavailable: %s", result)
+                            return False
+                        trending_items = list(result or [])
+                        for raw in trending_items:
+                            if not isinstance(raw, str):
+                                continue
+                            address = raw.strip()
+                            if not address:
+                                continue
+                            existed = address in candidates
+                            entry = _merge_candidate_entry(
+                                candidates,
+                                {
+                                    "address": address,
+                                    "name": address,
+                                    "symbol": address,
+                                },
+                                "trending",
+                            )
+                            if entry is None:
+                                continue
+                            sources = entry.get("sources")
+                            if isinstance(sources, set):
+                                before = len(sources)
+                                sources.add("trending")
+                                if len(sources) != before:
+                                    changed = True
+                            else:
+                                entry["sources"] = {"trending"}
+                                changed = True
+                            if not existed:
+                                changed = True
+                            _enrich_with_orca(entry)
                         return changed
                     if label == "dexscreener":
                         if isinstance(result, Exception):
