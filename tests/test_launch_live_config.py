@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def test_launch_live_missing_config(tmp_path: Path) -> None:
     env_file = tmp_path / "env"
-    env_file.write_text("")
+    env_file.write_text(f"PYTHONPATH={tmp_path / 'alt_pythonpath'}\n")
 
     proc = subprocess.run(
         [
@@ -34,7 +34,15 @@ def test_launch_live_missing_config(tmp_path: Path) -> None:
 
 def test_launch_live_missing_keypair(tmp_path: Path) -> None:
     env_file = tmp_path / "env"
-    env_file.write_text("KEYPAIR_PATH=/no/such/key.json\n")
+    env_file.write_text(
+        "\n".join(
+            [
+                f"PYTHONPATH={tmp_path / 'alt_pythonpath'}",
+                "KEYPAIR_PATH=/no/such/key.json",
+            ]
+        )
+        + "\n"
+    )
 
     env = os.environ.copy()
     env["LAUNCH_LIVE_SKIP_PIP"] = "1"
