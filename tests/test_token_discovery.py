@@ -219,6 +219,7 @@ async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
     monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
     monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
     monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
+    monkeypatch.setattr(td, "_OVERFETCH_FACTOR", 0.5)
     monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
     monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)

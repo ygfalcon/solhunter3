@@ -53,7 +53,7 @@ _MIN_VOLUME = _env_float("DISCOVERY_MIN_VOLUME_USD", "50000", fast_default=0.0)
 _MIN_LIQUIDITY = _env_float("DISCOVERY_MIN_LIQUIDITY_USD", "75000", fast_default=0.0)
 _MAX_TOKENS = int(os.getenv("DISCOVERY_MAX_TOKENS", "50") or 50)
 _PAGE_LIMIT = max(1, min(int(os.getenv("DISCOVERY_PAGE_SIZE", "25") or 25), 50))
-_OVERFETCH_FACTOR = float(os.getenv("DISCOVERY_OVERFETCH_FACTOR", "0.8") or 0.8)
+_OVERFETCH_FACTOR = float(os.getenv("DISCOVERY_OVERFETCH_FACTOR", "1.0") or 1.0)
 _CACHE_TTL = float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45)
 _MAX_OFFSET = int(os.getenv("DISCOVERY_MAX_OFFSET", "4000") or 4000)
 _MEMPOOL_LIMIT = int(os.getenv("DISCOVERY_MEMPOOL_LIMIT", "12") or 12)
@@ -896,7 +896,8 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
     if effective_limit <= 0:
         effective_limit = _MAX_TOKENS
     effective_limit = min(effective_limit, _MAX_TOKENS)
-    target_count = max(int(effective_limit * _OVERFETCH_FACTOR), _PAGE_LIMIT)
+    overfetch_factor = max(_OVERFETCH_FACTOR, 1.0)
+    target_count = max(int(effective_limit * overfetch_factor), _PAGE_LIMIT)
     backoff = _BIRDEYE_BACKOFF
 
     logger.debug(
