@@ -1708,13 +1708,22 @@ if not env_path.exists():
 pattern_strings = [
     r"REDACTED",
     r"YOUR[_-]",
-    r"\$\{",
     r"EXAMPLE",
     r"XXXX",
     r"CHANGE_ME",
     r"PLACEHOLDER",
 ]
 patterns = [re.compile(pat, re.IGNORECASE) for pat in pattern_strings]
+placeholder_token_pattern = re.compile(r"\$\{([^}]+)\}")
+placeholder_prefixes = (
+    "REPLACE",
+    "CHANGE",
+    "FILL",
+    "YOUR",
+    "EXAMPLE",
+    "PLACEHOLDER",
+    "TODO",
+)
 values: dict[str, str] = {}
 for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
     line = raw_line.strip()
@@ -1729,6 +1738,12 @@ for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
     if value == "":
         print(f"missing value for {key}", file=sys.stderr)
         raise SystemExit(1)
+    for token_match in placeholder_token_pattern.finditer(value):
+        token = token_match.group(1).strip()
+        token_upper = token.upper()
+        if any(token_upper.startswith(prefix) for prefix in placeholder_prefixes):
+            print(f"placeholder detected for {key}: ${{{token}}}", file=sys.stderr)
+            raise SystemExit(1)
     for pat in patterns:
         if pat.search(value):
             print(f"placeholder detected for {key}: {pat.pattern}", file=sys.stderr)
