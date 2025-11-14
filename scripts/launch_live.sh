@@ -1749,6 +1749,7 @@ check_live_keypair_paths() {
   local keypair_report
   if ! keypair_report=$(CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" - <<'PY'
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -1834,6 +1835,10 @@ for path, labels in candidates.items():
             continue
         if not os.access(path, os.R_OK):
             issues.append((path, labels, "is not readable"))
+            continue
+        mode = os.stat(path).st_mode
+        if mode & (stat.S_IRGRP | stat.S_IROTH):
+            issues.append((path, labels, "has insecure permissions (readable by group/other)"))
             continue
     except OSError as exc:  # pragma: no cover - filesystem edge cases
         issues.append((path, labels, f"is not accessible ({exc})"))

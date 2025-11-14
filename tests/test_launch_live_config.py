@@ -83,11 +83,36 @@ def test_launch_live_missing_keypair(tmp_path: Path) -> None:
     assert "/no/such/key.json" in proc.stderr
 
 
+def test_launch_live_rejects_lax_permissions(tmp_path: Path) -> None:
+    keypair_path = tmp_path / "id.json"
+    keypair_path.write_text("[]", encoding="utf-8")
+    keypair_path.chmod(0o664)
+
+    env = os.environ.copy()
+    env["KEYPAIR_PATH"] = str(keypair_path)
+    env["MODE"] = "live"
+    env.pop("SOLANA_KEYPAIR", None)
+    env.pop("CONFIG_PATH", None)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", CHECK_LIVE_KEYPAIR_SNIPPET],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 1
+    assert "has insecure permissions" in completed.stdout
+    assert str(keypair_path) in completed.stdout
+
+
 def test_launch_live_config_relative_keypair(tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     keypair_path = config_dir / "id.json"
     keypair_path.write_text("[]", encoding="utf-8")
+    keypair_path.chmod(0o600)
 
     config_path = config_dir / "live.toml"
     config_path.write_text("solana_keypair = \"id.json\"\n", encoding="utf-8")
