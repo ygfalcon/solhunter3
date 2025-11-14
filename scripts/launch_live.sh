@@ -582,14 +582,26 @@ PY
   fi
 
   local url
+  local redis_cli_usage_fallback=0
   if command -v redis-cli >/dev/null 2>&1; then
     for url in "${redis_urls[@]}"; do
-      if ! redis-cli -u "$url" PING >/dev/null 2>&1; then
+      local redis_cli_output=""
+      if ! redis_cli_output=$(redis-cli -u "$url" PING 2>&1); then
+        local normalized_output=${redis_cli_output,,}
+        if [[ $normalized_output == usage:* || $normalized_output == *$'\n'usage:* || $normalized_output == *unknown\ option* ]]; then
+          redis_cli_usage_fallback=1
+          break
+        fi
+        printf '%s\n' "$redis_cli_output" >&2
         return 1
       fi
     done
-  else
-    if ! "$PYTHON_BIN" - "${redis_urls[@]}" <<'PY'
+    if (( redis_cli_usage_fallback == 0 )); then
+      return 0
+    fi
+  fi
+
+  if ! "$PYTHON_BIN" - "${redis_urls[@]}" <<'PY'
 import asyncio
 import sys
 
@@ -614,7 +626,6 @@ PY
     then
       return 1
     fi
-  fi
 }
 
 run_connectivity_probes() {
