@@ -543,7 +543,7 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
     seen: set[str] = set()
     fallback: List[TokenEntry] = []
 
-    cache_key = _current_cache_key()
+    cache_key = _current_cache_key(limit)
     cached = _cache_get(cache_key) or []
     for item in cached:
         if not isinstance(item, Mapping):
@@ -632,8 +632,35 @@ def _cache_clear() -> None:
         _BIRDEYE_CACHE.clear()
 
 
-def _current_cache_key() -> str:
-    return f"tokens:{int(SETTINGS.min_volume)}:{int(SETTINGS.min_liquidity)}:{SETTINGS.page_limit}"
+def _normalize_limit(limit: int | None) -> int:
+    max_tokens = int(SETTINGS.max_tokens)
+    if limit is None:
+        numeric = max_tokens
+    else:
+        try:
+            numeric = int(limit)
+        except (TypeError, ValueError):
+            numeric = max_tokens
+
+    if numeric <= 0:
+        numeric = max_tokens
+
+    if max_tokens > 0:
+        numeric = min(numeric, max_tokens)
+
+    return numeric
+
+
+def _current_cache_key(limit: int | None = None) -> str:
+    normalized_limit = _normalize_limit(limit)
+    return (
+        "tokens:"
+        f"{int(SETTINGS.min_volume)}:"
+        f"{int(SETTINGS.min_liquidity)}:"
+        f"{SETTINGS.page_limit}:"
+        f"{int(SETTINGS.max_tokens)}:"
+        f"{normalized_limit}"
+    )
 
 
 def _make_timeout(value: Any) -> ClientTimeout | None:
@@ -1314,23 +1341,14 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
             remediation="Set the BIRDEYE_API_KEY environment variable.",
         )
 
-    cache_key = _current_cache_key()
+    cache_key = _current_cache_key(limit)
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
     tokens: Dict[str, TokenEntry] = {}
     offset = 0
-    if limit is None:
-        effective_limit = SETTINGS.max_tokens
-    else:
-        try:
-            effective_limit = int(limit)
-        except (TypeError, ValueError):
-            effective_limit = SETTINGS.max_tokens
-    if effective_limit <= 0:
-        effective_limit = SETTINGS.max_tokens
-    effective_limit = min(effective_limit, SETTINGS.max_tokens)
+    effective_limit = _normalize_limit(limit)
     target_count = max(int(effective_limit * SETTINGS.overfetch_factor), SETTINGS.page_limit)
     backoff = SETTINGS.birdeye_backoff
 
