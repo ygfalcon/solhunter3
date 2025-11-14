@@ -1736,6 +1736,7 @@ async def _pump_trending(
             meta["symbol"] = symbol
         if isinstance(icon, str):
             meta["icon"] = icon
+        meta["raw"] = entry
         pump_meta = {
             k: entry.get(k)
             for k in (
