@@ -685,13 +685,139 @@ def _sigmoid(value: float) -> float:
     return z / (1.0 + z)
 
 
-def _source_count(entry: Dict[str, Any]) -> int:
-    sources = entry.get("sources")
-    if isinstance(sources, set):
-        return len(sources)
-    if isinstance(sources, (list, tuple)):
-        return len(set(sources))
-    return 0
+_DEFAULT_CATEGORY_WEIGHT = 1.0
+_SOURCE_CATEGORY_MAP = {
+    "birdeye": "market_data",
+    "dexscreener": "market_data",
+    "dexlab": "launchpad",
+    "meteora": "amm_pool",
+    "mempool": "onchain_flow",
+    "raydium": "amm_pool",
+    "solscan": "metadata",
+    "trending": "social_signal",
+    "cache": "internal",
+    "fallback": "internal",
+    "static": "internal",
+}
+_CATEGORY_WEIGHT_OVERRIDES = {
+    "metadata": 0.5,
+    "internal": 0.0,
+}
+_SOURCE_DIVERSITY_MAX_CATEGORIES = 4
+_SOURCE_DIVERSITY_MAX_SCORE = float(_SOURCE_DIVERSITY_MAX_CATEGORIES)
+
+
+def _normalize_category_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+    else:
+        candidate = str(value).strip().lower()
+    if not candidate:
+        return None
+    return candidate
+
+
+def _normalize_category_weight(value: Any, default: float = _DEFAULT_CATEGORY_WEIGHT) -> float:
+    if value is None:
+        return max(0.0, float(default))
+    if isinstance(value, (int, float)):
+        weight = float(value)
+    else:
+        try:
+            weight = float(value)
+        except Exception:
+            weight = float(default)
+    if not math.isfinite(weight):
+        weight = float(default)
+    return max(0.0, weight)
+
+
+def _derive_source_category_weights(entry: Dict[str, Any]) -> Dict[str, float]:
+    categories: Dict[str, float] = {}
+
+    def _add(name: Any, weight: Any = None) -> None:
+        category = _normalize_category_name(name)
+        if not category:
+            return
+        numeric = _normalize_category_weight(weight)
+        if numeric <= 0:
+            return
+        previous = categories.get(category)
+        if previous is None or numeric > previous:
+            categories[category] = numeric
+
+    raw_categories = (
+        entry.get("source_categories")
+        or entry.get("categories")
+        or entry.get("category_set")
+    )
+    if isinstance(raw_categories, Mapping):
+        for key, value in raw_categories.items():
+            if isinstance(value, Mapping):
+                candidate_weight = (
+                    value.get("weight")
+                    or value.get("score")
+                    or value.get("value")
+                )
+            else:
+                candidate_weight = value
+            _add(key, candidate_weight)
+    elif isinstance(raw_categories, (set, list, tuple)):
+        for item in raw_categories:
+            if isinstance(item, Mapping):
+                name = (
+                    item.get("name")
+                    or item.get("category")
+                    or item.get("label")
+                )
+                candidate_weight = (
+                    item.get("weight")
+                    or item.get("score")
+                    or item.get("value")
+                )
+                _add(name, candidate_weight)
+            else:
+                _add(item)
+    elif isinstance(raw_categories, str):
+        _add(raw_categories)
+
+    if categories:
+        return categories
+
+    raw_sources = entry.get("sources")
+    if isinstance(raw_sources, set):
+        iterable = raw_sources
+    elif isinstance(raw_sources, (list, tuple)):
+        iterable = raw_sources
+    elif isinstance(raw_sources, str):
+        iterable = [raw_sources]
+    else:
+        iterable = []
+    for source in iterable:
+        if not isinstance(source, str):
+            continue
+        normalized_source = source.strip().lower()
+        if not normalized_source:
+            continue
+        category = _SOURCE_CATEGORY_MAP.get(normalized_source, normalized_source)
+        weight = _CATEGORY_WEIGHT_OVERRIDES.get(category)
+        if weight is None:
+            weight = _DEFAULT_CATEGORY_WEIGHT
+        _add(category, weight)
+
+    return categories
+
+
+def _source_count(entry: Dict[str, Any]) -> float:
+    weights = _derive_source_category_weights(entry)
+    if not weights:
+        return 0.0
+    ranked = sorted(weights.values(), reverse=True)
+    top = ranked[:_SOURCE_DIVERSITY_MAX_CATEGORIES]
+    total = min(_SOURCE_DIVERSITY_MAX_SCORE, sum(top))
+    return float(total)
 
 
 def _compute_feature_vector(

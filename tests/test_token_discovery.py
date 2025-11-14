@@ -98,6 +98,32 @@ def test_compute_feature_vector_mempool_score_fallback(monkeypatch, caplog):
     assert "Failed to coerce numeric value" in caplog.text
 
 
+def test_source_diversity_uses_categories():
+    entry = {"sources": {"birdeye", "dexscreener"}}
+    features = td._compute_feature_vector(entry, None)
+    assert features["source_diversity"] == pytest.approx(1.0)
+
+    entry = {"sources": {"birdeye", "mempool"}}
+    features = td._compute_feature_vector(entry, None)
+    assert features["source_diversity"] == pytest.approx(2.0)
+
+
+def test_source_diversity_respects_explicit_weights():
+    entry = {
+        "source_categories": {
+            "market_data": 1.0,
+            "metadata": 0.5,
+            "onchain_flow": 1.0,
+        }
+    }
+    assert td._source_count(entry) == pytest.approx(2.5)
+
+
+def test_source_diversity_ignores_internal_sources():
+    entry = {"sources": {"cache", "fallback", "static"}}
+    assert td._source_count(entry) == 0.0
+
+
 @pytest.mark.anyio("asyncio")
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()
