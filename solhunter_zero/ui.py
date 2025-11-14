@@ -1516,6 +1516,8 @@ _WS_CHANNELS: dict[str, _WebsocketState] = {
     "logs": _WebsocketState("logs"),
 }
 
+_WS_CHANNEL_LOCK = threading.Lock()
+
 # Tracks the most recent auto-generated websocket configuration that
 # ``start_websockets`` injected into the environment (URLs, ports, etc.). This
 # allows future calls to refresh the values when ports change while avoiding
@@ -2708,94 +2710,96 @@ def start_websockets() -> dict[str, threading.Thread]:
         log.warning("UI websockets unavailable: install the 'websockets' package")
         return {}
 
-    if all(state.loop is not None for state in _WS_CHANNELS.values()):
-        return {
-            name: state.thread
-            for name, state in _WS_CHANNELS.items()
-            if state.thread is not None
+    with _WS_CHANNEL_LOCK:
+        if all(state.loop is not None for state in _WS_CHANNELS.values()):
+            return {
+                name: state.thread
+                for name, state in _WS_CHANNELS.items()
+                if state.thread is not None
+            }
+
+        threads: dict[str, threading.Thread] = {}
+        host = _resolve_host()
+        queue_size = _parse_positive_int(os.getenv("UI_WS_QUEUE_SIZE"), _WS_QUEUE_DEFAULT)
+        ping_interval_raw = os.getenv("UI_WS_PING_INTERVAL")
+        if ping_interval_raw in (None, ""):
+            ping_interval_raw = os.getenv("WS_PING_INTERVAL")
+        ping_interval = _parse_positive_float(
+            ping_interval_raw, _WS_PING_INTERVAL_DEFAULT
+        )
+        ping_timeout_raw = os.getenv("UI_WS_PING_TIMEOUT")
+        if ping_timeout_raw in (None, ""):
+            ping_timeout_raw = os.getenv("WS_PING_TIMEOUT")
+        ping_timeout = _parse_positive_float(
+            ping_timeout_raw, _WS_PING_TIMEOUT_DEFAULT
+        )
+        url_host = _resolve_public_host(host)
+        scheme = _infer_ws_scheme()
+
+        rl_port = _resolve_port("UI_RL_WS_PORT", "RL_WS_PORT", default=_RL_WS_PORT_DEFAULT)
+        log_port = _resolve_port("UI_LOG_WS_PORT", default=_LOG_WS_PORT_DEFAULT)
+        event_port = _resolve_port("UI_EVENT_WS_PORT", "EVENT_WS_PORT", default=_EVENT_WS_PORT_DEFAULT)
+
+        try:
+            threads["rl"] = _start_channel(
+                "rl",
+                host=host,
+                port=rl_port,
+                queue_size=queue_size,
+                ping_interval=ping_interval,
+                ping_timeout=ping_timeout,
+            )
+            threads["events"] = _start_channel(
+                "events",
+                host=host,
+                port=event_port,
+                queue_size=queue_size,
+                ping_interval=ping_interval,
+                ping_timeout=ping_timeout,
+            )
+            threads["logs"] = _start_channel(
+                "logs",
+                host=host,
+                port=log_port,
+                queue_size=queue_size,
+                ping_interval=ping_interval,
+                ping_timeout=ping_timeout,
+            )
+        except Exception:
+            for state in _WS_CHANNELS.values():
+                _shutdown_state(state)
+            raise
+
+        events_url = f"{scheme}://{url_host}:{_EVENT_WS_PORT}{_channel_path('events')}"
+        rl_url = f"{scheme}://{url_host}:{_RL_WS_PORT}{_channel_path('rl')}"
+        logs_url = f"{scheme}://{url_host}:{_LOG_WS_PORT}{_channel_path('logs')}"
+
+        defaults = {
+            "UI_WS_URL": events_url,
+            "UI_EVENTS_WS_URL": events_url,
+            "UI_EVENTS_WS": events_url,
+            "UI_RL_WS_URL": rl_url,
+            "UI_RL_WS": rl_url,
+            "UI_LOG_WS_URL": logs_url,
+            "UI_LOGS_WS": logs_url,
         }
-
-    threads: dict[str, threading.Thread] = {}
-    host = _resolve_host()
-    queue_size = _parse_positive_int(os.getenv("UI_WS_QUEUE_SIZE"), _WS_QUEUE_DEFAULT)
-    ping_interval_raw = os.getenv("UI_WS_PING_INTERVAL")
-    if ping_interval_raw in (None, ""):
-        ping_interval_raw = os.getenv("WS_PING_INTERVAL")
-    ping_interval = _parse_positive_float(
-        ping_interval_raw, _WS_PING_INTERVAL_DEFAULT
-    )
-    ping_timeout_raw = os.getenv("UI_WS_PING_TIMEOUT")
-    if ping_timeout_raw in (None, ""):
-        ping_timeout_raw = os.getenv("WS_PING_TIMEOUT")
-    ping_timeout = _parse_positive_float(
-        ping_timeout_raw, _WS_PING_TIMEOUT_DEFAULT
-    )
-    url_host = _resolve_public_host(host)
-    scheme = _infer_ws_scheme()
-
-    rl_port = _resolve_port("UI_RL_WS_PORT", "RL_WS_PORT", default=_RL_WS_PORT_DEFAULT)
-    log_port = _resolve_port("UI_LOG_WS_PORT", default=_LOG_WS_PORT_DEFAULT)
-    event_port = _resolve_port("UI_EVENT_WS_PORT", "EVENT_WS_PORT", default=_EVENT_WS_PORT_DEFAULT)
-
-    try:
-        threads["rl"] = _start_channel(
-            "rl",
-            host=host,
-            port=rl_port,
-            queue_size=queue_size,
-            ping_interval=ping_interval,
-            ping_timeout=ping_timeout,
+        for key, value in defaults.items():
+            _update_auto_env_value(key, value, "URL")
+        log.info(
+            "UI websockets listening on rl=%s events=%s logs=%s",
+            _RL_WS_PORT,
+            _EVENT_WS_PORT,
+            _LOG_WS_PORT,
         )
-        threads["events"] = _start_channel(
-            "events",
-            host=host,
-            port=event_port,
-            queue_size=queue_size,
-            ping_interval=ping_interval,
-            ping_timeout=ping_timeout,
-        )
-        threads["logs"] = _start_channel(
-            "logs",
-            host=host,
-            port=log_port,
-            queue_size=queue_size,
-            ping_interval=ping_interval,
-            ping_timeout=ping_timeout,
-        )
-    except Exception:
-        for state in _WS_CHANNELS.values():
-            _shutdown_state(state)
-        raise
-
-    events_url = f"{scheme}://{url_host}:{_EVENT_WS_PORT}{_channel_path('events')}"
-    rl_url = f"{scheme}://{url_host}:{_RL_WS_PORT}{_channel_path('rl')}"
-    logs_url = f"{scheme}://{url_host}:{_LOG_WS_PORT}{_channel_path('logs')}"
-
-    defaults = {
-        "UI_WS_URL": events_url,
-        "UI_EVENTS_WS_URL": events_url,
-        "UI_EVENTS_WS": events_url,
-        "UI_RL_WS_URL": rl_url,
-        "UI_RL_WS": rl_url,
-        "UI_LOG_WS_URL": logs_url,
-        "UI_LOGS_WS": logs_url,
-    }
-    for key, value in defaults.items():
-        _update_auto_env_value(key, value, "URL")
-    log.info(
-        "UI websockets listening on rl=%s events=%s logs=%s",
-        _RL_WS_PORT,
-        _EVENT_WS_PORT,
-        _LOG_WS_PORT,
-    )
-    return threads
+        return threads
 
 
 def stop_websockets() -> None:
     """Shut down all websocket channels."""
 
-    for state in _WS_CHANNELS.values():
-        _shutdown_state(state)
+    with _WS_CHANNEL_LOCK:
+        for state in _WS_CHANNELS.values():
+            _shutdown_state(state)
 
 
 StatusProvider = Callable[[], Dict[str, Any]]

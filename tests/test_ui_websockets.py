@@ -206,6 +206,109 @@ def test_websocket_env_preserves_preconfigured_url(monkeypatch):
             t.join(timeout=1)
 
 
+@pytest.mark.timeout(30)
+def test_websocket_parallel_start_calls():
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+    pytest.importorskip("websockets")
+
+    importlib.import_module("websockets")
+
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault(
+        "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet")
+    )
+
+    from solhunter_zero import ui
+    importlib.reload(ui)
+
+    barrier = threading.Barrier(2)
+    results: list[dict[str, threading.Thread]] = []
+    errors: list[BaseException] = []
+
+    def _start_worker() -> None:
+        try:
+            barrier.wait(timeout=5)
+            results.append(ui.start_websockets())
+        except BaseException as exc:  # pragma: no cover - defensive
+            errors.append(exc)
+
+    thread_a = threading.Thread(target=_start_worker)
+    thread_b = threading.Thread(target=_start_worker)
+    thread_a.start()
+    thread_b.start()
+    thread_a.join()
+    thread_b.join()
+
+    try:
+        assert not errors, f"start_websockets raised: {errors}"
+        assert len(results) == 2
+        assert set(results[0]) == {"rl", "events", "logs"}
+        assert results[0] == results[1]
+    finally:
+        ui.stop_websockets()
+        for state in ui._WS_CHANNELS.values():
+            assert state.loop is None
+
+
+@pytest.mark.timeout(30)
+def test_websocket_parallel_start_stop_sequences():
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+    pytest.importorskip("websockets")
+
+    importlib.import_module("websockets")
+
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault(
+        "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet")
+    )
+
+    from solhunter_zero import ui
+    importlib.reload(ui)
+
+    initial_threads = ui.start_websockets()
+
+    barrier = threading.Barrier(2)
+    start_results: list[dict[str, threading.Thread]] = []
+    errors: list[tuple[str, BaseException]] = []
+
+    def _start_worker() -> None:
+        try:
+            barrier.wait(timeout=5)
+            start_results.append(ui.start_websockets())
+        except BaseException as exc:  # pragma: no cover - defensive
+            errors.append(("start", exc))
+
+    def _stop_worker() -> None:
+        try:
+            barrier.wait(timeout=5)
+            ui.stop_websockets()
+        except BaseException as exc:  # pragma: no cover - defensive
+            errors.append(("stop", exc))
+
+    thread_a = threading.Thread(target=_start_worker)
+    thread_b = threading.Thread(target=_stop_worker)
+    thread_a.start()
+    thread_b.start()
+    thread_a.join()
+    thread_b.join()
+
+    try:
+        assert not errors, f"parallel start/stop failed: {errors}"
+        assert len(start_results) == 1
+        assert set(start_results[0]) == {"rl", "events", "logs"}
+    finally:
+        ui.stop_websockets()
+        for state in ui._WS_CHANNELS.values():
+            assert state.loop is None
+
+    for t in initial_threads.values():
+        t.join(timeout=1)
+
+
 def test_websocket_invalid_ping_values_use_defaults(monkeypatch, caplog):
     ui = _reload_ui_module()
 
