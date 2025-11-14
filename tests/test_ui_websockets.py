@@ -887,6 +887,101 @@ def test_manifest_prefers_event_bus_url(monkeypatch):
     assert manifest["events_ws_available"] is True
 
 
+def test_start_stop_resets_ports_and_env(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+
+    class DummyLoop:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def call_soon_threadsafe(self, func, *args, **kwargs):  # type: ignore[no-untyped-def]
+            func(*args, **kwargs)
+
+        def stop(self) -> None:
+            return None
+
+        def is_closed(self) -> bool:
+            return self.closed
+
+        def close(self) -> None:
+            self.closed = True
+
+    class DummyThread:
+        def join(self, timeout=None):  # type: ignore[no-untyped-def]
+            return None
+
+    fallback_ports = {"rl": 9101, "events": 9100, "logs": 9102}
+
+    def _fake_start_channel(
+        channel: str,
+        *,
+        host: str,
+        port: int,
+        queue_size: int,
+        ping_interval: float,
+        ping_timeout: float,
+    ) -> DummyThread:
+        state = ui._WS_CHANNELS[channel]
+        assigned_port = port or fallback_ports[channel]
+        state.loop = DummyLoop()
+        state.thread = DummyThread()
+        state.host = host
+        state.port = assigned_port
+        if channel == "rl":
+            ui._RL_WS_PORT = assigned_port
+        elif channel == "events":
+            ui._EVENT_WS_PORT = assigned_port
+        else:
+            ui._LOG_WS_PORT = assigned_port
+        for env_key in ui._WS_PORT_ENV_KEYS.get(channel, ()):  # pragma: no branch - fixed keys
+            ui._update_auto_env_value(env_key, str(assigned_port), "port")
+        return state.thread
+
+    monkeypatch.setattr(ui, "_start_channel", _fake_start_channel)
+
+    threads = ui.start_websockets()
+    assert set(threads) == {"rl", "events", "logs"}
+
+    assert ui._RL_WS_PORT == fallback_ports["rl"]
+    assert ui._EVENT_WS_PORT == fallback_ports["events"]
+    assert ui._LOG_WS_PORT == fallback_ports["logs"]
+
+    expected_env_keys = {
+        "UI_WS_URL",
+        "UI_EVENTS_WS",
+        "UI_EVENTS_WS_URL",
+        "UI_RL_WS",
+        "UI_RL_WS_URL",
+        "UI_LOGS_WS",
+        "UI_LOG_WS_URL",
+    }
+    expected_env_keys.update(
+        {key for keys in ui._WS_PORT_ENV_KEYS.values() for key in keys}
+    )
+    assert expected_env_keys.issubset(os.environ.keys())
+    assert ui._AUTO_WS_ENV_VALUES
+
+    ui.stop_websockets()
+
+    assert ui._RL_WS_PORT == ui._RL_WS_PORT_DEFAULT
+    assert ui._EVENT_WS_PORT == ui._EVENT_WS_PORT_DEFAULT
+    assert ui._LOG_WS_PORT == ui._LOG_WS_PORT_DEFAULT
+
+    for state in ui._WS_CHANNELS.values():
+        assert state.loop is None
+        assert state.port == 0
+        assert state.host is None
+
+    for key in expected_env_keys:
+        assert key not in os.environ
+    assert ui._AUTO_WS_ENV_VALUES == {}
+
+    urls = ui.get_ws_urls()
+    assert all(value is None for value in urls.values())
+
+
 def test_manifest_uses_broker_ws_urls(monkeypatch):
     ui = _reload_ui_module()
 

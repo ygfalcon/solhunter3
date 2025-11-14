@@ -1591,6 +1591,17 @@ def _update_auto_env_value(key: str, value: str, descriptor: str) -> None:
         )
 
 
+def _clear_auto_env_values() -> None:
+    """Remove any environment entries that were auto-generated."""
+
+    for key in list(_AUTO_WS_ENV_VALUES):
+        previous = _AUTO_WS_ENV_VALUES.pop(key, None)
+        if previous is None:
+            continue
+        if os.environ.get(key) == previous:
+            os.environ.pop(key, None)
+
+
 def _resolve_host() -> str:
     for key in _WS_HOST_ENV_KEYS:
         host = os.getenv(key)
@@ -2466,26 +2477,60 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
     return manifest
 def _shutdown_state(state: _WebsocketState) -> None:
     loop = state.loop
-    if loop is None:
-        state.ready.clear()
-        if state.ready_status != "failed":
-            state.ready_status = "stopped"
-            state.ready_detail = None
-        return
 
-    def _stop_loop() -> None:
-        loop.stop()
+    if loop is not None:
 
-    loop.call_soon_threadsafe(_stop_loop)
-    thread = state.thread
-    if thread is not None:
-        thread.join(timeout=2)
+        def _stop_loop() -> None:
+            loop.stop()
+
+        try:
+            loop.call_soon_threadsafe(_stop_loop)
+        except Exception:
+            pass
+
+        thread = state.thread
+        if thread is not None:
+            with contextlib.suppress(Exception):
+                thread.join(timeout=2)
+
+        with contextlib.suppress(Exception):
+            if hasattr(loop, "is_closed"):
+                if not loop.is_closed():
+                    loop.close()
+            else:
+                loop.close()
+
     state.thread = None
+    state.loop = None
+    state.server = None
+    state.task = None
+    state.queue = None
     state.host = None
+    state.port = 0
+    with state.lock:
+        state.clients.clear()
+        state.client_filters.clear()
+
+    global rl_ws_loop, event_ws_loop, log_ws_loop
+    global _RL_WS_PORT, _EVENT_WS_PORT, _LOG_WS_PORT
+
+    if state.name == "rl":
+        rl_ws_loop = None
+        _RL_WS_PORT = _RL_WS_PORT_DEFAULT
+    elif state.name == "events":
+        event_ws_loop = None
+        _EVENT_WS_PORT = _EVENT_WS_PORT_DEFAULT
+    elif state.name == "logs":
+        log_ws_loop = None
+        _LOG_WS_PORT = _LOG_WS_PORT_DEFAULT
+
     state.ready.clear()
     if state.ready_status != "failed":
         state.ready_status = "stopped"
         state.ready_detail = None
+
+    if all(channel_state.loop is None for channel_state in _WS_CHANNELS.values()):
+        _clear_auto_env_values()
 
 
 def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> None:
