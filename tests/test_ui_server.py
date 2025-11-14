@@ -47,6 +47,22 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         server.stop()
 
 
+def test_build_ui_manifest_uses_active_http_port(monkeypatch) -> None:
+    monkeypatch.setenv("UI_PORT", "1234")
+    monkeypatch.setenv("PORT", "4321")
+
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    server.start()
+    try:
+        manifest = ui.build_ui_manifest(None)
+        assert manifest["ui_port"] == server.port
+        assert manifest["ui_port"] not in (0, 1234, 4321)
+    finally:
+        server.stop()
+
+
 def _install_stub_server(monkeypatch, *, server_port: int = 4321):
     stop_event = threading.Event()
 
