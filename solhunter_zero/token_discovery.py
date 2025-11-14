@@ -315,6 +315,7 @@ _SCORING_DEFAULT = {
         "sellable": 0.4,
         "mempool_pressure": 2.4,
         "staleness_ms": -0.3,
+        "dex_presence": 0.6,
     },
 }
 
@@ -694,6 +695,46 @@ def _source_count(entry: Dict[str, Any]) -> int:
     return 0
 
 
+_DEX_CATEGORY_HINTS = {
+    "amm",
+    "dex",
+    "dex_pool",
+    "liquidity",
+    "liquidity_pool",
+    "pool",
+}
+
+_AGGREGATOR_VENUE_HINTS = {
+    "aggregator",
+    "birdeye",
+    "helius",
+    "jupiter",
+}
+
+
+def _normalize_venue_names(value: Any) -> set[str]:
+    names: set[str] = set()
+    if not value:
+        return names
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate:
+            names.add(candidate)
+        return names
+    if isinstance(value, Mapping):
+        for key in ("name", "venue", "id"):
+            raw = value.get(key)
+            if isinstance(raw, str):
+                candidate = raw.strip().lower()
+                if candidate:
+                    names.add(candidate)
+        return names
+    if isinstance(value, (set, list, tuple)):
+        for item in value:
+            names.update(_normalize_venue_names(item))
+    return names
+
+
 def _compute_feature_vector(
     entry: Dict[str, Any],
     mempool: Dict[str, float] | None,
@@ -743,6 +784,25 @@ def _compute_feature_vector(
             staleness_minutes = max(0.0, (now - float(asof)) / 60.0)
         except Exception:
             staleness_minutes = 0.0
+    dex_presence = 0.0
+    category = entry.get("category")
+    if isinstance(category, str):
+        normalized = category.strip().lower()
+        if normalized in _DEX_CATEGORY_HINTS or any(
+            hint in normalized for hint in ("dex", "pool")
+        ):
+            dex_presence = 1.0
+    if dex_presence == 0.0:
+        venue_names = _normalize_venue_names(entry.get("venues"))
+        if venue_names:
+            if any(name not in _AGGREGATOR_VENUE_HINTS for name in venue_names):
+                dex_presence = 1.0
+    if dex_presence == 0.0:
+        venue_names = _normalize_venue_names(entry.get("venue"))
+        if venue_names and any(
+            name not in _AGGREGATOR_VENUE_HINTS for name in venue_names
+        ):
+            dex_presence = 1.0
     features = {
         "liquidity_usd": float(liquidity_feature),
         "vol_1h_z": float(vol_feature),
@@ -752,6 +812,7 @@ def _compute_feature_vector(
         "sellable": float(sellable),
         "mempool_pressure": float(max(0.0, mempool_pressure)),
         "staleness_ms": float(staleness_minutes),
+        "dex_presence": float(dex_presence),
     }
     return features
 

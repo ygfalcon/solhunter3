@@ -8,6 +8,7 @@ weights:
   sellable: 0.4
   mempool_pressure: 2.4
   staleness_ms: -0.3
+  dex_presence: 0.6
 momentum:
   top_n_active: 250
   weights:

@@ -98,6 +98,19 @@ def test_compute_feature_vector_mempool_score_fallback(monkeypatch, caplog):
     assert "Failed to coerce numeric value" in caplog.text
 
 
+def test_compute_feature_vector_dex_presence(monkeypatch):
+    _configure_env(monkeypatch, TRENDING_MIN_LIQUIDITY_USD="0")
+
+    aggregator_only = {"venues": [{"name": "Jupiter"}]}
+    dex_only = {"venues": [{"name": "Raydium"}]}
+
+    aggregator_features = td._compute_feature_vector(aggregator_only, None)
+    dex_features = td._compute_feature_vector(dex_only, None)
+
+    assert aggregator_features["dex_presence"] == 0.0
+    assert dex_features["dex_presence"] == 1.0
+
+
 @pytest.mark.anyio("asyncio")
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()
