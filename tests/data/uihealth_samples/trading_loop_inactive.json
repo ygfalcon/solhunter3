@@ -1,0 +1,12 @@
+{
+  "ok": false,
+  "status": {
+    "event_bus": "ok",
+    "trading_loop": "fail",
+    "logs_ws": "available",
+    "rl_ws": "fail"
+  },
+  "generated_ts": 1700000100.0,
+  "phase": "runtime",
+  "detail": "trading loop halted"
+}

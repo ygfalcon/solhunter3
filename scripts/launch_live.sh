@@ -1152,24 +1152,107 @@ PY
   while (( SECONDS < deadline )); do
     attempt=$((attempt + 1))
     log_info "UI health check attempt ${attempt} GET $target"
-    if UI_HEALTH_URL="$target" "$PYTHON_BIN" - <<'PY'
+    local health_output=""
+    if health_output=$(UI_HEALTH_URL="$target" "$PYTHON_BIN" - <<'PY'
+import json
 import os
 import sys
+import urllib.error
 import urllib.request
 
-url = os.environ.get("UI_HEALTH_URL")
-if not url:
-    sys.exit(1)
 
-req = urllib.request.Request(url, headers={"User-Agent": "solhunter-launcher"})
-with urllib.request.urlopen(req, timeout=5) as resp:
-    if getattr(resp, "status", 200) >= 400:
-        sys.exit(1)
-sys.exit(0)
+def _status_ok(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return False
+        if normalized in {"ok", "running", "ready", "connected", "available", "true"}:
+            return True
+        if normalized in {"fail", "failed", "error", "inactive", "down", "false", "unavailable"}:
+            return False
+        return True
+    if isinstance(value, dict):
+        if "ok" in value:
+            return _status_ok(value.get("ok"))
+        if "status" in value:
+            return _status_ok(value.get("status"))
+    return bool(value)
+
+
+def main() -> int:
+    url = os.environ.get("UI_HEALTH_URL")
+    if not url:
+        print("missing url", end="")
+        return 2
+    req = urllib.request.Request(url, headers={"User-Agent": "solhunter-launcher"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            status = getattr(resp, "status", 200)
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        print(f"http error {exc.code}", end="")
+        return 1
+    except Exception as exc:  # pragma: no cover - network failure reporting
+        print(f"request error: {exc}", end="")
+        return 1
+
+    if status >= 400:
+        print(f"http status {status}", end="")
+        return 1
+
+    text = body.decode("utf-8", errors="replace") if body else ""
+    if not text.strip():
+        print("empty body", end="")
+        return 1
+    try:
+        payload = json.loads(text)
+    except Exception as exc:
+        print(f"invalid json: {exc}", end="")
+        return 1
+
+    failure_reasons = []
+    if not _status_ok(payload.get("ok")):
+        failure_reasons.append("ok=false")
+
+    status_block = payload.get("status")
+    if isinstance(status_block, dict):
+        for key in (
+            "event_bus",
+            "trading_loop",
+            "ui",
+            "rl_ws",
+            "events_ws",
+            "logs_ws",
+            "rl_daemon",
+            "depth_service",
+        ):
+            if key not in status_block:
+                continue
+            value = status_block.get(key)
+            if not _status_ok(value):
+                failure_reasons.append(f"{key}={value!r}")
+
+    if failure_reasons:
+        print("; ".join(failure_reasons), end="")
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 PY
+    )
     then
       log_info "UI health endpoint responded successfully (url=$target)"
       return 0
+    fi
+    if [[ -n $health_output ]]; then
+      log_warn "UI health payload reported issues: ${health_output}"
     fi
     local now=$SECONDS
     if (( now >= deadline )); then
