@@ -70,7 +70,9 @@ This repo now has a single, obvious entry for the new, event‑driven runtime.
 
 - Standalone trading runs (for example `python -m solhunter_zero.runtime.trading_runtime`) now spin up the
   UI websockets directly, so the browser can connect to the RL, events, and logs streams even without the
-  orchestrator supervising startup.
+  orchestrator supervising startup. Install the [`websockets`](https://pypi.org/project/websockets/) package
+  to enable these realtime streams; startup now fails fast when the dependency is missing so broken UIs do
+  not linger.
 
 Legacy path remains available via `SOLHUNTER_LEGACY=1` when using `python -m solhunter_zero.launcher`.
 

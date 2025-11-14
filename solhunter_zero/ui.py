@@ -2705,8 +2705,12 @@ def start_websockets() -> dict[str, threading.Thread]:
     """Launch UI websocket endpoints for RL, runtime events, and logs."""
 
     if websockets is None:
-        log.warning("UI websockets unavailable: install the 'websockets' package")
-        return {}
+        message = (
+            "UI websockets require the 'websockets' package; install it to "
+            "enable realtime UI streams"
+        )
+        log.error(message)
+        raise RuntimeError(message)
 
     if all(state.loop is not None for state in _WS_CHANNELS.values()):
         return {
