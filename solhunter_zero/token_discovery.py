@@ -731,15 +731,11 @@ def _compute_feature_vector(
     sellable = 1.0 if liquidity >= _TRENDING_MIN_LIQUIDITY else 0.0
     mempool_pressure = 0.0
     if mempool:
-        try:
-            mempool_pressure = float(mempool.get("score", 0.0))
-        except Exception:
-            mempool_pressure = 0.0
+        mempool_pressure = _coerce_numeric(mempool.get("score"))
     if mempool_pressure <= 0.0:
-        try:
-            mempool_pressure = float(entry.get("score_mp") or entry.get("mempool_score") or 0.0)
-        except Exception:
-            mempool_pressure = 0.0
+        mempool_pressure = _coerce_numeric(
+            entry.get("score_mp") or entry.get("mempool_score")
+        )
     asof = entry.get("asof") or entry.get("updated_at") or discovered_at
     staleness_minutes = 0.0
     if asof:
@@ -779,8 +775,14 @@ def _coerce_numeric(value: Any) -> float:
     try:
         numeric = float(value)
     except Exception:
+        logger.debug(
+            "Failed to coerce numeric value %r; defaulting to 0.0", value
+        )
         return 0.0
     if math.isnan(numeric):
+        logger.debug(
+            "Coerced NaN from value %r; defaulting to 0.0", value
+        )
         return 0.0
     return numeric
 

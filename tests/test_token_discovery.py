@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import types
 
 import aiohttp
@@ -81,6 +82,20 @@ def test_compute_feature_vector_handles_minimal_entry(monkeypatch):
     entry["liquidity"] = 150
     above_threshold = td._compute_feature_vector(entry, mempool_snapshot)
     assert above_threshold["sellable"] == 1.0
+
+
+def test_compute_feature_vector_mempool_score_fallback(monkeypatch, caplog):
+    _configure_env(monkeypatch, TRENDING_MIN_LIQUIDITY_USD="100")
+
+    entry = {"liquidity": 150, "score_mp": "not-a-number"}
+    mempool_snapshot = {"score": "invalid"}
+
+    caplog.set_level(logging.DEBUG)
+
+    features = td._compute_feature_vector(entry, mempool_snapshot)
+
+    assert features["mempool_pressure"] == 0.0
+    assert "Failed to coerce numeric value" in caplog.text
 
 
 @pytest.mark.anyio("asyncio")
