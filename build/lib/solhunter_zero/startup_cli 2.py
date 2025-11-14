@@ -36,7 +36,7 @@ def render_banner() -> None:
     if os.getenv("STARTUP_QUIET", "").lower() in {"1", "true", "yes", "on"}:
         return
     if sys.stdout.isatty():
-        console.print(Panel.fit("[bold cyan]SolHunter Zero Startup[/]"), justify="center")
+        console.print(Panel.fit("[bold cyan]SolHunter Startup[/]"), justify="center")
 
 
 def parse_args(argv: List[str] | None = None) -> Tuple[argparse.Namespace, List[str]]:
