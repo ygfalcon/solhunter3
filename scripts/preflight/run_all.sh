@@ -75,7 +75,15 @@ main() {
   fi
 
   local -a preflight_runs=()
-  local modes=(1 0)
+  local -a modes=()
+  if [[ -n ${PREFLIGHT_MICRO_STATES:-} ]]; then
+    IFS=' ' read -r -a modes <<<"$PREFLIGHT_MICRO_STATES"
+  elif [[ -n ${MICRO_MODE:-} ]]; then
+    modes=("$MICRO_MODE")
+  else
+    modes=(1 0)
+  fi
+
   local original_micro=${MICRO_MODE:-}
   for mode in "${modes[@]}"; do
     local mode_label

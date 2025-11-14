@@ -2160,11 +2160,17 @@ run_preflight() {
   local idx=1
   for micro in "${micro_settings[@]}"; do
     log_info "Running preflight suite (mode=$mode micro=$micro pass $idx/$expected_runs)"
-    if ! MODE="$mode" MICRO_MODE="$micro" bash "$ROOT_DIR/scripts/preflight/run_all.sh"; then
-      return 1
-    fi
     ((idx++))
   done
+
+  local micro_states_string
+  micro_states_string=$(printf '%s ' "${micro_settings[@]}")
+  micro_states_string=${micro_states_string% }
+
+  if ! MODE="$mode" MICRO_MODE="${micro_settings[0]}" PREFLIGHT_MICRO_STATES="$micro_states_string" \
+    bash "$ROOT_DIR/scripts/preflight/run_all.sh"; then
+    return 1
+  fi
 }
 
 log_info "Running preflight suite"
