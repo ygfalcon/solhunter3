@@ -6,7 +6,7 @@ import os
 import sys
 import logging
 import re
-from typing import Mapping, Any, Sequence, cast
+from typing import Mapping, Any, Sequence, Callable, cast
 from pathlib import Path
 from importlib import import_module
 import urllib.parse
@@ -36,6 +36,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _VALIDATED_URLS: dict[str, str] = {}
+
+
+_ENV_REFRESH_HOOKS: list[Callable[[], None]] = []
+
+
+def register_runtime_init_hook(callback: Callable[[], None]) -> None:
+    """Register a callback to run after environment configuration updates."""
+
+    if callback not in _ENV_REFRESH_HOOKS:
+        _ENV_REFRESH_HOOKS.append(callback)
+
+
+def _run_runtime_init_hooks() -> None:
+    for hook in list(_ENV_REFRESH_HOOKS):
+        try:
+            hook()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Runtime init hook %s failed", hook)
 
 
 _REDACT_PATTERN = re.compile(r"(?i)(api[-_]?key|token|auth)=([^&#]+)")
@@ -544,6 +562,8 @@ def set_env_from_config(config: dict) -> None:
         scanner_common.refresh_runtime_values()
     except Exception:  # pragma: no cover - optional during early bootstrap
         pass
+
+    _run_runtime_init_hooks()
 
     # Gentle sanity: warn if someone points JUPITER_WS_URL to a Solana RPC host
     jws = os.getenv("JUPITER_WS_URL", "")

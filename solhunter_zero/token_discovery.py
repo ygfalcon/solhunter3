@@ -33,13 +33,15 @@ from .util.mints import is_valid_solana_mint
 
 logger = logging.getLogger(__name__)
 
-_FAST_MODE = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
+
+def _is_fast_mode() -> bool:
+    return os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 
 
 def _env_float(name: str, default: str, *, fast_default: float | None = None) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
-        if _FAST_MODE and fast_default is not None:
+        if fast_default is not None and _is_fast_mode():
             return float(fast_default)
         raw = default
     try:
@@ -49,19 +51,220 @@ def _env_float(name: str, default: str, *, fast_default: float | None = None) ->
     return value
 
 
-_MIN_VOLUME = _env_float("DISCOVERY_MIN_VOLUME_USD", "50000", fast_default=0.0)
-_MIN_LIQUIDITY = _env_float("DISCOVERY_MIN_LIQUIDITY_USD", "75000", fast_default=0.0)
-_MAX_TOKENS = int(os.getenv("DISCOVERY_MAX_TOKENS", "50") or 50)
-_PAGE_LIMIT = max(1, min(int(os.getenv("DISCOVERY_PAGE_SIZE", "25") or 25), 50))
-_OVERFETCH_FACTOR = float(os.getenv("DISCOVERY_OVERFETCH_FACTOR", "0.8") or 0.8)
-_CACHE_TTL = float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45)
-_MAX_OFFSET = int(os.getenv("DISCOVERY_MAX_OFFSET", "4000") or 4000)
-_MEMPOOL_LIMIT = int(os.getenv("DISCOVERY_MEMPOOL_LIMIT", "12") or 12)
-_ENABLE_MEMPOOL = os.getenv("DISCOVERY_ENABLE_MEMPOOL", "1").lower() in {"1", "true", "yes"}
-_WARM_TIMEOUT = float(os.getenv("DISCOVERY_WARM_TIMEOUT", "5") or 5)
-_BIRDEYE_RETRIES = int(os.getenv("DISCOVERY_BIRDEYE_RETRIES", "3") or 3)
-_BIRDEYE_BACKOFF = float(os.getenv("DISCOVERY_BIRDEYE_BACKOFF", "1.0") or 1.0)
-_BIRDEYE_BACKOFF_MAX = float(os.getenv("DISCOVERY_BIRDEYE_BACKOFF_MAX", "8.0") or 8.0)
+def _env_int(
+    name: str,
+    default: str,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        raw = default
+    try:
+        value = int(raw)
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _env_bool(name: str, default: str = "0") -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        raw = default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_str(name: str, default: str = "", *, strip: bool = True) -> str:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        raw = default
+    if strip:
+        return str(raw).strip()
+    return str(raw)
+
+
+class _DiscoverySettings:
+    __slots__ = ()
+
+    @property
+    def min_volume(self) -> float:
+        return _env_float("DISCOVERY_MIN_VOLUME_USD", "50000", fast_default=0.0)
+
+    @property
+    def min_liquidity(self) -> float:
+        return _env_float("DISCOVERY_MIN_LIQUIDITY_USD", "75000", fast_default=0.0)
+
+    @property
+    def max_tokens(self) -> int:
+        return _env_int("DISCOVERY_MAX_TOKENS", "50", minimum=1)
+
+    @property
+    def page_limit(self) -> int:
+        return _env_int("DISCOVERY_PAGE_SIZE", "25", minimum=1, maximum=50)
+
+    @property
+    def overfetch_factor(self) -> float:
+        return _env_float("DISCOVERY_OVERFETCH_FACTOR", "0.8")
+
+    @property
+    def cache_ttl(self) -> float:
+        return _env_float("DISCOVERY_CACHE_TTL", "45")
+
+    @property
+    def max_offset(self) -> int:
+        return _env_int("DISCOVERY_MAX_OFFSET", "4000", minimum=0)
+
+    @property
+    def mempool_limit(self) -> int:
+        return _env_int("DISCOVERY_MEMPOOL_LIMIT", "12", minimum=0)
+
+    @property
+    def enable_mempool(self) -> bool:
+        return _env_bool("DISCOVERY_ENABLE_MEMPOOL", "1")
+
+    @property
+    def warm_timeout(self) -> float:
+        return _env_float("DISCOVERY_WARM_TIMEOUT", "5")
+
+    @property
+    def birdeye_retries(self) -> int:
+        return _env_int("DISCOVERY_BIRDEYE_RETRIES", "3", minimum=1)
+
+    @property
+    def birdeye_backoff(self) -> float:
+        return _env_float("DISCOVERY_BIRDEYE_BACKOFF", "1.0")
+
+    @property
+    def birdeye_backoff_max(self) -> float:
+        return _env_float("DISCOVERY_BIRDEYE_BACKOFF_MAX", "8.0")
+
+    @property
+    def enable_dexscreener(self) -> bool:
+        return _env_bool("DISCOVERY_ENABLE_DEXSCREENER", "1")
+
+    @property
+    def dexscreener_url(self) -> str:
+        value = _env_str(
+            "DEXSCREENER_TOKENS_URL",
+            "https://api.dexscreener.com/latest/dex/tokens?chainId=solana",
+        )
+        return value
+
+    @property
+    def dexscreener_timeout(self) -> float:
+        return _env_float("DEXSCREENER_TIMEOUT", "8.0")
+
+    @property
+    def dexscreener_max_age(self) -> float:
+        return _env_float("DEXSCREENER_MAX_AGE_SECONDS", "3600")
+
+    @property
+    def enable_raydium(self) -> bool:
+        return _env_bool("DISCOVERY_ENABLE_RAYDIUM", "1")
+
+    @property
+    def raydium_timeout(self) -> float:
+        return _env_float("RAYDIUM_TIMEOUT", "2.0")
+
+    @property
+    def enable_meteora(self) -> bool:
+        return _env_bool("DISCOVERY_ENABLE_METEORA", "1")
+
+    @property
+    def meteora_pools_url(self) -> str:
+        value = _env_str("METEORA_POOLS_URL") or _env_str("METEORA_DISCOVERY_URL")
+        if value:
+            return value
+        return "https://dlmm-api.meteora.ag/api/pools/latest"
+
+    @property
+    def meteora_timeout(self) -> float:
+        return _env_float("METEORA_TIMEOUT", "8.0")
+
+    @property
+    def enable_dexlab(self) -> bool:
+        return _env_bool("DISCOVERY_ENABLE_DEXLAB", "1")
+
+    @property
+    def dexlab_list_url(self) -> str:
+        return _env_str("DEXLAB_LIST_URL", "https://api.dexlab.space/v1/token/list")
+
+    @property
+    def dexlab_timeout(self) -> float:
+        return _env_float("DEXLAB_TIMEOUT", "8.0")
+
+    @property
+    def enable_solscan(self) -> bool:
+        return _env_bool("DISCOVERY_ENABLE_SOLSCAN", "1")
+
+    @property
+    def solscan_meta_url(self) -> str:
+        value = _env_str("DISCOVERY_SOLSCAN_META_URL")
+        if value:
+            return value
+        value = _env_str("SOLSCAN_DISCOVERY_URL")
+        if value:
+            return value
+        return "https://public-api.solscan.io/token/meta"
+
+    @property
+    def solscan_api_key(self) -> str:
+        return _env_str("SOLSCAN_API_KEY")
+
+    @property
+    def solscan_timeout(self) -> float:
+        return _env_float("DISCOVERY_SOLSCAN_TIMEOUT", "6.0")
+
+    @property
+    def solscan_enrich_limit(self) -> int:
+        return max(0, _env_int("DISCOVERY_SOLSCAN_LIMIT", "8", minimum=0))
+
+    @property
+    def enable_orca(self) -> bool:
+        return _env_bool("DISCOVERY_ENABLE_ORCA", "1")
+
+    @property
+    def orca_timeout(self) -> float:
+        return _env_float("ORCA_TIMEOUT", "2.0")
+
+    @property
+    def orca_catalog_ttl(self) -> float:
+        return _env_float("ORCA_CATALOG_TTL", "600")
+
+    @property
+    def stage_b_score_threshold(self) -> float:
+        return _env_float("DISCOVERY_STAGE_B_THRESHOLD", "0.65")
+
+    @property
+    def stage_b_min_sources(self) -> int:
+        return _env_int("DISCOVERY_STAGE_B_MIN_SOURCES", "2", minimum=0)
+
+    @property
+    def solscan_negative_ttl(self) -> float:
+        return _env_float("SOLSCAN_NEGATIVE_TTL", "1800")
+
+    @property
+    def trending_min_liquidity(self) -> float:
+        return _env_float("TRENDING_MIN_LIQUIDITY_USD", "7500")
+
+
+SETTINGS = _DiscoverySettings()
+
+
+def _birdeye_tokenlist_url() -> str:
+    value = _env_str(
+        "BIRDEYE_TOKENLIST_URL", "https://api.birdeye.so/defi/tokenlist"
+    )
+    if not value:
+        return "https://api.birdeye.so/defi/tokenlist"
+    return value
+
+
 _BIRDEYE_THROTTLE_MARKERS = (
     "compute units usage limit exceeded",
     "request limit exceeded",
@@ -69,57 +272,6 @@ _BIRDEYE_THROTTLE_MARKERS = (
     "too many requests",
     "throttle",
 )
-
-_ENABLE_DEXSCREENER = (
-    os.getenv("DISCOVERY_ENABLE_DEXSCREENER", "1").lower() in {"1", "true", "yes", "on"}
-)
-_DEXSCREENER_URL = (
-    os.getenv("DEXSCREENER_TOKENS_URL")
-    or "https://api.dexscreener.com/latest/dex/tokens?chainId=solana"
-).strip()
-_DEXSCREENER_TIMEOUT = float(os.getenv("DEXSCREENER_TIMEOUT", "8.0") or 8.0)
-_DEXSCREENER_MAX_AGE_SECONDS = float(
-    os.getenv("DEXSCREENER_MAX_AGE_SECONDS", "3600") or 3600.0
-)
-
-_ENABLE_RAYDIUM = (
-    os.getenv("DISCOVERY_ENABLE_RAYDIUM", "1").lower() in {"1", "true", "yes", "on"}
-)
-_RAYDIUM_TIMEOUT = float(os.getenv("RAYDIUM_TIMEOUT", "2.0") or 2.0)
-
-_ENABLE_METEORA = (
-    os.getenv("DISCOVERY_ENABLE_METEORA", "1").lower() in {"1", "true", "yes", "on"}
-)
-_METEORA_POOLS_URL = (
-    os.getenv("METEORA_POOLS_URL")
-    or os.getenv("METEORA_DISCOVERY_URL")
-    or "https://dlmm-api.meteora.ag/api/pools/latest"
-).strip()
-_METEORA_TIMEOUT = float(os.getenv("METEORA_TIMEOUT", "8.0") or 8.0)
-
-_ENABLE_DEXLAB = (
-    os.getenv("DISCOVERY_ENABLE_DEXLAB", "1").lower() in {"1", "true", "yes", "on"}
-)
-_DEXLAB_LIST_URL = (
-    os.getenv("DEXLAB_LIST_URL") or "https://api.dexlab.space/v1/token/list"
-).strip()
-_DEXLAB_TIMEOUT = float(os.getenv("DEXLAB_TIMEOUT", "8.0") or 8.0)
-
-_ENABLE_SOLSCAN = (
-    os.getenv("DISCOVERY_ENABLE_SOLSCAN", "1").lower() in {"1", "true", "yes", "on"}
-)
-_SOLSCAN_META_URL = (
-    os.getenv("DISCOVERY_SOLSCAN_META_URL")
-    or os.getenv("SOLSCAN_DISCOVERY_URL")
-    or "https://public-api.solscan.io/token/meta"
-).strip()
-_SOLSCAN_API_KEY = (os.getenv("SOLSCAN_API_KEY") or "").strip()
-_SOLSCAN_TIMEOUT = float(os.getenv("DISCOVERY_SOLSCAN_TIMEOUT", "6.0") or 6.0)
-_SOLSCAN_ENRICH_LIMIT = max(0, int(os.getenv("DISCOVERY_SOLSCAN_LIMIT", "8") or 8))
-
-_ENABLE_ORCA = os.getenv("DISCOVERY_ENABLE_ORCA", "1").lower() in {"1", "true", "yes", "on"}
-_ORCA_TIMEOUT = float(os.getenv("ORCA_TIMEOUT", "2.0") or 2.0)
-_ORCA_CATALOG_TTL = float(os.getenv("ORCA_CATALOG_TTL", "600") or 600.0)
 
 TokenEntry = Dict[str, Any]
 
@@ -139,7 +291,7 @@ class DiscoveryConfigurationError(RuntimeError):
         return f"{base} (source={self.source})"
 
 
-_BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=_CACHE_TTL)
+_BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=SETTINGS.cache_ttl)
 _CACHE_LOCK = Lock()
 _BIRDEYE_DISABLED_INFO = False
 
@@ -147,13 +299,6 @@ _ORCA_CATALOG_CACHE: tuple[
     float, Dict[str, List[Dict[str, Any]]], float
 ] = (0.0, {}, 0.0)
 _ORCA_CATALOG_LOCK: asyncio.Lock | None = None
-
-_BIRDEYE_TOKENLIST_URL = (
-    (os.getenv("BIRDEYE_TOKENLIST_URL") or "https://api.birdeye.so/defi/tokenlist")
-    .strip()
-)
-if not _BIRDEYE_TOKENLIST_URL:
-    _BIRDEYE_TOKENLIST_URL = "https://api.birdeye.so/defi/tokenlist"
 
 
 _SCORING_DEFAULT = {
@@ -205,6 +350,29 @@ def _load_scoring_weights() -> tuple[float, Dict[str, float]]:
 
 
 _SCORING_BIAS, _SCORING_WEIGHTS = _load_scoring_weights()
+
+
+def refresh_runtime_values() -> None:
+    """Synchronise cached discovery state with the current environment."""
+
+    global _SCORING_BIAS, _SCORING_WEIGHTS, _BIRDEYE_DISABLED_INFO, _ORCA_CATALOG_CACHE
+
+    _SCORING_BIAS, _SCORING_WEIGHTS = _load_scoring_weights()
+
+    try:
+        _BIRDEYE_CACHE.ttl = float(SETTINGS.cache_ttl)
+    except Exception:
+        pass
+    _cache_clear()
+
+    try:
+        _SOLSCAN_NEGATIVE_CACHE.ttl = float(SETTINGS.solscan_negative_ttl)
+    except Exception:
+        pass
+    _SOLSCAN_NEGATIVE_CACHE.clear()
+
+    _ORCA_CATALOG_CACHE = (0.0, {}, 0.0)
+    _BIRDEYE_DISABLED_INFO = False
 
 
 def get_scoring_context() -> Tuple[float, Dict[str, float]]:
@@ -262,10 +430,7 @@ def compute_score_from_features(
     )[:3]
 
     return float(score), breakdown, top_features
-_STAGE_B_SCORE_THRESHOLD = float(os.getenv("DISCOVERY_STAGE_B_THRESHOLD", "0.65") or 0.65)
-_STAGE_B_MIN_SOURCES = int(os.getenv("DISCOVERY_STAGE_B_MIN_SOURCES", "2") or 2)
-_SOLSCAN_NEGATIVE_TTL = float(os.getenv("SOLSCAN_NEGATIVE_TTL", "1800") or 1800.0)
-_SOLSCAN_NEGATIVE_CACHE: TTLCache[str, bool] = TTLCache(maxsize=2048, ttl=_SOLSCAN_NEGATIVE_TTL)
+_SOLSCAN_NEGATIVE_CACHE: TTLCache[str, bool] = TTLCache(maxsize=2048, ttl=SETTINGS.solscan_negative_ttl)
 
 _ETAG_HOSTS = {
     "api.dexscreener.com",
@@ -273,6 +438,14 @@ _ETAG_HOSTS = {
     "api.meteora.ag",
     "api.dexlab.space",
 }
+
+
+try:  # Optional during bootstrap when config is not yet initialised
+    from .config import register_runtime_init_hook
+
+    register_runtime_init_hook(refresh_runtime_values)
+except Exception:  # pragma: no cover - defensive during partial imports
+    pass
 
 _STATIC_CANDIDATE_SEEDS: Sequence[tuple[str, str, str]] = (
     (
@@ -409,9 +582,9 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
 async def _load_orca_catalog(
     *, session: aiohttp.ClientSession | None = None
 ) -> Dict[str, List[Dict[str, Any]]]:
-    if not _ENABLE_ORCA:
+    if not SETTINGS.enable_orca:
         return {}
-    ttl = max(60.0, float(_ORCA_CATALOG_TTL))
+    ttl = max(60.0, float(SETTINGS.orca_catalog_ttl))
     lock = await _get_orca_catalog_lock()
     async with lock:
         global _ORCA_CATALOG_CACHE
@@ -422,7 +595,7 @@ async def _load_orca_catalog(
         try:
             payload = await orca_provider.fetch(
                 None,
-                timeout=_ORCA_TIMEOUT,
+                timeout=SETTINGS.orca_timeout,
                 session=session,
             )
         except Exception as exc:
@@ -455,7 +628,7 @@ def _cache_clear() -> None:
 
 
 def _current_cache_key() -> str:
-    return f"tokens:{int(_MIN_VOLUME)}:{int(_MIN_LIQUIDITY)}:{_PAGE_LIMIT}"
+    return f"tokens:{int(SETTINGS.min_volume)}:{int(SETTINGS.min_liquidity)}:{SETTINGS.page_limit}"
 
 
 def _make_timeout(value: Any) -> ClientTimeout | None:
@@ -535,7 +708,7 @@ def _compute_feature_vector(
                 oracle_present = 1.0
         except Exception:
             oracle_present = 0.0
-    sellable = 1.0 if liquidity >= _TRENDING_MIN_LIQUIDITY else 0.0
+    sellable = 1.0 if liquidity >= SETTINGS.trending_min_liquidity else 0.0
     mempool_pressure = 0.0
     if mempool:
         try:
@@ -887,22 +1060,22 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
     tokens: Dict[str, TokenEntry] = {}
     offset = 0
     if limit is None:
-        effective_limit = _MAX_TOKENS
+        effective_limit = SETTINGS.max_tokens
     else:
         try:
             effective_limit = int(limit)
         except (TypeError, ValueError):
-            effective_limit = _MAX_TOKENS
+            effective_limit = SETTINGS.max_tokens
     if effective_limit <= 0:
-        effective_limit = _MAX_TOKENS
-    effective_limit = min(effective_limit, _MAX_TOKENS)
-    target_count = max(int(effective_limit * _OVERFETCH_FACTOR), _PAGE_LIMIT)
-    backoff = _BIRDEYE_BACKOFF
+        effective_limit = SETTINGS.max_tokens
+    effective_limit = min(effective_limit, SETTINGS.max_tokens)
+    target_count = max(int(effective_limit * SETTINGS.overfetch_factor), SETTINGS.page_limit)
+    backoff = SETTINGS.birdeye_backoff
 
     logger.debug(
         "BirdEye fetch start offset=%s limit=%s target=%s effective_limit=%s",
         offset,
-        _PAGE_LIMIT,
+        SETTINGS.page_limit,
         target_count,
         effective_limit,
     )
@@ -925,25 +1098,25 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
         session = await get_session(timeout=session_timeout)
     except TypeError:
         session = await get_session()
-    while offset < _MAX_OFFSET and len(tokens) < target_count:
+    while offset < SETTINGS.max_offset and len(tokens) < target_count:
         initial_count = len(tokens)
         logger.debug(
             "BirdEye fetch page offset=%s limit=%s accumulated=%s",
             offset,
-            _PAGE_LIMIT,
+            SETTINGS.page_limit,
             len(tokens),
         )
         params = {
             "offset": offset,
-            "limit": _PAGE_LIMIT,
+            "limit": SETTINGS.page_limit,
             "sortBy": "v24hUSD",
             "chain": "solana",  # also pass chain in query to satisfy stricter backends
         }
         payload: Dict[str, Any] | None = None
-        for attempt in range(1, _BIRDEYE_RETRIES + 1):
+        for attempt in range(1, SETTINGS.birdeye_retries + 1):
             try:
                 request_cm = session.get(
-                    _BIRDEYE_TOKENLIST_URL,
+                    _birdeye_tokenlist_url(),
                     params=params,
                     headers=_headers(),
                 )
@@ -960,11 +1133,11 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                         retry_after = resp.headers.get("Retry-After")
                         if retry_after:
                             try:
-                                ra_val = min(float(retry_after), _BIRDEYE_BACKOFF_MAX)
+                                ra_val = min(float(retry_after), SETTINGS.birdeye_backoff_max)
                                 delay = max(delay, ra_val)
                             except ValueError:
                                 pass
-                        if attempt >= _BIRDEYE_RETRIES:
+                        if attempt >= SETTINGS.birdeye_retries:
                             if tokens:
                                 logger.warning(
                                     "BirdEye %s after %s tokens; returning partial results",
@@ -976,7 +1149,7 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                             _cache_set(cache_key, [])
                             return []
                         await asyncio.sleep(delay)
-                        backoff = min(max(backoff * 2, delay), _BIRDEYE_BACKOFF_MAX)
+                        backoff = min(max(backoff * 2, delay), SETTINGS.birdeye_backoff_max)
                         continue
 
                     if 400 <= resp.status < 500:
@@ -1017,7 +1190,7 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
 
                     resp.raise_for_status()
                     payload = await resp.json()
-                    backoff = _BIRDEYE_BACKOFF
+                    backoff = SETTINGS.birdeye_backoff
                     break
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 logger.warning(
@@ -1026,7 +1199,7 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                     offset,
                     exc,
                 )
-                if attempt >= _BIRDEYE_RETRIES:
+                if attempt >= SETTINGS.birdeye_retries:
                     if tokens:
                         logger.warning(
                             "BirdEye retries exhausted after %s tokens; returning partial",
@@ -1037,9 +1210,11 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                     _cache_set(cache_key, [])
                     return []
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, _BIRDEYE_BACKOFF_MAX)
+                backoff = min(backoff * 2, SETTINGS.birdeye_backoff_max)
                 continue
             except Exception as exc:
+                if isinstance(exc, DiscoveryConfigurationError):
+                    raise
                 logger.warning("BirdEye unexpected error offset=%s: %s", offset, exc)
                 if not tokens:
                     _cache_set(cache_key, [])
@@ -1081,9 +1256,9 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                 except Exception:
                     change = 0.0
 
-                if _MIN_VOLUME and volume < _MIN_VOLUME:
+                if SETTINGS.min_volume and volume < SETTINGS.min_volume:
                     continue
-                if _MIN_LIQUIDITY and liquidity < _MIN_LIQUIDITY:
+                if SETTINGS.min_liquidity and liquidity < SETTINGS.min_liquidity:
                     continue
 
                 entry = tokens.setdefault(
@@ -1107,7 +1282,7 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                 if len(tokens) >= effective_limit:
                     break
 
-            offset += _PAGE_LIMIT
+            offset += SETTINGS.page_limit
             total = data.get("total")
             if total is None:
                 total = data.get("totalCount")
@@ -1137,12 +1312,12 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
 async def _fetch_raydium_tokens(
     *, session: aiohttp.ClientSession | None = None
 ) -> List[TokenEntry]:
-    if not _ENABLE_RAYDIUM:
+    if not SETTINGS.enable_raydium:
         return []
     try:
         payload = await raydium_provider.fetch(
             None,
-            timeout=_RAYDIUM_TIMEOUT,
+            timeout=SETTINGS.raydium_timeout,
             session=session,
         )
     except Exception as exc:
@@ -1167,7 +1342,7 @@ async def _fetch_raydium_tokens(
         if not valid_mint:
             continue
         liquidity = _coerce_numeric(pair.get("liquidity_usd"))
-        if _MIN_LIQUIDITY and liquidity < _MIN_LIQUIDITY:
+        if SETTINGS.min_liquidity and liquidity < SETTINGS.min_liquidity:
             continue
         price = _coerce_numeric(pair.get("price_usd"))
         entry: Dict[str, Any] = {
@@ -1192,14 +1367,14 @@ async def _fetch_raydium_tokens(
 async def _fetch_dexscreener_tokens(
     *, session: aiohttp.ClientSession | None = None
 ) -> List[TokenEntry]:
-    if not _ENABLE_DEXSCREENER or not _DEXSCREENER_URL:
+    if not SETTINGS.enable_dexscreener or not SETTINGS.dexscreener_url:
         return []
 
     try:
         payload = await _http_get_json(
-            _DEXSCREENER_URL,
+            SETTINGS.dexscreener_url,
             headers={"Accept": "application/json"},
-            timeout=_DEXSCREENER_TIMEOUT,
+            timeout=SETTINGS.dexscreener_timeout,
             session=session,
         )
     except Exception as exc:
@@ -1215,7 +1390,7 @@ async def _fetch_dexscreener_tokens(
         return []
 
     now = time.time()
-    max_age = max(0.0, float(_DEXSCREENER_MAX_AGE_SECONDS))
+    max_age = max(0.0, float(SETTINGS.dexscreener_max_age))
 
     tokens: Dict[str, Dict[str, Any]] = {}
 
@@ -1315,14 +1490,14 @@ async def _fetch_dexscreener_tokens(
 async def _fetch_meteora_tokens(
     *, session: aiohttp.ClientSession | None = None
 ) -> List[TokenEntry]:
-    if not _ENABLE_METEORA or not _METEORA_POOLS_URL:
+    if not SETTINGS.enable_meteora or not SETTINGS.meteora_pools_url:
         return []
 
     try:
         payload = await _http_get_json(
-            _METEORA_POOLS_URL,
+            SETTINGS.meteora_pools_url,
             headers={"Accept": "application/json"},
-            timeout=_METEORA_TIMEOUT,
+            timeout=SETTINGS.meteora_timeout,
             session=session,
         )
     except Exception as exc:
@@ -1431,14 +1606,14 @@ async def _fetch_meteora_tokens(
 async def _fetch_dexlab_tokens(
     *, session: aiohttp.ClientSession | None = None
 ) -> List[TokenEntry]:
-    if not _ENABLE_DEXLAB or not _DEXLAB_LIST_URL:
+    if not SETTINGS.enable_dexlab or not SETTINGS.dexlab_list_url:
         return []
 
     try:
         payload = await _http_get_json(
-            _DEXLAB_LIST_URL,
+            SETTINGS.dexlab_list_url,
             headers={"Accept": "application/json"},
-            timeout=_DEXLAB_TIMEOUT,
+            timeout=SETTINGS.dexlab_timeout,
             session=session,
         )
     except Exception as exc:
@@ -1555,9 +1730,9 @@ async def _enrich_with_solscan(
     addresses: Iterable[str] | None = None,
 ) -> None:
     if (
-        not _ENABLE_SOLSCAN
-        or not _SOLSCAN_META_URL
-        or _SOLSCAN_ENRICH_LIMIT <= 0
+        not SETTINGS.enable_solscan
+        or not SETTINGS.solscan_meta_url
+        or SETTINGS.solscan_enrich_limit <= 0
         or not candidates
     ):
         return
@@ -1574,20 +1749,20 @@ async def _enrich_with_solscan(
             continue
         if needs_symbol or needs_name or needs_decimals:
             pending.append(addr)
-        if len(pending) >= _SOLSCAN_ENRICH_LIMIT:
+        if len(pending) >= SETTINGS.solscan_enrich_limit:
             break
 
     if not pending:
         return
 
     headers = {"Accept": "application/json"}
-    if _SOLSCAN_API_KEY:
-        headers["token"] = _SOLSCAN_API_KEY
+    if SETTINGS.solscan_api_key:
+        headers["token"] = SETTINGS.solscan_api_key
 
-    timeout = _make_timeout(_SOLSCAN_TIMEOUT)
+    timeout = _make_timeout(SETTINGS.solscan_timeout)
     session = await get_session(timeout=timeout)
 
-    concurrency = max(1, min(4, _SOLSCAN_ENRICH_LIMIT))
+    concurrency = max(1, min(4, SETTINGS.solscan_enrich_limit))
     semaphore = asyncio.Semaphore(concurrency)
 
     async def _fetch_and_apply(address: str) -> None:
@@ -1595,7 +1770,7 @@ async def _enrich_with_solscan(
         async with semaphore:
             try:
                 payload = await _http_get_json(
-                    _SOLSCAN_META_URL,
+                    SETTINGS.solscan_meta_url,
                     params=params,
                     headers=headers,
                     timeout=timeout,
@@ -1637,7 +1812,7 @@ async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, 
             if not addr:
                 continue
             scores[addr] = item
-            if len(scores) >= _MEMPOOL_LIMIT:
+            if len(scores) >= SETTINGS.mempool_limit:
                 break
     except Exception as exc:
         logger.debug("Mempool stream unavailable: %s", exc)
@@ -1689,17 +1864,17 @@ def discover_candidates(
     """Combine BirdEye numeric candidates with mempool signals and rank."""
 
     if limit is None or limit <= 0:
-        limit = _MAX_TOKENS
+        limit = SETTINGS.max_tokens
     if mempool_threshold is None:
         mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
 
     shared_http_sources = any(
         (
-            _ENABLE_DEXSCREENER and _DEXSCREENER_URL,
-            _ENABLE_METEORA and _METEORA_POOLS_URL,
-            _ENABLE_DEXLAB and _DEXLAB_LIST_URL,
-            _ENABLE_RAYDIUM,
-            _ENABLE_ORCA,
+            SETTINGS.enable_dexscreener and SETTINGS.dexscreener_url,
+            SETTINGS.enable_meteora and SETTINGS.meteora_pools_url,
+            SETTINGS.enable_dexlab and SETTINGS.dexlab_list_url,
+            SETTINGS.enable_raydium,
+            SETTINGS.enable_orca,
         )
     )
 
@@ -1735,7 +1910,7 @@ def discover_candidates(
                 entry.pop(legacy, None)
             source_count = _source_count(entry)
             entry["_stage_b_eligible"] = bool(
-                score >= _STAGE_B_SCORE_THRESHOLD or source_count >= _STAGE_B_MIN_SOURCES
+                score >= SETTINGS.stage_b_score_threshold or source_count >= SETTINGS.stage_b_min_sources
             )
 
     def _snapshot(
@@ -1803,7 +1978,7 @@ def discover_candidates(
             shared_session: aiohttp.ClientSession | None,
         ) -> AsyncIterator[List[TokenEntry]]:
             orca_catalog: Dict[str, List[Dict[str, Any]]] = {}
-            if _ENABLE_ORCA:
+            if SETTINGS.enable_orca:
                 try:
                     orca_catalog = await _load_orca_catalog(session=shared_session)
                 except Exception as exc:
@@ -1814,34 +1989,34 @@ def discover_candidates(
                 asyncio.create_task(
                     _collect_mempool_signals(rpc_url, mempool_threshold)
                 )
-                if _ENABLE_MEMPOOL and rpc_url
+                if SETTINGS.enable_mempool and rpc_url
                 else None
             )
-            if _ENABLE_MEMPOOL and rpc_url:
+            if SETTINGS.enable_mempool and rpc_url:
                 logger.debug("Discovery mempool threshold=%.3f", mempool_threshold)
 
             task_map: Dict[asyncio.Task[Any], str] = {bird_task: "bird"}
             if mempool_task is not None:
                 task_map[mempool_task] = "mempool"
-            if _ENABLE_DEXSCREENER and _DEXSCREENER_URL:
+            if SETTINGS.enable_dexscreener and SETTINGS.dexscreener_url:
                 task_map[
                     asyncio.create_task(
                         _fetch_dexscreener_tokens(session=shared_session)
                     )
                 ] = "dexscreener"
-            if _ENABLE_RAYDIUM:
+            if SETTINGS.enable_raydium:
                 task_map[
                     asyncio.create_task(
                         _fetch_raydium_tokens(session=shared_session)
                     )
                 ] = "raydium"
-            if _ENABLE_METEORA and _METEORA_POOLS_URL:
+            if SETTINGS.enable_meteora and SETTINGS.meteora_pools_url:
                 task_map[
                     asyncio.create_task(
                         _fetch_meteora_tokens(session=shared_session)
                     )
                 ] = "meteora"
-            if _ENABLE_DEXLAB and _DEXLAB_LIST_URL:
+            if SETTINGS.enable_dexlab and SETTINGS.dexlab_list_url:
                 task_map[
                     asyncio.create_task(
                         _fetch_dexlab_tokens(session=shared_session)
@@ -1851,7 +2026,7 @@ def discover_candidates(
             def _enrich_with_orca(entry: Dict[str, Any] | None) -> None:
                 if not entry:
                     return
-                if not _ENABLE_ORCA or not orca_catalog:
+                if not SETTINGS.enable_orca or not orca_catalog:
                     return
                 _merge_orca_venues(entry, orca_catalog)
 
@@ -2188,7 +2363,7 @@ def warm_cache(rpc_url: str, *, limit: int | None = None) -> None:
     if not (rpc_url or api_key):
         return
 
-    limit = limit or min(_MAX_TOKENS, 10)
+    limit = limit or min(SETTINGS.max_tokens, 10)
     mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
 
     def _worker() -> None:
@@ -2199,7 +2374,7 @@ def warm_cache(rpc_url: str, *, limit: int | None = None) -> None:
                 ):
                     pass
 
-            asyncio.run(asyncio.wait_for(_consume(), timeout=_WARM_TIMEOUT))
+            asyncio.run(asyncio.wait_for(_consume(), timeout=SETTINGS.warm_timeout))
         except Exception as exc:
             logger.debug("Discovery warm cache failed: %s", exc)
 
