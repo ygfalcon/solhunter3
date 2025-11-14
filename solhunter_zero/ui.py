@@ -127,6 +127,19 @@ def _unregister_ui_server(server: "UIServer") -> None:
         _teardown_ui_environment()
 
 
+def _resolve_active_http_port() -> int | None:
+    """Return the port of an active HTTP server if one is running."""
+
+    for server in list(_ACTIVE_HTTP_SERVERS):
+        try:
+            port = int(getattr(server, "port", 0))
+        except (TypeError, ValueError):
+            continue
+        if port:
+            return port
+    return None
+
+
 def _select_first_url(*candidates: Any) -> str | None:
     for candidate in candidates:
         if not candidate:
@@ -2461,8 +2474,12 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
             manifest[f"{channel}_ws"] = None
             manifest[f"{channel}_ws_available"] = False
 
-    ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
-    manifest["ui_port"] = _parse_port(ui_port_value, DEFAULT_UI_PORT)
+    active_http_port = _resolve_active_http_port()
+    if active_http_port is not None:
+        manifest["ui_port"] = active_http_port
+    else:
+        ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
+        manifest["ui_port"] = _parse_port(ui_port_value, DEFAULT_UI_PORT)
     return manifest
 def _shutdown_state(state: _WebsocketState) -> None:
     loop = state.loop
