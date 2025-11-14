@@ -1,5 +1,10 @@
 import asyncio
 import importlib
+from types import SimpleNamespace
+
+import pytest
+
+from solhunter_zero.discovery import merge_sources
 
 
 def _reset_state(token_scanner):
@@ -309,3 +314,82 @@ def test_collect_trending_runs_das_alongside(monkeypatch):
     asyncio.run(runner())
     assert flags["helius"] == 1
     assert flags["pump"] == 1
+
+
+PUMP_TOKEN = "PumpFunMint111111111111111111111111111111111"
+PUMP_PRICE = 0.0123
+
+
+async def _empty_stream(*_args, **_kwargs):
+    if False:  # pragma: no cover - required to form an async generator
+        yield None
+
+
+def test_merge_sources_prefers_pumpfun_metadata(monkeypatch):
+    async def fake_trending(limit=None):  # noqa: ARG001 - signature matches real call
+        return [PUMP_TOKEN]
+
+    async def fake_onchain_scan(*_args, **_kwargs):
+        return []
+
+    async def fake_fetch_dex_metrics(token, rpc_url=None):  # noqa: ARG001
+        assert token == PUMP_TOKEN
+        return {"price": 0.0, "volume_24h": 0.0, "liquidity_usd": 0.0}
+
+    async def fake_volume(token, rpc_url=None):  # noqa: ARG001
+        assert token == PUMP_TOKEN
+        return 0.0
+
+    async def fake_liquidity(token, rpc_url=None):  # noqa: ARG001
+        assert token == PUMP_TOKEN
+        return 10.0
+
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.fetch_trending_tokens_async",
+        fake_trending,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.stream_ranked_mempool_tokens_with_depth",
+        _empty_stream,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.scan_tokens_onchain",
+        fake_onchain_scan,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.validate_mint",
+        lambda _: True,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.normalize_candidate",
+        lambda addr: addr,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.token_scanner",
+        SimpleNamespace(
+            TRENDING_METADATA={
+                PUMP_TOKEN: {
+                    "metadata": {"pumpfun": {"price": PUMP_PRICE}},
+                }
+            }
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.onchain_metrics.fetch_dex_metrics_async",
+        fake_fetch_dex_metrics,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.onchain_metrics.fetch_volume_onchain_async",
+        fake_volume,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.discovery.raw_liquidity_onchain_async",
+        fake_liquidity,
+    )
+
+    merged = asyncio.run(merge_sources("rpc", limit=1, mempool_threshold=0.0))
+    assert merged, "expected discovery results"
+    entry = next(item for item in merged if item["address"] == PUMP_TOKEN)
+    assert entry["price"] == pytest.approx(PUMP_PRICE)
+    assert "onchain_fallback" in entry["sources"]
