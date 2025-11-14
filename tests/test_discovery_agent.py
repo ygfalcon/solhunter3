@@ -102,6 +102,39 @@ def test_zero_env_limit_disables_discovery(monkeypatch, caplog):
     assert "Discovery disabled" in caplog.text
 
 
+def test_social_limit_invalid_env_uses_default(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("DISCOVERY_SOCIAL_LIMIT", "nope")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.social_limit == 12
+    assert "Invalid DISCOVERY_SOCIAL_LIMIT" in caplog.text
+
+
+def test_social_min_mentions_below_min_uses_default(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("DISCOVERY_SOCIAL_MIN_MENTIONS", "0")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.social_min_mentions == 2
+    assert "DISCOVERY_SOCIAL_MIN_MENTIONS" in caplog.text
+
+
+def test_social_sample_limit_invalid_env_uses_default(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("DISCOVERY_SOCIAL_SAMPLE_LIMIT", "bad")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.social_sample_limit == 3
+    assert "Invalid DISCOVERY_SOCIAL_SAMPLE_LIMIT" in caplog.text
+
+
 def test_collect_mempool_times_out(monkeypatch, caplog):
     _reset_cache()
 
