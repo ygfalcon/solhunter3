@@ -1731,7 +1731,10 @@ if config_path:
         sys.exit(1)
     value = cfg.get("solana_keypair")
     if isinstance(value, str) and value.strip():
-        path = Path(value.strip()).expanduser()
+        candidate = Path(value.strip())
+        if config_path and not candidate.is_absolute():
+            candidate = Path(config_path).parent / candidate
+        path = candidate.expanduser()
         candidates.setdefault(path, set()).add("config.solana_keypair")
 
 if not candidates:
