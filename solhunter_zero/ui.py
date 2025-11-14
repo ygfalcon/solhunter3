@@ -1488,6 +1488,9 @@ class _WebsocketState:
         "last_drop_warning_at",
         "recent_close_codes",
         "lock",
+        "ready",
+        "ready_status",
+        "ready_detail",
     )
 
     def __init__(self, name: str) -> None:
@@ -1508,6 +1511,9 @@ class _WebsocketState:
         self.last_drop_warning_at: float = 0.0
         self.recent_close_codes: Deque[int | None] = deque(maxlen=10)
         self.lock = threading.Lock()
+        self.ready = threading.Event()
+        self.ready_status: str = "stopped"
+        self.ready_detail: str | None = None
 
 
 _WS_CHANNELS: dict[str, _WebsocketState] = {
@@ -2044,6 +2050,97 @@ def get_ws_channel_metrics() -> Dict[str, Dict[str, Any]]:
     return metrics
 
 
+def get_ws_status_snapshot() -> Dict[str, Dict[str, Any]]:
+    """Return a readiness snapshot for each websocket channel."""
+
+    snapshot: Dict[str, Dict[str, Any]] = {}
+    for name, state in _WS_CHANNELS.items():
+        with state.lock:
+            client_count = len(state.clients)
+        thread_alive = bool(state.thread and state.thread.is_alive())
+        loop_active = state.loop is not None
+        server_active = state.server is not None
+        ready = state.ready.is_set()
+        status = "ok"
+        detail: str | None = None
+        if not (ready and thread_alive and loop_active and server_active):
+            status = "failed"
+            if state.ready_detail:
+                detail = state.ready_detail
+            elif not ready:
+                detail = "not ready"
+            elif not thread_alive:
+                detail = "thread not running"
+            elif not server_active:
+                detail = "server unavailable"
+            else:
+                detail = "loop inactive"
+        snapshot[name] = {
+            "status": status,
+            "ready": ready,
+            "thread_alive": thread_alive,
+            "loop_active": loop_active,
+            "server_active": server_active,
+            "clients": client_count,
+            "detail": detail,
+            "host": state.host,
+            "port": state.port,
+        }
+    return snapshot
+
+
+def summarize_ws_status(
+    optional: bool | None = None,
+) -> tuple[Dict[str, str], Dict[str, str]]:
+    """Return websocket status strings and optional detail messages."""
+
+    optional_flag = (
+        parse_bool_env("UI_WS_OPTIONAL", False)
+        if optional is None
+        else bool(optional)
+    )
+    status_map: Dict[str, str] = {}
+    detail_map: Dict[str, str] = {}
+    for channel, info in get_ws_status_snapshot().items():
+        key = f"{channel}_ws"
+        status = str(info.get("status") or "failed")
+        detail = info.get("detail")
+        if optional_flag and status == "failed":
+            status = "degraded"
+            if detail:
+                detail = f"{detail}; optional"
+            else:
+                detail = "optional"
+        status_map[key] = status
+        if detail:
+            detail_map[key] = detail
+    return status_map, detail_map
+
+
+def _status_value_ok(value: Any) -> bool:
+    """Return True when *value* represents a healthy status."""
+
+    if isinstance(value, Mapping):
+        if "ok" in value:
+            return _status_value_ok(value.get("ok"))
+        if "status" in value:
+            return _status_value_ok(value.get("status"))
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return False
+        if normalized in {"ok", "running", "ready", "connected", "available", "true"}:
+            return True
+        if normalized in {"fail", "failed", "error", "inactive", "down", "false", "unavailable"}:
+            return False
+        return True
+    return bool(value)
+
+
 def _normalize_ws_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -2265,6 +2362,10 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
 def _shutdown_state(state: _WebsocketState) -> None:
     loop = state.loop
     if loop is None:
+        state.ready.clear()
+        if state.ready_status != "failed":
+            state.ready_status = "stopped"
+            state.ready_detail = None
         return
 
     def _stop_loop() -> None:
@@ -2276,6 +2377,10 @@ def _shutdown_state(state: _WebsocketState) -> None:
         thread.join(timeout=2)
     state.thread = None
     state.host = None
+    state.ready.clear()
+    if state.ready_status != "failed":
+        state.ready_status = "stopped"
+        state.ready_detail = None
 
 
 def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> None:
@@ -2298,6 +2403,10 @@ def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> No
         state.task.cancel()
         with contextlib.suppress(BaseException):
             loop.run_until_complete(state.task)
+    state.ready.clear()
+    if state.ready_status != "failed":
+        state.ready_status = "stopped"
+        state.ready_detail = None
     state.task = None
 
     if state.queue is not None:
@@ -2333,6 +2442,9 @@ def _start_channel(
     ping_timeout: float,
 ) -> threading.Thread:
     state = _WS_CHANNELS[channel]
+    state.ready.clear()
+    state.ready_status = "starting"
+    state.ready_detail = None
     ready: Queue[Any] = Queue(maxsize=1)
 
     def _run() -> None:
@@ -2658,11 +2770,17 @@ def _start_channel(
                 loop.close()
             except Exception:
                 pass
+            state.ready.clear()
+            state.ready_status = "failed"
+            state.ready_detail = str(last_exc) if last_exc else "bind failed"
             return
 
         state.server = server
         state.task = loop.create_task(_broadcast_loop())
         ready.put(None)
+        state.ready.set()
+        state.ready_status = "ok"
+        state.ready_detail = None
 
         try:
             loop.run_forever()
@@ -2689,10 +2807,16 @@ def _start_channel(
     try:
         result = ready.get(timeout=ready_timeout)
     except Exception as exc:  # pragma: no cover - unexpected queue failure
+        state.ready.clear()
+        state.ready_status = "failed"
+        state.ready_detail = f"startup timeout: {exc}"
         _shutdown_state(state)
         raise RuntimeError(f"Timeout starting {channel} websocket") from exc
 
     if isinstance(result, Exception):
+        state.ready.clear()
+        state.ready_status = "failed"
+        state.ready_detail = str(result)
         _shutdown_state(state)
         raise RuntimeError(
             f"{channel} websocket failed to bind on {host}:{port}: {result}"
@@ -3460,35 +3584,25 @@ def create_app(state: UIState | None = None) -> Flask:
             base_url = f"{scheme}://{host}"
         meta_snapshot = get_ui_meta_snapshot()
         payload: Dict[str, Any] = {"url": base_url, "meta": meta_snapshot}
+        status_payload = state.snapshot_status()
+        if isinstance(status_payload, Mapping):
+            status_block: Dict[str, Any] = dict(status_payload)
+        else:
+            status_block = {}
+        status_block.setdefault("ui", "ok")
+        ws_statuses, ws_details = summarize_ws_status()
         for channel in ("rl", "events", "logs"):
             key = f"{channel}_ws"
             available_key = f"{channel}_ws_available"
             payload[key] = manifest.get(key)
             payload[available_key] = manifest.get(available_key, bool(manifest.get(key)))
+            status_block.setdefault(key, ws_statuses.get(key, "failed"))
+        status_block.update(ws_statuses)
+        payload["status"] = status_block
+        payload["ok"] = all(_status_value_ok(value) for value in status_block.values())
+        if ws_details:
+            payload["status_details"] = ws_details
         return payload
-
-    def _probe_ws(url: str | None, *, timeout: float = 1.5) -> tuple[str, Optional[str]]:
-        if not url:
-            return "fail", "missing endpoint"
-        if websockets is None:
-            return "fail", "websockets module unavailable"
-
-        async def _check() -> tuple[str, Optional[str]]:
-            try:
-                async with websockets.connect(url, ping_timeout=timeout, close_timeout=timeout):
-                    return "ok", None
-            except Exception as exc:  # pragma: no cover - network probe failures
-                log.debug("UI websocket probe failed for %s: %s", url, exc)
-                return "fail", f"{type(exc).__name__}: {exc}"
-
-        try:
-            return asyncio.run(_check())
-        except RuntimeError as exc:  # pragma: no cover - unexpected event loop state
-            log.debug("UI websocket probe unavailable for %s: %s", url, exc)
-            return "fail", f"RuntimeError: {exc}"
-        except Exception as exc:  # pragma: no cover - defensive
-            log.debug("UI websocket probe crashed for %s: %s", url, exc)
-            return "fail", f"{type(exc).__name__}: {exc}"
 
     @app.get("/api/manifest")
     def api_manifest() -> Any:
@@ -3588,27 +3702,20 @@ def create_app(state: UIState | None = None) -> Flask:
 
     @app.get("/ui/health")
     def ui_health() -> Any:
-        urls = get_ws_urls()
-        rl_status, rl_detail = _probe_ws(urls.get("rl"))
-        events_status, events_detail = _probe_ws(urls.get("events"))
-        logs_status, logs_detail = _probe_ws(urls.get("logs"))
-        payload: Dict[str, Any] = {
-            "ui": "ok",
-            "rl_ws": rl_status,
-            "events_ws": events_status,
-            "logs_ws": logs_status,
-        }
-        details = {
-            key: detail
-            for key, detail in {
-                "rl_ws": rl_detail,
-                "events_ws": events_detail,
-                "logs_ws": logs_detail,
-            }.items()
-            if detail
-        }
-        if details:
-            payload["details"] = details
+        status_payload = state.snapshot_status()
+        if isinstance(status_payload, Mapping):
+            status_block: Dict[str, Any] = dict(status_payload)
+        else:
+            status_block = {}
+        status_block.setdefault("ui", "ok")
+        ws_statuses, ws_details = summarize_ws_status()
+        status_block.update(ws_statuses)
+        payload: Dict[str, Any] = {"ui": status_block.get("ui", "ok")}
+        payload.update(ws_statuses)
+        payload["status"] = status_block
+        payload["ok"] = all(_status_value_ok(value) for value in status_block.values())
+        if ws_details:
+            payload["details"] = ws_details
         return jsonify(payload)
 
     @app.get("/health")

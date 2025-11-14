@@ -288,6 +288,11 @@ async def test_ui_health_reports_websocket_channels_ok(monkeypatch):
         assert payload["rl_ws"] == "ok"
         assert payload["events_ws"] == "ok"
         assert payload["logs_ws"] == "ok"
+        status_block = payload.get("status")
+        assert isinstance(status_block, dict), "expected status block in ui health"
+        assert status_block.get("rl_ws") == "ok"
+        assert status_block.get("events_ws") == "ok"
+        assert status_block.get("logs_ws") == "ok"
     finally:
         await runtime.stop()
 
