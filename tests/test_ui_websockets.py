@@ -741,6 +741,34 @@ def test_manifest_public_host_full_url(monkeypatch):
         assert manifest[f"{channel}_ws_available"] is True
 
 
+def test_manifest_public_host_with_port(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+
+    for state in ui._WS_CHANNELS.values():
+        state.port = 0
+        state.host = None
+
+    ui._RL_WS_PORT = 9101
+    ui._EVENT_WS_PORT = 9100
+    ui._LOG_WS_PORT = 9102
+
+    monkeypatch.setenv("UI_PUBLIC_HOST", "example.com:8443")
+
+    urls = ui.get_ws_urls()
+    assert urls["events"] == "ws://example.com:8443/ws/events"
+    assert urls["rl"] == "ws://example.com:8443/ws/rl"
+    assert urls["logs"] == "ws://example.com:8443/ws/logs"
+
+    manifest = ui.build_ui_manifest(None)
+    assert manifest["events_ws"] == "ws://example.com:8443/ws/events"
+    assert manifest["rl_ws"] == "ws://example.com:8443/ws/rl"
+    assert manifest["logs_ws"] == "ws://example.com:8443/ws/logs"
+    for channel in ("rl", "events", "logs"):
+        assert manifest[f"{channel}_ws_available"] is True
+
+
 def _clear_ws_env(monkeypatch):
     for key in (
         "UI_EVENTS_WS",
