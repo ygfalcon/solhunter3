@@ -560,7 +560,6 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
             entry_sources = {sources}
         else:
             entry_sources = set()
-        entry_sources.add("cache")
         entry["sources"] = entry_sources
         entry.setdefault("score", 0.0)
         entry.setdefault("_stage_b_eligible", False)
@@ -686,6 +685,8 @@ def _sigmoid(value: float) -> float:
 
 
 def _source_count(entry: Dict[str, Any]) -> int:
+    if entry.get("_fallback_only"):
+        return 0
     sources = entry.get("sources")
     if isinstance(sources, set):
         return len(sources)
@@ -2364,10 +2365,10 @@ def discover_candidates(
                         source_set = {sources}
                     else:
                         source_set = set()
-                    source_set.add("fallback")
                     entry_copy["sources"] = source_set
                     entry_copy.setdefault("score", 0.0)
                     entry_copy.setdefault("_stage_b_eligible", False)
+                    entry_copy["_fallback_only"] = True
                     fallback_candidates[address] = entry_copy
 
                 if fallback_candidates:

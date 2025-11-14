@@ -1006,3 +1006,62 @@ async def test_discover_candidates_shared_session_failure_falls_back(monkeypatch
     for session in per_task_sessions:
         # Fallback sessions are owned by individual tasks; ensure they were not closed here.
         assert session.closed is False
+
+
+@pytest.mark.anyio("asyncio")
+async def test_discover_candidates_fallback_tokens_flagged(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_STAGE_B_THRESHOLD="0.9",
+        DISCOVERY_STAGE_B_MIN_SOURCES="3",
+    )
+
+    async def no_bird(*, limit=None):
+        _ = limit
+        return []
+
+    async def no_trending(*, limit=None):
+        _ = limit
+        return []
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", no_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", no_trending)
+
+    async def empty_mempool(_rpc_url, _threshold):
+        if False:  # pragma: no cover - generator structure
+            yield None
+
+    monkeypatch.setattr(td, "stream_ranked_mempool_tokens_with_depth", empty_mempool)
+
+    batches: list[list[dict[str, object]]] = []
+    async for batch in td.discover_candidates(
+        "https://rpc", limit=2, mempool_threshold=0.0
+    ):
+        batches.append(batch)
+
+    assert batches, "expected fallback batch"
+    fallback_results = batches[-1]
+
+    assert fallback_results, "fallback batch should not be empty"
+    for entry in fallback_results:
+        assert entry.get("_fallback_only") is True
+        assert "fallback" not in entry.get("sources", [])
+        assert "cache" not in entry.get("sources", [])
+        assert td._source_count(entry) == 0
+        score = float(entry.get("score", 0.0) or 0.0)
+        stage_b_threshold = float(td.SETTINGS.stage_b_score_threshold)
+        stage_b_min_sources = int(td.SETTINGS.stage_b_min_sources)
+        eligible = score >= stage_b_threshold or td._source_count(entry) >= stage_b_min_sources
+        assert eligible is False
