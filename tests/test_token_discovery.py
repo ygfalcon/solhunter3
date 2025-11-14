@@ -98,6 +98,34 @@ def test_compute_feature_vector_mempool_score_fallback(monkeypatch, caplog):
     assert "Failed to coerce numeric value" in caplog.text
 
 
+def test_merge_candidate_entry_strips_mint_whitespace(monkeypatch):
+    mint = "So11111111111111111111111111111111111111112"
+    dirty_mint = f"  {mint}\n"
+
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda addr: addr == mint)
+
+    candidates: dict[str, dict] = {}
+
+    entry_dirty = td._merge_candidate_entry(
+        candidates,
+        {"address": dirty_mint, "name": "Dirty Bird"},
+        "source-a",
+    )
+
+    assert entry_dirty is not None
+    assert set(candidates.keys()) == {mint}
+
+    entry_clean = td._merge_candidate_entry(
+        candidates,
+        {"address": mint, "name": "Clean Bird"},
+        "source-b",
+    )
+
+    assert entry_clean is entry_dirty
+    assert entry_clean["address"] == mint
+    assert entry_clean["sources"] == {"source-a", "source-b"}
+
+
 @pytest.mark.anyio("asyncio")
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()

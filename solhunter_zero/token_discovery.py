@@ -882,7 +882,9 @@ def _merge_candidate_entry(
     raw_address = token.get("address") or token.get("mint")
     if not raw_address:
         return None
-    address = str(raw_address)
+    address = str(raw_address).strip()
+    if not address:
+        return None
     if not is_valid_solana_mint(address):
         return None
 
