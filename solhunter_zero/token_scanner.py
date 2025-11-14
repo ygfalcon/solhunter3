@@ -1708,13 +1708,36 @@ async def _pump_trending(
         logger.debug("Pump.fun trending request failed: %s", exc)
         return []
 
-    if not isinstance(payload, list):
+    entries: Iterable[Any]
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        # Pump.fun leaderboard currently responds with either a bare list or a
+        # wrapper that nests the list under common keys such as "tokens".
+        wrapped: Iterable[Any] | None = None
+        for key in ("tokens", "items", "results"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                wrapped = candidate
+                break
+        if wrapped is None:
+            logger.debug(
+                "Pump.fun leaderboard payload missing expected list under"
+                " tokens/items/results keys: keys=%s",
+                list(payload.keys()),
+            )
+            return []
+        entries = wrapped
+    else:
+        logger.debug(
+            "Pump.fun leaderboard payload had unexpected type: %s", type(payload)
+        )
         return []
 
     tokens: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
-    for entry in payload:
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         raw_mint = entry.get("mint") or entry.get("tokenMint") or entry.get("tokenAddress")
