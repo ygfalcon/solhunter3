@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -1714,6 +1715,45 @@ async def _pump_trending(
     tokens: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
+    def _coerce_rank(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return None
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                return int(stripped)
+            except ValueError:
+                try:
+                    parsed = float(stripped)
+                except ValueError:
+                    return None
+                if not math.isfinite(parsed):
+                    return None
+                return int(parsed)
+        return None
+
+    def _extract_rank(entry: Dict[str, Any], fallback: int) -> int:
+        for key in (
+            "rank",
+            "rankNumber",
+            "rank_number",
+            "leaderboardRank",
+            "leaderboard_rank",
+            "position",
+        ):
+            rank = _coerce_rank(entry.get(key))
+            if rank is not None:
+                return rank
+        return fallback
+
     for entry in payload:
         if not isinstance(entry, dict):
             continue
@@ -1725,7 +1765,7 @@ async def _pump_trending(
             "address": mint,
             "source": "pumpfun",
             "sources": ["pumpfun"],
-            "rank": len(tokens),
+            "rank": _extract_rank(entry, len(tokens)),
         }
         name = entry.get("name")
         symbol = entry.get("symbol")
