@@ -243,6 +243,7 @@ class DiscoveryAgent:
         self.last_tokens: List[str] = []
         self.last_method: str | None = None
         self.last_fallback_used: bool = False
+        self._last_discovery_origin: Optional[str] = None
         self.filter_prefix_11 = (
             os.getenv("DISCOVERY_FILTER_PREFIX_11", "1").strip().lower()
             in {"1", "true", "yes", "on"}
@@ -442,6 +443,7 @@ class DiscoveryAgent:
         now = time.time()
         ttl = self.cache_ttl
         self.last_fallback_used = False
+        self._last_discovery_origin = None
         method_override = method is not None
         requested_method = resolve_discovery_method(method)
         if requested_method is None:
@@ -573,6 +575,7 @@ class DiscoveryAgent:
         if mempool_flag is not None:
             mempool_enabled = mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
         fallback_used = False
+        fallback_label: Optional[str] = None
 
         birdeye_configured = bool((self.birdeye_api_key or "").strip())
         if not birdeye_configured and not self._birdeye_notice_logged:
@@ -627,21 +630,38 @@ class DiscoveryAgent:
                 else base_details if base_details else {}
             )
             fallback_used = bool(tokens)
+            fallback_label = fallback_reason or None
+
+        origin = self._last_discovery_origin
+        if fallback_label is None and origin in {"cache", "static"}:
+            fallback_label = origin
+        if (
+            fallback_label is None
+            and origin == "mempool"
+            and active_method != "mempool"
+        ):
+            fallback_label = "mempool"
+        if fallback_label in {"cache", "static"}:
+            fallback_used = True
+        actual_method = fallback_label or origin or active_method
 
         self.last_tokens = tokens
         self.last_details = details
-        self.last_method = active_method
+        self.last_method = actual_method
         self.last_fallback_used = fallback_used
 
         detail = f"yield={len(tokens)}"
         if self.limit:
             detail = f"{detail}/{self.limit}"
-        detail = f"{detail} method={active_method}"
+        if actual_method != active_method:
+            detail = f"{detail} method={actual_method} requested={active_method}"
+        else:
+            detail = f"{detail} method={actual_method}"
         if self.limit and len(tokens) < self.limit:
             detail = f"{detail} partial"
         publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
         logger.info(
-            "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
+            "DiscoveryAgent yielded %d tokens via %s", len(tokens), actual_method
         )
 
         if ttl > 0 and tokens and not fallback_used:
@@ -649,7 +669,7 @@ class DiscoveryAgent:
                 _CACHE["tokens"] = list(tokens)
                 _CACHE["ts"] = now
                 _CACHE["limit"] = self.limit
-                _CACHE["method"] = active_method
+                _CACHE["method"] = actual_method
                 _CACHE["rpc_identity"] = current_rpc_identity
                 _CACHE["details"] = self._prepare_cache_details(details)
         elif fallback_used:
@@ -672,9 +692,11 @@ class DiscoveryAgent:
         offline: bool,
         token_file: Optional[str],
     ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
+        self._last_discovery_origin = method
         if (offline or method == "file") and token_file:
             try:
                 tokens = scan_tokens_from_file(token_file, limit=self.limit)
+                self._last_discovery_origin = "file"
                 return tokens, {}
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Failed to read token_file %s: %s", token_file, exc)
@@ -735,12 +757,14 @@ class DiscoveryAgent:
                 for mint, info in details.items()
                 if not self._should_skip_token(mint)
             }
+            self._last_discovery_origin = "websocket"
             return list(details.keys()), details
 
         if method == "mempool":
             tokens, details = await self._collect_mempool()
             filtered = [tok for tok in tokens if not self._should_skip_token(tok)]
             details = {k: v for k, v in details.items() if not self._should_skip_token(k)}
+            self._last_discovery_origin = "mempool"
             return filtered, details
 
         if method == "onchain":
@@ -790,6 +814,7 @@ class DiscoveryAgent:
                 tokens = [tok for tok in raw_tokens if isinstance(tok, str)]
         if tokens:
             tokens = [tok for tok in tokens if not self._should_skip_token(tok)]
+            self._last_discovery_origin = method
             return tokens, {}
 
         logger.warning(
@@ -813,6 +838,7 @@ class DiscoveryAgent:
         if details:
             details = {k: v for k, v in details.items() if not self._should_skip_token(k)}
             if details:
+                self._last_discovery_origin = "websocket"
                 return list(details.keys()), details
         return await self._fallback_after_merge_failure()
 
@@ -915,7 +941,13 @@ class DiscoveryAgent:
         logger.warning("Websocket merge yielded no tokens; trying mempool fallback")
         mem_tokens, mem_details = await self._collect_mempool()
         if mem_tokens:
-            return mem_tokens, mem_details
+            self._last_discovery_origin = "mempool"
+            annotated = self._annotate_fallback_details(
+                mem_tokens,
+                mem_details or None,
+                reason="mempool",
+            )
+            return mem_tokens, annotated
 
         logger.warning("All discovery sources empty; returning fallback tokens")
         fallback_tokens = self._fallback_tokens()
@@ -952,6 +984,8 @@ class DiscoveryAgent:
             )
         else:
             details = base_details if base_details else {}
+        if fallback_reason:
+            self._last_discovery_origin = fallback_reason
         return fallback, details
 
     def _normalise(self, tokens: Iterable[Any]) -> List[str]:
