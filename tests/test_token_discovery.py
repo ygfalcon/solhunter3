@@ -196,6 +196,106 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_stage_b_requires_dex_or_mempool_source(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    trend_mint = "TrendMint1111111111111111111111111111111111"
+    dex_mint = "DexMint111111111111111111111111111111111111"
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return [
+            {
+                "address": trend_mint,
+                "name": "Trend Token",
+                "symbol": "TRND",
+                "liquidity": 5000,
+                "volume": 4000,
+            },
+            {
+                "address": dex_mint,
+                "name": "Dex Token",
+                "symbol": "DEX",
+                "liquidity": 6000,
+                "volume": 4500,
+            },
+        ]
+
+    async def fake_trending(*, limit=None):
+        _ = limit
+        return [trend_mint, dex_mint]
+
+    async def fake_raydium(*, session=None):
+        _ = session
+        return [
+            {
+                "address": dex_mint,
+                "name": "Dex Token",
+                "symbol": "DEX",
+                "liquidity": 7000,
+                "volume": 5500,
+                "sources": ["raydium"],
+            }
+        ]
+
+    async def _no_tokens(*, session=None):
+        _ = session
+        return []
+
+    captured_flags: dict[str, bool] = {}
+    captured_addresses: list[list[str]] = []
+
+    async def fake_enrich(candidates, *, addresses=None):
+        captured_flags.clear()
+        for addr, entry in candidates.items():
+            captured_flags[addr] = bool(entry.get("_stage_b_eligible"))
+        captured_addresses.append(list(addresses or []))
+        return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "_fetch_raydium_tokens", fake_raydium)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_enrich_with_solscan", fake_enrich)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_STAGE_B_THRESHOLD="0.99",
+        DISCOVERY_STAGE_B_MIN_SOURCES="2",
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates("https://rpc", limit=4, mempool_threshold=0.0):
+        batches.append(batch)
+
+    assert captured_addresses, "expected solscan enrichment invocation"
+    final_addresses = captured_addresses[-1]
+    assert dex_mint in final_addresses
+    assert trend_mint not in final_addresses
+
+    assert captured_flags[dex_mint] is True
+    assert captured_flags[trend_mint] is False
+
+    assert batches, "expected discovery batches"
+    final = batches[-1]
+    mapping = {entry["address"]: entry for entry in final}
+    assert mapping[dex_mint]["sources"]
+    assert mapping[trend_mint]["sources"]
+
+
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_includes_trending_tokens(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 

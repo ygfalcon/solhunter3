@@ -355,6 +355,23 @@ def _load_scoring_weights() -> tuple[float, Dict[str, float]]:
 _SCORING_BIAS, _SCORING_WEIGHTS = _load_scoring_weights()
 
 
+_STAGE_B_SOURCE_CATEGORY_MAP: Dict[str, set[str]] = {
+    "birdeye": {"aggregator"},
+    "dexscreener": {"dex"},
+    "raydium": {"dex"},
+    "meteora": {"dex"},
+    "dexlab": {"dex"},
+    "orca": {"dex"},
+    "mempool": {"mempool"},
+    "trending": {"signal"},
+    "solscan": {"metadata"},
+    "cache": {"cache"},
+    "static": {"seed"},
+}
+
+_STAGE_B_CORE_CATEGORIES = frozenset({"dex", "mempool"})
+
+
 def refresh_runtime_values() -> None:
     """Synchronise cached discovery state with the current environment."""
 
@@ -692,6 +709,35 @@ def _source_count(entry: Dict[str, Any]) -> int:
     if isinstance(sources, (list, tuple)):
         return len(set(sources))
     return 0
+
+
+def _normalize_source_names(sources: Any) -> set[str]:
+    if isinstance(sources, str):
+        iterable: Iterable[Any] = [sources]
+    elif isinstance(sources, (list, tuple, set)):
+        iterable = sources  # type: ignore[assignment]
+    else:
+        iterable = []
+    normalized: set[str] = set()
+    for raw in iterable:
+        if not isinstance(raw, str):
+            continue
+        value = raw.strip().lower()
+        if value:
+            normalized.add(value)
+    return normalized
+
+
+def _source_categories_from(sources: Any) -> set[str]:
+    normalized_sources = _normalize_source_names(sources)
+    categories: set[str] = set()
+    for name in normalized_sources:
+        mapped = _STAGE_B_SOURCE_CATEGORY_MAP.get(name)
+        if mapped:
+            categories.update(mapped)
+    if normalized_sources and not categories:
+        categories.add("other")
+    return categories
 
 
 def _compute_feature_vector(
@@ -1946,8 +1992,14 @@ def discover_candidates(
             for legacy in ("score_liq", "score_vol", "score_mp", "score_mult"):
                 entry.pop(legacy, None)
             source_count = _source_count(entry)
+            stage_categories = _source_categories_from(entry.get("sources"))
+            entry["_stage_b_categories"] = stage_categories
+            meets_source_rule = bool(
+                source_count >= SETTINGS.stage_b_min_sources
+                and stage_categories.intersection(_STAGE_B_CORE_CATEGORIES)
+            )
             entry["_stage_b_eligible"] = bool(
-                score >= SETTINGS.stage_b_score_threshold or source_count >= SETTINGS.stage_b_min_sources
+                score >= SETTINGS.stage_b_score_threshold or meets_source_rule
             )
 
     def _snapshot(
@@ -1980,7 +2032,7 @@ def discover_candidates(
             else:
                 venues_list = []
             copy["venues"] = venues_list
-            for internal in ("_stage_b_eligible", "score_breakdown"):
+            for internal in ("_stage_b_eligible", "score_breakdown", "_stage_b_categories"):
                 copy.pop(internal, None)
             final.append(copy)
         return final
