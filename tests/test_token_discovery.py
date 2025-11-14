@@ -1354,3 +1354,80 @@ async def test_discover_candidates_shared_session_failure_falls_back(monkeypatch
     for session in per_task_sessions:
         # Fallback sessions are owned by individual tasks; ensure they were not closed here.
         assert session.closed is False
+
+
+@pytest.mark.anyio("asyncio")
+async def test_discover_candidates_birdeye_only_limit(monkeypatch):
+    td._cache_clear()
+
+    _configure_env(
+        monkeypatch,
+        BIRDEYE_API_KEY="test-key",
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        DISCOVERY_OVERFETCH_FACTOR="0.5",
+        DISCOVERY_PAGE_SIZE="1",
+        DISCOVERY_MAX_TOKENS="8",
+    )
+
+    async def fake_trending(limit=None):
+        _ = limit
+        return []
+
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    token_pages = [
+        [
+            {
+                "address": "Bird1111111111111111111111111111111111111111",
+                "symbol": "BIRD1",
+                "name": "Bird One",
+                "liquidity": 1000,
+                "v24hUSD": 500,
+                "price": 1.5,
+                "v24hChangePercent": 10.0,
+            }
+        ],
+        [
+            {
+                "address": "Bird2111111111111111111111111111111111111111",
+                "symbol": "BIRD2",
+                "name": "Bird Two",
+                "liquidity": 900,
+                "v24hUSD": 400,
+                "price": 1.2,
+                "v24hChangePercent": 5.0,
+            }
+        ],
+    ]
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        responses = [
+            _DummyResponse(
+                200,
+                json_data={"data": {"tokens": page, "total": len(token_pages)}},
+            )
+            for page in token_pages
+        ]
+        return _DummySession(responses)
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    limit = 2
+    result = td.discover_candidates("", limit=limit)
+    tokens = await result
+
+    assert len(tokens) == limit
+    assert {token["address"] for token in tokens} == {
+        "Bird1111111111111111111111111111111111111111",
+        "Bird2111111111111111111111111111111111111111",
+    }

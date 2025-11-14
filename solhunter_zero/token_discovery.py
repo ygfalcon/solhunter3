@@ -110,7 +110,7 @@ class _DiscoverySettings:
 
     @property
     def overfetch_factor(self) -> float:
-        return _env_float("DISCOVERY_OVERFETCH_FACTOR", "0.8")
+        return _env_float("DISCOVERY_OVERFETCH_FACTOR", "1.2")
 
     @property
     def cache_ttl(self) -> float:
@@ -1331,7 +1331,11 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
     if effective_limit <= 0:
         effective_limit = SETTINGS.max_tokens
     effective_limit = min(effective_limit, SETTINGS.max_tokens)
-    target_count = max(int(effective_limit * SETTINGS.overfetch_factor), SETTINGS.page_limit)
+    target_count = max(
+        int(effective_limit * SETTINGS.overfetch_factor),
+        SETTINGS.page_limit,
+        effective_limit,
+    )
     backoff = SETTINGS.birdeye_backoff
 
     logger.debug(

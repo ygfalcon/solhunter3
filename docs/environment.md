@@ -53,6 +53,7 @@ files unless the loader is invoked with `overwrite=True`.
 | `DISCOVERY_SOCIAL_MIN_MENTIONS` | `2` | Minimum mention count required for social candidates |
 | `DISCOVERY_SOCIAL_SAMPLE_LIMIT` | `3` | Maximum example snippets stored per social token |
 | `DISCOVERY_MAX_BACKOFF` | `60` | Maximum cooldown applied to repeated empty discovery fetches (set to `0` to disable) |
+| `DISCOVERY_OVERFETCH_FACTOR` | `1.2` | Multiplier applied to the BirdEye discovery limit when paging results so extra candidates are fetched for filtering |
 | `DYNAMIC_CONCURRENCY_INTERVAL` | `` | Interval for dynamic concurrency |
 | `EDGE_CACHE_TTL` | `60` | TTL for edge cache cache |
 | `EVENT_BATCH_MS` | `` | Configures event batch ms |
