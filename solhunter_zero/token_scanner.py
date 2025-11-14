@@ -1708,16 +1708,30 @@ async def _pump_trending(
         logger.debug("Pump.fun trending request failed: %s", exc)
         return []
 
-    if not isinstance(payload, list):
+    entries: Iterable[Any]
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        maybe_tokens = payload.get("tokens")
+        if isinstance(maybe_tokens, list):
+            entries = maybe_tokens
+        else:
+            return []
+    else:
         return []
 
     tokens: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
-    for entry in payload:
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
-        mint = _normalize_mint_candidate(entry.get("mint") or entry.get("tokenMint"))
+        mint = _normalize_mint_candidate(
+            entry.get("mint")
+            or entry.get("tokenMint")
+            or entry.get("tokenAddress")
+            or entry.get("address")
+        )
         if not mint or mint in seen:
             continue
         seen.add(mint)
@@ -1747,6 +1761,11 @@ async def _pump_trending(
                 "volume_5m",
                 "market_cap",
                 "price",
+                "score",
+                "pumpScore",
+                "buyersLastHour",
+                "tweetsLastHour",
+                "sentiment",
             )
             if k in entry
         }

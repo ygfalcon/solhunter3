@@ -66,6 +66,96 @@ def test_scan_tokens_uses_pump_fallback_when_dex_disabled(monkeypatch):
     assert flags["dex_calls"] == 0
 
 
+def test_pump_fallback_normalizes_token_address_entries(monkeypatch):
+    monkeypatch.setenv("DEXSCREENER_DISABLED", "1")
+    monkeypatch.setenv("USE_DAS_DISCOVERY", "0")
+    monkeypatch.setenv("STATIC_SEED_TOKENS", "")
+    monkeypatch.setenv("PUMP_FUN_TOKENS", "")
+    monkeypatch.setenv("PUMP_LEADERBOARD_URL", "https://example.com/pump")
+    monkeypatch.delenv("SOLSCAN_API_KEY", raising=False)
+
+    import solhunter_zero.token_scanner as token_scanner
+
+    token_scanner = importlib.reload(token_scanner)
+    _reset_state(token_scanner)
+
+    pump_mint = "H6yn7A6PRQT83wXWx3YpGHTKp21HBFA2wNrMESeiD7rq"
+    payload = {
+        "tokens": [
+            {
+                "tokenAddress": pump_mint,
+                "name": "Pump Alpha",
+                "symbol": "PMP",
+                "score": 0.87,
+                "buyersLastHour": 42,
+                "tweetsLastHour": 13,
+                "sentiment": 0.73,
+            }
+        ]
+    }
+
+    async def empty(*args, **kwargs):
+        return []
+
+    async def fake_enrich(session, addresses):
+        return {}
+
+    monkeypatch.setattr(token_scanner, "_dexscreener_new_pairs", empty)
+    monkeypatch.setattr(token_scanner, "_dexscreener_trending_movers", empty)
+    monkeypatch.setattr(token_scanner, "_birdeye_trending", empty)
+    monkeypatch.setattr(token_scanner, "_helius_search_assets", empty)
+    monkeypatch.setattr(token_scanner, "_pyth_seed_entries", lambda: [])
+    monkeypatch.setattr(token_scanner, "_das_enrich_candidates", fake_enrich)
+
+    class DummyResponse:
+        def __init__(self, data):
+            self._data = data
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self, content_type=None):
+            return self._data
+
+    class DummyClientSession:
+        def __init__(self, *args, **kwargs):
+            self.post = object()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, *, params=None, timeout=None):
+            return DummyResponse(payload)
+
+    monkeypatch.setattr(token_scanner.aiohttp, "ClientSession", DummyClientSession)
+
+    async def runner():
+        result = await token_scanner._scan_tokens_async_locked(
+            limit=2,
+            rpc_url="http://localhost",
+            enrich=False,
+            api_key=None,
+        )
+        assert result == [pump_mint]
+        entry = token_scanner.TRENDING_METADATA[pump_mint]
+        assert entry["source"] == "pumpfun"
+        assert "pumpfun" in entry.get("sources", [])
+        pump_meta = entry.get("metadata", {}).get("pumpfun", {})
+        assert pump_meta.get("score") == payload["tokens"][0]["score"]
+        assert pump_meta.get("buyersLastHour") == payload["tokens"][0]["buyersLastHour"]
+
+    asyncio.run(runner())
+
+
 def test_static_env_tokens_used_when_all_sources_fail(monkeypatch):
     env_mints = [
         "9wFFujD6jH4KrhzCYXmf4jPQTa1hsJ8qsyYvD5vyGqjA",
