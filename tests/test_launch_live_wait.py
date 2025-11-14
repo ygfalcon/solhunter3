@@ -887,6 +887,8 @@ def test_run_preflight_invokes_micro_and_full(tmp_path: Path) -> None:
             #!/usr/bin/env bash
             set -euo pipefail
             echo "invocation mode=${MODE:-} micro=${MICRO_MODE:-} states=${PREFLIGHT_MICRO_STATES:-}" >> "$RUN_LOG"
+            echo "config=${CONFIG_PATH:-}" >> "$RUN_LOG"
+            echo "solhunter=${SOLHUNTER_MODE:-}" >> "$RUN_LOG"
             if [[ -n ${PREFLIGHT_MICRO_STATES:-} ]]; then
               for micro in $PREFLIGHT_MICRO_STATES; do
                 echo "micro=$micro" >> "$RUN_LOG"
@@ -906,6 +908,8 @@ def test_run_preflight_invokes_micro_and_full(tmp_path: Path) -> None:
         ROOT_DIR=%(root)s
         MICRO_FLAG=1
         PREFLIGHT_RUNS=2
+        export CONFIG_PATH=%(config)s
+        export SOLHUNTER_MODE=paper
         %(timestamp)s
         %(log_info)s
         %(log_warn)s
@@ -916,6 +920,7 @@ def test_run_preflight_invokes_micro_and_full(tmp_path: Path) -> None:
         % {
             "run_log": shlex.quote(str(run_log)),
             "root": shlex.quote(str(stub_root)),
+            "config": shlex.quote(str(tmp_path / "config.toml")),
             "timestamp": timestamp_fn,
             "log_info": log_info_fn,
             "log_warn": log_warn_fn,
@@ -934,9 +939,13 @@ def test_run_preflight_invokes_micro_and_full(tmp_path: Path) -> None:
     log_entries = run_log.read_text().splitlines()
     invocation_entries = [line for line in log_entries if line.startswith("invocation ")]
     micro_entries = [line for line in log_entries if line.startswith("micro=")]
+    config_entries = [line for line in log_entries if line.startswith("config=")]
+    solhunter_entries = [line for line in log_entries if line.startswith("solhunter=")]
 
     assert invocation_entries == ["invocation mode=paper micro=1 states=1 0"]
     assert micro_entries == ["micro=1", "micro=0"]
+    assert config_entries == [f"config={tmp_path / 'config.toml'}"]
+    assert solhunter_entries == ["solhunter=paper"]
 
 
 def test_run_preflight_uses_active_micro_mode(tmp_path: Path) -> None:
@@ -958,6 +967,8 @@ def test_run_preflight_uses_active_micro_mode(tmp_path: Path) -> None:
             #!/usr/bin/env bash
             set -euo pipefail
             echo "invocation mode=${MODE:-} micro=${MICRO_MODE:-} states=${PREFLIGHT_MICRO_STATES:-}" >> "$RUN_LOG"
+            echo "config=${CONFIG_PATH:-}" >> "$RUN_LOG"
+            echo "solhunter=${SOLHUNTER_MODE:-}" >> "$RUN_LOG"
             if [[ -n ${PREFLIGHT_MICRO_STATES:-} ]]; then
               for micro in $PREFLIGHT_MICRO_STATES; do
                 echo "micro=$micro" >> "$RUN_LOG"
@@ -977,6 +988,8 @@ def test_run_preflight_uses_active_micro_mode(tmp_path: Path) -> None:
         ROOT_DIR=%(root)s
         MICRO_FLAG=0
         PREFLIGHT_RUNS=1
+        export CONFIG_PATH=%(config)s
+        export SOLHUNTER_MODE=paper
         %(timestamp)s
         %(log_info)s
         %(log_warn)s
@@ -987,6 +1000,7 @@ def test_run_preflight_uses_active_micro_mode(tmp_path: Path) -> None:
         % {
             "run_log": shlex.quote(str(run_log)),
             "root": shlex.quote(str(stub_root)),
+            "config": shlex.quote(str(tmp_path / "config.toml")),
             "timestamp": timestamp_fn,
             "log_info": log_info_fn,
             "log_warn": log_warn_fn,
@@ -1005,9 +1019,13 @@ def test_run_preflight_uses_active_micro_mode(tmp_path: Path) -> None:
     log_entries = run_log.read_text().splitlines()
     invocation_entries = [line for line in log_entries if line.startswith("invocation ")]
     micro_entries = [line for line in log_entries if line.startswith("micro=")]
+    config_entries = [line for line in log_entries if line.startswith("config=")]
+    solhunter_entries = [line for line in log_entries if line.startswith("solhunter=")]
 
     assert invocation_entries == ["invocation mode=paper micro=0 states=0"]
     assert micro_entries == ["micro=0"]
+    assert config_entries == [f"config={tmp_path / 'config.toml'}"]
+    assert solhunter_entries == ["solhunter=paper"]
 
 
 def test_validate_env_file_handles_export(tmp_path: Path) -> None:

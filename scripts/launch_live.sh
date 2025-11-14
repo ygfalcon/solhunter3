@@ -2281,8 +2281,21 @@ run_preflight() {
   micro_states_string=$(printf '%s ' "${micro_settings[@]}")
   micro_states_string=${micro_states_string% }
 
-  if ! MODE="$mode" MICRO_MODE="${micro_settings[0]}" PREFLIGHT_MICRO_STATES="$micro_states_string" \
-    bash "$ROOT_DIR/scripts/preflight/run_all.sh"; then
+  local -a env_overrides=(
+    "MODE=$mode"
+    "MICRO_MODE=${micro_settings[0]}"
+    "PREFLIGHT_MICRO_STATES=$micro_states_string"
+  )
+
+  if [[ -n ${CONFIG_PATH:-} ]]; then
+    env_overrides+=("CONFIG_PATH=$CONFIG_PATH")
+  fi
+
+  if [[ -n ${SOLHUNTER_MODE:-} ]]; then
+    env_overrides+=("SOLHUNTER_MODE=$SOLHUNTER_MODE")
+  fi
+
+  if ! env "${env_overrides[@]}" bash "$ROOT_DIR/scripts/preflight/run_all.sh"; then
     return 1
   fi
 }

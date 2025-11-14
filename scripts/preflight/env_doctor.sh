@@ -62,6 +62,19 @@ main() {
     fi
   done
 
+  if [[ -n ${CONFIG_PATH:-} ]]; then
+    if [[ -f $CONFIG_PATH && -r $CONFIG_PATH ]]; then
+      pass "config: $CONFIG_PATH"
+      check_details+=("$(jq -n --arg path "$CONFIG_PATH" '{type:"config",path:$path,status:"pass"}')")
+      record_audit pass "config:$CONFIG_PATH"
+    else
+      fail "config: $CONFIG_PATH (not readable)"
+      check_details+=("$(jq -n --arg path "$CONFIG_PATH" '{type:"config",path:$path,status:"fail"}')")
+      record_audit fail "config:$CONFIG_PATH"
+      ((failures++))
+    fi
+  fi
+
   printf '\n'
   log INFO "checking Solana RPC health"
   if [[ ${SOLANA_RPC_URL:-} ]]; then
