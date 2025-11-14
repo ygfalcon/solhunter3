@@ -67,7 +67,7 @@ except ImportError as exc:  # pragma: no cover - optional dependency guard
 
     async def scan_tokens_async(
         *,
-        rpc_url: str = DEFAULT_SOLANA_RPC,
+        rpc_url: str | None = None,
         limit: int = 50,
         enrich: bool = True,
         api_key: str | None = None,
@@ -774,7 +774,7 @@ class DiscoveryAgent:
 
         # Default: BirdEye/Helius trending via REST
         raw_tokens = await scan_tokens_async(
-            rpc_url=self.rpc_url,
+            rpc_url=None,
             limit=self.limit,
             enrich=False,
             api_key=self.birdeye_api_key,

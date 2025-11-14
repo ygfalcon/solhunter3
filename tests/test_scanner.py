@@ -167,6 +167,22 @@ def test_scan_tokens_onchain(monkeypatch):
 from solhunter_zero.token_scanner import scan_tokens_async as async_scan
 
 
+def test_scan_tokens_async_uses_current_env(monkeypatch):
+    captured: list[str] = []
+
+    async def fake_locked(*, rpc_url=None, **_):
+        captured.append(scanner._resolve_trending_rpc_url(rpc_url))
+        return []
+
+    monkeypatch.setattr(scanner, "_scan_tokens_async_locked", fake_locked)
+    monkeypatch.setenv("SOLANA_RPC_URL", "http://first")
+    asyncio.run(scanner.scan_tokens_async(rpc_url=None))
+    monkeypatch.setenv("SOLANA_RPC_URL", "http://second")
+    asyncio.run(scanner.scan_tokens_async(rpc_url=None))
+
+    assert captured == ["http://first", "http://second"]
+
+
 def test_scan_tokens_async(monkeypatch):
     data = {"data": [{"address": "abc"}, {"address": "other"}]}
     class FakeResp:

@@ -65,7 +65,7 @@ except ImportError as exc:  # pragma: no cover - optional dependency guard
 
     async def scan_tokens_async(
         *,
-        rpc_url: str,
+        rpc_url: str | None = None,
         limit: int = 50,
         enrich: bool = True,
         api_key: str | None = None,

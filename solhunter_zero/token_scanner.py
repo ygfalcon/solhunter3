@@ -45,6 +45,20 @@ def _default_enrich_rpc() -> str:
 
 DEFAULT_SOLANA_RPC = _default_enrich_rpc()
 
+
+def _resolve_trending_rpc_url(explicit: str | None) -> str:
+    """Return the RPC endpoint to use for trending fetches."""
+
+    if isinstance(explicit, str):
+        candidate = explicit.strip()
+        if candidate:
+            return candidate
+    for env_name in ("SOLANA_RPC_URL", "HELIUS_RPC_URL"):
+        env_value = (os.getenv(env_name) or "").strip()
+        if env_value:
+            return env_value
+    return DEFAULT_SOLANA_RPC
+
 BIRDEYE_BASE = "https://api.birdeye.so"
 
 HELIUS_BASE = os.getenv("HELIUS_PRICE_BASE_URL", "https://api.helius.xyz")
@@ -2169,7 +2183,7 @@ def _format_cooldown(ts: float) -> str:
 
 async def _scan_tokens_async_locked(
     *,
-    rpc_url: str = DEFAULT_SOLANA_RPC,
+    rpc_url: str | None = None,
     limit: int = 50,
     enrich: bool = True,   # kept for compatibility; enrichment is separate call
     api_key: str | None = None,
@@ -2178,7 +2192,8 @@ async def _scan_tokens_async_locked(
     Pull trending mints preferring Helius price data, falling back to BirdEye.
     If both sources fail, return a small static set so the loop can proceed.
     """
-    _ = rpc_url  # reserved for future use; enrichment uses this parameter
+    resolved_rpc_url = _resolve_trending_rpc_url(rpc_url)
+    _ = resolved_rpc_url  # reserved for future use; enrichment uses this parameter
     global _FAILURE_COUNT, _COOLDOWN_UNTIL
 
     requested = max(1, int(limit))
@@ -2252,7 +2267,7 @@ async def _scan_tokens_async_locked(
                 session,
                 limit=requested,
                 birdeye_api_key=resolved_birdeye_key if birdeye_allowed else None,
-                rpc_url=os.getenv("SOLANA_RPC_URL", DEFAULT_SOLANA_RPC),
+                rpc_url=resolved_rpc_url,
             )
         except BirdeyeThrottleError as exc:
             reason = str(exc)
@@ -2595,7 +2610,7 @@ async def _scan_tokens_async_locked(
             search_items = await _helius_search_assets(
                 session,
                 limit=requested,
-                rpc_url=os.getenv("SOLANA_RPC_URL", DEFAULT_SOLANA_RPC),
+                rpc_url=resolved_rpc_url,
             )
             for item in search_items:
                 address = _normalize_mint_candidate(item.get("address"))
@@ -2762,7 +2777,7 @@ async def _scan_tokens_async_locked(
 
 async def scan_tokens_async(
     *,
-    rpc_url: str = DEFAULT_SOLANA_RPC,
+    rpc_url: str | None = None,
     limit: int = 50,
     enrich: bool = True,
     api_key: str | None = None,
