@@ -2452,10 +2452,14 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
                 path = "/" + path.lstrip("/")
             parsed_scheme = _scheme_from_hint(parsed.scheme)
             scheme = override_scheme or parsed_scheme or fallback_scheme
-            netloc = host or ""
+            host_component = _format_host_for_url(host) if host else ""
             if port:
-                netloc = f"{host}:{port}"
-            manifest[f"{channel}_ws"] = urlunparse((scheme, netloc, path, "", "", ""))
+                netloc = f"{host_component}:{port}"
+            else:
+                netloc = host_component
+            manifest[f"{channel}_ws"] = urlunparse(
+                (scheme, netloc, path, "", parsed.query, parsed.fragment)
+            )
             manifest[f"{channel}_ws_available"] = True
         else:
             manifest[f"{channel}_ws"] = None
