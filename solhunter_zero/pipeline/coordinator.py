@@ -163,11 +163,18 @@ class PipelineCoordinator:
         )
         self._portfolio_service = PortfolioManagementService(portfolio)
 
+        raw_discovery_limit = os.getenv("DISCOVERY_LIMIT")
+        resolved_limit = resolve_discovery_limit(default=0)
+        if raw_discovery_limit is None or not str(raw_discovery_limit).strip():
+            discovery_limit = None if resolved_limit <= 0 else resolved_limit
+        else:
+            discovery_limit = max(0, resolved_limit)
+
         self._discovery_service = DiscoveryService(
             self._discovery_queue,
             interval=self.discovery_interval,
             cache_ttl=self.discovery_cache_ttl,
-            limit=resolve_discovery_limit(default=0) or None,
+            limit=discovery_limit,
             emit_batch_size=1 if fast_mode else None,
         )
         self._scoring_service = ScoringService(

@@ -75,8 +75,31 @@ def test_negative_env_limit(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
         agent = DiscoveryAgent()
 
-    assert agent.limit == 1
+    assert agent.limit == 0
     assert "below minimum" in caplog.text
+
+
+def test_zero_env_limit_disables_discovery(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("DISCOVERY_LIMIT", "0")
+
+    called = False
+
+    async def fail_scan(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return ["unexpected"]
+
+    monkeypatch.setattr(discovery_mod, "scan_tokens_async", fail_scan)
+
+    with caplog.at_level("INFO", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+        tokens = asyncio.run(agent.discover_tokens())
+
+    assert agent.limit == 0
+    assert tokens == []
+    assert called is False
+    assert "Discovery disabled" in caplog.text
 
 
 def test_collect_mempool_times_out(monkeypatch, caplog):

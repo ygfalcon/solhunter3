@@ -33,7 +33,10 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_discovery_limit(*, default: int = 60) -> int:
-    """Return a validated discovery limit from the environment."""
+    """Return a validated discovery limit from the environment.
+
+    A resolved limit of zero disables active discovery.
+    """
 
     raw_value = os.getenv("DISCOVERY_LIMIT")
     if raw_value is None:
@@ -144,7 +147,7 @@ _STATIC_FALLBACK = [
 
 DEFAULT_DISCOVERY_METHOD = "helius"
 
-MIN_DISCOVERY_LIMIT = 1
+MIN_DISCOVERY_LIMIT = 0
 
 DEFAULT_MEMPOOL_MAX_WAIT = 10.0
 
@@ -218,6 +221,11 @@ class DiscoveryAgent:
                 MIN_DISCOVERY_LIMIT,
             )
             limit = MIN_DISCOVERY_LIMIT
+        self._disabled_skip_logged = False
+        if limit == 0:
+            logger.info(
+                "Discovery limit set to 0; discovery will remain disabled",
+            )
         self.limit = limit
         self.cache_ttl = max(0.0, float(os.getenv("DISCOVERY_CACHE_TTL", "45") or 45.0))
         self.backoff = max(0.0, float(os.getenv("TOKEN_DISCOVERY_BACKOFF", "1") or 1.0))
@@ -442,6 +450,16 @@ class DiscoveryAgent:
         now = time.time()
         ttl = self.cache_ttl
         self.last_fallback_used = False
+        if self.limit == 0:
+            if not self._disabled_skip_logged:
+                logger.info(
+                    "Discovery disabled (DISCOVERY_LIMIT=0); skipping discovery cycle",
+                )
+                self._disabled_skip_logged = True
+            self.last_tokens = []
+            self.last_details = {}
+            self.last_method = None
+            return []
         method_override = method is not None
         requested_method = resolve_discovery_method(method)
         if requested_method is None:
