@@ -886,7 +886,14 @@ def test_run_preflight_invokes_micro_and_full(tmp_path: Path) -> None:
             """
             #!/usr/bin/env bash
             set -euo pipefail
-            echo "mode=${MODE:-} micro=${MICRO_MODE:-}" >> "$RUN_LOG"
+            echo "invocation mode=${MODE:-} micro=${MICRO_MODE:-} states=${PREFLIGHT_MICRO_STATES:-}" >> "$RUN_LOG"
+            if [[ -n ${PREFLIGHT_MICRO_STATES:-} ]]; then
+              for micro in $PREFLIGHT_MICRO_STATES; do
+                echo "micro=$micro" >> "$RUN_LOG"
+              done
+            else
+              echo "micro=${MICRO_MODE:-}" >> "$RUN_LOG"
+            fi
             """
         )
     )
@@ -924,8 +931,12 @@ def test_run_preflight_invokes_micro_and_full(tmp_path: Path) -> None:
         text=True,
     )
 
-    entries = [line.strip() for line in completed.stdout.splitlines() if line.startswith("mode=")]
-    assert entries == ["mode=paper micro=1", "mode=paper micro=0"]
+    log_entries = run_log.read_text().splitlines()
+    invocation_entries = [line for line in log_entries if line.startswith("invocation ")]
+    micro_entries = [line for line in log_entries if line.startswith("micro=")]
+
+    assert invocation_entries == ["invocation mode=paper micro=1 states=1 0"]
+    assert micro_entries == ["micro=1", "micro=0"]
 
 
 def test_run_preflight_uses_active_micro_mode(tmp_path: Path) -> None:
@@ -946,7 +957,14 @@ def test_run_preflight_uses_active_micro_mode(tmp_path: Path) -> None:
             """
             #!/usr/bin/env bash
             set -euo pipefail
-            echo "mode=${MODE:-} micro=${MICRO_MODE:-}" >> "$RUN_LOG"
+            echo "invocation mode=${MODE:-} micro=${MICRO_MODE:-} states=${PREFLIGHT_MICRO_STATES:-}" >> "$RUN_LOG"
+            if [[ -n ${PREFLIGHT_MICRO_STATES:-} ]]; then
+              for micro in $PREFLIGHT_MICRO_STATES; do
+                echo "micro=$micro" >> "$RUN_LOG"
+              done
+            else
+              echo "micro=${MICRO_MODE:-}" >> "$RUN_LOG"
+            fi
             """
         )
     )
@@ -984,8 +1002,12 @@ def test_run_preflight_uses_active_micro_mode(tmp_path: Path) -> None:
         text=True,
     )
 
-    entries = [line.strip() for line in completed.stdout.splitlines() if line.startswith("mode=")]
-    assert entries == ["mode=paper micro=0"]
+    log_entries = run_log.read_text().splitlines()
+    invocation_entries = [line for line in log_entries if line.startswith("invocation ")]
+    micro_entries = [line for line in log_entries if line.startswith("micro=")]
+
+    assert invocation_entries == ["invocation mode=paper micro=0 states=0"]
+    assert micro_entries == ["micro=0"]
 
 
 def test_validate_env_file_handles_export(tmp_path: Path) -> None:
