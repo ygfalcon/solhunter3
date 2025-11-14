@@ -83,6 +83,34 @@ def test_merge_candidate_entry_tracks_source_categories(monkeypatch):
     assert entry["source_categories"] == {"market_data", "mempool_signal"}
 
 
+@pytest.mark.parametrize(
+    "source,expected_category",
+    [
+        ("birdeye_overview", "market_data"),
+        ("dex_metrics", "market_data"),
+        ("onchain", "onchain_metrics"),
+        ("onchain_fallback", "fallback"),
+        ("social", "social_signal"),
+        ("helius_search", "metadata"),
+        ("pumpfun", "trending_signal"),
+    ],
+)
+def test_merge_candidate_entry_assigns_expected_categories(
+    monkeypatch, source, expected_category
+):
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    candidates: dict[str, dict] = {}
+    entry = td._merge_candidate_entry(
+        candidates,
+        {"address": f"{source}_mint", "liquidity": 0, "volume": 0},
+        source,
+    )
+
+    assert entry is not None
+    assert entry["source_categories"] == {expected_category}
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
