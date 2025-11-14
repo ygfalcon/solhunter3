@@ -65,3 +65,34 @@ def test_launch_live_missing_keypair(tmp_path: Path) -> None:
     assert proc.returncode == 1
     assert "Live trading requires a readable signing keypair" in proc.stderr
     assert "/no/such/key.json" in proc.stderr
+
+
+def test_launch_live_invalid_preflight_value(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_file.write_text(f"PYTHONPATH={tmp_path / 'alt_pythonpath'}\n")
+
+    env = os.environ.copy()
+    env["LAUNCH_LIVE_SKIP_PIP"] = "1"
+
+    proc = subprocess.run(
+        [
+            "bash",
+            "scripts/launch_live.sh",
+            "--env",
+            str(env_file),
+            "--micro",
+            "0",
+            "--preflight",
+            "3",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert proc.returncode == 2
+    assert (
+        "Invalid --preflight value '3'; set to 1 for the active micro mode or 2 to cover both micro states."
+        in proc.stderr
+    )

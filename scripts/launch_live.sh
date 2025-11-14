@@ -1541,6 +1541,11 @@ if [[ $PREFLIGHT_RUNS -lt 1 ]]; then
   exit $EXIT_PREFLIGHT
 fi
 
+if [[ $PREFLIGHT_RUNS != "1" && $PREFLIGHT_RUNS != "2" ]]; then
+  echo "Invalid --preflight value '$PREFLIGHT_RUNS'; set to 1 for the active micro mode or 2 to cover both micro states." >&2
+  exit $EXIT_PREFLIGHT
+fi
+
 if [[ ! -f $ENV_FILE ]]; then
   echo "Environment file $ENV_FILE not found" >&2
   exit $EXIT_KEYS
