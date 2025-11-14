@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -399,3 +400,86 @@ def test_runtime_lock_refresher_keeps_ttl(tmp_path: Path) -> None:
     state_path = Path(env["REDIS_STATE_PATH"])
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["store"] == {}
+
+
+def _cleanup_script(source: str) -> str:
+    return (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "cleanup")
+    )
+
+
+def test_cleanup_preserves_foreign_runtime_lock(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = _cleanup_script(source)
+
+    lock_path = tmp_path / "runtime.lock"
+    lock_path.write_text("foreign", encoding="utf-8")
+
+    stop_stub = "stop_runtime_lock_refresher() { :; }"
+    release_stub = "release_runtime_lock() { :; }"
+    bash_script = "\n".join(
+        [
+            "set -euo pipefail",
+            functions,
+            stop_stub,
+            release_stub,
+            f"RUNTIME_FS_LOCK={shlex.quote(str(lock_path))}",
+            "RUNTIME_LOCK_ATTEMPTED=1",
+            "RUNTIME_LOCK_ACQUIRED=0",
+            "RUNTIME_FS_LOCK_WRITTEN=0",
+            "RUNTIME_FS_LOCK_PAYLOAD=\"\"",
+            "CHILD_PIDS=()",
+            "cleanup",
+        ]
+    )
+
+    subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        check=True,
+        text=True,
+    )
+
+    assert lock_path.exists()
+    assert lock_path.read_text(encoding="utf-8") == "foreign"
+
+
+def test_cleanup_removes_owned_runtime_lock(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = _cleanup_script(source)
+
+    lock_path = tmp_path / "runtime.lock"
+    payload = "12345"
+    lock_path.write_text(payload, encoding="utf-8")
+
+    stop_stub = "stop_runtime_lock_refresher() { :; }"
+    release_stub = "release_runtime_lock() { :; }"
+    bash_script = "\n".join(
+        [
+            "set -euo pipefail",
+            functions,
+            stop_stub,
+            release_stub,
+            f"RUNTIME_FS_LOCK={shlex.quote(str(lock_path))}",
+            "RUNTIME_LOCK_ATTEMPTED=1",
+            "RUNTIME_LOCK_ACQUIRED=1",
+            "RUNTIME_FS_LOCK_WRITTEN=1",
+            f"RUNTIME_FS_LOCK_PAYLOAD={shlex.quote(payload)}",
+            "CHILD_PIDS=()",
+            "cleanup",
+        ]
+    )
+
+    subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        check=True,
+        text=True,
+    )
+
+    assert not lock_path.exists()

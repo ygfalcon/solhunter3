@@ -103,6 +103,8 @@ RUNTIME_CACHE_DIR="$RUNTIME_ARTIFACT_ROOT/.cache"
 RUNTIME_FS_LOCK="$RUNTIME_CACHE_DIR/runtime.lock"
 RUNTIME_LOCK_ATTEMPTED=0
 RUNTIME_LOCK_ACQUIRED=0
+RUNTIME_FS_LOCK_WRITTEN=0
+RUNTIME_FS_LOCK_PAYLOAD=""
 RUNTIME_LOCK_REFRESH_PID=0
 
 export RUNTIME_LOCK_TTL_SECONDS="${RUNTIME_LOCK_TTL_SECONDS:-60}"
@@ -1864,9 +1866,19 @@ register_child() {
 cleanup() {
   stop_runtime_lock_refresher
   release_runtime_lock
-  if (( RUNTIME_LOCK_ATTEMPTED == 1 && RUNTIME_LOCK_ACQUIRED == 0 )); then
+  if (( RUNTIME_LOCK_ATTEMPTED == 1 && RUNTIME_LOCK_ACQUIRED == 1 && RUNTIME_FS_LOCK_WRITTEN == 1 )); then
     if [[ -e $RUNTIME_FS_LOCK ]]; then
-      if rm -f "$RUNTIME_FS_LOCK"; then
+      local current_payload=""
+      if [[ -r $RUNTIME_FS_LOCK ]]; then
+        current_payload=$(<"$RUNTIME_FS_LOCK")
+      fi
+      current_payload=${current_payload//$'\r'/}
+      current_payload=${current_payload//$'\n'/}
+      if [[ -z $RUNTIME_FS_LOCK_PAYLOAD ]]; then
+        log_info "Runtime filesystem lock $RUNTIME_FS_LOCK left in place (ownership unknown)"
+      elif [[ $current_payload != "$RUNTIME_FS_LOCK_PAYLOAD" ]]; then
+        log_info "Runtime filesystem lock $RUNTIME_FS_LOCK left in place (payload mismatch)"
+      elif rm -f "$RUNTIME_FS_LOCK"; then
         log_info "Removed stale runtime filesystem lock ($RUNTIME_FS_LOCK)"
       else
         log_warn "Runtime filesystem lock $RUNTIME_FS_LOCK could not be removed automatically; remove it manually if the runtime is not running"
