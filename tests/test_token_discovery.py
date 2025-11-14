@@ -62,6 +62,104 @@ def anyio_backend():
     return "asyncio"
 
 
+@pytest.fixture
+def multi_source_candidate_setup(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="1",
+        DISCOVERY_ENABLE_DEXSCREENER="1",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    multi_mint = "Multi1111111111111111111111111111111111111"
+    mem_only_mint = "MemOnly111111111111111111111111111111111"
+    birdeye_only_mint = "BirdOnly1111111111111111111111111111111"
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return [
+            {
+                "address": multi_mint,
+                "symbol": "MUL",
+                "name": "Multi Token",
+                "liquidity": 220000,
+                "volume": 190000,
+                "price": 1.52,
+                "price_change": 11.0,
+                "sources": ["birdeye"],
+            },
+            {
+                "address": birdeye_only_mint,
+                "symbol": "BRD",
+                "name": "Bird Only",
+                "liquidity": 80000,
+                "volume": 70000,
+                "price": 0.9,
+                "price_change": -1.0,
+                "sources": ["birdeye"],
+            },
+        ]
+
+    async def fake_trending(*, limit=None):
+        _ = limit
+        return []
+
+    async def fake_collect(rpc_url, threshold):
+        _ = (rpc_url, threshold)
+        return {
+            multi_mint: {"score": 5.0, "liquidity": 50000, "volume": 60000},
+            mem_only_mint: {"score": 1.0, "liquidity": 7000, "volume": 6000},
+        }
+
+    async def fake_dexscreener(*, session=None):
+        _ = session
+        return [
+            {
+                "address": multi_mint,
+                "symbol": "MUL",
+                "name": "Multi Token",
+                "liquidity": 220000,
+                "volume": 190000,
+                "price": 1.52,
+                "price_change": 11.0,
+            }
+        ]
+
+    async def _no_tokens(*, session=None):
+        _ = session
+        return []
+
+    async def _noop_enrich(_candidates, *, addresses=None):
+        _ = addresses
+        return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "_collect_mempool_signals", fake_collect)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", fake_dexscreener)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_raydium_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_enrich_with_solscan", _noop_enrich)
+
+    return {
+        "multi": multi_mint,
+        "mem_only": mem_only_mint,
+        "birdeye_only": birdeye_only_mint,
+    }
+
+
 def test_token_discovery_importable_under_pytest():
     import importlib
 
@@ -99,100 +197,50 @@ def test_compute_feature_vector_mempool_score_fallback(monkeypatch, caplog):
 
 
 @pytest.mark.anyio("asyncio")
-async def test_discover_candidates_prioritises_scores(monkeypatch):
-    td._BIRDEYE_CACHE.clear()
-
-    bird1 = "So11111111111111111111111111111111111111112"
-    bird2 = "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU"
-
-    async def fake_bird(*, limit=None):
-        _ = limit
-        return [
-            {
-                "address": bird1,
-                "name": "Bird One",
-                "symbol": "B1",
-                "liquidity": 300000,
-                "volume": 200000,
-                "price": 1.2,
-                "price_change": 5.0,
-                "sources": ["birdeye"],
-            },
-            {
-                "address": bird2,
-                "name": "Bird Two",
-                "symbol": "B2",
-                "liquidity": 90000,
-                "volume": 80000,
-                "price": 0.8,
-                "price_change": -2.0,
-                "sources": ["birdeye"],
-            },
-        ]
-
-    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
-    async def fake_trending(*, limit=None):
-        _ = limit
-        return [bird2, "trend_only"]
-
-    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
-    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
-    _configure_env(
-        monkeypatch,
-        DISCOVERY_MIN_VOLUME_USD="0",
-        DISCOVERY_MIN_LIQUIDITY_USD="0",
-        TRENDING_MIN_LIQUIDITY_USD="0",
-    )
-    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
-
-    async def _no_tokens(*, session=None):
-        _ = session
-        return []
-
-    async def _noop_enrich(_candidates, *, addresses=None):
-        _ = addresses
-        return None
-
-    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", _no_tokens)
-    monkeypatch.setattr(td, "_fetch_meteora_tokens", _no_tokens)
-    monkeypatch.setattr(td, "_fetch_dexlab_tokens", _no_tokens)
-    monkeypatch.setattr(td, "_enrich_with_solscan", _noop_enrich)
-
-    mem_mint = "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av"
-
-    async def fake_mempool(_rpc_url, threshold):
-        _ = threshold
-        yield {
-            "address": mem_mint,
-            "score": 2.0,
-            "volume": 15000,
-                "liquidity": 40000,
-                "momentum": 0.2,
-            }
-
-    async def mempool_gen(rpc_url, threshold):
-        agen = fake_mempool(rpc_url, threshold)
-        async for item in agen:
-            yield item
-
-    monkeypatch.setattr(td, "stream_ranked_mempool_tokens_with_depth", mempool_gen)
-
+async def test_discover_candidates_prioritises_multi_source_candidates(
+    multi_source_candidate_setup,
+):
     batches: list[list[dict]] = []
     async for batch in td.discover_candidates(
-        "https://rpc", limit=3, mempool_threshold=0.0
+        "https://rpc", limit=5, mempool_threshold=0.0
     ):
         batches.append(batch)
 
-    results = batches[-1] if batches else []
-    addresses = [r["address"] for r in results]
+    assert batches, "expected discovery batches"
 
-    assert batches, "expected at least one incremental batch"
+    results = batches[-1]
+    assert len(results) >= 3
 
-    assert len(results) <= 3
-    assert addresses[0] == mem_mint
-    assert set(addresses) >= {bird1, bird2, mem_mint}
-    assert results[0]["sources"] == ["mempool"]
-    assert any("birdeye" in r["sources"] for r in results)
+    addresses = {entry["address"]: entry for entry in results}
+
+    multi_addr = multi_source_candidate_setup["multi"]
+    mem_only_addr = multi_source_candidate_setup["mem_only"]
+    bird_only_addr = multi_source_candidate_setup["birdeye_only"]
+
+    assert multi_addr in addresses
+    assert mem_only_addr in addresses
+    assert bird_only_addr in addresses
+
+    multi_entry = addresses[multi_addr]
+    mem_only_entry = addresses[mem_only_addr]
+    birdeye_entry = addresses[bird_only_addr]
+
+    assert results.index(multi_entry) < results.index(mem_only_entry)
+    assert multi_entry["score"] > mem_only_entry["score"]
+    assert mem_only_entry["score"] > birdeye_entry["score"]
+
+    assert multi_entry["sources"] == ["birdeye", "dexscreener", "mempool"]
+    assert mem_only_entry["sources"] == ["mempool"]
+    assert birdeye_entry["sources"] == ["birdeye"]
+
+    assert multi_entry["score_features"]["source_diversity"] == pytest.approx(
+        len(multi_entry["sources"])
+    )
+    assert mem_only_entry["score_features"]["source_diversity"] == pytest.approx(1.0)
+    assert birdeye_entry["score_features"]["source_diversity"] == pytest.approx(1.0)
+
+    assert mem_only_entry["score_features"]["source_diversity"] < multi_entry["score_features"]["source_diversity"]
+    assert birdeye_entry["score_features"]["source_diversity"] < multi_entry["score_features"]["source_diversity"]
 
 
 @pytest.mark.anyio("asyncio")
@@ -628,11 +676,17 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
 
     dex_sources = set(addresses[dex_mint]["sources"])
     assert {"dexscreener", "meteora"}.issubset(dex_sources)
+    assert addresses[dex_mint]["score_features"]["source_diversity"] == pytest.approx(
+        len(addresses[dex_mint]["sources"])
+    )
 
     lab_entry = addresses[lab_mint]
     assert "dexlab" in lab_entry["sources"]
     assert "solscan" in lab_entry["sources"]
     assert lab_entry["name"] == "DexLab Token"
+    assert lab_entry["score_features"]["source_diversity"] == pytest.approx(
+        len(lab_entry["sources"])
+    )
 
 
 @pytest.mark.anyio("asyncio")
