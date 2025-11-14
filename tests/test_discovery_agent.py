@@ -937,6 +937,8 @@ def test_fallback_results_do_not_populate_cache(monkeypatch):
     assert discovery_mod._CACHE["tokens"] == []
     assert discovery_mod._CACHE["ts"] == 0.0
     assert agent.last_details[first[0]]["fallback_reason"] == "cache"
+    assert agent.last_method == "fallback:cache"
+    assert agent.last_fallback_reason == "cache"
 
 
 def test_merge_failure_cache_fallback_details(monkeypatch):
@@ -1057,3 +1059,5 @@ def test_offline_discovery_returns_static_fallback(monkeypatch, caplog):
     assert "offline mode active" in caplog.text
     assert tokens, "expected static fallback tokens"
     assert agent.last_details[tokens[0]]["fallback_reason"] == "static"
+    assert agent.last_method == "fallback:static"
+    assert agent.last_fallback_reason == "static"

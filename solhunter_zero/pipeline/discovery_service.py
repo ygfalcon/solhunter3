@@ -324,6 +324,11 @@ class DiscoveryService:
             metadata.setdefault("discovery_method", method)
             source_set.add(f"discovery:{method}")
 
+        fallback_reason = getattr(self._agent, "last_fallback_reason", None)
+        if isinstance(fallback_reason, str) and fallback_reason:
+            metadata.setdefault("discovery_fallback_reason", fallback_reason)
+            source_set.add(f"fallback:{fallback_reason}")
+
         if source_set:
             metadata["sources"] = sorted(source_set)
 

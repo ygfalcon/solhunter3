@@ -41,6 +41,7 @@ def test_emit_tokens_detects_metadata_changes():
         agent = types.SimpleNamespace(
             last_method="unit-test",
             last_details={token: {"price": 1.0}},
+            last_fallback_reason=None,
         )
         service = DiscoveryService(queue, emit_batch_size=10)
         service._agent = agent
@@ -69,6 +70,7 @@ def test_emit_tokens_ignores_metadata_changes_when_not_fresh():
         agent = types.SimpleNamespace(
             last_method="unit-test",
             last_details={token: {"price": 1.0}},
+            last_fallback_reason=None,
         )
         service = DiscoveryService(queue, emit_batch_size=10)
         service._agent = agent
@@ -81,6 +83,29 @@ def test_emit_tokens_ignores_metadata_changes_when_not_fresh():
         await service._emit_tokens([token], fresh=False)
 
         assert queue.qsize() == 0
+
+    asyncio.run(runner())
+
+
+def test_metadata_includes_fallback_reason():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        token = "So11111111111111111111111111111111111111112"
+        agent = types.SimpleNamespace(
+            last_method="fallback:static",
+            last_fallback_reason="static",
+            last_details={token: {"fallback_reason": "static"}},
+        )
+        service = DiscoveryService(queue, emit_batch_size=10)
+        service._agent = agent
+
+        await service._emit_tokens([token], fresh=True)
+        batch = queue.get_nowait()
+        metadata = batch[0].metadata
+
+        assert metadata["discovery_method"] == "fallback:static"
+        assert metadata["discovery_fallback_reason"] == "static"
+        assert "fallback:static" in metadata["sources"]
 
     asyncio.run(runner())
 

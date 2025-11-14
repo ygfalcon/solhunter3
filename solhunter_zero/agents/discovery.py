@@ -287,6 +287,7 @@ class DiscoveryAgent:
         self.last_tokens: List[str] = []
         self.last_method: str | None = None
         self.last_fallback_used: bool = False
+        self.last_fallback_reason: str | None = None
         self.filter_prefix_11 = (
             os.getenv("DISCOVERY_FILTER_PREFIX_11", "1").strip().lower()
             in {"1", "true", "yes", "on"}
@@ -520,6 +521,7 @@ class DiscoveryAgent:
             self.last_tokens = []
             self.last_details = {}
             self.last_method = None
+            self.last_fallback_reason = None
             return []
         method_override = method is not None
         requested_method = resolve_discovery_method(method)
@@ -556,6 +558,7 @@ class DiscoveryAgent:
         consider_cache = bool(cached_tokens) and cache_method_matches and identity_matches
         if offline and not method_override:
             offline_source = "fallback"
+            fallback_reason: str | None = None
             if token_file:
                 try:
                     tokens = scan_tokens_from_file(token_file, limit=self.limit)
@@ -566,7 +569,7 @@ class DiscoveryAgent:
                 details: Dict[str, Dict[str, Any]] = {}
             else:
                 tokens = self._fallback_tokens()
-                fallback_reason = "cache" if tokens else ""
+                fallback_reason = "cache" if tokens else None
                 base_details: Dict[str, Dict[str, Any]] = {}
                 if tokens:
                     offline_source = "cache"
@@ -595,13 +598,17 @@ class DiscoveryAgent:
             )
             if self.limit:
                 tokens = tokens[: self.limit]
+            method_label = "offline"
+            if fallback_reason:
+                method_label = f"fallback:{fallback_reason}"
             self.last_tokens = tokens
             self.last_details = details
-            self.last_method = "offline"
+            self.last_method = method_label
+            self.last_fallback_reason = fallback_reason
             detail = f"yield={len(tokens)}"
             if self.limit:
                 detail = f"{detail}/{self.limit}"
-            detail = f"{detail} method=offline source={offline_source}"
+            detail = f"{detail} method={method_label} source={offline_source}"
             publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
             logger.info(
                 "DiscoveryAgent offline mode active (source=%s, count=%d)",
@@ -609,6 +616,8 @@ class DiscoveryAgent:
                 len(tokens),
             )
             self.last_fallback_used = offline_source in {"cache", "static"}
+            if not self.last_fallback_used:
+                self.last_fallback_reason = None
             return tokens
         if cached_tokens and not identity_matches:
             logger.debug(
@@ -641,6 +650,7 @@ class DiscoveryAgent:
             self.last_details = details
             self.last_method = cached_method or active_method
             self.last_fallback_used = False
+            self.last_fallback_reason = None
             return list(payload)
 
         attempts = self.max_attempts
@@ -652,6 +662,7 @@ class DiscoveryAgent:
         if mempool_flag is not None:
             mempool_enabled = mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
         fallback_used = False
+        fallback_reason: str | None = None
 
         birdeye_configured = bool((self.birdeye_api_key or "").strip())
         if not birdeye_configured and not self._birdeye_notice_logged:
@@ -688,7 +699,7 @@ class DiscoveryAgent:
 
         if not tokens:
             tokens = self._fallback_tokens()
-            fallback_reason = "cache" if tokens else ""
+            fallback_reason = "cache" if tokens else None
             base_details: Dict[str, Dict[str, Any]] = {}
             if tokens and fallback_reason == "cache":
                 base_details = self._hydrate_cached_details(
@@ -709,18 +720,25 @@ class DiscoveryAgent:
 
         self.last_tokens = tokens
         self.last_details = details
-        self.last_method = active_method
+        if fallback_reason:
+            self.last_method = f"fallback:{fallback_reason}"
+        else:
+            self.last_method = active_method
         self.last_fallback_used = fallback_used
+        self.last_fallback_reason = fallback_reason
 
         detail = f"yield={len(tokens)}"
         if self.limit:
             detail = f"{detail}/{self.limit}"
-        detail = f"{detail} method={active_method}"
+        method_for_detail = self.last_method or active_method
+        detail = f"{detail} method={method_for_detail}"
         if self.limit and len(tokens) < self.limit:
             detail = f"{detail} partial"
         publish("runtime.log", RuntimeLog(stage="discovery", detail=detail))
         logger.info(
-            "DiscoveryAgent yielded %d tokens via %s", len(tokens), active_method
+            "DiscoveryAgent yielded %d tokens via %s",
+            len(tokens),
+            method_for_detail,
         )
 
         if ttl > 0 and tokens and not fallback_used:
