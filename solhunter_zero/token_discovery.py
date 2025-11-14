@@ -280,6 +280,17 @@ _BIRDEYE_THROTTLE_MARKERS = (
 TokenEntry = Dict[str, Any]
 
 
+_OPTIONAL_SOURCE_META: Dict[str, Tuple[str, str]] = {
+    "bird": ("birdeye", "BirdEye"),
+    "mempool": ("mempool", "Mempool"),
+    "trending": ("trending", "Trending feed"),
+    "dexscreener": ("dexscreener", "DexScreener"),
+    "raydium": ("raydium", "Raydium"),
+    "meteora": ("meteora", "Meteora"),
+    "dexlab": ("dexlab", "DexLab"),
+}
+
+
 class DiscoveryConfigurationError(RuntimeError):
     """Raised when discovery prerequisites are misconfigured."""
 
@@ -2151,6 +2162,23 @@ class _DiscoveryResult:
 
         return self._config_errors[0] if self._config_errors else None
 
+    @property
+    def degraded_sources(self) -> Tuple[str, ...]:
+        """Return optional discovery sources that failed or degraded."""
+
+        sources: set[str] = set()
+        for error in self._config_errors:
+            source = getattr(error, "source", None)
+            if source:
+                sources.add(str(source))
+        return tuple(sorted(sources))
+
+    @property
+    def degraded(self) -> bool:
+        """Return ``True`` when any optional discovery sources degraded."""
+
+        return bool(self.degraded_sources)
+
 
 def discover_candidates(
     rpc_url: str,
@@ -2378,17 +2406,46 @@ def discover_candidates(
                 lock = merge_locks[label]
                 async with lock:
                     changed = False
+                    source_id, friendly_name = _OPTIONAL_SOURCE_META.get(
+                        label, (label, label)
+                    )
+
+                    def _record_error(
+                        error: DiscoveryConfigurationError,
+                        *,
+                        track_primary: bool = False,
+                    ) -> None:
+                        nonlocal config_error
+                        duplicate = False
+                        for existing in config_errors:
+                            if (
+                                existing.source == error.source
+                                and str(existing) == str(error)
+                            ):
+                                duplicate = True
+                                break
+                        if not duplicate:
+                            config_errors.append(error)
+                        if track_primary:
+                            config_error = error
+
+                    def _wrap_optional_error(exc: Exception) -> DiscoveryConfigurationError:
+                        if isinstance(exc, DiscoveryConfigurationError):
+                            return exc
+                        message = f"{friendly_name} discovery unavailable: {exc}"
+                        return DiscoveryConfigurationError(source_id, message)
+
                     if label == "bird":
                         if isinstance(result, Exception):
                             if isinstance(result, DiscoveryConfigurationError):
-                                config_error = result
-                                if result not in config_errors:
-                                    config_errors.append(result)
+                                _record_error(result, track_primary=True)
                                 logger.warning(
                                     "BirdEye discovery disabled due to configuration: %s",
                                     result,
                                 )
                                 return False
+                            wrapped = _wrap_optional_error(result)
+                            _record_error(wrapped, track_primary=True)
                             logger.warning("BirdEye discovery failed: %s", result)
                             return False
                         bird_tokens = list(result or [])
@@ -2401,7 +2458,9 @@ def discover_candidates(
                         return changed
                     if label == "mempool":
                         if isinstance(result, Exception):
-                            logger.debug("Mempool signals unavailable: %s", result)
+                            error = _wrap_optional_error(result)
+                            _record_error(error)
+                            logger.warning("Mempool signals unavailable: %s", result)
                             return False
                         mempool = dict(result or {})
                         changed = bool(mempool)
@@ -2437,7 +2496,9 @@ def discover_candidates(
                         return changed
                     if label == "trending":
                         if isinstance(result, Exception):
-                            logger.debug("Trending discovery unavailable: %s", result)
+                            error = _wrap_optional_error(result)
+                            _record_error(error)
+                            logger.warning("Trending discovery unavailable: %s", result)
                             return False
                         trending_items = list(result or [])
                         needs_enrichment: List[str] = []
@@ -2489,7 +2550,9 @@ def discover_candidates(
                         return changed
                     if label == "dexscreener":
                         if isinstance(result, Exception):
-                            logger.debug(
+                            error = _wrap_optional_error(result)
+                            _record_error(error)
+                            logger.warning(
                                 "DexScreener discovery unavailable: %s", result
                             )
                             return False
@@ -2505,7 +2568,9 @@ def discover_candidates(
                         return changed
                     if label == "raydium":
                         if isinstance(result, Exception):
-                            logger.debug("Raydium discovery unavailable: %s", result)
+                            error = _wrap_optional_error(result)
+                            _record_error(error)
+                            logger.warning("Raydium discovery unavailable: %s", result)
                             return False
                         raydium_tokens = list(result or [])
                         for token in raydium_tokens:
@@ -2519,7 +2584,9 @@ def discover_candidates(
                         return changed
                     if label == "meteora":
                         if isinstance(result, Exception):
-                            logger.debug("Meteora discovery unavailable: %s", result)
+                            error = _wrap_optional_error(result)
+                            _record_error(error)
+                            logger.warning("Meteora discovery unavailable: %s", result)
                             return False
                         meteora_tokens = list(result or [])
                         for token in meteora_tokens:
@@ -2533,7 +2600,9 @@ def discover_candidates(
                         return changed
                     if label == "dexlab":
                         if isinstance(result, Exception):
-                            logger.debug("DexLab discovery unavailable: %s", result)
+                            error = _wrap_optional_error(result)
+                            _record_error(error)
+                            logger.warning("DexLab discovery unavailable: %s", result)
                             return False
                         dexlab_tokens = list(result or [])
                         for token in dexlab_tokens:

@@ -1115,6 +1115,8 @@ async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch,
     assert error is not None
     assert error.source == "birdeye"
     assert "API key missing" in str(error)
+    assert result.degraded is True
+    assert "birdeye" in result.degraded_sources
 
 
 @pytest.mark.anyio("asyncio")
@@ -1160,6 +1162,60 @@ async def test_discover_candidates_falls_back_when_birdeye_config_error(monkeypa
     assert error is not None
     assert error.source == "birdeye"
     assert "HTTP 401" in str(error)
+    assert result.degraded is True
+    assert "birdeye" in result.degraded_sources
+
+
+@pytest.mark.anyio("asyncio")
+async def test_discover_candidates_records_optional_source_failures(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="1",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+    )
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return [
+            {
+                "address": "So11111111111111111111111111111111111111112",
+                "symbol": "SOL",
+                "name": "Solana",
+                "liquidity": 1000,
+                "volume": 1000,
+            }
+        ]
+
+    async def fake_trending(limit=None):
+        _ = limit
+        return []
+
+    async def fail_mempool(*args, **kwargs):
+        raise RuntimeError("mempool offline")
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "_collect_mempool_signals", fail_mempool)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    result = td.discover_candidates("https://rpc", limit=2)
+
+    batches: list[list[dict]] = []
+    async for batch in result:
+        batches.append(batch)
+
+    assert batches, "expected discovery batches"
+    assert result.degraded is True
+    assert "mempool" in result.degraded_sources
+    assert any(err.source == "mempool" for err in result.config_errors)
 
 
 def test_warm_cache_skips_without_birdeye_key(monkeypatch):
