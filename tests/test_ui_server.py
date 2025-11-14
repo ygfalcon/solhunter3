@@ -1,5 +1,6 @@
 import errno
 import socket
+import threading
 
 import pytest
 
@@ -41,6 +42,63 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         assert server.port != 0
         assert server.serve_forever_started.wait(timeout=server.ready_timeout)
     finally:
+        server.stop()
+
+
+def _install_stub_server(monkeypatch, *, server_port: int = 4321):
+    stop_event = threading.Event()
+
+    class _StubServer:
+        def __init__(self) -> None:
+            self.server_port = server_port
+            self.socket = None
+
+        def serve_forever(self) -> None:
+            stop_event.wait(timeout=1)
+
+        def shutdown(self) -> None:
+            stop_event.set()
+
+        def server_close(self) -> None:
+            pass
+
+    def _make_server(host, port, app):
+        return _StubServer()
+
+    monkeypatch.setattr(ui, "make_server", _make_server)
+
+    return stop_event
+
+
+def test_ui_server_extended_ready_timeout_default(monkeypatch) -> None:
+    monkeypatch.delenv("UI_HTTP_READY_TIMEOUT", raising=False)
+    stop_event = _install_stub_server(monkeypatch, server_port=54321)
+
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    server.start()
+    try:
+        assert server.ready_timeout == pytest.approx(ui.DEFAULT_UI_HTTP_READY_TIMEOUT)
+        assert server.port == 54321
+    finally:
+        stop_event.set()
+        server.stop()
+
+
+def test_ui_server_ready_timeout_override_handles_slow_start(monkeypatch) -> None:
+    monkeypatch.setenv("UI_HTTP_READY_TIMEOUT", "42")
+    stop_event = _install_stub_server(monkeypatch, server_port=65432)
+
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    server.start()
+    try:
+        assert server.ready_timeout == pytest.approx(42.0)
+        assert server.port == 65432
+    finally:
+        stop_event.set()
         server.stop()
 
 

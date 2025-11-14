@@ -198,6 +198,7 @@ files unless the loader is invoked with `overwrite=True`.
 | `USE_FLASH_LOANS` | `0` | Enable flash loans |
 | `USE_GNN_ROUTING` | `0` | Enable gnn routing |
 | `USE_GPU_SIM` | `` | Enable gpu sim |
+| `UI_HTTP_READY_TIMEOUT` | `15` | Seconds to wait for the HTTP UI server to bind before declaring startup failure; increase when the runtime boots slowly |
 | `UI_PROXY_FIX` | `0` | When `1`, wrap the Flask UI with Werkzeug's `ProxyFix` so scheme/host reflect `X-Forwarded-*` headers |
 | `UI_PUBLIC_HOST` | `` | Hostname advertised to UI clients when the server binds to `0.0.0.0`/`::`; when unset the runtime falls back to the inbound request host (if available) or the system hostname, so set this explicitly when fronting the UI with a proxy |
 | `USE_MEV_BUNDLES` | `false` | Enable mev bundles |
