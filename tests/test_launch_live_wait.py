@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import http.server
 import os
 import shlex
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -399,6 +401,97 @@ def test_check_ui_health_skips_when_port_zero(tmp_path: Path) -> None:
 
     assert "UI health check skipped: HTTP server disabled" in completed.stdout
     assert "ui_url=unavailable" in completed.stdout
+
+
+def _start_meta_server(payload: dict[str, object]):
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # type: ignore[override]
+            if self.path.startswith("/ui/meta"):
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_error(404)
+
+        def log_message(self, format: str, *args):  # type: ignore[override]
+            return
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def _run_health_check(tmp_path: Path, port: int) -> subprocess.CompletedProcess[str]:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "extract_ui_url")
+        + _extract_function(source, "check_ui_health")
+    )
+
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text(f"[ts] UI_READY url=http://127.0.0.1:{port}")
+
+    python_bin = shlex.quote(sys.executable)
+    bash_script = (
+        "set -euo pipefail\n"
+        + functions
+        + f"PYTHON_BIN={python_bin}\n"
+        + "READY_TIMEOUT=1\n"
+        + f"check_ui_health '{log_path}'\n"
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    return completed
+
+
+def test_check_ui_health_logs_event_bus_failure(tmp_path: Path) -> None:
+    payload_path = REPO_ROOT / "tests" / "data" / "uihealth_samples" / "event_bus_down.json"
+    payload = json.loads(payload_path.read_text())
+    server = _start_meta_server(payload)
+    try:
+        host, port = server.server_address
+        assert host == "127.0.0.1"
+        completed = _run_health_check(tmp_path, port)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 1
+    assert "UI health payload reported issues" in completed.stderr
+    assert "ok=false" in completed.stderr
+    assert "event_bus=False" in completed.stderr
+    assert "rl_daemon=False" in completed.stderr
+
+
+def test_check_ui_health_logs_loop_failure_strings(tmp_path: Path) -> None:
+    payload_path = REPO_ROOT / "tests" / "data" / "uihealth_samples" / "trading_loop_inactive.json"
+    payload = json.loads(payload_path.read_text())
+    server = _start_meta_server(payload)
+    try:
+        host, port = server.server_address
+        assert host == "127.0.0.1"
+        completed = _run_health_check(tmp_path, port)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 1
+    assert "UI health payload reported issues" in completed.stderr
+    assert "trading_loop='fail'" in completed.stderr
+    assert "rl_ws='fail'" in completed.stderr
 
 
 def test_wait_for_socket_release_backoff() -> None:

@@ -1,0 +1,12 @@
+{
+  "ok": false,
+  "status": {
+    "event_bus": false,
+    "trading_loop": true,
+    "rl_daemon": false,
+    "depth_service": true
+  },
+  "generated_ts": 1700000000.0,
+  "phase": "runtime",
+  "detail": "event bus offline"
+}
