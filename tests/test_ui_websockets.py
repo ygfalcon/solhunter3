@@ -472,6 +472,78 @@ def test_start_channel_allows_slow_ready(monkeypatch):
         state.host = prev_host
 
 
+@pytest.mark.parametrize("env_value", ["0", "-3.5"])
+def test_start_channel_non_positive_ready_timeout_uses_default(
+    monkeypatch, caplog, env_value
+) -> None:
+    ui = _reload_ui_module()
+
+    class DummyThread:
+        def __init__(self, target=None, name=None, daemon=None):
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def join(self, timeout=None):
+            return None
+
+    class RecordingQueue:
+        last_timeout = None
+
+        def __init__(self, *args, **kwargs):
+            self.value = None
+
+        def put(self, value):
+            self.value = value
+
+        def get(self, timeout=None):
+            type(self).last_timeout = timeout
+            return self.value
+
+    monkeypatch.setattr(ui, "Queue", RecordingQueue)
+    monkeypatch.setattr(ui.threading, "Thread", DummyThread)
+    monkeypatch.setenv("UI_WS_READY_TIMEOUT", env_value)
+
+    state = ui._WS_CHANNELS["events"]
+    prev_thread = state.thread
+    prev_loop = state.loop
+    prev_queue = state.queue
+    prev_server = state.server
+    prev_task = state.task
+    prev_port = state.port
+    prev_host = state.host
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            thread = ui._start_channel(
+                "events",
+                host="127.0.0.1",
+                port=0,
+                queue_size=1,
+                ping_interval=1.0,
+                ping_timeout=1.0,
+            )
+
+        assert isinstance(thread, DummyThread)
+        assert RecordingQueue.last_timeout == ui._WS_READY_TIMEOUT_DEFAULT
+        assert any(
+            "must be greater than zero" in record.getMessage()
+            for record in caplog.records
+        )
+    finally:
+        state.thread = prev_thread
+        state.loop = prev_loop
+        state.queue = prev_queue
+        state.server = prev_server
+        state.task = prev_task
+        state.port = prev_port
+        state.host = prev_host
+
+
 def test_enqueue_message_logs_warning_when_queue_full(caplog):
     ui = _reload_ui_module()
     state = ui._WS_CHANNELS["events"]

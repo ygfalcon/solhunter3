@@ -2904,6 +2904,14 @@ def _start_channel(
                 _WS_READY_TIMEOUT_DEFAULT,
             )
             ready_timeout = _WS_READY_TIMEOUT_DEFAULT
+        else:
+            if ready_timeout <= 0:
+                log.warning(
+                    "UI_WS_READY_TIMEOUT value %r must be greater than zero; using default %.0f seconds",
+                    ready_timeout_raw,
+                    _WS_READY_TIMEOUT_DEFAULT,
+                )
+                ready_timeout = _WS_READY_TIMEOUT_DEFAULT
     try:
         result = ready.get(timeout=ready_timeout)
     except Exception as exc:  # pragma: no cover - unexpected queue failure
