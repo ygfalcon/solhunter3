@@ -993,6 +993,27 @@ PY
     exit $EXIT_HEALTH
   fi
   log_info "Acquired runtime lock key=$RUNTIME_LOCK_KEY"
+  if [[ -n ${RUNTIME_FS_LOCK:-} ]]; then
+    local fs_lock_dir=""
+    fs_lock_dir=$(dirname -- "$RUNTIME_FS_LOCK")
+    if mkdir -p "$fs_lock_dir"; then
+      local fs_lock_host="unknown"
+      if ! fs_lock_host=$(hostname 2>/dev/null); then
+        fs_lock_host="unknown"
+      fi
+      local fs_lock_pid="${BASHPID:-$$}"
+      local fs_lock_payload="pid=${fs_lock_pid} host=${fs_lock_host} token=${RUNTIME_LOCK_TOKEN}"
+      if printf '%s\n' "$fs_lock_payload" >"$RUNTIME_FS_LOCK"; then
+        RUNTIME_FS_LOCK_WRITTEN=1
+        RUNTIME_FS_LOCK_PAYLOAD="$fs_lock_payload"
+        log_info "Recorded runtime filesystem lock at $RUNTIME_FS_LOCK"
+      else
+        log_warn "Failed to write runtime filesystem lock at $RUNTIME_FS_LOCK"
+      fi
+    else
+      log_warn "Failed to prepare runtime filesystem lock directory $fs_lock_dir"
+    fi
+  fi
   start_runtime_lock_refresher
   if [[ -z ${RUNTIME_LOCK_REFRESH_PID:-} || $RUNTIME_LOCK_REFRESH_PID -le 0 ]]; then
     log_warn "Runtime lock refresher did not start; lock TTL may expire early"
