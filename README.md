@@ -58,6 +58,12 @@ This repo now has a single, obvious entry for the new, event‑driven runtime.
   2. Start Event Bus (brokers + local WS)
   3. Start Agents
      - Discovery publishes `token_discovered`
+        - Candidates require corroboration across source categories (aggregator,
+          DEX depth, mempool, on-chain scans). At least two categories must agree
+          before a mint is surfaced. When the aggregator tier (BirdEye) is
+          unavailable the system enters a degraded `aggregator_degraded` mode that
+          relies on DEX/mempool evidence only and down-weights conviction scores
+          until cross-category coverage is restored.
      - Agents evaluate and publish `action_decision` (includes price/size)
      - Executor subscribes and trades, logging to `Memory` and updating `Portfolio`
      - RL trains in background and publishes `rl_weights`; AgentManager continuously evolves (mutates/culls) based on success

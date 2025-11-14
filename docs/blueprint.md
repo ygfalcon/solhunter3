@@ -26,7 +26,7 @@ This document captures the end-to-end event pipeline for SolHunter's discovery, 
 
 ## 1. Discovery (Helius DAS)
 
-**Goal:** Continuously surface newly active, tradable mints without running raw RPC scans.
+**Goal:** Continuously surface newly active, tradable mints without running raw RPC scans while enforcing cross-category corroboration.
 
 **Input:** `searchAssets` results from Helius DAS, sorted by `recentAction`.
 
@@ -35,8 +35,14 @@ This document captures the end-to-end event pipeline for SolHunter's discovery, 
 - Page size 100–120, target ~3 requests/second with up to a 6-request burst for cursor advancement.
 - Normalise candidate addresses (base58 length check) and drop known program/router prefixes (Jupiter router, Tokenkeg, Phoenix, Orca whirlpools, Vote111, etc.).
 - Validate via `getAssetBatch` keeping only `FungibleToken` or `FungibleAsset` entries, with `0 ≤ decimals ≤ 12`. Record the `token_program` (Tokenkeg vs Token-2022).
+- Classify each candidate into a category (`aggregator`, `dex_depth`, `mempool`,
+  `onchain_scan`).
 - De-duplicate using `discovery:seen:{mint}` in Redis with a 24h TTL.
 - Persist the cursor (`discovery:cursor`) for resume on restart.
+- Hold candidates in a pending set until at least two distinct categories agree
+  (for example BirdEye aggregator + DEX depth or DEX depth + mempool print).
+- Emit immediately with reduced conviction when running in a degraded mode
+  (e.g. BirdEye outage) that cannot satisfy the two-category gate.
 - Apply a circuit breaker after 5 consecutive failures within 30 seconds, cooling down for 60 seconds.
 
 **Output Event:**
@@ -46,6 +52,12 @@ DiscoveryCandidate {
   asof
 }
 ```
+
+- Add `sources` metadata in the envelope (not shown above) that lists the
+  contributing categories and their evidence. Downstream scoring boosts the
+  candidate when corroboration includes the aggregator tier; when aggregator
+  data is missing the score is scaled down and marked `aggregator_degraded` so
+  UI/alerting can surface the reduced confidence.
 
 **SLOs:** `429` rate < 0.5%; candidate latency < 2s p95.
 

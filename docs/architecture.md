@@ -146,9 +146,19 @@ class MyAgent(BaseAgent):
   depth.  These metrics produce a multiplicative "tactical" boost that rewards
   consistent execution and penalises high-volatility or low‑sample strategies,
   ensuring the hive mind leans into agents that deliver reliable alpha.
+- **Token discovery corroboration** — discovery sources are grouped into
+  categories (`aggregator`, `dex_depth`, `mempool`, `onchain_scan`). A mint is
+  only promoted when at least two categories agree (for example BirdEye
+  aggregator + Jupiter/Orca depth, or DEX depth + mempool prints). Cross-source
+  confirmation boosts conviction scoring; single-source hits are parked until a
+  second category arrives or the TTL expires.
 - **Token discovery fallback** — the default `websocket` discovery mode uses
   BirdEye when `BIRDEYE_API_KEY` is set and continues with mempool, DEX and
-  on-chain scanning when the key is missing.
+  on-chain scanning when the key is missing. If BirdEye is unavailable mid-run
+  the system shifts into `aggregator_degraded` mode: only DEX/mempool/on-chain
+  categories remain eligible and scoring is scaled down to reflect the missing
+  corroboration tier. Once aggregator data returns the pipeline automatically
+  re-enables the full confirmation requirement.
 - **BirdEye configuration signal** — when BirdEye access fails because the
   key is missing or rejected, `discover_candidates` still emits fallback
   batches but records the configuration error on the result via
