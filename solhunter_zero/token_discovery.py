@@ -2421,7 +2421,17 @@ def discover_candidates(
                             address = raw.strip()
                             if not address:
                                 continue
-                            existed = address in candidates
+                            existing_entry = candidates.get(address)
+                            had_trending = False
+                            if isinstance(existing_entry, Mapping):
+                                sources_field = existing_entry.get("sources")
+                                if isinstance(sources_field, set):
+                                    had_trending = "trending" in sources_field
+                                elif sources_field:
+                                    normalized_sources = _normalize_string_collection(
+                                        sources_field
+                                    )
+                                    had_trending = "trending" in normalized_sources
                             entry = _merge_candidate_entry(
                                 candidates,
                                 {
@@ -2433,9 +2443,7 @@ def discover_candidates(
                             )
                             if entry is None:
                                 continue
-                            if _register_source(entry, "trending"):
-                                changed = True
-                            if not existed:
+                            if not had_trending:
                                 changed = True
                             _enrich_with_orca(entry)
                             if (
