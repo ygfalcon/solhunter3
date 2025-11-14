@@ -1570,22 +1570,44 @@ _WS_CHANNEL_LOCK = threading.Lock()
 # ``start_websockets`` injected into the environment (URLs, ports, etc.). This
 # allows future calls to refresh the values when ports change while avoiding
 # overwriting user-supplied configuration.
-_AUTO_WS_ENV_VALUES: dict[str, str] = {}
-
 _WS_PORT_ENV_KEYS: dict[str, tuple[str, ...]] = {
     "rl": ("UI_RL_WS_PORT",),
     "events": ("UI_EVENT_WS_PORT",),
     "logs": ("UI_LOG_WS_PORT",),
 }
 
+_AUTO_WS_ENV_VALUES: dict[str, str] = {}
+_AUTO_WS_ENV_CHANNELS: dict[str, str] = {}
 
-def _update_auto_env_value(key: str, value: str, descriptor: str) -> None:
+_WS_ENV_KEY_CHANNEL_HINTS: dict[str, str] = {
+    "UI_WS_URL": "events",
+    "UI_EVENTS_WS_URL": "events",
+    "UI_EVENTS_WS": "events",
+    "UI_RL_WS_URL": "rl",
+    "UI_RL_WS": "rl",
+    "UI_LOG_WS_URL": "logs",
+    "UI_LOGS_WS": "logs",
+}
+
+for _channel_name, _env_keys in _WS_PORT_ENV_KEYS.items():
+    for _env_key in _env_keys:
+        _WS_ENV_KEY_CHANNEL_HINTS.setdefault(_env_key, _channel_name)
+
+
+def _update_auto_env_value(
+    key: str, value: str, descriptor: str, *, channel: str | None = None
+) -> None:
     existing = os.environ.get(key)
     previous_auto = _AUTO_WS_ENV_VALUES.get(key)
+    channel_name = channel or _WS_ENV_KEY_CHANNEL_HINTS.get(key)
 
     if existing is None or (previous_auto is not None and existing == previous_auto):
         os.environ[key] = value
         _AUTO_WS_ENV_VALUES[key] = value
+        if channel_name:
+            _AUTO_WS_ENV_CHANNELS[key] = channel_name
+        else:
+            _AUTO_WS_ENV_CHANNELS.pop(key, None)
         action = "set" if existing is None else "refreshed"
         log.info(
             "UI websocket env %s %s to auto-generated %s %s",
@@ -1596,12 +1618,27 @@ def _update_auto_env_value(key: str, value: str, descriptor: str) -> None:
         )
     else:
         _AUTO_WS_ENV_VALUES.pop(key, None)
+        _AUTO_WS_ENV_CHANNELS.pop(key, None)
         log.info(
             "UI websocket env %s kept preconfigured value %s (auto-generated %s)",
             key,
             existing,
             value,
         )
+
+
+def _clear_auto_env_values_for_channels(channels: Iterable[str]) -> None:
+    if not channels:
+        return
+    channel_set = set(channels)
+    for key in list(_AUTO_WS_ENV_VALUES):
+        channel_name = _AUTO_WS_ENV_CHANNELS.get(key)
+        if channel_name is not None and channel_name not in channel_set:
+            continue
+        auto_value = _AUTO_WS_ENV_VALUES.pop(key, None)
+        if auto_value is not None and os.environ.get(key) == auto_value:
+            os.environ.pop(key, None)
+        _AUTO_WS_ENV_CHANNELS.pop(key, None)
 
 
 def _resolve_host() -> str:
@@ -2872,7 +2909,9 @@ def _start_channel(
                     _LOG_WS_PORT = bound_port
 
                 for env_key in _WS_PORT_ENV_KEYS.get(channel, ()):  # pragma: no branch - fixed keys
-                    _update_auto_env_value(env_key, str(bound_port), "port")
+                    _update_auto_env_value(
+                        env_key, str(bound_port), "port", channel=channel
+                    )
                 if candidate_port == 0 and bound_port != previous_port:
                     log.info(
                         "%s websocket using dynamically assigned port %s", channel, bound_port
@@ -3065,8 +3104,11 @@ def stop_websockets() -> None:
     """Shut down all websocket channels."""
 
     with _WS_CHANNEL_LOCK:
-        for state in _WS_CHANNELS.values():
+        stopped_channels: list[str] = []
+        for name, state in _WS_CHANNELS.items():
             _shutdown_state(state)
+            stopped_channels.append(name)
+        _clear_auto_env_values_for_channels(stopped_channels)
 
 
 StatusProvider = Callable[[], Dict[str, Any]]
