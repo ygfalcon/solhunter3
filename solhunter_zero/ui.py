@@ -1446,6 +1446,7 @@ _LOG_WS_PORT_DEFAULT = 0
 _WS_QUEUE_DEFAULT = 512
 _WS_PING_INTERVAL_DEFAULT = 20.0
 _WS_PING_TIMEOUT_DEFAULT = 20.0
+_WS_READY_TIMEOUT_DEFAULT = 15.0
 _backlog_env = os.getenv("UI_WS_BACKLOG_MAX", "64")
 try:
     BACKLOG_MAX = int(_backlog_env or 64)
@@ -2672,15 +2673,19 @@ def _start_channel(
     thread.start()
     state.thread = thread
 
-    ready_timeout_raw = os.getenv("UI_WS_READY_TIMEOUT", "5")
-    try:
-        ready_timeout = float(ready_timeout_raw or 5)
-    except (TypeError, ValueError):
-        log.warning(
-            "Invalid UI_WS_READY_TIMEOUT value %r; using default 5 seconds",
-            ready_timeout_raw,
-        )
-        ready_timeout = 5.0
+    ready_timeout_raw = os.getenv("UI_WS_READY_TIMEOUT")
+    if ready_timeout_raw in (None, ""):
+        ready_timeout = _WS_READY_TIMEOUT_DEFAULT
+    else:
+        try:
+            ready_timeout = float(ready_timeout_raw)
+        except (TypeError, ValueError):
+            log.warning(
+                "Invalid UI_WS_READY_TIMEOUT value %r; using default %.0f seconds",
+                ready_timeout_raw,
+                _WS_READY_TIMEOUT_DEFAULT,
+            )
+            ready_timeout = _WS_READY_TIMEOUT_DEFAULT
     try:
         result = ready.get(timeout=ready_timeout)
     except Exception as exc:  # pragma: no cover - unexpected queue failure

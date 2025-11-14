@@ -7,6 +7,7 @@ import threading
 import sys
 import time
 import types
+from queue import Empty
 from typing import Any
 
 import pytest
@@ -266,6 +267,74 @@ def test_websocket_invalid_ping_values_use_defaults(monkeypatch, caplog):
     for key in list(ui._AUTO_WS_ENV_VALUES):
         os.environ.pop(key, None)
     ui._AUTO_WS_ENV_VALUES.clear()
+
+
+def test_start_channel_allows_slow_ready(monkeypatch):
+    ui = _reload_ui_module()
+
+    class DummyThread:
+        def __init__(self, target=None, name=None, daemon=None):
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def join(self, timeout=None):
+            return None
+
+    class SlowReadyQueue:
+        required_timeout = 8.5
+        last_timeout = None
+
+        def __init__(self, *args, **kwargs):
+            self.value = None
+
+        def put(self, value):
+            self.value = value
+
+        def get(self, timeout=None):
+            type(self).last_timeout = timeout
+            if timeout is not None and timeout < self.required_timeout:
+                raise Empty
+            return self.value
+
+    monkeypatch.setattr(ui, "Queue", SlowReadyQueue)
+    monkeypatch.setattr(ui.threading, "Thread", DummyThread)
+    monkeypatch.delenv("UI_WS_READY_TIMEOUT", raising=False)
+
+    state = ui._WS_CHANNELS["events"]
+    prev_thread = state.thread
+    prev_loop = state.loop
+    prev_queue = state.queue
+    prev_server = state.server
+    prev_task = state.task
+    prev_port = state.port
+    prev_host = state.host
+    try:
+        thread = ui._start_channel(
+            "events",
+            host="127.0.0.1",
+            port=0,
+            queue_size=1,
+            ping_interval=1.0,
+            ping_timeout=1.0,
+        )
+        assert isinstance(thread, DummyThread)
+        assert thread.started is True
+        assert SlowReadyQueue.last_timeout is not None
+        assert SlowReadyQueue.last_timeout >= SlowReadyQueue.required_timeout
+        assert SlowReadyQueue.last_timeout == ui._WS_READY_TIMEOUT_DEFAULT
+    finally:
+        state.thread = prev_thread
+        state.loop = prev_loop
+        state.queue = prev_queue
+        state.server = prev_server
+        state.task = prev_task
+        state.port = prev_port
+        state.host = prev_host
 
 
 def test_enqueue_message_logs_warning_when_queue_full(caplog):
