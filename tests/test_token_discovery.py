@@ -196,6 +196,121 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_stage_b_allows_single_source_when_metrics_present(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    recorded: list[list[str]] = []
+    mint = "So11111111111111111111111111111111111111112"
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return [
+            {
+                "address": mint,
+                "name": "Metric Token",
+                "symbol": "MET",
+                "liquidity": 125000.0,
+                "volume": 98000.0,
+                "price": 0.42,
+                "sources": ["birdeye"],
+            }
+        ]
+
+    async def fake_trending(*, limit=None):
+        _ = limit
+        return []
+
+    async def no_tokens(*, session=None):
+        _ = session
+        return []
+
+    async def record_enrich(_candidates, *, addresses=None):
+        recorded.append(sorted(addresses or []))
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", no_tokens)
+    monkeypatch.setattr(td, "_fetch_raydium_tokens", no_tokens)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", no_tokens)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+    monkeypatch.setattr(td, "_enrich_with_solscan", record_enrich)
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_SOLSCAN="1",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_STAGE_B_MIN_SOURCES="5",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+
+    async for _ in td.discover_candidates("https://rpc", limit=3):
+        pass
+
+    assert recorded, "stage-b enrichment should be attempted"
+    assert any(mint in batch for batch in recorded)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_stage_b_waits_for_extra_sources_when_metrics_missing(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    recorded: list[list[str]] = []
+    mint = "So11111111111111111111111111111111111111113"
+
+    async def empty_bird(*, limit=None):
+        _ = limit
+        return []
+
+    async def trending_only(*, limit=None):
+        _ = limit
+        return [mint]
+
+    async def no_tokens(*, session=None):
+        _ = session
+        return []
+
+    async def record_enrich(_candidates, *, addresses=None):
+        recorded.append(sorted(addresses or []))
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", empty_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", trending_only)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", no_tokens)
+    monkeypatch.setattr(td, "_fetch_raydium_tokens", no_tokens)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", no_tokens)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+    monkeypatch.setattr(td, "_enrich_with_solscan", record_enrich)
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_SOLSCAN="1",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_STAGE_B_MIN_SOURCES="1",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+
+    async for _ in td.discover_candidates("https://rpc", limit=3):
+        pass
+
+    assert recorded == [], "trending-only candidates should wait for more sources"
+
+
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_includes_trending_tokens(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 

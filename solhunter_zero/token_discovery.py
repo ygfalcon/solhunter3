@@ -694,6 +694,34 @@ def _source_count(entry: Dict[str, Any]) -> int:
     return 0
 
 
+def _has_core_metrics(
+    entry: Mapping[str, Any], mempool: Mapping[str, float] | None = None
+) -> bool:
+    """Return ``True`` if ``entry`` already exposes actionable metrics."""
+
+    liquidity = _coerce_numeric(entry.get("liquidity"))
+    volume = _coerce_numeric(entry.get("volume"))
+    price = _coerce_numeric(entry.get("price"))
+    if any(value > 0 for value in (liquidity, volume, price)):
+        return True
+    if mempool:
+        mempool_score = _coerce_numeric(mempool.get("score"))
+        if mempool_score > 0:
+            return True
+    return False
+
+
+def _stage_b_required_sources(
+    entry: Mapping[str, Any], mempool: Mapping[str, float] | None = None
+) -> int:
+    """Return the minimum sources needed before Stage-B enrichment."""
+
+    configured = max(1, int(SETTINGS.stage_b_min_sources))
+    if _has_core_metrics(entry, mempool):
+        return 1
+    return max(2, configured)
+
+
 def _compute_feature_vector(
     entry: Dict[str, Any],
     mempool: Dict[str, float] | None,
@@ -1945,9 +1973,11 @@ def discover_candidates(
             entry["top_features"] = top
             for legacy in ("score_liq", "score_vol", "score_mp", "score_mult"):
                 entry.pop(legacy, None)
+            required_sources = _stage_b_required_sources(entry, mp)
             source_count = _source_count(entry)
             entry["_stage_b_eligible"] = bool(
-                score >= SETTINGS.stage_b_score_threshold or source_count >= SETTINGS.stage_b_min_sources
+                score >= SETTINGS.stage_b_score_threshold
+                or (required_sources > 0 and source_count >= required_sources)
             )
 
     def _snapshot(
