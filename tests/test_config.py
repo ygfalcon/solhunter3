@@ -314,6 +314,32 @@ def test_set_env_from_config_booleans(monkeypatch):
     assert os.getenv("USE_MEV_BUNDLES") == "True"
 
 
+def test_set_env_from_config_refreshes_token_discovery(monkeypatch):
+    monkeypatch.delenv("DISCOVERY_MIN_VOLUME_USD", raising=False)
+    monkeypatch.delenv("DISCOVERY_MIN_LIQUIDITY_USD", raising=False)
+    monkeypatch.delenv("DISCOVERY_CACHE_TTL", raising=False)
+
+    from solhunter_zero import token_discovery as td
+
+    td._BIRDEYE_CACHE.clear()
+    original_ttl = td._BIRDEYE_CACHE.ttl
+
+    cfg = {
+        "discovery_min_volume_usd": 12345,
+        "discovery_min_liquidity_usd": 6789,
+        "discovery_cache_ttl": 12,
+    }
+
+    set_env_from_config(cfg)
+
+    assert os.getenv("DISCOVERY_MIN_VOLUME_USD") == "12345"
+    assert os.getenv("DISCOVERY_MIN_LIQUIDITY_USD") == "6789"
+    assert td.SETTINGS.min_volume == 12345.0
+    assert td.SETTINGS.min_liquidity == 6789.0
+    assert td._BIRDEYE_CACHE.ttl == 12.0
+    assert original_ttl != td._BIRDEYE_CACHE.ttl
+
+
 def test_get_broker_urls_falls_back_to_event_bus(monkeypatch):
     from solhunter_zero.config import get_broker_urls
 

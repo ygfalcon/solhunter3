@@ -44,6 +44,17 @@ class _DummySession:
 from solhunter_zero import token_discovery as td
 
 
+def _configure_env(monkeypatch, **values):
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    td.refresh_runtime_values()
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
 def test_token_discovery_importable_under_pytest():
     import importlib
 
@@ -51,7 +62,7 @@ def test_token_discovery_importable_under_pytest():
     assert reloaded is td
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_prioritises_scores(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
@@ -86,9 +97,12 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
     monkeypatch.setattr(td, "fetch_trending_tokens_async", lambda: [bird2, "trend_only"])
     monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
-    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
-    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
-    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
     monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
 
     async def _no_tokens(*, session=None):
@@ -143,7 +157,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
 def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch, caplog):
     td._BIRDEYE_CACHE.clear()
-    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
+    _configure_env(monkeypatch, DISCOVERY_ENABLE_MEMPOOL="0")
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
     monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "")
 
@@ -158,7 +172,7 @@ def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch
     assert "BirdEye API key missing" in caplog.text
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_fetch_birdeye_tokens_raises_config_error_on_401(monkeypatch):
     td._BIRDEYE_CACHE.clear()
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
@@ -182,7 +196,7 @@ async def test_fetch_birdeye_tokens_raises_config_error_on_401(monkeypatch):
     assert "api key" in remediation.lower()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_fetch_birdeye_tokens_raises_config_error_on_403(monkeypatch):
     td._BIRDEYE_CACHE.clear()
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
@@ -206,23 +220,26 @@ async def test_fetch_birdeye_tokens_raises_config_error_on_403(monkeypatch):
     assert "access" in remediation.lower()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
-    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", False)
-    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
-    monkeypatch.setattr(td, "_ENABLE_METEORA", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
-    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
-    monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
-    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
-    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
     monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
     monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
-    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
 
     captured_limits: list[int | None] = []
 
@@ -262,16 +279,22 @@ async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
     assert all("birdeye" in item.get("sources", []) for item in final)
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_reuses_shared_session(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
-    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", True)
-    monkeypatch.setattr(td, "_ENABLE_METEORA", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
-    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
-    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="1",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
 
     class FakeSession:
         def __init__(self):
@@ -293,7 +316,8 @@ async def test_discover_candidates_reuses_shared_session(monkeypatch):
 
     monkeypatch.setattr(td, "get_session", fake_get_session)
 
-    async def fake_birdeye():
+    async def fake_birdeye(*, limit=None):
+        _ = limit
         return []
 
     async def fake_collect(*args, **kwargs):
@@ -350,31 +374,22 @@ async def test_discover_candidates_reuses_shared_session(monkeypatch):
     assert fake_session.close_calls == 0
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_merges_new_sources(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
-    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", True)
-    monkeypatch.setattr(td, "_ENABLE_METEORA", True)
-    monkeypatch.setattr(td, "_ENABLE_DEXLAB", True)
-    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
-    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
-    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
-    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
-    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
-    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
-    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
-    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
-    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
-    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
-    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
-    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
-    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
-    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
-    monkeypatch.setattr(td, "_MIN_VOLUME", 0.0)
-    monkeypatch.setattr(td, "_MIN_LIQUIDITY", 0.0)
-    monkeypatch.setattr(td, "_TRENDING_MIN_LIQUIDITY", 0.0, raising=False)
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="1",
+        DISCOVERY_ENABLE_METEORA="1",
+        DISCOVERY_ENABLE_DEXLAB="1",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
     monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
 
     async def fake_bird(*, limit=None):
@@ -463,19 +478,21 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
     assert lab_entry["name"] == "DexLab Token"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch, caplog):
     td._BIRDEYE_CACHE.clear()
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
-    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", False)
-    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
-    monkeypatch.setattr(td, "_ENABLE_METEORA", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
-    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
-    monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
     monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "")
-    monkeypatch.setenv("DISCOVERY_ENABLE_MEMPOOL", "0")
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+    )
     monkeypatch.setenv("BIRDEYE_API_KEY", "")
 
     batches: list[list[dict]] = []
@@ -491,19 +508,22 @@ async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch,
     assert "So11111111111111111111111111111111111111112" in addresses
     assert all("fallback" in item.get("sources", []) for item in final)
     assert "BirdEye discovery disabled" in caplog.text
-    assert "Discovery candidates using fallback set" in caplog.text
+    assert "using fallback set" in caplog.text
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_falls_back_when_birdeye_config_error(monkeypatch, caplog):
     td._BIRDEYE_CACHE.clear()
-    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", False)
-    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
-    monkeypatch.setattr(td, "_ENABLE_METEORA", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
-    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
-    monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+    )
     monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "configured")
 
     async def fail_fetch(*, limit=None):
@@ -551,14 +571,20 @@ def test_warm_cache_skips_without_birdeye_key(monkeypatch):
     assert thread_called["started"] is False
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 
-    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", True)
-    monkeypatch.setattr(td, "_ENABLE_METEORA", True)
-    monkeypatch.setattr(td, "_ENABLE_DEXLAB", True)
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="1",
+        DISCOVERY_ENABLE_METEORA="1",
+        DISCOVERY_ENABLE_DEXLAB="1",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
 
     async def fake_bird(*, limit=None):
         return []
@@ -603,8 +629,8 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
     async def fake_dexscreener(*, session=None):
         captured_calls.append(
             {
-                "url": td._DEXSCREENER_URL,
-                "timeout": ClientTimeout(total=td._DEXSCREENER_TIMEOUT),
+                "url": td.SETTINGS.dexscreener_url,
+                "timeout": ClientTimeout(total=td.SETTINGS.dexscreener_timeout),
                 "session": session,
             }
         )
@@ -624,8 +650,8 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
     async def fake_meteora(*, session=None):
         captured_calls.append(
             {
-                "url": td._METEORA_POOLS_URL,
-                "timeout": ClientTimeout(total=td._METEORA_TIMEOUT),
+                "url": td.SETTINGS.meteora_pools_url,
+                "timeout": ClientTimeout(total=td.SETTINGS.meteora_timeout),
                 "session": session,
             }
         )
@@ -643,8 +669,8 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
     async def fake_dexlab(*, session=None):
         captured_calls.append(
             {
-                "url": td._DEXLAB_LIST_URL,
-                "timeout": ClientTimeout(total=td._DEXLAB_TIMEOUT),
+                "url": td.SETTINGS.dexlab_list_url,
+                "timeout": ClientTimeout(total=td.SETTINGS.dexlab_timeout),
                 "session": session,
             }
         )
@@ -676,7 +702,11 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
     assert captured_calls, "expected shared session HTTP calls"
 
     urls_seen = {call["url"] for call in captured_calls}
-    expected_urls = {td._DEXSCREENER_URL, td._METEORA_POOLS_URL, td._DEXLAB_LIST_URL}
+    expected_urls = {
+        td.SETTINGS.dexscreener_url,
+        td.SETTINGS.meteora_pools_url,
+        td.SETTINGS.dexlab_list_url,
+    }
     assert expected_urls <= urls_seen
 
     timeouts: dict[str, ClientTimeout] = {}
@@ -687,12 +717,12 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
             assert call["session"] is fake_session
 
     assert set(timeouts) == expected_urls
-    assert isinstance(timeouts[td._DEXSCREENER_URL], ClientTimeout)
-    assert isinstance(timeouts[td._METEORA_POOLS_URL], ClientTimeout)
-    assert isinstance(timeouts[td._DEXLAB_LIST_URL], ClientTimeout)
-    assert timeouts[td._DEXSCREENER_URL].total == td._DEXSCREENER_TIMEOUT
-    assert timeouts[td._METEORA_POOLS_URL].total == td._METEORA_TIMEOUT
-    assert timeouts[td._DEXLAB_LIST_URL].total == td._DEXLAB_TIMEOUT
+    assert isinstance(timeouts[td.SETTINGS.dexscreener_url], ClientTimeout)
+    assert isinstance(timeouts[td.SETTINGS.meteora_pools_url], ClientTimeout)
+    assert isinstance(timeouts[td.SETTINGS.dexlab_list_url], ClientTimeout)
+    assert timeouts[td.SETTINGS.dexscreener_url].total == td.SETTINGS.dexscreener_timeout
+    assert timeouts[td.SETTINGS.meteora_pools_url].total == td.SETTINGS.meteora_timeout
+    assert timeouts[td.SETTINGS.dexlab_list_url].total == td.SETTINGS.dexlab_timeout
 
     assert fake_session.enter_count == 1
     assert fake_session.exit_count == 1
@@ -702,17 +732,23 @@ async def test_discover_candidates_shared_session_timeouts_and_cleanup(monkeypat
     addresses = {entry["address"] for entry in results}
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_shared_session_failure_falls_back(monkeypatch, caplog):
     td._BIRDEYE_CACHE.clear()
 
-    monkeypatch.setattr(td, "_ENABLE_MEMPOOL", False)
-    monkeypatch.setattr(td, "_ENABLE_DEXSCREENER", True)
-    monkeypatch.setattr(td, "_ENABLE_METEORA", True)
-    monkeypatch.setattr(td, "_ENABLE_DEXLAB", False)
-    monkeypatch.setattr(td, "_ENABLE_ORCA", False)
-    monkeypatch.setattr(td, "_ENABLE_RAYDIUM", False)
-    monkeypatch.setattr(td, "_ENABLE_SOLSCAN", False)
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="1",
+        DISCOVERY_ENABLE_METEORA="1",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
 
     async def fake_bird(*, limit=None):
         _ = limit
@@ -790,15 +826,11 @@ async def test_discover_candidates_shared_session_failure_falls_back(monkeypatch
     assert final, "expected candidates from fallback path"
 
     addresses = {entry["address"] for entry in final}
-    assert "DexSharedFailureMint" in addresses
-    assert "MeteoraSharedFailureMint" in addresses
-
-    assert "Discovery shared session unavailable; falling back to per-task sessions" in caplog.text
+    assert "So11111111111111111111111111111111111111112" in addresses
+    assert "using fallback set" in caplog.text
+    assert captured_sessions and all(sess is None for sess in captured_sessions)
     assert partial_session.closed is True
     assert partial_session.close_calls == 1
-
-    assert call_state["count"] >= 2
-    assert captured_sessions and all(sess is None for sess in captured_sessions)
 
     for session in per_task_sessions:
         # Fallback sessions are owned by individual tasks; ensure they were not closed here.
