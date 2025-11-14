@@ -1620,7 +1620,7 @@ PY
 
 check_live_keypair_paths() {
   local keypair_report
-  if ! keypair_report=$("$PYTHON_BIN" - <<'PY'
+  if ! keypair_report=$(CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" - <<'PY'
 import os
 import sys
 from pathlib import Path
@@ -1761,14 +1761,14 @@ set +a
 # importable even after sourcing overrides.
 ensure_repo_pythonpath
 
+if [[ -n $CONFIG_PATH ]]; then
+  export CONFIG_PATH
+fi
+
 check_live_keypair_paths
 
 # Ensure Jupiter websocket uses the stats endpoint unless explicitly overridden.
 export JUPITER_WS_URL="${JUPITER_WS_URL:-wss://stats.jup.ag/ws}"
-
-if [[ -n $CONFIG_PATH ]]; then
-  export CONFIG_PATH
-fi
 
 PROVIDER_STATUS=""
 log_info "Checking configured provider credentials and connectivity"
