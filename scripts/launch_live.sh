@@ -1446,6 +1446,40 @@ need_val() {
   fi
 }
 
+require_positive_number() {
+  local flag=$1
+  local value=$2
+  if [[ -z $value ]]; then
+    echo "$flag requires a value" >&2
+    exit 1
+  fi
+  if ! [[ $value =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "$flag must be a positive numeric value" >&2
+    exit 1
+  fi
+  if command -v bc >/dev/null 2>&1; then
+    local bc_result
+    bc_result=$(echo "$value > 0" | bc -l 2>/dev/null || true)
+    if [[ $bc_result != "1" ]]; then
+      echo "$flag must be greater than zero" >&2
+      exit 1
+    fi
+  else
+    if ! python3 - "$value" <<'PY'; then
+import sys
+try:
+    value = float(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+if not value > 0:
+    raise SystemExit(1)
+PY
+      echo "$flag must be greater than zero" >&2
+      exit 1
+    fi
+  fi
+}
+
 ENV_FILE=""
 MICRO_FLAG=""
 CANARY_MODE=0
@@ -1558,6 +1592,14 @@ if [[ $CANARY_MODE -eq 1 ]]; then
     echo "--canary requires --budget and --risk" >&2
     exit 1
   fi
+fi
+
+if [[ -n $CANARY_BUDGET ]]; then
+  require_positive_number "--budget" "$CANARY_BUDGET"
+fi
+
+if [[ -n $CANARY_RISK ]]; then
+  require_positive_number "--risk" "$CANARY_RISK"
 fi
 
 if ! [[ $SOAK_DURATION =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
