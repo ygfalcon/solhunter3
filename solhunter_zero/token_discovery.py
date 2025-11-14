@@ -551,17 +551,11 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
         if not address or address in seen:
             continue
         entry = dict(item)
-        sources = entry.get("sources")
-        if isinstance(sources, set):
-            entry_sources = set(sources)
-        elif isinstance(sources, (list, tuple)):
-            entry_sources = {str(src) for src in sources if isinstance(src, str) and src}
-        elif isinstance(sources, str) and sources:
-            entry_sources = {sources}
-        else:
-            entry_sources = set()
-        entry_sources.add("cache")
-        entry["sources"] = entry_sources
+        entry["sources"] = _normalize_string_collection(entry.get("sources"))
+        entry["source_categories"] = _normalize_string_collection(
+            entry.get("source_categories")
+        )
+        _register_source(entry, "cache")
         entry.setdefault("score", 0.0)
         entry.setdefault("_stage_b_eligible", False)
         fallback.append(entry)
@@ -577,6 +571,7 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
             "symbol": symbol,
             "name": name,
             "sources": {"static"},
+            "source_categories": {"fallback"},
             "score": 0.0,
             "_stage_b_eligible": False,
         }
@@ -812,6 +807,84 @@ def _normalize_venues_field(value: Any) -> set[str]:
     return venues
 
 
+def _normalize_string_collection(value: Any) -> set[str]:
+    if isinstance(value, set):
+        iterable = value
+    elif isinstance(value, (list, tuple)):
+        iterable = value
+    elif isinstance(value, str):
+        iterable = [value]
+    else:
+        return set()
+    normalized: set[str] = set()
+    for item in iterable:
+        if isinstance(item, str):
+            candidate = item.strip()
+        else:
+            candidate = str(item).strip()
+        if candidate:
+            normalized.add(candidate)
+    return normalized
+
+
+_SOURCE_CATEGORY_MAP: Dict[str, str] = {
+    "birdeye": "market_data",
+    "dexscreener": "market_data",
+    "meteora": "market_data",
+    "dexlab": "market_data",
+    "raydium": "market_data",
+    "mempool": "mempool_signal",
+    "trending": "trending_signal",
+    "solscan": "metadata",
+    "cache": "fallback",
+    "static": "fallback",
+    "fallback": "fallback",
+}
+
+
+def _source_category_for(label: str) -> str | None:
+    key = str(label).strip().lower()
+    if not key:
+        return None
+    return _SOURCE_CATEGORY_MAP.get(key, "other")
+
+
+def _register_source(entry: Dict[str, Any], source: str) -> bool:
+    if not source:
+        return False
+    normalized_source = str(source).strip()
+    if not normalized_source:
+        return False
+    existing_sources = entry.get("sources")
+    if isinstance(existing_sources, set):
+        before = len(existing_sources)
+        existing_sources.add(normalized_source)
+        sources_changed = len(existing_sources) != before
+    else:
+        normalized = _normalize_string_collection(existing_sources)
+        before = len(normalized)
+        normalized.add(normalized_source)
+        entry["sources"] = normalized
+        sources_changed = len(normalized) != before
+
+    category = _source_category_for(normalized_source)
+    categories_changed = False
+    if category:
+        existing_categories = entry.get("source_categories")
+        if isinstance(existing_categories, set):
+            before_cat = len(existing_categories)
+            existing_categories.add(category)
+            categories_changed = len(existing_categories) != before_cat
+        else:
+            normalized_categories = _normalize_string_collection(existing_categories)
+            before_cat = len(normalized_categories)
+            normalized_categories.add(category)
+            entry["source_categories"] = normalized_categories
+            categories_changed = len(normalized_categories) != before_cat
+
+    return sources_changed or categories_changed
+
+
 def _merge_orca_venues(
     entry: Dict[str, Any], catalog: Mapping[str, Sequence[Mapping[str, Any]]]
 ) -> None:
@@ -894,6 +967,7 @@ def _merge_candidate_entry(
             "price": price,
             "price_change": change,
             "sources": set(),
+            "source_categories": set(),
             "venues": set(incoming_venues),
         }
         if discovered_at is not None:
@@ -921,6 +995,15 @@ def _merge_candidate_entry(
             entry["venues"] = _normalize_venues_field(venues_field)
         else:
             entry["venues"] = set()
+        categories_field = entry.get("source_categories")
+        if isinstance(categories_field, list):
+            entry["source_categories"] = _normalize_string_collection(categories_field)
+        elif isinstance(categories_field, set):
+            pass
+        elif categories_field:
+            entry["source_categories"] = _normalize_string_collection(categories_field)
+        else:
+            entry["source_categories"] = set()
         if symbol and not entry.get("symbol"):
             entry["symbol"] = str(symbol)
         if name and (not entry.get("name") or entry.get("name") == entry.get("address")):
@@ -956,7 +1039,9 @@ def _merge_candidate_entry(
             if extra_key in token and extra_key not in entry:
                 entry[extra_key] = token[extra_key]
 
-    entry.setdefault("sources", set()).add(source)
+    entry.setdefault("sources", set())
+    entry.setdefault("source_categories", set())
+    _register_source(entry, source)
     return entry
 
 
@@ -1740,7 +1825,9 @@ def _apply_solscan_enrichment(
     if isinstance(verified, bool):
         entry["verified"] = verified
 
-    entry.setdefault("sources", set()).add("solscan")
+    entry.setdefault("sources", set())
+    entry.setdefault("source_categories", set())
+    _register_source(entry, "solscan")
 
 
 async def _enrich_with_solscan(
@@ -1921,6 +2008,7 @@ def discover_candidates(
     ) -> None:
         for addr, entry in candidates.items():
             entry.setdefault("sources", set())
+            entry.setdefault("source_categories", set())
             mp = mempool.get(addr)
             features = _compute_feature_vector(entry, mp)
             z = float(_SCORING_BIAS)
@@ -1970,6 +2058,12 @@ def discover_candidates(
                 src_list = sorted(list(sources or []))
             copy = dict(entry)
             copy["sources"] = src_list
+            categories = entry.get("source_categories", [])
+            if isinstance(categories, set):
+                category_list = sorted(categories)
+            else:
+                category_list = sorted(list(categories or []))
+            copy["source_categories"] = category_list
             venues_field = entry.get("venues")
             if isinstance(venues_field, set):
                 venues_list = sorted(venues_field)
@@ -2187,14 +2281,7 @@ def discover_candidates(
                             )
                             if entry is None:
                                 continue
-                            sources = entry.get("sources")
-                            if isinstance(sources, set):
-                                before = len(sources)
-                                sources.add("trending")
-                                if len(sources) != before:
-                                    changed = True
-                            else:
-                                entry["sources"] = {"trending"}
+                            if _register_source(entry, "trending"):
                                 changed = True
                             if not existed:
                                 changed = True
@@ -2351,21 +2438,13 @@ def discover_candidates(
                     if not address:
                         continue
                     entry_copy = dict(entry)
-                    sources = entry_copy.get("sources")
-                    if isinstance(sources, set):
-                        source_set = set(sources)
-                    elif isinstance(sources, (list, tuple)):
-                        source_set = {
-                            str(src)
-                            for src in sources
-                            if isinstance(src, str) and src
-                        }
-                    elif isinstance(sources, str) and sources:
-                        source_set = {sources}
-                    else:
-                        source_set = set()
-                    source_set.add("fallback")
-                    entry_copy["sources"] = source_set
+                    entry_copy["sources"] = _normalize_string_collection(
+                        entry_copy.get("sources")
+                    )
+                    entry_copy["source_categories"] = _normalize_string_collection(
+                        entry_copy.get("source_categories")
+                    )
+                    _register_source(entry_copy, "fallback")
                     entry_copy.setdefault("score", 0.0)
                     entry_copy.setdefault("_stage_b_eligible", False)
                     fallback_candidates[address] = entry_copy

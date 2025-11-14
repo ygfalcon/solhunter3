@@ -57,6 +57,32 @@ def _configure_env(monkeypatch, **values):
     td.refresh_runtime_values()
 
 
+def test_merge_candidate_entry_tracks_source_categories(monkeypatch):
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    candidates = {}
+    address = "So11111111111111111111111111111111111111112"
+
+    entry = td._merge_candidate_entry(
+        candidates,
+        {"address": address, "liquidity": 10, "volume": 20},
+        "birdeye",
+    )
+
+    assert entry is not None
+    assert candidates[address] is entry
+    assert entry["source_categories"] == {"market_data"}
+
+    second = td._merge_candidate_entry(
+        candidates,
+        {"address": address, "liquidity": 15, "volume": 25},
+        "mempool",
+    )
+
+    assert second is entry
+    assert entry["source_categories"] == {"market_data", "mempool_signal"}
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
@@ -192,7 +218,11 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     assert addresses[0] == mem_mint
     assert set(addresses) >= {bird1, bird2, mem_mint}
     assert results[0]["sources"] == ["mempool"]
+    assert "mempool_signal" in results[0]["source_categories"]
     assert any("birdeye" in r["sources"] for r in results)
+    assert any(
+        "market_data" in r.get("source_categories", []) for r in results
+    )
 
 
 @pytest.mark.anyio("asyncio")
