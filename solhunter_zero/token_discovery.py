@@ -858,13 +858,20 @@ def _normalize_string_collection(value: Any) -> set[str]:
 
 _SOURCE_CATEGORY_MAP: Dict[str, str] = {
     "birdeye": "market_data",
+    "birdeye_overview": "market_data",
     "dexscreener": "market_data",
     "meteora": "market_data",
     "dexlab": "market_data",
     "raydium": "market_data",
+    "dex_metrics": "market_data",
+    "pumpfun": "trending_signal",
     "mempool": "mempool_signal",
     "trending": "trending_signal",
+    "social": "social_signal",
     "solscan": "metadata",
+    "helius_search": "metadata",
+    "onchain": "onchain_metrics",
+    "onchain_fallback": "fallback",
     "cache": "fallback",
     "static": "fallback",
     "fallback": "fallback",
@@ -1133,12 +1140,13 @@ def _apply_trending_enrichment(entry: Dict[str, Any], payload: Mapping[str, Any]
 
     sources = entry.setdefault("sources", set())
     if not isinstance(sources, set):
-        sources = set(str(src) for src in sources if isinstance(src, str))
+        sources = {str(src) for src in sources if isinstance(src, str)}
         entry["sources"] = sources
-    before = len(sources)
-    sources.add("birdeye_overview")
-    if len(sources) != before:
-        changed = True
+    if changed:
+        before = len(sources)
+        sources.add("birdeye_overview")
+        if len(sources) != before:
+            changed = True
 
     return changed
 
