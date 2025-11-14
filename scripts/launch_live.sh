@@ -20,6 +20,20 @@ log_warn() {
   printf '[%s] [launch_live][warn] %s\n' "$(timestamp)" "$msg" >&2
 }
 
+ensure_repo_pythonpath() {
+  if [[ -n ${PYTHONPATH:-} ]]; then
+    case ":$PYTHONPATH:" in
+      *":$ROOT_DIR:"*)
+        ;;
+      *)
+        export PYTHONPATH="$ROOT_DIR:$PYTHONPATH"
+        ;;
+    esac
+  else
+    export PYTHONPATH="$ROOT_DIR"
+  fi
+}
+
 detect_pip_online() {
   if [[ -n ${PIP_NO_INDEX:-} ]]; then
     return 1
@@ -94,11 +108,7 @@ RUNTIME_LOCK_ACQUIRED=0
 # "launch_live.sh" may be executed before the package is installed (e.g. from a
 # fresh clone), so python invocations need the project root on PYTHONPATH so
 # that modules like ``solhunter_zero`` can be imported successfully.
-if [[ -n ${PYTHONPATH:-} ]]; then
-  export PYTHONPATH="$ROOT_DIR:$PYTHONPATH"
-else
-  export PYTHONPATH="$ROOT_DIR"
-fi
+ensure_repo_pythonpath
 
 ensure_virtualenv() {
   if [[ ! -x $PYTHON_BIN ]]; then
@@ -1532,6 +1542,10 @@ set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
+
+# Environment files may override PYTHONPATH; ensure the repository root remains
+# importable even after sourcing overrides.
+ensure_repo_pythonpath
 
 check_live_keypair_paths
 
