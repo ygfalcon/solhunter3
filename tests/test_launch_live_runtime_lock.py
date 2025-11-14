@@ -182,12 +182,14 @@ def _base_env(tmp_path: Path, stub_root: Path) -> dict[str, str]:
     return env
 
 
-def _make_acquire_script(functions: str, *commands: str) -> str:
+def _make_acquire_script(
+    functions: str, *commands: str, start_stub: str | None = None
+) -> str:
     stubs = (
         "stop_runtime_lock_refresher() { :; }",
-        "start_runtime_lock_refresher() { :; }",
+        start_stub or "start_runtime_lock_refresher() { RUNTIME_LOCK_REFRESH_PID=$$; }",
     )
-    parts = ["set -euo pipefail", functions, *stubs]
+    parts = ["set -euo pipefail", "EXIT_HEALTH=4", functions, *stubs]
     if commands:
         parts.extend(commands)
     else:
@@ -345,6 +347,35 @@ def test_acquire_runtime_lock_takeover_on_host_mismatch(tmp_path: Path) -> None:
     payload = json.loads(entry["value"])
     assert payload["host"] == socket.gethostname()
     assert payload["token"] != "remote-token"
+
+
+def test_acquire_runtime_lock_exits_when_refresher_missing(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "acquire_runtime_lock")
+    )
+
+    stub_root = _write_stub_redis(tmp_path)
+    env = _base_env(tmp_path, stub_root)
+
+    refresher_stub = "start_runtime_lock_refresher() { RUNTIME_LOCK_REFRESH_PID=0; }"
+    bash_script = _make_acquire_script(functions, start_stub=refresher_stub)
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == 4
+    assert "Runtime lock refresher did not start" in completed.stderr
 
 
 def test_release_runtime_lock_requires_matching_token(tmp_path: Path) -> None:
