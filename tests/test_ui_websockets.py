@@ -269,6 +269,78 @@ def test_websocket_invalid_ping_values_use_defaults(monkeypatch, caplog):
     ui._AUTO_WS_ENV_VALUES.clear()
 
 
+def test_start_websockets_stops_started_channels_on_failure(monkeypatch):
+    ui = _reload_ui_module()
+
+    class DummyLoop:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        def call_soon_threadsafe(self, callback, *args, **kwargs):
+            callback(*args, **kwargs)
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    class DummyThread:
+        def __init__(self) -> None:
+            self.join_calls = 0
+
+        def join(self, timeout=None):
+            self.join_calls += 1
+
+    dummy_loop = DummyLoop()
+    dummy_thread = DummyThread()
+    started_channels: list[str] = []
+    stopped_channels: list[str] = []
+
+    def fake_start_channel(
+        channel: str,
+        *,
+        host: str,
+        port: int,
+        queue_size: int,
+        ping_interval: float,
+        ping_timeout: float,
+    ) -> Any:
+        started_channels.append(channel)
+        state = ui._WS_CHANNELS[channel]
+        if channel == "rl":
+            state.loop = dummy_loop
+            state.thread = dummy_thread
+            state.host = host
+            state.port = port
+            return dummy_thread
+        raise RuntimeError("boom")
+
+    def fake_shutdown_state(state):
+        stopped_channels.append(state.name)
+        loop = state.loop
+        if loop is not None:
+            loop.call_soon_threadsafe(loop.stop)
+        thread = state.thread
+        if thread is not None:
+            thread.join(timeout=2)
+        state.loop = None
+        state.thread = None
+        state.host = None
+        state.port = 0
+
+    monkeypatch.setattr(ui, "_start_channel", fake_start_channel)
+    monkeypatch.setattr(ui, "_shutdown_state", fake_shutdown_state)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        ui.start_websockets()
+
+    assert started_channels == ["rl", "events"]
+    assert stopped_channels == ["rl"]
+    rl_state = ui._WS_CHANNELS["rl"]
+    assert rl_state.loop is None
+    assert rl_state.thread is None
+    assert dummy_thread.join_calls == 1
+    assert dummy_loop.stop_calls == 1
+
+
 def test_start_channel_allows_slow_ready(monkeypatch):
     ui = _reload_ui_module()
 

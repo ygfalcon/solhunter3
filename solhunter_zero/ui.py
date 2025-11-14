@@ -2737,33 +2737,25 @@ def start_websockets() -> dict[str, threading.Thread]:
     log_port = _resolve_port("UI_LOG_WS_PORT", default=_LOG_WS_PORT_DEFAULT)
     event_port = _resolve_port("UI_EVENT_WS_PORT", "EVENT_WS_PORT", default=_EVENT_WS_PORT_DEFAULT)
 
+    channel_ports = {
+        "rl": rl_port,
+        "events": event_port,
+        "logs": log_port,
+    }
+    started_states: list[_WebsocketState] = []
     try:
-        threads["rl"] = _start_channel(
-            "rl",
-            host=host,
-            port=rl_port,
-            queue_size=queue_size,
-            ping_interval=ping_interval,
-            ping_timeout=ping_timeout,
-        )
-        threads["events"] = _start_channel(
-            "events",
-            host=host,
-            port=event_port,
-            queue_size=queue_size,
-            ping_interval=ping_interval,
-            ping_timeout=ping_timeout,
-        )
-        threads["logs"] = _start_channel(
-            "logs",
-            host=host,
-            port=log_port,
-            queue_size=queue_size,
-            ping_interval=ping_interval,
-            ping_timeout=ping_timeout,
-        )
+        for name in ("rl", "events", "logs"):
+            threads[name] = _start_channel(
+                name,
+                host=host,
+                port=channel_ports[name],
+                queue_size=queue_size,
+                ping_interval=ping_interval,
+                ping_timeout=ping_timeout,
+            )
+            started_states.append(_WS_CHANNELS[name])
     except Exception:
-        for state in _WS_CHANNELS.values():
+        for state in reversed(started_states):
             _shutdown_state(state)
         raise
 
