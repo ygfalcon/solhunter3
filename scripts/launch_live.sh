@@ -1790,6 +1790,15 @@ wait_for_ready() {
   local golden_seen=0
   local golden_disabled_seen=0
   local runtime_seen=0
+  local allow_ws_degraded=0
+  local allow_ws_raw="${LAUNCH_LIVE_ALLOW_WS_DEGRADED:-${UI_WS_OPTIONAL:-}}"
+  if [[ -n ${allow_ws_raw:-} ]]; then
+    case "${allow_ws_raw,,}" in
+      1|true|yes|on|enabled)
+        allow_ws_degraded=1
+        ;;
+    esac
+  fi
   while [[ $waited -lt $READY_TIMEOUT ]]; do
     if [[ -n $notify && -f $notify ]]; then
       runtime_seen=1
@@ -1797,8 +1806,56 @@ wait_for_ready() {
     if [[ $ui_seen -eq 0 ]] && grep -q "UI_READY" "$log" 2>/dev/null; then
       ui_seen=1
     fi
-    if [[ $ui_ws_seen -eq 0 ]] && grep -q "UI_WS_READY" "$log" 2>/dev/null; then
-      ui_ws_seen=1
+    if [[ $ui_ws_seen -eq 0 ]]; then
+      local ui_ws_line=""
+      ui_ws_line="$(grep -m1 "UI_WS_READY" "$log" 2>/dev/null || true)"
+      if [[ -n $ui_ws_line ]]; then
+        local ui_ws_status=""
+        local ui_ws_detail=""
+        if [[ $ui_ws_line =~ status=([^[:space:]]+) ]]; then
+          ui_ws_status="${BASH_REMATCH[1]}"
+        fi
+        if [[ $ui_ws_line =~ detail=(.*) ]]; then
+          ui_ws_detail="${BASH_REMATCH[1]}"
+        fi
+        if [[ -z $ui_ws_status ]]; then
+          print_log_excerpt "$log" "UI websocket readiness line missing status: $ui_ws_line"
+          exit "$EXIT_HEALTH"
+        fi
+        case "$ui_ws_status" in
+          ok)
+            ui_ws_seen=1
+            ;;
+          degraded)
+            if [[ $allow_ws_degraded -eq 1 ]]; then
+              ui_ws_seen=1
+            else
+              local reason="UI websocket readiness reported status=degraded"
+              if [[ -n $ui_ws_detail ]]; then
+                reason+=" detail=$ui_ws_detail"
+              fi
+              print_log_excerpt "$log" "$reason"
+              exit "$EXIT_HEALTH"
+            fi
+            ;;
+          failed)
+            local reason="UI websocket readiness reported status=failed"
+            if [[ -n $ui_ws_detail ]]; then
+              reason+=" detail=$ui_ws_detail"
+            fi
+            print_log_excerpt "$log" "$reason"
+            exit "$EXIT_HEALTH"
+            ;;
+          *)
+            local reason="UI websocket readiness reported status=$ui_ws_status"
+            if [[ -n $ui_ws_detail ]]; then
+              reason+=" detail=$ui_ws_detail"
+            fi
+            print_log_excerpt "$log" "$reason"
+            exit "$EXIT_HEALTH"
+            ;;
+        esac
+      fi
     fi
     if [[ $bus_seen -eq 0 ]] && grep -q "Event bus: connected" "$log" 2>/dev/null; then
       bus_seen=1

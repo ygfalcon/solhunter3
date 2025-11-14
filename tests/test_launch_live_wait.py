@@ -39,8 +39,42 @@ def _extract_function(source: str, name: str) -> str:
     return source[start:end] + "\n"
 
 
+LAUNCH_LIVE_PATH = REPO_ROOT / "scripts" / "launch_live.sh"
+_LAUNCH_LIVE_SOURCE = LAUNCH_LIVE_PATH.read_text()
+WAIT_FOR_READY_SNIPPET = (
+    _extract_function(_LAUNCH_LIVE_SOURCE, "print_log_excerpt")
+    + _extract_function(_LAUNCH_LIVE_SOURCE, "wait_for_ready")
+)
+
+
+def _run_wait_for_ready(
+    tmp_path: Path,
+    log_lines: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text("\n".join(log_lines) + "\n")
+    bash_script = (
+        "set -euo pipefail\n"
+        + WAIT_FOR_READY_SNIPPET
+        + "EXIT_HEALTH=4\n"
+        + f"READY_TIMEOUT=2\nwait_for_ready '{log_path}' ''\n"
+    )
+    env_vars = os.environ.copy()
+    if env:
+        env_vars.update(env)
+    return subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env_vars,
+    )
+
+
 def test_ensure_virtualenv_respects_skip_flag(tmp_path: Path) -> None:
-    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    script_path = LAUNCH_LIVE_PATH
     source = script_path.read_text()
     ensure_fn = _extract_function(source, "ensure_virtualenv")
     detect_fn = _extract_function(source, "detect_pip_online")
@@ -236,30 +270,67 @@ def test_start_log_stream_preserves_existing_content(tmp_path: Path) -> None:
     ],
 )
 def test_wait_for_ready_accepts_disabled(tmp_path: Path, golden_line: str) -> None:
-    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
-    source = script_path.read_text()
-    functions = _extract_function(source, "print_log_excerpt") + _extract_function(source, "wait_for_ready")
-
-    log_path = tmp_path / "runtime.log"
-    log_path.write_text(
-        "\n".join(
-            [
-                "[ts] UI_READY url=http://localhost:1234",  # UI ready marker
-                "[ts] UI_WS_READY status=ok rl_ws=ws://localhost:2345 events_ws=ws://localhost:3456 logs_ws=ws://localhost:4567",
-                "[ts] Event bus: connected",  # Event bus connected marker
-                golden_line,
-                "[ts] RUNTIME_READY",  # Runtime ready marker
-            ]
-        )
+    completed = _run_wait_for_ready(
+        tmp_path,
+        [
+            "[ts] UI_READY url=http://localhost:1234",  # UI ready marker
+            "[ts] UI_WS_READY status=ok rl_ws=ws://localhost:2345 events_ws=ws://localhost:3456 logs_ws=ws://localhost:4567",
+            "[ts] Event bus: connected",  # Event bus connected marker
+            golden_line,
+            "[ts] RUNTIME_READY",  # Runtime ready marker
+        ],
     )
 
-    bash_script = (
-        "set -euo pipefail\n"
-        + functions
-        + f"READY_TIMEOUT=2\nwait_for_ready '{log_path}' ''\n"
+    assert completed.returncode == 0
+
+
+def test_wait_for_ready_exits_on_ui_ws_failure(tmp_path: Path) -> None:
+    completed = _run_wait_for_ready(
+        tmp_path,
+        [
+            "[ts] UI_READY url=http://localhost:1234",
+            "[ts] UI_WS_READY status=failed detail=websocket handshake failed",
+            "[ts] Event bus: connected",
+            "[ts] GOLDEN_READY stage=liq",
+            "[ts] RUNTIME_READY",
+        ],
     )
 
-    subprocess.run(["bash", "-c", bash_script], check=True, cwd=REPO_ROOT)
+    assert completed.returncode == 4
+    assert "status=failed" in completed.stderr
+    assert "detail=websocket handshake failed" in completed.stderr
+
+
+def test_wait_for_ready_rejects_degraded_without_opt_in(tmp_path: Path) -> None:
+    completed = _run_wait_for_ready(
+        tmp_path,
+        [
+            "[ts] UI_READY url=http://localhost:1234",
+            "[ts] UI_WS_READY status=degraded detail=ws optional but not enabled",
+            "[ts] Event bus: connected",
+            "[ts] GOLDEN_READY stage=liq",
+            "[ts] RUNTIME_READY",
+        ],
+    )
+
+    assert completed.returncode == 4
+    assert "status=degraded" in completed.stderr
+
+
+def test_wait_for_ready_allows_degraded_when_optional(tmp_path: Path) -> None:
+    completed = _run_wait_for_ready(
+        tmp_path,
+        [
+            "[ts] UI_READY url=http://localhost:1234",
+            "[ts] UI_WS_READY status=degraded detail=ws optional",
+            "[ts] Event bus: connected",
+            "[ts] GOLDEN_READY stage=liq",
+            "[ts] RUNTIME_READY",
+        ],
+        env={"UI_WS_OPTIONAL": "1"},
+    )
+
+    assert completed.returncode == 0
 
 
 def test_check_ui_health_skips_when_disabled_flag(tmp_path: Path) -> None:
