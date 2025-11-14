@@ -8,11 +8,12 @@ from aiohttp import ClientTimeout
 
 
 class _DummyResponse:
-    def __init__(self, status, *, text="", headers=None, reason=""):
+    def __init__(self, status, *, text="", headers=None, reason="", json_data=None):
         self.status = status
         self._text = text
         self.headers = headers or {}
         self.reason = reason
+        self._json = json_data
 
     async def __aenter__(self):
         return self
@@ -20,14 +21,19 @@ class _DummyResponse:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def json(self, *args, **kwargs):  # pragma: no cover - not expected in tests
-        raise AssertionError("json() should not be called on error responses")
+    async def json(self, *args, **kwargs):
+        if self._json is None:
+            raise AssertionError("json() should not be called on dummy responses without json_data")
+        return self._json
 
     async def text(self):
         return self._text
 
-    def raise_for_status(self):  # pragma: no cover - not expected in tests
-        raise AssertionError("raise_for_status() should not be called for dummy error responses")
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise AssertionError(
+                "raise_for_status() should not be called for dummy error responses"
+            )
 
 
 class _DummySession:
@@ -233,6 +239,60 @@ async def test_fetch_birdeye_tokens_raises_config_error_on_403(monkeypatch):
     assert "403" in str(excinfo.value)
     remediation = excinfo.value.remediation or ""
     assert "access" in remediation.lower()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_fetch_birdeye_tokens_success_parses_payload(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "good-key")
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    payload = {
+        "data": {
+            "tokens": [
+                {
+                    "address": "Mint11111111111111111111111111111111111",
+                    "symbol": "BIRD",
+                    "name": "Bird Token",
+                    "v24hUSD": 150000.0,
+                    "liquidity": 90000.0,
+                    "price": 1.5,
+                    "v24hChangePercent": 12.5,
+                }
+            ]
+        }
+    }
+
+    response = _DummyResponse(200, json_data=payload)
+    session = _DummySession([response])
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        DISCOVERY_MAX_TOKENS="10",
+        DISCOVERY_PAGE_SIZE="5",
+    )
+
+    results = await td._fetch_birdeye_tokens(limit=5)
+
+    assert len(results) == 1
+    token = results[0]
+    assert token["address"] == "Mint11111111111111111111111111111111111"
+    assert token["symbol"] == "BIRD"
+    assert token["name"] == "Bird Token"
+    assert token["liquidity"] == 90000.0
+    assert token["volume"] == 150000.0
+    assert token["price"] == 1.5
+    assert token["price_change"] == 12.5
+    assert token["sources"] == ["birdeye"]
 
 
 @pytest.mark.anyio("asyncio")

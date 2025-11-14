@@ -1234,62 +1234,59 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
                 # Success path already breaks out of loop
                 pass
 
-            if payload is not None:
+        if payload is None:
+            break
+
+        data = payload.get("data", {})
+        items = data.get("tokens") or data.get("list") or []
+        if not items:
+            break
+
+        for item in items:
+            raw_address = item.get("address") or item.get("mint")
+            if not raw_address:
+                continue
+            address = str(raw_address)
+            if not is_valid_solana_mint(address):
+                continue
+            volume = _extract_numeric_from_item(
+                item, "v24hUSD", "volume24hUSD", "volume"
+            )
+            liquidity = _extract_numeric_from_item(item, "liquidity")
+            try:
+                price = float(item.get("price") or 0.0)
+            except Exception:
+                price = 0.0
+            try:
+                change = float(item.get("v24hChangePercent") or 0.0)
+            except Exception:
+                change = 0.0
+
+            if SETTINGS.min_volume and volume < SETTINGS.min_volume:
+                continue
+            if SETTINGS.min_liquidity and liquidity < SETTINGS.min_liquidity:
+                continue
+
+            entry = tokens.setdefault(
+                address,
+                {
+                    "address": str(address),
+                    "symbol": str(item.get("symbol") or ""),
+                    "name": str(item.get("name") or item.get("symbol") or address),
+                    "liquidity": liquidity,
+                    "volume": volume,
+                    "price": price,
+                    "price_change": change,
+                    "sources": ["birdeye"],
+                },
+            )
+            # Aggregate max across pages
+            entry["liquidity"] = max(entry["liquidity"], liquidity)
+            entry["volume"] = max(entry["volume"], volume)
+            entry["price"] = price or entry.get("price", 0.0)
+            entry["price_change"] = change
+            if len(tokens) >= effective_limit:
                 break
-
-            if payload is None:
-                break
-
-            data = payload.get("data", {})
-            items = data.get("tokens") or data.get("list") or []
-            if not items:
-                break
-
-            for item in items:
-                raw_address = item.get("address") or item.get("mint")
-                if not raw_address:
-                    continue
-                address = str(raw_address)
-                if not is_valid_solana_mint(address):
-                    continue
-                volume = _extract_numeric_from_item(
-                    item, "v24hUSD", "volume24hUSD", "volume"
-                )
-                liquidity = _extract_numeric_from_item(item, "liquidity")
-                try:
-                    price = float(item.get("price") or 0.0)
-                except Exception:
-                    price = 0.0
-                try:
-                    change = float(item.get("v24hChangePercent") or 0.0)
-                except Exception:
-                    change = 0.0
-
-                if SETTINGS.min_volume and volume < SETTINGS.min_volume:
-                    continue
-                if SETTINGS.min_liquidity and liquidity < SETTINGS.min_liquidity:
-                    continue
-
-                entry = tokens.setdefault(
-                    address,
-                    {
-                        "address": str(address),
-                        "symbol": str(item.get("symbol") or ""),
-                        "name": str(item.get("name") or item.get("symbol") or address),
-                        "liquidity": liquidity,
-                        "volume": volume,
-                        "price": price,
-                        "price_change": change,
-                        "sources": ["birdeye"],
-                    },
-                )
-                # Aggregate max across pages
-                entry["liquidity"] = max(entry["liquidity"], liquidity)
-                entry["volume"] = max(entry["volume"], volume)
-                entry["price"] = price or entry.get("price", 0.0)
-                entry["price_change"] = change
-                if len(tokens) >= effective_limit:
-                    break
 
             offset += SETTINGS.page_limit
             total = data.get("total")
