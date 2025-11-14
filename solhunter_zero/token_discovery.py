@@ -245,6 +245,10 @@ class _DiscoverySettings:
         return _env_int("DISCOVERY_STAGE_B_MIN_SOURCES", "2", minimum=0)
 
     @property
+    def min_category_sources(self) -> int:
+        return _env_int("DISCOVERY_MIN_CATEGORY_SOURCES", "2", minimum=0)
+
+    @property
     def solscan_negative_ttl(self) -> float:
         return _env_float("SOLSCAN_NEGATIVE_TTL", "1800")
 
@@ -257,6 +261,11 @@ SETTINGS = _DiscoverySettings()
 
 
 _TRENDING_MIN_LIQUIDITY = float(SETTINGS.trending_min_liquidity)
+
+try:
+    _MIN_CATEGORY_SOURCES = max(0, int(SETTINGS.min_category_sources))
+except Exception:
+    _MIN_CATEGORY_SOURCES = 0
 
 
 def _birdeye_tokenlist_url() -> str:
@@ -359,7 +368,7 @@ def refresh_runtime_values() -> None:
     """Synchronise cached discovery state with the current environment."""
 
     global _SCORING_BIAS, _SCORING_WEIGHTS, _BIRDEYE_DISABLED_INFO, _ORCA_CATALOG_CACHE
-    global _TRENDING_MIN_LIQUIDITY
+    global _TRENDING_MIN_LIQUIDITY, _MIN_CATEGORY_SOURCES
 
     _SCORING_BIAS, _SCORING_WEIGHTS = _load_scoring_weights()
 
@@ -367,6 +376,11 @@ def refresh_runtime_values() -> None:
         _TRENDING_MIN_LIQUIDITY = float(SETTINGS.trending_min_liquidity)
     except Exception:
         _TRENDING_MIN_LIQUIDITY = 0.0
+
+    try:
+        _MIN_CATEGORY_SOURCES = max(0, int(SETTINGS.min_category_sources))
+    except Exception:
+        _MIN_CATEGORY_SOURCES = 0
 
     try:
         _BIRDEYE_CACHE.ttl = float(SETTINGS.cache_ttl)
@@ -1954,6 +1968,8 @@ def discover_candidates(
         candidates: Dict[str, Dict[str, Any]],
         *,
         limit: int,
+        min_sources: int | None = None,
+        demoted: List[TokenEntry] | None = None,
     ) -> List[TokenEntry]:
         ordered = sorted(
             candidates.values(),
@@ -1961,15 +1977,27 @@ def discover_candidates(
             reverse=True,
         )
 
+        try:
+            required_sources = max(0, int(min_sources if min_sources is not None else _MIN_CATEGORY_SOURCES))
+        except Exception:
+            required_sources = max(0, int(_MIN_CATEGORY_SOURCES))
+
+        if limit <= 0:
+            return []
+
         final: List[TokenEntry] = []
-        for entry in ordered[:limit]:
-            sources = entry.get("sources", [])
-            if isinstance(sources, set):
-                src_list = sorted(sources)
+        for entry in ordered:
+            sources_field = entry.get("sources")
+            if isinstance(sources_field, set):
+                src_set = {str(src) for src in sources_field if isinstance(src, str) and src}
+            elif isinstance(sources_field, (list, tuple)):
+                src_set = {str(src) for src in sources_field if isinstance(src, str) and src}
+            elif isinstance(sources_field, str) and sources_field:
+                src_set = {sources_field}
             else:
-                src_list = sorted(list(sources or []))
-            copy = dict(entry)
-            copy["sources"] = src_list
+                src_set = set()
+            src_list = sorted(src_set)
+
             venues_field = entry.get("venues")
             if isinstance(venues_field, set):
                 venues_list = sorted(venues_field)
@@ -1979,10 +2007,25 @@ def discover_candidates(
                 venues_list = sorted(_normalize_venues_field(venues_field))
             else:
                 venues_list = []
+
+            source_count = len(src_set)
+            if required_sources > 1 and source_count < required_sources:
+                if demoted is not None:
+                    demoted_entry = dict(entry)
+                    demoted_entry["sources"] = src_list
+                    demoted_entry["venues"] = venues_list
+                    demoted_entry["_demoted_reason"] = "insufficient_source_mix"
+                    demoted.append(demoted_entry)
+                continue
+
+            copy = dict(entry)
+            copy["sources"] = src_list
             copy["venues"] = venues_list
             for internal in ("_stage_b_eligible", "score_breakdown"):
                 copy.pop(internal, None)
             final.append(copy)
+            if len(final) >= limit:
+                break
         return final
 
     config_errors: List[DiscoveryConfigurationError] = []
@@ -2323,7 +2366,9 @@ def discover_candidates(
 
             if candidates:
                 _score_candidates(candidates, mempool)
-            final = _snapshot(candidates, limit=limit)
+            demoted_entries: List[TokenEntry] = []
+            final = _snapshot(candidates, limit=limit, demoted=demoted_entries)
+            insufficient_mix = bool(not final and demoted_entries)
 
             top_score = final[0]["score"] if final and "score" in final[0] else None
             logger.debug(
@@ -2340,6 +2385,9 @@ def discover_candidates(
 
             fallback_final: List[TokenEntry] | None = None
             fallback_reasons: List[str] = []
+
+            if insufficient_mix:
+                fallback_reasons.append("insufficient source mix")
 
             if not final:
                 fallback_entries = _fallback_candidate_tokens(limit)
@@ -2381,7 +2429,11 @@ def discover_candidates(
                     if cache_entry_count == 0:
                         fallback_reasons.append("cache empty")
 
-                    fallback_final = _snapshot(fallback_candidates, limit=limit)
+                    fallback_final = _snapshot(
+                        fallback_candidates,
+                        limit=limit,
+                        min_sources=0,
+                    )
                     if fallback_final:
                         degrade_reason = ", ".join(fallback_reasons) or "fallback engaged"
                         logger.warning(

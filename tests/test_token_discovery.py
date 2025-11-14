@@ -104,6 +104,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
     bird1 = "So11111111111111111111111111111111111111112"
     bird2 = "GoNKc7dBq2oNuvqNEBQw9u5VnXNmeZLk52BEQcJkySU"
+    mem_mint = "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av"
 
     async def fake_bird(*, limit=None):
         _ = limit
@@ -133,7 +134,7 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
     async def fake_trending(*, limit=None):
         _ = limit
-        return [bird2, "trend_only"]
+        return [bird2, mem_mint, "trend_only"]
 
     monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
     monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
@@ -157,8 +158,6 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     monkeypatch.setattr(td, "_fetch_meteora_tokens", _no_tokens)
     monkeypatch.setattr(td, "_fetch_dexlab_tokens", _no_tokens)
     monkeypatch.setattr(td, "_enrich_with_solscan", _noop_enrich)
-
-    mem_mint = "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av"
 
     async def fake_mempool(_rpc_url, threshold):
         _ = threshold
@@ -189,10 +188,16 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
     assert batches, "expected at least one incremental batch"
 
     assert len(results) <= 3
-    assert addresses[0] == mem_mint
-    assert set(addresses) >= {bird1, bird2, mem_mint}
-    assert results[0]["sources"] == ["mempool"]
-    assert any("birdeye" in r["sources"] for r in results)
+    assert bird1 not in addresses
+    assert "trend_only" not in addresses
+    assert {bird2, mem_mint}.issubset(addresses)
+    assert all(len(entry["sources"]) >= 2 for entry in results)
+
+    mem_entry = next(item for item in results if item["address"] == mem_mint)
+    assert {"mempool", "trending"}.issubset(set(mem_entry["sources"]))
+
+    bird_entry = next(item for item in results if item["address"] == bird2)
+    assert {"birdeye", "trending"}.issubset(set(bird_entry["sources"]))
 
 
 @pytest.mark.anyio("asyncio")
@@ -204,7 +209,16 @@ async def test_discover_candidates_includes_trending_tokens(monkeypatch):
 
     async def fake_bird(*, limit=None):
         _ = limit
-        return []
+        return [
+            {
+                "address": trend_mint,
+                "symbol": "TREND",
+                "name": "Trending Token",
+                "liquidity": 1000,
+                "volume": 1000,
+                "sources": ["birdeye"],
+            }
+        ]
 
     async def fake_trending(*, limit=None):
         observed_limits.append(limit)
@@ -254,6 +268,7 @@ async def test_discover_candidates_includes_trending_tokens(monkeypatch):
     trend_entry = next((item for item in final if item["address"] == trend_mint), None)
     assert trend_entry is not None, "trending mint should be merged into candidates"
     assert "trending" in trend_entry["sources"]
+    assert "birdeye" in trend_entry["sources"]
 
 
 def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch, caplog):
@@ -396,6 +411,14 @@ async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
     monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
 
+    async def fake_trending(*, limit=None):
+        total = 15
+        addresses = [f"Bird{idx:02d}" for idx in range(total)]
+        max_items = limit if limit is not None else total
+        return addresses[:max_items]
+
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+
     captured_limits: list[int | None] = []
 
     async def fake_bird(*, limit=None):
@@ -431,7 +454,7 @@ async def test_discover_candidates_limits_birdeye_fetches(monkeypatch):
 
     assert captured_limits == [10]
     assert len(final) == 10
-    assert all("birdeye" in item.get("sources", []) for item in final)
+    assert all({"birdeye", "trending"}.issubset(set(item.get("sources", []))) for item in final)
 
 
 @pytest.mark.anyio("asyncio")
