@@ -166,6 +166,163 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
     assert "restored=restore-me" in completed.stdout
 
 
+def _write_connectivity_stub(target_dir: Path) -> None:
+    package_dir = target_dir / "solhunter_zero"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    stub_source = (
+        "from __future__ import annotations\n"
+        "import os\n"
+        "from pathlib import Path\n\n"
+        "class _Result:\n"
+        "    def __init__(self, name: str, target: str, ok: bool = True, error: str | None = None) -> None:\n"
+        "        self.name = name\n"
+        "        self.target = target\n"
+        "        self.ok = ok\n"
+        "        self.error = error\n"
+        "        self.status = None\n"
+        "        self.status_code = None\n"
+        "        self.latency_ms = 12.3\n\n"
+        "class ConnectivityChecker:\n"
+        "    def __init__(self) -> None:\n"
+        "        marker = os.environ.get(\"PROBE_MARKER\")\n"
+        "        self._marker = Path(marker) if marker else None\n\n"
+        "    async def check_all(self):\n"
+        "        return [\n"
+        "            _Result(\"redis\", \"redis://localhost/0\"),\n"
+        "            _Result(\"solana-rpc\", \"https://solana-rpc.local\"),\n"
+        "            _Result(\"solana-ws\", \"wss://solana-ws.local\"),\n"
+        "            _Result(\"helius-rest\", \"https://helius-rest.local\"),\n"
+        "            _Result(\"helius-das\", \"https://helius-das.local\"),\n"
+        "        ]\n\n"
+        "    async def _probe_ws(self, name: str, target: str):\n"
+        "        if self._marker is not None:\n"
+        "            self._marker.write_text(f\"{name} {target}\", encoding=\"utf-8\")\n"
+        "        return _Result(name, target, ok=False, error=\"unreachable\")\n"
+    )
+    (package_dir / "production.py").write_text(stub_source, encoding="utf-8")
+
+
+def _create_python_wrapper(target_dir: Path) -> Path:
+    wrapper = target_dir / "python_wrapper.py"
+    wrapper.write_text(
+        dedent(
+            """\
+            #!/usr/bin/env python3
+            import os
+            import runpy
+            import sys
+
+            stub_root = os.environ.get("STUB_ROOT")
+            if stub_root:
+                sys.path.insert(0, stub_root)
+
+            args = sys.argv[1:]
+            if not args:
+                sys.exit(1)
+
+            if args[0] == "-":
+                sys.argv = args
+                code = sys.stdin.read()
+                exec(compile(code, "<stdin>", "exec"), {"__name__": "__main__"})
+            else:
+                sys.argv = args
+                runpy.run_path(args[0], run_name="__main__")
+            """
+        ),
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def test_run_connectivity_probes_skips_local_event_bus(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_local"
+    _write_connectivity_stub(stub_root)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+    marker_path = tmp_path / "marker_local.txt"
+    quoted_marker = shlex.quote(str(marker_path))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        export PROBE_MARKER={quoted_marker}
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (
+        "Event bus: SKIPPED → runtime-managed local endpoint ws://127.0.0.1:8779 "
+        "(post-launch readiness checks will verify availability)" in completed.stdout
+    )
+    assert not marker_path.exists()
+
+
+def test_run_connectivity_probes_requires_remote_event_bus(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_remote"
+    _write_connectivity_stub(stub_root)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+    marker_path = tmp_path / "marker_remote.txt"
+    quoted_marker = shlex.quote(str(marker_path))
+    bus_url = "wss://bus.example.com/ws"
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export EVENT_BUS_URL={bus_url}
+        export PROBE_MARKER={quoted_marker}
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert (
+        "Event bus: FAIL (unreachable) → wss://bus.example.com/ws (12.3 ms)" in completed.stdout
+    )
+    assert (
+        "Event bus connectivity check failed: unreachable (wss://bus.example.com/ws)" in completed.stderr
+    )
+    assert marker_path.read_text(encoding="utf-8") == "event-bus wss://bus.example.com/ws"
+
+
 def test_redis_health_falls_back_when_redis_cli_lacks_url_support(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()

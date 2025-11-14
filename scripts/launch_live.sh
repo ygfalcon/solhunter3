@@ -654,8 +654,10 @@ PY
 run_connectivity_probes() {
   "$PYTHON_BIN" - <<'PY'
 import asyncio
+import ipaddress
 import os
 import sys
+from urllib.parse import urlparse
 
 from solhunter_zero.production import ConnectivityChecker
 
@@ -678,25 +680,62 @@ def _format_result(label: str, result) -> str:
     return f"{label}: {status} → {result.target} ({latency})"
 
 
+def _runtime_bus_target(raw_url: str | None) -> tuple[str, int, str]:
+    default = urlparse("ws://127.0.0.1:8779")
+    parsed = urlparse(raw_url or default.geturl())
+    host = parsed.hostname or default.hostname or "127.0.0.1"
+    port = parsed.port or default.port or 8779
+    if raw_url:
+        display = raw_url
+    else:
+        display = f"ws://{host}:{port}"
+    return host, port, display
+
+
+def _is_local_host(hostname: str) -> bool:
+    normalized = (hostname or "").strip().lower()
+    if not normalized or normalized == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_loopback
+
+
 async def _run() -> None:
     checker = ConnectivityChecker()
     results = await checker.check_all()
     lookup = {result.name: result for result in results}
 
-    bus_url = os.environ.get("EVENT_BUS_URL")
+    raw_bus_url = os.environ.get("EVENT_BUS_URL")
     bus_result = None
-    if bus_url:
-        try:
-            bus_result = await checker._probe_ws("event-bus", bus_url)
-        except AttributeError as exc:  # pragma: no cover - defensive
-            print(f"ConnectivityChecker missing WebSocket probe support: {exc}", file=sys.stderr)
-            raise SystemExit(1)
-        lookup["event-bus"] = bus_result
+    bus_skip_message: str | None = None
+
+    if raw_bus_url:
+        bus_host, bus_port, bus_display = _runtime_bus_target(raw_bus_url)
+        if _is_local_host(bus_host):
+            target = bus_display or f"ws://{bus_host}:{bus_port}"
+            bus_skip_message = (
+                "Event bus: SKIPPED → runtime-managed local endpoint "
+                f"{target} (post-launch readiness checks will verify availability)"
+            )
+        else:
+            try:
+                bus_result = await checker._probe_ws("event-bus", raw_bus_url)
+            except AttributeError as exc:  # pragma: no cover - defensive
+                print(f"ConnectivityChecker missing WebSocket probe support: {exc}", file=sys.stderr)
+                raise SystemExit(1)
+            lookup["event-bus"] = bus_result
     else:
         lookup.setdefault("event-bus", None)
 
     failures: list[str] = []
     for key, label in REQUIRED_TARGETS:
+        if key == "event-bus" and bus_skip_message:
+            print(bus_skip_message)
+            continue
+
         result = lookup.get(key)
         print(_format_result(label, result))
         if result is None:
