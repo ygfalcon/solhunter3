@@ -256,6 +256,9 @@ class _DiscoverySettings:
 SETTINGS = _DiscoverySettings()
 
 
+_TRENDING_MIN_LIQUIDITY = float(SETTINGS.trending_min_liquidity)
+
+
 def _birdeye_tokenlist_url() -> str:
     value = _env_str(
         "BIRDEYE_TOKENLIST_URL", "https://api.birdeye.so/defi/tokenlist"
@@ -356,8 +359,14 @@ def refresh_runtime_values() -> None:
     """Synchronise cached discovery state with the current environment."""
 
     global _SCORING_BIAS, _SCORING_WEIGHTS, _BIRDEYE_DISABLED_INFO, _ORCA_CATALOG_CACHE
+    global _TRENDING_MIN_LIQUIDITY
 
     _SCORING_BIAS, _SCORING_WEIGHTS = _load_scoring_weights()
+
+    try:
+        _TRENDING_MIN_LIQUIDITY = float(SETTINGS.trending_min_liquidity)
+    except Exception:
+        _TRENDING_MIN_LIQUIDITY = 0.0
 
     try:
         _BIRDEYE_CACHE.ttl = float(SETTINGS.cache_ttl)
@@ -708,7 +717,7 @@ def _compute_feature_vector(
                 oracle_present = 1.0
         except Exception:
             oracle_present = 0.0
-    sellable = 1.0 if liquidity >= SETTINGS.trending_min_liquidity else 0.0
+    sellable = 1.0 if liquidity >= _TRENDING_MIN_LIQUIDITY else 0.0
     mempool_pressure = 0.0
     if mempool:
         try:
