@@ -196,6 +196,100 @@ async def test_discover_candidates_prioritises_scores(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_discover_candidates_initial_emit_waits_for_multiple_sources(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    bird_mint = "Bird111111111111111111111111111111111111111"
+    mem_mint = "Mem111111111111111111111111111111111111111"
+
+    sequence: list[str] = []
+    bird_ready = asyncio.Event()
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        sequence.append("bird")
+        bird_ready.set()
+        return [
+            {
+                "address": bird_mint,
+                "name": "Bird Token",
+                "symbol": "BIRD",
+                "liquidity": 200000,
+                "volume": 150000,
+                "price": 1.0,
+                "sources": ["birdeye"],
+            }
+        ]
+
+    async def fake_mempool_stream(_rpc_url, *, threshold):
+        _ = threshold
+        await bird_ready.wait()
+        sequence.append("mempool")
+        yield {
+            "address": mem_mint,
+            "symbol": "MEM",
+            "name": "Mempool Token",
+            "liquidity": 50000,
+            "volume": 40000,
+            "price": 0.25,
+            "score": 1.5,
+        }
+
+    async def fake_trending(*, limit=None):
+        _ = limit
+        return []
+
+    async def _noop_enrich(_candidates, *, addresses=None):
+        _ = addresses
+        return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "test-key")
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+    monkeypatch.setattr(td, "_enrich_with_solscan", _noop_enrich)
+    monkeypatch.setattr(
+        td,
+        "stream_ranked_mempool_tokens_with_depth",
+        fake_mempool_stream,
+    )
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+        DISCOVERY_ENABLE_MEMPOOL="1",
+        DISCOVERY_MEMPOOL_LIMIT="5",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+    )
+
+    first_batch: list[dict] | None = None
+    async for batch in td.discover_candidates(
+        "https://rpc", limit=3, mempool_threshold=0.0
+    ):
+        sequence.append("batch")
+        first_batch = batch
+        break
+
+    assert first_batch, "expected an incremental batch"
+    assert {item["address"] for item in first_batch} >= {bird_mint, mem_mint}
+
+    combined_sources = {
+        src
+        for item in first_batch
+        for src in item.get("sources", [])
+    }
+    assert {"birdeye", "mempool"} <= combined_sources
+
+    assert "mempool" in sequence and "batch" in sequence
+    assert sequence.index("mempool") < sequence.index("batch")
+
+@pytest.mark.anyio("asyncio")
 async def test_discover_candidates_includes_trending_tokens(monkeypatch):
     td._BIRDEYE_CACHE.clear()
 

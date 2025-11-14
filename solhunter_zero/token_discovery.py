@@ -2265,6 +2265,9 @@ def discover_candidates(
             try:
                 pending: set[asyncio.Task[Any]] = set(task_list)
                 start_time = time.monotonic()
+                all_labels = set(task_map.values())
+                settled_sources: set[str] = set()
+                contributing_sources: set[str] = set()
                 while pending:
                     wait_timeout: float | None = None
                     if overall_timeout > 0:
@@ -2289,8 +2292,18 @@ def discover_candidates(
                         completed.add(fut)
                         if label is None:
                             continue
+                        settled_sources.add(label)
                         changed = await _merge_result(label, result)
                         if not candidates or not changed:
+                            continue
+                        contributing_sources.add(label)
+                        if not emitted and (
+                            len(contributing_sources) < 2
+                            and not settled_sources.issuperset(all_labels)
+                        ):
+                            # Defer the very first emission until we have
+                            # multiple source categories represented, unless
+                            # every provider has already completed.
                             continue
                         _score_candidates(candidates, mempool)
                         snapshot = _snapshot(candidates, limit=limit)
