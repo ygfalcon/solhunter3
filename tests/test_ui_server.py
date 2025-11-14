@@ -1,5 +1,7 @@
 import errno
+import importlib
 import socket
+import sys
 import threading
 
 import pytest
@@ -186,3 +188,39 @@ def test_ui_server_stop_resets_environment_state() -> None:
 
     assert ui._get_active_ui_state() is None
     assert ui._ENV_BOOTSTRAPPED is False
+
+
+@pytest.mark.timeout(30)
+def test_ui_server_stop_stops_websockets_and_clears_registry() -> None:
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+
+    pytest.importorskip("websockets")
+    websockets_module = importlib.import_module("websockets")
+    assert getattr(websockets_module, "__file__", None)
+
+    reloaded_ui = importlib.reload(ui)
+    server = reloaded_ui.UIServer(reloaded_ui.UIState(), host="127.0.0.1", port=0)
+
+    server.start()
+    threads: dict[str, threading.Thread] = {}
+    try:
+        assert server in reloaded_ui._ACTIVE_HTTP_SERVERS
+        threads = reloaded_ui.start_websockets()
+        for state in reloaded_ui._WS_CHANNELS.values():
+            assert state.loop is not None
+            assert state.thread is not None
+            assert state.thread.is_alive()
+    finally:
+        server.stop()
+
+    assert not reloaded_ui._ACTIVE_HTTP_SERVERS
+
+    for thread in threads.values():
+        thread.join(timeout=2)
+
+    for state in reloaded_ui._WS_CHANNELS.values():
+        assert state.loop is None
+        assert state.thread is None
+        assert state.ready_status == "stopped"
