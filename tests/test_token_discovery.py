@@ -256,6 +256,86 @@ async def test_discover_candidates_includes_trending_tokens(monkeypatch):
     assert "trending" in trend_entry["sources"]
 
 
+@pytest.mark.anyio("asyncio")
+async def test_trending_enrichment_populates_metrics(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    trend_mint = "E7vCh2szgdWzxubAEANe1yoyWP7JfVv5sWpQXXAUP8Av"
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return []
+
+    async def fake_trending(*, limit=None):
+        _ = limit
+        return [trend_mint]
+
+    async def _no_tokens(*, session=None):
+        _ = session
+        return []
+
+    async def _noop_enrich(_candidates, *, addresses=None):
+        _ = (addresses,)
+        return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "_fetch_dexscreener_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_raydium_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_meteora_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_fetch_dexlab_tokens", _no_tokens)
+    monkeypatch.setattr(td, "_enrich_with_solscan", _noop_enrich)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    observed_overview_calls: list[tuple[str, aiohttp.ClientSession | None]] = []
+
+    async def fake_overview(mint: str, *, session=None):
+        observed_overview_calls.append((mint, session))
+        return {
+            "price": 1.5,
+            "price_change": 0.25,
+            "volume_24h": 3210.0,
+            "liquidity_usd": 6540.0,
+            "holders": 7,
+            "pool_count": 2,
+        }
+
+    monkeypatch.setattr(
+        td.onchain_metrics,
+        "fetch_birdeye_overview_async",
+        fake_overview,
+    )
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+        TRENDING_MIN_LIQUIDITY_USD="0",
+    )
+
+    batches: list[list[dict]] = []
+    async for batch in td.discover_candidates("https://rpc", limit=1):
+        batches.append(batch)
+
+    assert observed_overview_calls, "expected BirdEye overview enrichment to run"
+
+    final = batches[-1] if batches else []
+    assert final, "expected at least one candidate batch"
+    entry = final[0]
+    assert entry["address"] == trend_mint
+    assert set(entry["sources"]) >= {"trending", "birdeye_overview"}
+    assert entry["volume"] == pytest.approx(3210.0)
+    assert entry["liquidity"] == pytest.approx(6540.0)
+    assert entry.get("price") == pytest.approx(1.5)
+
+
 def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch, caplog):
     td._BIRDEYE_CACHE.clear()
     _configure_env(monkeypatch, DISCOVERY_ENABLE_MEMPOOL="0")

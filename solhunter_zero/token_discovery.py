@@ -24,6 +24,7 @@ import aiohttp
 
 from .http import HostCircuitOpenError, host_request, host_retry_config
 from .http import get_session as _shared_http_session
+from . import onchain_metrics
 from .scanner_common import DEFAULT_BIRDEYE_API_KEY
 from .providers import orca as orca_provider
 from .providers import raydium as raydium_provider
@@ -958,6 +959,122 @@ def _merge_candidate_entry(
 
     entry.setdefault("sources", set()).add(source)
     return entry
+
+
+def _needs_trending_enrichment(entry: Mapping[str, Any]) -> bool:
+    sources = entry.get("sources")
+    if isinstance(sources, set):
+        source_set = sources
+    elif isinstance(sources, (list, tuple)):
+        source_set = set(str(src) for src in sources if isinstance(src, str))
+    else:
+        source_set = set()
+    if not source_set:
+        return False
+    if any(src != "trending" for src in source_set):
+        return False
+    liquidity = _coerce_numeric(entry.get("liquidity"))
+    volume = _coerce_numeric(entry.get("volume"))
+    price = _coerce_numeric(entry.get("price"))
+    return liquidity <= 0.0 or volume <= 0.0 or price <= 0.0
+
+
+def _apply_trending_enrichment(entry: Dict[str, Any], payload: Mapping[str, Any]) -> bool:
+    changed = False
+
+    price = _coerce_numeric(payload.get("price"))
+    if price > 0.0 and not math.isclose(price, _coerce_numeric(entry.get("price"))):
+        entry["price"] = price
+        changed = True
+
+    change = _coerce_numeric(payload.get("price_change"))
+    if change != 0.0:
+        existing_change = _coerce_numeric(entry.get("price_change"))
+        if not math.isclose(change, existing_change):
+            entry["price_change"] = change
+            changed = True
+
+    volume = _coerce_numeric(payload.get("volume_24h") or payload.get("volume"))
+    if volume > _coerce_numeric(entry.get("volume")):
+        entry["volume"] = volume
+        changed = True
+
+    liquidity = _coerce_numeric(payload.get("liquidity_usd") or payload.get("liquidity"))
+    if liquidity > _coerce_numeric(entry.get("liquidity")):
+        entry["liquidity"] = liquidity
+        changed = True
+
+    holders = payload.get("holders")
+    if isinstance(holders, (int, float)) and holders > 0:
+        if int(holders) != int(_coerce_numeric(entry.get("holders"))):
+            entry["holders"] = int(holders)
+            changed = True
+
+    pool_count = payload.get("pool_count")
+    if isinstance(pool_count, (int, float)) and pool_count > 0:
+        if int(pool_count) != int(_coerce_numeric(entry.get("pool_count"))):
+            entry["pool_count"] = int(pool_count)
+            changed = True
+
+    sources = entry.setdefault("sources", set())
+    if not isinstance(sources, set):
+        sources = set(str(src) for src in sources if isinstance(src, str))
+        entry["sources"] = sources
+    before = len(sources)
+    sources.add("birdeye_overview")
+    if len(sources) != before:
+        changed = True
+
+    return changed
+
+
+async def _enrich_trending_candidates(
+    candidates: Dict[str, Dict[str, Any]],
+    addresses: Iterable[str],
+    *,
+    session: aiohttp.ClientSession | None = None,
+) -> bool:
+    pending = []
+    for address in addresses:
+        if address in candidates and candidates[address]:
+            pending.append(address)
+    if not pending:
+        return False
+
+    session_obj = session
+    if session_obj is None:
+        try:
+            session_obj = await get_session()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Trending enrichment session unavailable: %s", exc)
+            session_obj = None
+
+    updated = False
+    semaphore = asyncio.Semaphore(4)
+
+    async def _hydrate(address: str) -> None:
+        nonlocal updated
+        entry = candidates.get(address)
+        if not entry:
+            return
+        async with semaphore:
+            try:
+                payload = await onchain_metrics.fetch_birdeye_overview_async(
+                    address, session=session_obj
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Trending enrichment failed for %s: %s", address, exc)
+                return
+        if not payload:
+            return
+        if _apply_trending_enrichment(entry, payload):
+            updated = True
+
+    tasks = [_hydrate(addr) for addr in pending]
+    if tasks:
+        await asyncio.gather(*tasks)
+
+    return updated
 
 
 def _parse_timestamp(value: Any) -> float | None:
@@ -2088,6 +2205,8 @@ def discover_candidates(
             meteora_tokens: List[TokenEntry] = []
             dexlab_tokens: List[TokenEntry] = []
 
+            trending_enriched: set[str] = set()
+
             last_snapshot: List[TokenEntry] | None = None
             emitted = False
 
@@ -2169,6 +2288,7 @@ def discover_candidates(
                             logger.debug("Trending discovery unavailable: %s", result)
                             return False
                         trending_items = list(result or [])
+                        needs_enrichment: List[str] = []
                         for raw in trending_items:
                             if not isinstance(raw, str):
                                 continue
@@ -2199,6 +2319,20 @@ def discover_candidates(
                             if not existed:
                                 changed = True
                             _enrich_with_orca(entry)
+                            if (
+                                address not in trending_enriched
+                                and _needs_trending_enrichment(entry)
+                            ):
+                                needs_enrichment.append(address)
+                        if needs_enrichment:
+                            updated = await _enrich_trending_candidates(
+                                candidates,
+                                needs_enrichment,
+                                session=shared_session,
+                            )
+                            trending_enriched.update(needs_enrichment)
+                            if updated:
+                                changed = True
                         return changed
                     if label == "dexscreener":
                         if isinstance(result, Exception):
