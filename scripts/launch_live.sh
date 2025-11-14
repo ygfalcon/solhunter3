@@ -934,6 +934,7 @@ if existing:
     existing_host = data.get("host")
     existing_pid = data.get("pid")
     same_host = isinstance(existing_host, str) and existing_host == host
+    same_pid = isinstance(existing_pid, int) and existing_pid == pid
     if same_host and isinstance(existing_pid, int):
         try:
             os.kill(existing_pid, 0)
@@ -945,7 +946,7 @@ if existing:
                 file=sys.stderr,
             )
             sys.exit(1)
-    if same_host:
+    if same_host and not same_pid:
         client.delete(key)
         time.sleep(0.2)
 
@@ -962,7 +963,24 @@ if not client.set(key, json.dumps(payload), nx=True, ex=ttl_seconds):
         same_pid = isinstance(existing_pid, int) and existing_pid == pid
         if same_host and same_pid:
             token = data.get("token") or token
+            if isinstance(data, dict):
+                payload = dict(data)
+            payload["pid"] = pid
+            payload["host"] = host
+            payload["channel"] = channel
             payload["token"] = token
+            payload["ts"] = time.time()
+            try:
+                refreshed = client.set(
+                    key,
+                    json.dumps(payload),
+                    xx=True,
+                    ex=ttl_seconds,
+                )
+            except Exception:
+                refreshed = False
+            if not refreshed:
+                client.set(key, json.dumps(payload), ex=ttl_seconds)
             print(f"{key} {token}")
             sys.exit(0)
         if not same_host or not same_pid:

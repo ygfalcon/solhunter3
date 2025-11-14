@@ -136,6 +136,27 @@ class Redis:
 """
 
 
+STUB_SITECUSTOMIZE = """
+import os
+
+
+def _fixed_pid(pid: int):
+    def _inner() -> int:
+        return pid
+
+    return _inner
+
+
+_override = os.environ.get("FAKE_RUNTIME_LOCK_PID")
+if _override is not None:
+    try:
+        _pid = int(_override)
+    except ValueError:
+        _pid = None
+    if _pid is not None:
+        os.getpid = _fixed_pid(_pid)  # type: ignore[assignment]
+"""
+
 
 def _extract_function(source: str, name: str) -> str:
     marker = f"{name}() {{"
@@ -162,6 +183,7 @@ def _write_stub_redis(tmp_path: Path) -> Path:
     package_dir = stub_root / "redis"
     package_dir.mkdir(parents=True)
     (package_dir / "__init__.py").write_text(STUB_REDIS, encoding="utf-8")
+    (stub_root / "sitecustomize.py").write_text(STUB_SITECUSTOMIZE, encoding="utf-8")
     return stub_root
 
 
@@ -195,7 +217,17 @@ def test_acquire_runtime_lock_sets_ttl(tmp_path: Path) -> None:
     stub_root = _write_stub_redis(tmp_path)
     env = _base_env(tmp_path, stub_root)
 
-    bash_script = "set -euo pipefail\n" + functions + "acquire_runtime_lock\n"
+    stop_stub = "stop_runtime_lock_refresher() { :; }"
+    start_stub = "start_runtime_lock_refresher() { :; }"
+    bash_script = "\n".join(
+        [
+            "set -euo pipefail",
+            stop_stub,
+            start_stub,
+            functions,
+            "acquire_runtime_lock",
+        ]
+    )
 
     completed = subprocess.run(
         ["bash", "-c", bash_script],
@@ -217,6 +249,72 @@ def test_acquire_runtime_lock_sets_ttl(tmp_path: Path) -> None:
     assert entry["ex"] == 60
     assert pytest.approx(60, rel=0.05) == entry["expires_at"] - entry["stored_at"]
     assert entry["expires_at"] > time.time()
+
+
+def test_acquire_runtime_lock_reuse_renews_ttl(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "acquire_runtime_lock")
+    )
+
+    stub_root = _write_stub_redis(tmp_path)
+    env = _base_env(tmp_path, stub_root)
+    env["FAKE_RUNTIME_LOCK_PID"] = "4242"
+
+    stop_stub = "stop_runtime_lock_refresher() { :; }"
+    start_stub = "start_runtime_lock_refresher() { :; }"
+    bash_script = "\n".join(
+        [
+            "set -euo pipefail",
+            stop_stub,
+            start_stub,
+            functions,
+            "acquire_runtime_lock",
+        ]
+    )
+
+    subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    state_path = Path(env["REDIS_STATE_PATH"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    key, entry = next(iter(state["store"].items()))
+    payload = json.loads(entry["value"])
+    initial_token = payload["token"]
+    initial_stored = entry["stored_at"]
+    initial_expires = entry["expires_at"]
+
+    time.sleep(1.0)
+
+    subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+
+    updated_state = json.loads(state_path.read_text(encoding="utf-8"))
+    updated_entry = updated_state["store"][key]
+    updated_payload = json.loads(updated_entry["value"])
+
+    assert updated_payload["token"] == initial_token
+    assert updated_entry["ex"] == 60
+    assert updated_entry["stored_at"] > initial_stored
+    assert updated_entry["expires_at"] > initial_expires
+    assert pytest.approx(60, rel=0.05) == updated_entry["expires_at"] - updated_entry["stored_at"]
+    assert updated_entry["expires_at"] > time.time()
 
 
 def test_acquire_runtime_lock_takeover_on_host_mismatch(tmp_path: Path) -> None:
@@ -253,7 +351,17 @@ def test_acquire_runtime_lock_takeover_on_host_mismatch(tmp_path: Path) -> None:
     }
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
-    bash_script = "set -euo pipefail\n" + functions + "acquire_runtime_lock\n"
+    stop_stub = "stop_runtime_lock_refresher() { :; }"
+    start_stub = "start_runtime_lock_refresher() { :; }"
+    bash_script = "\n".join(
+        [
+            "set -euo pipefail",
+            stop_stub,
+            start_stub,
+            functions,
+            "acquire_runtime_lock",
+        ]
+    )
 
     completed = subprocess.run(
         ["bash", "-c", bash_script],
@@ -288,7 +396,17 @@ def test_release_runtime_lock_requires_matching_token(tmp_path: Path) -> None:
     stub_root = _write_stub_redis(tmp_path)
     env = _base_env(tmp_path, stub_root)
 
-    acquire_script = "set -euo pipefail\n" + acquire_functions + "acquire_runtime_lock\n"
+    stop_stub = "stop_runtime_lock_refresher() { :; }"
+    start_stub = "start_runtime_lock_refresher() { :; }"
+    acquire_script = "\n".join(
+        [
+            "set -euo pipefail",
+            stop_stub,
+            start_stub,
+            acquire_functions,
+            "acquire_runtime_lock",
+        ]
+    )
 
     subprocess.run(
         ["bash", "-c", acquire_script],
@@ -312,7 +430,17 @@ def test_release_runtime_lock_requires_matching_token(tmp_path: Path) -> None:
             "RUNTIME_LOCK_TOKEN": f"{correct_token}-bad",
         }
     )
-    release_script = "set -euo pipefail\n" + release_function + "release_runtime_lock\n"
+    release_stub = "stop_runtime_lock_refresher() { :; }"
+    start_stub = "start_runtime_lock_refresher() { :; }"
+    release_script = "\n".join(
+        [
+            "set -euo pipefail",
+            release_stub,
+            start_stub,
+            release_function,
+            "release_runtime_lock",
+        ]
+    )
 
     subprocess.run(
         ["bash", "-c", release_script],
