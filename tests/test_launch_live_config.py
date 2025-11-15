@@ -20,7 +20,7 @@ def _extract_python_snippet(source: str, marker: str) -> str:
 
 CHECK_LIVE_KEYPAIR_SNIPPET = _extract_python_snippet(
     _LAUNCH_LIVE_SOURCE,
-    'if ! keypair_report=$(CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" - <<\'PY\'',
+    'if ! keypair_report=$(CONFIG_PATH="$CONFIG_PATH" ENV_FILE_PATH="$ENV_FILE" "$PYTHON_BIN" - <<\'PY\'',
 )
 
 
@@ -87,6 +87,36 @@ def test_launch_live_missing_keypair(tmp_path: Path) -> None:
     assert proc.returncode == 1
     assert "Live trading requires a readable signing keypair" in proc.stderr
     assert "/no/such/key.json" in proc.stderr
+
+
+def test_launch_live_env_relative_keypair(tmp_path: Path) -> None:
+    env_dir = tmp_path / "envdir"
+    env_dir.mkdir()
+
+    keypair_path = env_dir / "keys" / "id.json"
+    keypair_path.parent.mkdir(parents=True, exist_ok=True)
+    keypair_path.write_text("[]", encoding="utf-8")
+
+    env_file = env_dir / "live.env"
+    env_file.write_text("KEYPAIR_PATH=keys/id.json\nMODE=live\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["ENV_FILE_PATH"] = str(env_file)
+    env["KEYPAIR_PATH"] = "keys/id.json"
+    env.pop("SOLANA_KEYPAIR", None)
+    env["MODE"] = "live"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", CHECK_LIVE_KEYPAIR_SNIPPET],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == ""
+    assert completed.stderr.strip() == ""
 
 
 def test_launch_live_config_relative_keypair(tmp_path: Path) -> None:

@@ -1779,13 +1779,24 @@ PY
 
 check_live_keypair_paths() {
   local keypair_report
-  if ! keypair_report=$(CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" - <<'PY'
+  if ! keypair_report=$(CONFIG_PATH="$CONFIG_PATH" ENV_FILE_PATH="$ENV_FILE" "$PYTHON_BIN" - <<'PY'
 import os
 import sys
 from pathlib import Path
 
 TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+
+
+env_file_dir = None
+env_file_path = os.getenv("ENV_FILE_PATH")
+if env_file_path:
+    try:
+        env_path = Path(env_file_path)
+    except Exception:  # pragma: no cover - defensive path handling
+        env_file_dir = None
+    else:
+        env_file_dir = env_path.parent
 
 
 def _parse_bool(value):
@@ -1820,11 +1831,19 @@ if not live_trading_requested():
 
 candidates = {}
 
+
+def _normalize_candidate(raw_value: str) -> Path:
+    candidate = Path(raw_value)
+    if env_file_dir and not candidate.is_absolute() and not raw_value.strip().startswith("~"):
+        candidate = env_file_dir / candidate
+    return candidate.expanduser()
+
+
 for source in ("KEYPAIR_PATH", "SOLANA_KEYPAIR"):
     raw = os.getenv(source)
     if not raw:
         continue
-    path = Path(raw).expanduser()
+    path = _normalize_candidate(raw)
     candidates.setdefault(path, set()).add(source)
 
 config_path = os.getenv("CONFIG_PATH")
