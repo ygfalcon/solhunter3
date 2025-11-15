@@ -2241,6 +2241,27 @@ wait_for_ready() {
   local runtime_seen=0
   local allow_ws_degraded=0
   local allow_ws_raw="${LAUNCH_LIVE_ALLOW_WS_DEGRADED:-${UI_WS_OPTIONAL:-}}"
+  local ui_disabled=0
+  if [[ -n ${UI_ENABLED:-} ]]; then
+    local normalized="${UI_ENABLED,,}"
+    case $normalized in
+      0|false|no|off|disabled)
+        ui_disabled=1
+        ;;
+    esac
+  fi
+  if [[ $ui_disabled -eq 0 && -n ${UI_DISABLE_HTTP_SERVER:-} ]]; then
+    local normalized="${UI_DISABLE_HTTP_SERVER,,}"
+    case $normalized in
+      1|true|yes|on|enabled)
+        ui_disabled=1
+        ;;
+    esac
+  fi
+  if [[ $ui_disabled -eq 1 ]]; then
+    ui_seen=1
+    ui_ws_seen=1
+  fi
   if [[ -n ${allow_ws_raw:-} ]]; then
     case "${allow_ws_raw,,}" in
       1|true|yes|on|enabled)
@@ -2286,6 +2307,9 @@ wait_for_ready() {
               print_log_excerpt "$log" "$reason"
               exit "$EXIT_HEALTH"
             fi
+            ;;
+          disabled)
+            ui_ws_seen=1
             ;;
           failed)
             local reason="UI websocket readiness reported status=failed"
