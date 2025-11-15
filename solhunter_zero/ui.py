@@ -2293,6 +2293,9 @@ def _normalize_ws_url(value: str | None) -> str | None:
     candidate = value.strip()
     if not candidate:
         return None
+    lowered = candidate.lower()
+    if lowered == "unavailable":
+        return "unavailable"
     if candidate.startswith(("ws://", "wss://")):
         return candidate
     return None
@@ -2480,6 +2483,10 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
     manifest: Dict[str, Any] = {}
     for channel in ("rl", "events", "logs"):
         raw_url = urls.get(channel)
+        if isinstance(raw_url, str) and raw_url.lower() == "unavailable":
+            manifest[f"{channel}_ws"] = "unavailable"
+            manifest[f"{channel}_ws_available"] = False
+            continue
         if raw_url:
             parsed = urlparse(raw_url)
             parsed_host = parsed.hostname
@@ -3000,16 +3007,57 @@ def _start_channel(
     return thread
 
 
+def _mark_websockets_unavailable(reason: str) -> None:
+    defaults = {
+        "UI_WS_URL": "unavailable",
+        "UI_EVENTS_WS_URL": "unavailable",
+        "UI_EVENTS_WS": "unavailable",
+        "UI_RL_WS_URL": "unavailable",
+        "UI_RL_WS": "unavailable",
+        "UI_LOG_WS_URL": "unavailable",
+        "UI_LOGS_WS": "unavailable",
+    }
+
+    for key, value in defaults.items():
+        _update_auto_env_value(key, value, "URL")
+
+    for state in _WS_CHANNELS.values():
+        state.ready.clear()
+        state.ready_status = "failed"
+        state.ready_detail = reason
+        state.server = None
+        state.task = None
+        state.thread = None
+        state.loop = None
+        state.host = None
+        state.port = 0
+        with state.lock:
+            state.clients.clear()
+            state.client_filters.clear()
+            state.queue = None
+            state.queue_max = 0
+            state.queue_depth = 0
+            state.queue_high = 0
+            state.drop_count = 0
+            state.last_drop_warning_at = 0.0
+            state.recent_close_codes.clear()
+
+
+def _handle_missing_websockets_dependency() -> dict[str, threading.Thread]:
+    message = (
+        "UI websockets unavailable: install the 'websockets' package to enable realtime streams"
+    )
+    log.warning(message)
+    with _WS_CHANNEL_LOCK:
+        _mark_websockets_unavailable("websockets dependency unavailable")
+    return {}
+
+
 def start_websockets() -> dict[str, threading.Thread]:
     """Launch UI websocket endpoints for RL, runtime events, and logs."""
 
     if websockets is None:
-        message = (
-            "UI websockets require the 'websockets' package; install it to "
-            "enable realtime UI streams"
-        )
-        log.error(message)
-        raise RuntimeError(message)
+        return _handle_missing_websockets_dependency()
 
     with _WS_CHANNEL_LOCK:
         if all(state.loop is not None for state in _WS_CHANNELS.values()):
@@ -3761,8 +3809,10 @@ def create_app(state: UIState | None = None) -> Flask:
         for channel in ("rl", "events", "logs"):
             key = f"{channel}_ws"
             available_key = f"{channel}_ws_available"
-            payload[key] = manifest.get(key)
-            payload[available_key] = manifest.get(available_key, bool(manifest.get(key)))
+            value = manifest.get(key)
+            payload[key] = value
+            default_available = bool(value) and str(value).lower() != "unavailable"
+            payload[available_key] = manifest.get(available_key, default_available)
         return payload
 
     def _ui_meta_payload() -> Dict[str, Any]:
@@ -3786,8 +3836,10 @@ def create_app(state: UIState | None = None) -> Flask:
         for channel in ("rl", "events", "logs"):
             key = f"{channel}_ws"
             available_key = f"{channel}_ws_available"
-            payload[key] = manifest.get(key)
-            payload[available_key] = manifest.get(available_key, bool(manifest.get(key)))
+            value = manifest.get(key)
+            payload[key] = value
+            default_available = bool(value) and str(value).lower() != "unavailable"
+            payload[available_key] = manifest.get(available_key, default_available)
             status_block.setdefault(key, ws_statuses.get(key, "failed"))
         status_block.update(ws_statuses)
         payload["status"] = status_block
@@ -3916,6 +3968,29 @@ def create_app(state: UIState | None = None) -> Flask:
         health_snapshot = state.snapshot_health()
         if not isinstance(health_snapshot, Mapping):
             health_snapshot = {"ok": False}
+
+        ws_statuses, ws_details = summarize_ws_status()
+        if ws_statuses:
+            existing_ws = health_snapshot.get("ws")
+            if isinstance(existing_ws, Mapping):
+                ws_block: Dict[str, Any] = dict(existing_ws)
+            else:
+                ws_block = {}
+            ws_block.update(ws_statuses)
+            health_snapshot["ws"] = ws_block
+            ws_ok = all(_status_value_ok(value) for value in ws_statuses.values())
+            if not ws_ok:
+                health_snapshot["ok"] = False
+            elif "ok" not in health_snapshot:
+                health_snapshot["ok"] = True
+            if ws_details:
+                existing_details = health_snapshot.get("ws_details")
+                if isinstance(existing_details, Mapping):
+                    merged_details = dict(existing_details)
+                    merged_details.update(ws_details)
+                else:
+                    merged_details = dict(ws_details)
+                health_snapshot["ws_details"] = merged_details
 
         ok = bool(health_snapshot.get("ok"))
         payload = {
