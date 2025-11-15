@@ -203,6 +203,25 @@ def test_validate_env_allows_shell_expansion(tmp_path: Path) -> None:
     assert "DATA_DIR" in completed.stdout
 
 
+def test_validate_env_masks_credentialed_urls(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_file.write_text(
+        "DATABASE_URL=https://user:pass@secure.test\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", VALIDATE_ENV_SNIPPET, str(env_file)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "DATABASE_URL=***" in completed.stdout
+    assert "https://user:pass@secure.test" not in completed.stdout
+
+
 def test_validate_env_rejects_placeholder_tokens(tmp_path: Path) -> None:
     env_file = tmp_path / "env"
     env_file.write_text("DATA_DIR=${REPLACE_ME}\n", encoding="utf-8")
