@@ -985,10 +985,36 @@ class TradingRuntime:
 
         self._set_ui_port_env(None)
 
-        if not self._ui_enabled:
+        http_disabled_raw = os.getenv("UI_DISABLE_HTTP_SERVER", "")
+        http_disabled = http_disabled_raw.lower() in {"1", "true", "yes", "on"}
+        if not self._ui_enabled or http_disabled:
             self.ui_server = None
             self._clear_ui_env()
-            log.info("TradingRuntime: UI disabled via UI_ENABLED")
+            detail_parts = []
+            if not self._ui_enabled:
+                ui_enabled_value = os.getenv("UI_ENABLED")
+                if ui_enabled_value is None:
+                    detail_parts.append("UI_ENABLED=0")
+                elif ui_enabled_value.strip():
+                    detail_parts.append(f"UI_ENABLED={ui_enabled_value}")
+                else:
+                    detail_parts.append("UI_ENABLED=<unset>")
+            if http_disabled:
+                if http_disabled_raw.strip():
+                    detail_parts.append(f"UI_DISABLE_HTTP_SERVER={http_disabled_raw}")
+                else:
+                    detail_parts.append("UI_DISABLE_HTTP_SERVER=1")
+            detail_text = " ".join(detail_parts)
+            if detail_text:
+                log.info("UI_READY status=disabled detail=%s", detail_text)
+                log.info("UI_WS_READY status=disabled detail=%s", detail_text)
+            else:
+                log.info("UI_READY status=disabled")
+                log.info("UI_WS_READY status=disabled")
+            if not self._ui_enabled:
+                log.info("TradingRuntime: UI disabled via UI_ENABLED")
+            if http_disabled:
+                log.info("TradingRuntime: UI disabled via UI_DISABLE_HTTP_SERVER")
             return
 
         self.ui_server = UIServer(self.ui_state, host=self.ui_host, port=self.ui_port)

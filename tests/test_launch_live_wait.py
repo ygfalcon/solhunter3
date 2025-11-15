@@ -433,6 +433,30 @@ def test_wait_for_ready_allows_degraded_when_optional(tmp_path: Path) -> None:
     assert completed.returncode == 0
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"UI_ENABLED": "0"},
+        {"UI_DISABLE_HTTP_SERVER": "1"},
+    ],
+)
+def test_wait_for_ready_short_circuits_when_ui_headless(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    completed = _run_wait_for_ready(
+        tmp_path,
+        [
+            "[ts] Event bus: connected",
+            "[ts] GOLDEN_READY stage=liq",
+            "[ts] RUNTIME_READY",
+        ],
+        env=env,
+    )
+
+    assert completed.returncode == 0
+    assert "Timed out" not in completed.stderr
+
+
 def test_check_ui_health_skips_when_disabled_flag(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
