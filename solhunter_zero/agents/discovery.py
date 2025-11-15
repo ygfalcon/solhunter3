@@ -558,6 +558,7 @@ class DiscoveryAgent:
         offline: bool = False,
         token_file: Optional[str] = None,
         method: Optional[str] = None,
+        mempool_enabled: Optional[bool] = None,
     ) -> List[str]:
         now = time.time()
         ttl = self.cache_ttl
@@ -701,10 +702,15 @@ class DiscoveryAgent:
         details: Dict[str, Dict[str, Any]] = {}
         tokens: List[str] = []
 
-        mempool_flag = os.getenv("DISCOVERY_ENABLE_MEMPOOL")
-        mempool_enabled = True
-        if mempool_flag is not None:
-            mempool_enabled = mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
+        if mempool_enabled is None:
+            mempool_flag = os.getenv("DISCOVERY_ENABLE_MEMPOOL")
+            mempool_enabled = True
+            if mempool_flag is not None:
+                mempool_enabled = (
+                    mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
+                )
+        else:
+            mempool_enabled = bool(mempool_enabled)
         fallback_used = False
         fallback_reason = ""
 
@@ -725,6 +731,7 @@ class DiscoveryAgent:
                 method=active_method,
                 offline=offline,
                 token_file=token_file,
+                mempool_enabled=mempool_enabled,
             )
             tokens = self._normalise(tokens)
             tokens, details = await self._apply_social_mentions(
@@ -809,6 +816,7 @@ class DiscoveryAgent:
         method: str,
         offline: bool,
         token_file: Optional[str],
+        mempool_enabled: bool,
     ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
         if (offline or method == "file") and token_file:
             try:
@@ -819,6 +827,13 @@ class DiscoveryAgent:
                 return [], {}
 
         if method == "websocket":
+            if not mempool_enabled:
+                logger.debug(
+                    "Skipping websocket merge because mempool discovery is disabled",
+                )
+                return await self._fallback_after_merge_failure(
+                    mempool_enabled=mempool_enabled
+                )
             kwargs: Dict[str, Any] = {
                 "mempool_threshold": self.mempool_threshold,
             }
@@ -856,7 +871,9 @@ class DiscoveryAgent:
             if isinstance(results, list) and len(results) > self.limit:
                 results = results[: self.limit]
             if merge_error:
-                return await self._fallback_after_merge_failure()
+                return await self._fallback_after_merge_failure(
+                    mempool_enabled=mempool_enabled
+                )
             details = {}
             for item in results:
                 if not isinstance(item, dict):
@@ -876,6 +893,11 @@ class DiscoveryAgent:
             return list(details.keys()), details
 
         if method == "mempool":
+            if not mempool_enabled:
+                logger.debug(
+                    "Skipping mempool discovery because it is disabled",
+                )
+                return [], {}
             tokens, details = await self._collect_mempool()
             filtered = [tok for tok in tokens if not self._should_skip_token(tok)]
             details = {k: v for k, v in details.items() if not self._should_skip_token(k)}
@@ -933,6 +955,13 @@ class DiscoveryAgent:
         logger.warning(
             "Helius/BirdEye discovery returned no tokens; falling back to websocket merge"
         )
+        if not mempool_enabled:
+            logger.debug(
+                "Skipping websocket merge fallback because mempool discovery is disabled",
+            )
+            return await self._fallback_after_merge_failure(
+                mempool_enabled=mempool_enabled
+            )
         try:
             merged = await merge_sources(
                 self.rpc_url,
@@ -952,7 +981,9 @@ class DiscoveryAgent:
             details = {k: v for k, v in details.items() if not self._should_skip_token(k)}
             if details:
                 return list(details.keys()), details
-        return await self._fallback_after_merge_failure()
+        return await self._fallback_after_merge_failure(
+            mempool_enabled=mempool_enabled
+        )
 
     async def _collect_mempool(self) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
         gen = self.stream_mempool_events(threshold=self.mempool_threshold)
@@ -1049,11 +1080,18 @@ class DiscoveryAgent:
 
     async def _fallback_after_merge_failure(
         self,
+        *,
+        mempool_enabled: bool,
     ) -> tuple[List[str], Dict[str, Dict[str, Any]]]:
-        logger.warning("Websocket merge yielded no tokens; trying mempool fallback")
-        mem_tokens, mem_details = await self._collect_mempool()
-        if mem_tokens:
-            return mem_tokens, mem_details
+        if mempool_enabled:
+            logger.warning("Websocket merge yielded no tokens; trying mempool fallback")
+            mem_tokens, mem_details = await self._collect_mempool()
+            if mem_tokens:
+                return mem_tokens, mem_details
+        else:
+            logger.warning(
+                "Websocket merge yielded no tokens and mempool discovery is disabled",
+            )
 
         logger.warning("All discovery sources empty; returning fallback tokens")
         fallback_tokens = self._fallback_tokens()

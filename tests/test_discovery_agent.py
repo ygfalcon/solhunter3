@@ -477,7 +477,12 @@ def test_discover_once_websocket_omits_unsupported_merge_kwargs(monkeypatch):
     agent.limit = 42
 
     tokens, details = asyncio.run(
-        agent._discover_once(method="websocket", offline=False, token_file=None)
+        agent._discover_once(
+            method="websocket",
+            offline=False,
+            token_file=None,
+            mempool_enabled=True,
+        )
     )
 
     assert tokens == [VALID_MINT]
@@ -504,7 +509,12 @@ def test_discover_once_websocket_supports_new_merge_kwargs(monkeypatch):
     agent.limit = 15
 
     tokens, details = asyncio.run(
-        agent._discover_once(method="websocket", offline=False, token_file=None)
+        agent._discover_once(
+            method="websocket",
+            offline=False,
+            token_file=None,
+            mempool_enabled=True,
+        )
     )
 
     assert tokens == [VALID_MINT]
@@ -512,6 +522,64 @@ def test_discover_once_websocket_supports_new_merge_kwargs(monkeypatch):
     assert received["limit"] == agent.limit
     assert received["mempool_threshold"] == agent.mempool_threshold
     assert received["ws_url"] == agent.ws_url
+
+
+def test_discover_once_websocket_skips_merge_when_mempool_disabled(monkeypatch):
+    _reset_cache()
+
+    def fail_merge(*_a, **_k):  # pragma: no cover - defensive
+        raise AssertionError("merge_sources should not be called when mempool is disabled")
+
+    fallback_called = {"value": False}
+
+    async def fake_fallback(self, *, mempool_enabled):
+        fallback_called["value"] = True
+        assert mempool_enabled is False
+        return [], {}
+
+    monkeypatch.setattr(
+        "solhunter_zero.agents.discovery.merge_sources",
+        fail_merge,
+    )
+    monkeypatch.setattr(DiscoveryAgent, "_fallback_after_merge_failure", fake_fallback)
+
+    agent = DiscoveryAgent()
+
+    tokens, details = asyncio.run(
+        agent._discover_once(
+            method="websocket",
+            offline=False,
+            token_file=None,
+            mempool_enabled=False,
+        )
+    )
+
+    assert tokens == []
+    assert details == {}
+    assert fallback_called["value"] is True
+
+
+def test_discover_once_mempool_skips_collect_when_disabled(monkeypatch):
+    _reset_cache()
+
+    async def fail_collect(self):  # pragma: no cover - defensive
+        raise AssertionError("_collect_mempool should not be called when disabled")
+
+    monkeypatch.setattr(DiscoveryAgent, "_collect_mempool", fail_collect)
+
+    agent = DiscoveryAgent()
+
+    tokens, details = asyncio.run(
+        agent._discover_once(
+            method="mempool",
+            offline=False,
+            token_file=None,
+            mempool_enabled=False,
+        )
+    )
+
+    assert tokens == []
+    assert details == {}
 
 
 def test_discover_tokens_warns_when_birdeye_missing_and_mempool_disabled(
@@ -522,8 +590,8 @@ def test_discover_tokens_warns_when_birdeye_missing_and_mempool_disabled(
     monkeypatch.setenv("DISCOVERY_ENABLE_MEMPOOL", "0")
     monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
 
-    async def fake_discover_once(self, *, method, offline, token_file):
-        _ = method, offline, token_file
+    async def fake_discover_once(self, *, method, offline, token_file, mempool_enabled):
+        _ = method, offline, token_file, mempool_enabled
         return [VALID_MINT], {VALID_MINT: {"address": VALID_MINT}}
 
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
@@ -549,8 +617,8 @@ def test_discover_tokens_warns_once_when_birdeye_missing(monkeypatch, caplog):
     monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "1")
     monkeypatch.setattr("solhunter_zero.agents.discovery.publish", lambda *_, **__: None)
 
-    async def fake_discover_once(self, *, method, offline, token_file):
-        _ = method, offline, token_file
+    async def fake_discover_once(self, *, method, offline, token_file, mempool_enabled):
+        _ = method, offline, token_file, mempool_enabled
         return [], {}
 
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
@@ -611,7 +679,7 @@ def test_discover_tokens_includes_social_mentions(monkeypatch):
     agent.social_limit = 3
     agent.social_min_mentions = 1
 
-    async def fake_discover_once(self, *, method, offline, token_file):
+    async def fake_discover_once(self, *, method, offline, token_file, mempool_enabled):
         return [], {}
 
     async def fake_collect_social(self):
@@ -671,7 +739,7 @@ def test_discovery_cache_is_scoped_per_rpc(monkeypatch):
 
     call_count = {"value": 0}
 
-    async def fake_discover_once(self, *, method, offline, token_file):
+    async def fake_discover_once(self, *, method, offline, token_file, mempool_enabled):
         call_count["value"] += 1
         return [VALID_MINT], {}
 
@@ -742,8 +810,8 @@ def test_discover_tokens_concurrent_calls_use_cache_lock(monkeypatch):
         first_call_ready = asyncio.Event()
         release_first_call = asyncio.Event()
 
-        async def fake_discover_once(self, *, method, offline, token_file):
-            del method, offline, token_file
+        async def fake_discover_once(self, *, method, offline, token_file, mempool_enabled):
+            del method, offline, token_file, mempool_enabled
             call_counter["value"] += 1
             if call_counter["value"] == 1:
                 first_call_ready.set()
@@ -836,8 +904,8 @@ def test_discover_tokens_concurrent_cached_reads(monkeypatch):
                 }
             )
 
-        async def fail_discover_once(self, *, method, offline, token_file):  # pragma: no cover - defensive
-            del method, offline, token_file
+        async def fail_discover_once(self, *, method, offline, token_file, mempool_enabled):  # pragma: no cover - defensive
+            del method, offline, token_file, mempool_enabled
             raise AssertionError("_discover_once should not be called when cache is valid")
 
         monkeypatch.setattr(DiscoveryAgent, "_discover_once", fail_discover_once)
@@ -864,7 +932,7 @@ def test_cached_details_hydrate_with_weights(monkeypatch):
     now = time.time()
     features = {"alpha": 1.0}
 
-    async def fail_discover_once(self, *, method, offline, token_file):  # pragma: no cover
+    async def fail_discover_once(self, *, method, offline, token_file, mempool_enabled):  # pragma: no cover
         raise AssertionError("_discover_once should not be called when cache is valid")
 
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", fail_discover_once)
@@ -914,7 +982,7 @@ def test_stale_cache_triggers_static_fallback(monkeypatch):
     static_token = "Fallback111111111111111111111111111111111111111"
     static_calls = {"value": 0}
 
-    async def empty_discover(self, *, method, offline, token_file):
+    async def empty_discover(self, *, method, offline, token_file, mempool_enabled):
         return [], {}
 
     async def passthrough_social(self, tokens, details, *, offline=False):
@@ -963,8 +1031,8 @@ def test_fallback_results_do_not_populate_cache(monkeypatch):
     fallback_tokens = ["Fallback111111111111111111111111111111111111111"]
     call_counter = {"value": 0}
 
-    async def fail_discover_once(self, *, method, offline, token_file):
-        del method, offline, token_file
+    async def fail_discover_once(self, *, method, offline, token_file, mempool_enabled):
+        del method, offline, token_file, mempool_enabled
         call_counter["value"] += 1
         return [], {}
 
@@ -1018,8 +1086,8 @@ def test_cached_fallback_cycle_clears_cache(monkeypatch):
         }
     )
 
-    async def fail_discover_once(self, *, method, offline, token_file):
-        del method, offline, token_file
+    async def fail_discover_once(self, *, method, offline, token_file, mempool_enabled):
+        del method, offline, token_file, mempool_enabled
         return [], {}
 
     static_tokens = ["Fallback111111111111111111111111111111111111111"]
@@ -1058,7 +1126,9 @@ def test_merge_failure_cache_fallback_details(monkeypatch):
 
     agent = DiscoveryAgent()
 
-    tokens, details = asyncio.run(agent._fallback_after_merge_failure())
+    tokens, details = asyncio.run(
+        agent._fallback_after_merge_failure(mempool_enabled=True)
+    )
 
     assert tokens == fallback_tokens
     assert details[tokens[0]]["fallback_reason"] == "cache"
@@ -1086,11 +1156,36 @@ def test_merge_failure_static_fallback_details(monkeypatch):
 
     agent = DiscoveryAgent()
 
-    tokens, details = asyncio.run(agent._fallback_after_merge_failure())
+    tokens, details = asyncio.run(
+        agent._fallback_after_merge_failure(mempool_enabled=True)
+    )
 
     assert tokens == static_tokens
     assert details[tokens[0]]["fallback_reason"] == "static"
     _reset_cache()
+
+
+def test_fallback_after_merge_failure_skips_mempool_when_disabled(monkeypatch):
+    _reset_cache()
+
+    async def fail_collect(self):  # pragma: no cover - defensive
+        raise AssertionError("_collect_mempool should not be called when disabled")
+
+    def empty_fallback(self):
+        return []
+
+    monkeypatch.setattr(DiscoveryAgent, "_collect_mempool", fail_collect)
+    monkeypatch.setattr(DiscoveryAgent, "_fallback_tokens", empty_fallback)
+    monkeypatch.setattr(DiscoveryAgent, "_static_fallback_tokens", empty_fallback)
+
+    agent = DiscoveryAgent()
+
+    tokens, details = asyncio.run(
+        agent._fallback_after_merge_failure(mempool_enabled=False)
+    )
+
+    assert tokens == []
+    assert details == {}
 
 
 def test_offline_discovery_skips_social_mentions(monkeypatch, caplog):
@@ -1192,7 +1287,7 @@ def test_discovery_logs_fallback_reason(monkeypatch):
     agent.max_attempts = 1
     agent.backoff = 0.0
 
-    async def no_tokens(self, *, method, offline, token_file):
+    async def no_tokens(self, *, method, offline, token_file, mempool_enabled):
         del self, method, offline, token_file
         return [], {}
 
