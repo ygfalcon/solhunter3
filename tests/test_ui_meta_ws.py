@@ -66,12 +66,23 @@ def test_ui_meta_websocket_smoke(monkeypatch):
             ) as response:
                 manifest = json.loads(response.read().decode("utf-8"))
             assert meta["url"].startswith("http://127.0.0.1:")
+            http_server_block = meta.get("http_server")
+            assert http_server_block is not None
+            assert http_server_block.get("host") == "127.0.0.1"
+            assert http_server_block.get("port") == port
+            meta_snapshot_http = (meta.get("meta") or {}).get("http_server") or {}
+            assert meta_snapshot_http.get("host") == "127.0.0.1"
+            assert meta_snapshot_http.get("port") == port
             assert meta["events_ws"].startswith("ws://")
             status_block = meta.get("status")
             assert isinstance(status_block, dict)
             assert status_block.get("rl_ws") == "ok"
             assert status_block.get("events_ws") == "ok"
             assert status_block.get("logs_ws") == "ok"
+            active_state = ui._get_active_ui_state()
+            assert active_state is not None
+            assert active_state.http_host == "127.0.0.1"
+            assert active_state.http_port == port
             assert manifest["ui_port"] == 6200
             from solhunter_zero.production.connectivity import ConnectivityChecker
 

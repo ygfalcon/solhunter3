@@ -54,6 +54,40 @@ _ACTIVE_UI_STATE_LOCK = threading.Lock()
 _ENV_BOOTSTRAPPED = False
 _ACTIVE_HTTP_SERVERS: WeakSet["UIServer"] = WeakSet()
 
+
+def _update_state_http_binding(
+    state: "UIState" | None, *, host: str | None = None, port: int | str | None = None
+) -> None:
+    """Record the current HTTP server binding on *state* if provided."""
+
+    if state is None:
+        return
+
+    if host:
+        state.http_host = str(host)
+
+    if port in (None, ""):
+        return
+
+    try:
+        port_int = int(port)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return
+
+    if port_int > 0:
+        state.http_port = port_int
+
+
+def _clear_state_http_binding(state: "UIState" | None) -> None:
+    """Clear the recorded HTTP server binding from *state*."""
+
+    if state is None:
+        return
+
+    state.http_host = None
+    state.http_port = None
+
+
 _QUEUE_DROP_WARNING_INTERVAL = float(os.getenv("UI_QUEUE_DROP_WARNING_INTERVAL", "10") or 10.0)
 
 DEFAULT_UI_HTTP_READY_TIMEOUT = 15.0
@@ -118,11 +152,16 @@ def _teardown_ui_environment() -> None:
 
 def _register_ui_server(server: "UIServer") -> None:
     _ACTIVE_HTTP_SERVERS.add(server)
+    state = getattr(server, "state", None)
+    host = getattr(server, "host", None)
+    port = getattr(server, "port", None)
+    _update_state_http_binding(state, host=host, port=port)
 
 
 def _unregister_ui_server(server: "UIServer") -> None:
     _ACTIVE_HTTP_SERVERS.discard(server)
     if not _ACTIVE_HTTP_SERVERS:
+        _clear_state_http_binding(getattr(server, "state", None))
         stop_websockets()
         _teardown_ui_environment()
 
@@ -1438,8 +1477,14 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         except Exception:
             log.debug("Failed to snapshot run state for UI meta", exc_info=True)
             run_state = _default_run_state()
+        try:
+            http_server_snapshot = dict(state.snapshot_http_server())
+        except Exception:
+            log.debug("Failed to snapshot HTTP server binding for UI meta", exc_info=True)
+            http_server_snapshot = {}
     else:
         run_state = _default_run_state()
+        http_server_snapshot = {}
 
     redis_url = os.getenv("REDIS_URL") or os.getenv("BROKER_URL") or "redis://localhost:6379/1"
     redis_info = _parse_redis_url(redis_url)
@@ -1461,6 +1506,8 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
     }
     if rl_health_url:
         payload["rl_health_url"] = rl_health_url
+    if http_server_snapshot:
+        payload["http_server"] = http_server_snapshot
     return payload
 
 def get_ui_meta_snapshot(force: bool = False) -> Dict[str, Any]:
@@ -3227,6 +3274,8 @@ class UIState:
     close_position_handler: ClosePositionHandler = field(default=_default_close_handler)
     golden_depth_enabled: bool = False
     golden_momentum_enabled: bool = False
+    http_host: Optional[str] = field(default=None, repr=False)
+    http_port: Optional[int] = field(default=None, repr=False)
 
     def snapshot_status(self) -> Dict[str, Any]:
         try:
@@ -3396,6 +3445,16 @@ class UIState:
             payload = {}
 
         payload.setdefault("ok", False)
+        return payload
+
+    def snapshot_http_server(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        host = self.http_host
+        port = self.http_port
+        if host:
+            payload["host"] = host
+        if port is not None and port > 0:
+            payload["port"] = int(port)
         return payload
 
     def snapshot_run_state(self) -> Dict[str, Any]:
@@ -3767,6 +3826,7 @@ def create_app(state: UIState | None = None) -> Flask:
 
     def _ui_meta_payload() -> Dict[str, Any]:
         manifest = build_ui_manifest(request)
+        active_state = _get_active_ui_state() or state
         base_url = (request.url_root or "").rstrip("/")
         if not base_url:
             scheme = getattr(request, "scheme", "http") or "http"
@@ -3776,7 +3836,45 @@ def create_app(state: UIState | None = None) -> Flask:
             base_url = f"{scheme}://{host}"
         meta_snapshot = get_ui_meta_snapshot()
         payload: Dict[str, Any] = {"url": base_url, "meta": meta_snapshot}
-        status_payload = state.snapshot_status()
+        http_server_info: Dict[str, Any] = {}
+        http_host = getattr(active_state, "http_host", None) if active_state is not None else None
+        http_port = getattr(active_state, "http_port", None) if active_state is not None else None
+        if not http_host:
+            host_header = request.host
+            if host_header:
+                http_host = host_header.split(":")[0]
+        if not http_port or http_port <= 0:
+            resolved_port = _resolve_active_http_port()
+            if resolved_port:
+                http_port = resolved_port
+            else:
+                try:
+                    server_port = request.environ.get("SERVER_PORT")
+                except Exception:  # pragma: no cover - defensive guard
+                    server_port = None
+                try:
+                    http_port = int(server_port) if server_port is not None else None
+                except (TypeError, ValueError):
+                    http_port = None
+        if http_host:
+            http_server_info["host"] = http_host
+        if isinstance(http_port, int):
+            if http_port > 0:
+                http_server_info["port"] = http_port
+        elif http_port not in (None, ""):
+            try:
+                port_int = int(http_port)
+            except (TypeError, ValueError):
+                port_int = None
+            if port_int and port_int > 0:
+                http_port = port_int
+                http_server_info["port"] = port_int
+        if http_server_info:
+            payload["http_server"] = http_server_info
+            _update_state_http_binding(
+                active_state, host=http_server_info.get("host"), port=http_server_info.get("port")
+            )
+        status_payload = active_state.snapshot_status() if active_state is not None else {}
         if isinstance(status_payload, Mapping):
             status_block: Dict[str, Any] = dict(status_payload)
         else:
@@ -4006,6 +4104,19 @@ class UIServer:
                 except (TypeError, ValueError):  # pragma: no cover - defensive guard
                     bound_port = self.port
                 self.port = bound_port
+
+                try:
+                    server_address = getattr(server, "server_address", None)
+                    if isinstance(server_address, (tuple, list)) and server_address:
+                        bound_host = str(server_address[0] or self.host)
+                    else:
+                        bound_host = str(getattr(server, "server_name", self.host))
+                except Exception:  # pragma: no cover - best effort capture
+                    bound_host = self.host
+                if bound_host:
+                    self.host = bound_host
+
+                _update_state_http_binding(self.state, host=self.host, port=self.port)
 
                 if reuse_enabled:
                     log.info(
