@@ -2077,6 +2077,12 @@ register_child() {
 cleanup() {
   stop_runtime_lock_refresher
   release_runtime_lock
+  if [[ -n ${RUNTIME_LOCK_KEY+x} ]]; then
+    unset RUNTIME_LOCK_KEY
+  fi
+  if [[ -n ${RUNTIME_LOCK_TOKEN+x} ]]; then
+    unset RUNTIME_LOCK_TOKEN
+  fi
   if (( RUNTIME_LOCK_ATTEMPTED == 1 && RUNTIME_LOCK_ACQUIRED == 1 && RUNTIME_FS_LOCK_WRITTEN == 1 )); then
     if [[ -e $RUNTIME_FS_LOCK ]]; then
       local current_payload=""
