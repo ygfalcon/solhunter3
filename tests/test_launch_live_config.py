@@ -54,6 +54,40 @@ def test_launch_live_missing_config(tmp_path: Path) -> None:
     assert "Config file /nonexistent must exist and be readable" in proc.stderr
 
 
+def test_launch_live_config_missing_from_env_file(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_file.write_text(
+        "\n".join(
+            [
+                f"PYTHONPATH={tmp_path / 'alt_pythonpath'}",
+                "CONFIG_PATH=/nonexistent",
+            ]
+        )
+        + "\n"
+    )
+
+    env = os.environ.copy()
+    env["LAUNCH_LIVE_SKIP_PIP"] = "1"
+
+    proc = subprocess.run(
+        [
+            "bash",
+            "scripts/launch_live.sh",
+            "--env",
+            str(env_file),
+            "--micro",
+            "0",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert proc.returncode == 1
+    assert "Config file /nonexistent must exist and be readable" in proc.stderr
+
+
 def test_launch_live_missing_keypair(tmp_path: Path) -> None:
     env_file = tmp_path / "env"
     env_file.write_text(
