@@ -381,6 +381,78 @@ def test_root_health_defaults_to_false(monkeypatch, client):
     assert payload["health"]["ok"] is False
 
 
+def test_start_websockets_handles_missing_dependency(monkeypatch, caplog):
+    keys = (
+        "UI_WS_URL",
+        "UI_EVENTS_WS_URL",
+        "UI_EVENTS_WS",
+        "UI_RL_WS_URL",
+        "UI_RL_WS",
+        "UI_LOG_WS_URL",
+        "UI_LOGS_WS",
+    )
+    previous_env = {key: os.environ.get(key) for key in keys}
+    monkeypatch.setattr(ui, "websockets", None)
+
+    caplog.set_level(logging.WARNING, logger="solhunter_zero.ui")
+
+    threads = ui.start_websockets()
+    assert threads == {}
+
+    warning_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "solhunter_zero.ui"
+    ]
+    assert any("UI websockets unavailable" in message for message in warning_messages)
+
+    for key in keys:
+        assert os.environ.get(key) == "unavailable"
+
+    snapshot = ui.get_ws_status_snapshot()
+    assert snapshot
+    for info in snapshot.values():
+        assert info["status"] == "failed"
+        assert info["detail"] == "websockets dependency unavailable"
+
+    for state in ui._WS_CHANNELS.values():
+        state.ready.clear()
+        state.ready_status = "stopped"
+        state.ready_detail = None
+
+    for key, value in previous_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+    ui._AUTO_WS_ENV_VALUES.clear()
+    ui._AUTO_WS_ENV_CHANNELS.clear()
+
+
+def test_health_endpoint_reports_ws_unavailable(client):
+    with ui._WS_CHANNEL_LOCK:
+        ui._mark_websockets_unavailable("dependency missing for test")
+    try:
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["ok"] is False
+        health = payload["health"]
+        assert health["ok"] is False
+        assert "ws" in health
+        assert health["ws"]["events_ws"] == "failed"
+        assert health.get("ws_details", {}).get("events_ws")
+    finally:
+        for state in ui._WS_CHANNELS.values():
+            state.ready.clear()
+            state.ready_status = "stopped"
+            state.ready_detail = None
+        ui._clear_auto_env_values_for_channels(ui._WS_CHANNELS.keys())
+        ui._AUTO_WS_ENV_VALUES.clear()
+        ui._AUTO_WS_ENV_CHANNELS.clear()
+
+
 def test_logs_tail_endpoint(monkeypatch, client):
     state = _active_state()
     monkeypatch.setattr(state, "logs_provider", lambda: [{"msg": "a"}, {"msg": "b"}])
