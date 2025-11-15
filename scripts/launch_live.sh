@@ -1776,6 +1776,40 @@ for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
         if pat.search(value):
             print(f"placeholder detected for {key}: {pat.pattern}", file=sys.stderr)
             raise SystemExit(1)
+required_reports: list[str] = []
+required_exact = [
+    ("SOLANA_RPC_URL", "Solana RPC URL"),
+    ("SOLANA_WS_URL", "Solana websocket URL"),
+    ("REDIS_URL", "Redis endpoint"),
+]
+for env_name, description in required_exact:
+    candidate = values.get(env_name, "").strip()
+    if not candidate:
+        required_reports.append(f"{env_name} ({description})")
+
+keypair_candidates = ("KEYPAIR_PATH", "SOLANA_KEYPAIR")
+if not any(values.get(name, "").strip() for name in keypair_candidates):
+    required_reports.append(
+        "keypair pointer missing; set KEYPAIR_PATH or SOLANA_KEYPAIR to a readable keypair JSON"
+    )
+
+broker_candidates = (
+    "EVENT_BUS_URL",
+    "BROKER_URL",
+    "BROKER_URLS",
+    "BROKER_WS_URLS",
+    "BROKER_URLS_JSON",
+)
+if not any(values.get(name, "").strip() for name in broker_candidates):
+    required_reports.append(
+        "broker/event bus endpoint missing; set EVENT_BUS_URL or provide BROKER_URL/BROKER_URLS/BROKER_WS_URLS"
+    )
+
+if required_reports:
+    print("Environment file is missing required entries:", file=sys.stderr)
+    for message in required_reports:
+        print(f"  - {message}", file=sys.stderr)
+    raise SystemExit(1)
 manifest = []
 for key, value in sorted(values.items()):
     lowered = key.lower()
