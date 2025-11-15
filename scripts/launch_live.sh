@@ -2117,8 +2117,34 @@ fi
 log_info "Redis health check passed"
 
 declare -a CHILD_PIDS=()
+START_CONTROLLER_STDERR_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/start_controller.XXXXXX")
 register_child() {
   CHILD_PIDS+=("$1")
+}
+
+start_controller_stderr_file() {
+  local log=$1
+  if [[ -z ${START_CONTROLLER_STDERR_STATE_DIR:-} ]]; then
+    return 1
+  fi
+  local key
+  key=$(printf '%s' "$log" | LC_ALL=C od -An -tx1 | tr -d ' \n')
+  if [[ -z $key ]]; then
+    return 1
+  fi
+  echo "$START_CONTROLLER_STDERR_STATE_DIR/${key}.stderr"
+}
+
+print_captured_start_controller_stderr() {
+  local log=$1
+  local file
+  file=$(start_controller_stderr_file "$log") || return 1
+  if [[ -f $file && -s $file ]]; then
+    cat "$file" >&2 || true
+    rm -f "$file" || true
+    return 0
+  fi
+  return 1
 }
 
 cleanup() {
@@ -2165,6 +2191,9 @@ cleanup() {
       wait "$pid" 2>/dev/null || true
     fi
   done
+  if [[ -n ${START_CONTROLLER_STDERR_STATE_DIR:-} && -d ${START_CONTROLLER_STDERR_STATE_DIR:-} ]]; then
+    rm -rf "$START_CONTROLLER_STDERR_STATE_DIR" || true
+  fi
 }
 
 trap cleanup EXIT
@@ -2215,7 +2244,18 @@ start_controller() {
   local log=$2
   local notify=$3
   # Truncate the log before launching the controller to drop any stale output.
-  : > "$log"
+  local stderr_file
+  stderr_file=$(start_controller_stderr_file "$log") || true
+  if [[ -n ${stderr_file:-} ]]; then
+    mkdir -p "${START_CONTROLLER_STDERR_STATE_DIR:-}" || true
+    : >"$stderr_file" || true
+  fi
+  if ! : > "$log"; then
+    if [[ -n ${stderr_file:-} ]]; then
+      printf 'Failed to truncate log %s\n' "$log" >>"$stderr_file"
+    fi
+    return 1
+  fi
   local args=("$ROOT_DIR/scripts/live_runtime_controller.py" "--mode" "$mode" "--micro" "$MICRO_FLAG")
   if [[ -n $CONFIG_PATH ]]; then
     args+=("--config" "$CONFIG_PATH")
@@ -2226,7 +2266,11 @@ start_controller() {
   if [[ -n $notify ]]; then
     args+=("--notify" "$notify")
   fi
-  "$PYTHON_BIN" "${args[@]}" >"$log" 2>&1 &
+  if [[ -n ${stderr_file:-} ]]; then
+    "$PYTHON_BIN" "${args[@]}" >"$log" 2> >(tee -a "$stderr_file" >>"$log") &
+  else
+    "$PYTHON_BIN" "${args[@]}" >"$log" 2>&1 &
+  fi
   local pid=$!
   register_child "$pid"
   printf '%s\n' "$pid"
@@ -2245,6 +2289,7 @@ print_log_excerpt() {
     echo "---- End runtime log ----" >&2
   else
     echo "Log file $log not found" >&2
+    print_captured_start_controller_stderr "$log" || true
   fi
 }
 

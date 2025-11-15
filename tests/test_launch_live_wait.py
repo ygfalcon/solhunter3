@@ -48,6 +48,13 @@ WAIT_FOR_READY_SNIPPET = (
     + _extract_function(_LAUNCH_LIVE_SOURCE, "wait_for_ready")
 )
 
+START_CONTROLLER_SNIPPET = (
+    _extract_function(_LAUNCH_LIVE_SOURCE, "start_controller_stderr_file")
+    + _extract_function(_LAUNCH_LIVE_SOURCE, "print_captured_start_controller_stderr")
+    + _extract_function(_LAUNCH_LIVE_SOURCE, "start_controller")
+    + _extract_function(_LAUNCH_LIVE_SOURCE, "print_log_excerpt")
+)
+
 
 def _extract_python_function(source: str, name: str) -> str:
     marker = f"def {name}"
@@ -297,6 +304,62 @@ def test_start_log_stream_preserves_existing_content(tmp_path: Path) -> None:
     assert "[ts] [test] MARKER" in lines
     assert "[ts] [test] AFTER" in lines
     assert log_path.read_text().splitlines() == ["MARKER", "AFTER"]
+
+
+def test_print_log_excerpt_surfaces_controller_stderr_when_log_missing(tmp_path: Path) -> None:
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir(parents=True)
+    controller_path = script_dir / "live_runtime_controller.py"
+    controller_path.write_text(
+        "import sys\n"
+        "sys.stderr.write('controller boom\\n')\n"
+        "sys.exit(1)\n"
+    )
+    controller_path.chmod(0o755)
+
+    log_path = tmp_path / "logs" / "runtime.log"
+    log_path.parent.mkdir(parents=True)
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        ROOT_DIR={shlex.quote(str(tmp_path))}
+        PYTHON_BIN={shlex.quote(sys.executable)}
+        MICRO_FLAG=0
+        CONFIG_PATH=
+        CANARY_MODE=0
+        CANARY_BUDGET=0
+        CANARY_RISK=0
+        declare -a CHILD_PIDS=()
+        register_child() {{
+          CHILD_PIDS+=("$1")
+        }}
+        START_CONTROLLER_STDERR_STATE_DIR=$(mktemp -d)
+        {START_CONTROLLER_SNIPPET}
+        LOG_PATH={shlex.quote(str(log_path))}
+        pid=$(start_controller live "$LOG_PATH" "")
+        for _ in $(seq 1 50); do
+          if ! kill -0 "$pid" >/dev/null 2>&1; then
+            break
+          fi
+          sleep 0.1
+        done
+        rm -f "$LOG_PATH"
+        print_log_excerpt "$LOG_PATH" "controller crashed"
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "controller crashed" in completed.stderr
+    assert "controller boom" in completed.stderr
+    assert "Log file" in completed.stderr
 
 
 @pytest.mark.parametrize(
