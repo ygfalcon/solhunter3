@@ -123,6 +123,27 @@ def test_launch_live_missing_keypair(tmp_path: Path) -> None:
     assert "/no/such/key.json" in proc.stderr
 
 
+def test_launch_live_skips_keypair_when_upcoming_mode_paper(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.pop("KEYPAIR_PATH", None)
+    env.pop("SOLANA_KEYPAIR", None)
+    env.pop("CONFIG_PATH", None)
+    env["UPCOMING_CONTROLLER_MODE"] = "paper"
+    env["MODE"] = "live"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", CHECK_LIVE_KEYPAIR_SNIPPET],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == ""
+    assert completed.stderr.strip() == ""
+
+
 def test_launch_live_env_relative_keypair(tmp_path: Path) -> None:
     env_dir = tmp_path / "envdir"
     env_dir.mkdir()
