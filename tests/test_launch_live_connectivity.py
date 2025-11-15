@@ -124,7 +124,8 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
         "        return _Summary()\n"
     )
     (package_dir / "production.py").write_text(stub_source, encoding="utf-8")
-    python_bin = shlex.quote(sys.executable)
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
     preserved_value = "restore-me"
     quoted_report = shlex.quote(str(report_path))
     quoted_value = shlex.quote(preserved_value)
@@ -143,7 +144,9 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
         export SOAK_REPORT={quoted_report}
         export ARTIFACT_DIR={quoted_artifact_dir}
         export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
         export PYTHONPATH={quoted_stub_root}
+        export CONNECTIVITY_OPTIONAL_PROBES='{{}}'
         export EXIT_CONNECTIVITY=99
         {soak_block}
         if [[ -n ${{CONNECTIVITY_SKIP_UI_PROBES+x}} ]]; then
@@ -166,7 +169,18 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
     assert "restored=restore-me" in completed.stdout
 
 
-def _write_connectivity_stub(target_dir: Path) -> None:
+def _default_connectivity_targets() -> list[dict[str, object]]:
+    return [
+        {"name": "redis", "target": "redis://localhost/0"},
+        {"name": "solana-rpc", "target": "https://solana-rpc.local"},
+        {"name": "solana-ws", "target": "wss://solana-ws.local"},
+        {"name": "helius-rest", "target": "https://helius-rest.local"},
+        {"name": "helius-das", "target": "https://helius-das.local"},
+    ]
+
+
+def _write_connectivity_stub(target_dir: Path, targets: list[dict[str, object]] | None = None) -> None:
+    target_specs = targets or _default_connectivity_targets()
     package_dir = target_dir / "solhunter_zero"
     package_dir.mkdir(parents=True)
     (package_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -174,6 +188,7 @@ def _write_connectivity_stub(target_dir: Path) -> None:
         "from __future__ import annotations\n"
         "import os\n"
         "from pathlib import Path\n\n"
+        f"TARGET_SPECS = {target_specs!r}\n\n"
         "class _Result:\n"
         "    def __init__(self, name: str, target: str, ok: bool = True, error: str | None = None) -> None:\n"
         "        self.name = name\n"
@@ -189,11 +204,13 @@ def _write_connectivity_stub(target_dir: Path) -> None:
         "        self._marker = Path(marker) if marker else None\n\n"
         "    async def check_all(self):\n"
         "        return [\n"
-        "            _Result(\"redis\", \"redis://localhost/0\"),\n"
-        "            _Result(\"solana-rpc\", \"https://solana-rpc.local\"),\n"
-        "            _Result(\"solana-ws\", \"wss://solana-ws.local\"),\n"
-        "            _Result(\"helius-rest\", \"https://helius-rest.local\"),\n"
-        "            _Result(\"helius-das\", \"https://helius-das.local\"),\n"
+        "            _Result(\n"
+        "                spec['name'],\n"
+        "                spec['target'],\n"
+        "                ok=spec.get('ok', True),\n"
+        "                error=spec.get('error'),\n"
+        "            )\n"
+        "            for spec in TARGET_SPECS\n"
         "        ]\n\n"
         "    async def _probe_ws(self, name: str, target: str):\n"
         "        if self._marker is not None:\n"
@@ -321,6 +338,86 @@ def test_run_connectivity_probes_requires_remote_event_bus(tmp_path: Path) -> No
         "Event bus connectivity check failed: unreachable (wss://bus.example.com/ws)" in completed.stderr
     )
     assert marker_path.read_text(encoding="utf-8") == "event-bus wss://bus.example.com/ws"
+
+
+def test_run_connectivity_probes_optional_missing_target(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_optional_missing"
+    targets = [spec for spec in _default_connectivity_targets() if spec["name"] != "helius-das"]
+    _write_connectivity_stub(stub_root, targets=targets)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+    optional_map = shlex.quote(json.dumps({"helius-das": True}))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export CONNECTIVITY_OPTIONAL_PROBES={optional_map}
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Helius DAS: missing target" in completed.stdout
+
+
+def test_run_connectivity_probes_optional_failure(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_optional_failure"
+    targets = _default_connectivity_targets()
+    for spec in targets:
+        if spec["name"] == "redis":
+            spec["ok"] = False
+            spec["error"] = "unreachable"
+    _write_connectivity_stub(stub_root, targets=targets)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+    optional_map = shlex.quote(json.dumps({"redis": True}))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export CONNECTIVITY_OPTIONAL_PROBES={optional_map}
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Redis: FAIL (unreachable) → redis://localhost/0" in completed.stdout
 
 
 def test_redis_health_falls_back_when_redis_cli_lacks_url_support(tmp_path: Path) -> None:

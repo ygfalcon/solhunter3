@@ -655,6 +655,7 @@ run_connectivity_probes() {
   "$PYTHON_BIN" - <<'PY'
 import asyncio
 import ipaddress
+import json
 import os
 import sys
 from urllib.parse import urlparse
@@ -678,6 +679,44 @@ def _format_result(label: str, result) -> str:
     status = "OK" if result.ok else f"FAIL ({result.error or result.status or result.status_code})"
     latency = f"{result.latency_ms:.1f} ms" if result.latency_ms is not None else "n/a"
     return f"{label}: {status} → {result.target} ({latency})"
+
+
+def _parse_optional_flag(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "false", "no", "off", "disabled"}:
+            return False
+        if normalized in {"1", "true", "yes", "on", "enabled"}:
+            return True
+    return bool(value)
+
+
+def _load_optional_probe_map() -> dict[str, bool]:
+    raw = os.environ.get("CONNECTIVITY_OPTIONAL_PROBES")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        entries = [item.strip() for item in raw.split(",") if item.strip()]
+        return {entry.lower(): True for entry in entries}
+    optional: dict[str, bool] = {}
+    if isinstance(data, dict):
+        for key, value in data.items():
+            key_str = str(key).strip().lower()
+            if not key_str:
+                continue
+            optional[key_str] = _parse_optional_flag(value)
+    elif isinstance(data, (list, tuple)):
+        for item in data:
+            key_str = str(item).strip().lower()
+            if key_str:
+                optional[key_str] = True
+    return optional
 
 
 def _runtime_bus_target(raw_url: str | None) -> tuple[str, int, str]:
@@ -715,6 +754,10 @@ async def _run() -> None:
     checker = ConnectivityChecker()
     results = await checker.check_all()
     lookup = {result.name: result for result in results}
+    optional_map = _load_optional_probe_map()
+
+    def _is_optional(name: str) -> bool:
+        return optional_map.get(name.lower(), False)
 
     raw_bus_url = os.environ.get("EVENT_BUS_URL")
     bus_result = None
@@ -747,11 +790,13 @@ async def _run() -> None:
         result = lookup.get(key)
         print(_format_result(label, result))
         if result is None:
-            failures.append(f"{label} connectivity probe skipped (no target configured)")
+            if not _is_optional(key):
+                failures.append(f"{label} connectivity probe skipped (no target configured)")
             continue
         if not result.ok:
             reason = result.error or result.status or "unavailable"
-            failures.append(f"{label} connectivity check failed: {reason} ({result.target})")
+            if not _is_optional(key):
+                failures.append(f"{label} connectivity check failed: {reason} ({result.target})")
 
     if failures:
         print("\n".join(failures), file=sys.stderr)
@@ -1967,11 +2012,9 @@ check_live_keypair_paths
 # Ensure Jupiter websocket uses the stats endpoint unless explicitly overridden.
 export JUPITER_WS_URL="${JUPITER_WS_URL:-wss://stats.jup.ag/ws}"
 
-PROVIDER_STATUS=""
-log_info "Checking configured provider credentials and connectivity"
-if ! PROVIDER_STATUS=$("$PYTHON_BIN" - <<'PY'
+PROVIDER_COMMON=$(cat <<'PY'
 from solhunter_zero.production import Provider, assert_providers_ok, format_configured_providers
-import sys
+
 providers = [
     Provider("Solana", ("SOLANA_RPC_URL", "SOLANA_WS_URL")),
     Provider("Helius", ("HELIUS_API_KEY",)),
@@ -1979,11 +2022,26 @@ providers = [
     Provider("UI", ("UI_WS_URL",), optional=True),
     Provider("Helius-DAS", ("DAS_BASE_URL",), optional=True),
 ]
+
+OPTIONAL_PROBE_MAP = {
+    "redis": providers[2].optional,
+    "helius-das": providers[4].optional,
+}
+PY
+)
+
+PROVIDER_STATUS=""
+log_info "Checking configured provider credentials and connectivity"
+if ! PROVIDER_STATUS=$("$PYTHON_BIN" - <<PY
+$PROVIDER_COMMON
+import sys
+
 try:
     assert_providers_ok(providers)
 except Exception as exc:
     print(exc, file=sys.stderr)
     raise SystemExit(1)
+
 print(format_configured_providers(providers))
 PY
 ); then
@@ -1994,6 +2052,24 @@ log_info "Environment manifest (sensitive values masked)"
 printf '%s\n' "$MANIFEST_RAW"
 log_info "Provider status"
 printf '%s\n' "$PROVIDER_STATUS"
+
+if [[ -z ${CONNECTIVITY_OPTIONAL_PROBES:-} ]]; then
+  if ! CONNECTIVITY_OPTIONAL_PROBES=$("$PYTHON_BIN" - <<PY
+$PROVIDER_COMMON
+import json
+
+payload = {
+    name: True for name, optional in OPTIONAL_PROBE_MAP.items() if bool(optional)
+}
+
+print(json.dumps(payload))
+PY
+  ); then
+    log_warn "Failed to derive connectivity optional probe map"
+    exit $EXIT_KEYS
+  fi
+  export CONNECTIVITY_OPTIONAL_PROBES
+fi
 
 log_info "Standardising event bus and Redis configuration"
 if ! BUS_EXPORTS=$(normalize_bus_configuration); then
