@@ -671,6 +671,11 @@ REQUIRED_TARGETS = [
     ("event-bus", "Event bus"),
 ]
 
+UI_TARGETS = [
+    ("ui-ws", "UI WebSocket"),
+    ("ui-http", "UI HTTP"),
+]
+
 
 def _format_result(label: str, result) -> str:
     if result is None:
@@ -711,6 +716,11 @@ def _is_local_host(hostname: str) -> bool:
     return address.is_loopback
 
 
+def _env_flag(name: str) -> bool:
+    raw = os.environ.get(name, "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def _run() -> None:
     checker = ConnectivityChecker()
     results = await checker.check_all()
@@ -719,6 +729,7 @@ async def _run() -> None:
     raw_bus_url = os.environ.get("EVENT_BUS_URL")
     bus_result = None
     bus_skip_message: str | None = None
+    skip_ui = _env_flag("CONNECTIVITY_SKIP_UI_PROBES")
 
     if raw_bus_url:
         bus_host, bus_port, bus_display = _runtime_bus_target(raw_bus_url)
@@ -749,6 +760,23 @@ async def _run() -> None:
         if result is None:
             failures.append(f"{label} connectivity probe skipped (no target configured)")
             continue
+        if not result.ok:
+            reason = result.error or result.status or "unavailable"
+            failures.append(f"{label} connectivity check failed: {reason} ({result.target})")
+
+    for key, label in UI_TARGETS:
+        result = lookup.get(key)
+        if result is None:
+            if skip_ui:
+                print(
+                    f"{label}: SKIPPED → UI connectivity probes disabled"
+                    " (CONNECTIVITY_SKIP_UI_PROBES=1)"
+                )
+                continue
+            print(_format_result(label, result))
+            failures.append(f"{label} connectivity probe skipped (no target configured)")
+            continue
+        print(_format_result(label, result))
         if not result.ok:
             reason = result.error or result.status or "unavailable"
             failures.append(f"{label} connectivity check failed: {reason} ({result.target})")
@@ -2006,9 +2034,35 @@ if ! eval "$BUS_EXPORTS"; then
 fi
 log_info "RUNTIME_MANIFEST channel=$BROKER_CHANNEL redis=$REDIS_URL mint_stream=$MINT_STREAM_REDIS_URL mempool=$MEMPOOL_STREAM_REDIS_URL amm_watch=$AMM_WATCH_REDIS_URL bus=$EVENT_BUS_URL"
 
+CONNECTIVITY_SKIP_UI_PROBES_FORCED=0
+CONNECTIVITY_SKIP_UI_PROBES_RESTORE=0
+CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS_VALUE=""
+ui_disabled_reason=""
+if [[ ${UI_ENABLED:-1} == "0" ]]; then
+  ui_disabled_reason="UI_ENABLED=0"
+elif [[ -z ${UI_HOST:-} || -z ${UI_PORT:-} ]]; then
+  ui_disabled_reason="UI host/port not configured"
+fi
+if [[ -n $ui_disabled_reason ]]; then
+  CONNECTIVITY_SKIP_UI_PROBES_FORCED=1
+  if [[ -n ${CONNECTIVITY_SKIP_UI_PROBES+x} ]]; then
+    CONNECTIVITY_SKIP_UI_PROBES_RESTORE=1
+    CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS_VALUE="$CONNECTIVITY_SKIP_UI_PROBES"
+  fi
+  export CONNECTIVITY_SKIP_UI_PROBES=1
+  log_info "UI connectivity probes disabled for connectivity check ($ui_disabled_reason)"
+fi
+
 log_info "Running connectivity probes"
 if ! CONNECTIVITY_REPORT=$(run_connectivity_probes 2>&1); then
   log_warn "Connectivity probes failed:\n$CONNECTIVITY_REPORT"
+  if (( CONNECTIVITY_SKIP_UI_PROBES_FORCED )); then
+    if (( CONNECTIVITY_SKIP_UI_PROBES_RESTORE )); then
+      export CONNECTIVITY_SKIP_UI_PROBES="$CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS_VALUE"
+    else
+      unset CONNECTIVITY_SKIP_UI_PROBES
+    fi
+  fi
   exit $EXIT_CONNECTIVITY
 fi
 while IFS= read -r line; do
@@ -2016,6 +2070,13 @@ while IFS= read -r line; do
     log_info "Connectivity probe: $line"
   fi
 done <<<"$CONNECTIVITY_REPORT"
+if (( CONNECTIVITY_SKIP_UI_PROBES_FORCED )); then
+  if (( CONNECTIVITY_SKIP_UI_PROBES_RESTORE )); then
+    export CONNECTIVITY_SKIP_UI_PROBES="$CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS_VALUE"
+  else
+    unset CONNECTIVITY_SKIP_UI_PROBES
+  fi
+fi
 log_info "Connectivity probes succeeded"
 
 SOCKET_STATE_RAW=$(wait_for_socket_release)
