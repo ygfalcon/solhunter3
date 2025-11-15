@@ -17,6 +17,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Sequence, AsyncIterator, Tuple
 from urllib.parse import urlparse
+from weakref import WeakKeyDictionary
 
 import yaml
 from aiohttp import ClientTimeout
@@ -500,7 +501,9 @@ class _CachedJSON:
 
 
 _JSON_CACHE: Dict[str, _CachedJSON] = {}
-_JSON_CACHE_LOCK: asyncio.Lock | None = None
+_JSON_CACHE_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    WeakKeyDictionary()
+)
 
 
 def _cache_key(url: str, params: Dict[str, Any] | None) -> str:
@@ -515,10 +518,12 @@ def _cache_key(url: str, params: Dict[str, Any] | None) -> str:
 
 
 async def _get_cache_lock() -> asyncio.Lock:
-    global _JSON_CACHE_LOCK
-    if _JSON_CACHE_LOCK is None:
-        _JSON_CACHE_LOCK = asyncio.Lock()
-    return _JSON_CACHE_LOCK
+    loop = asyncio.get_running_loop()
+    lock = _JSON_CACHE_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _JSON_CACHE_LOCKS[loop] = lock
+    return lock
 
 
 async def _get_orca_catalog_lock() -> asyncio.Lock:

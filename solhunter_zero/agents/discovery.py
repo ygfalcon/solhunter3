@@ -8,6 +8,7 @@ import os
 import time
 import urllib.parse
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Mapping
+from weakref import WeakKeyDictionary
 
 from .. import config
 from ..token_aliases import canonical_mint, validate_mint
@@ -101,7 +102,18 @@ _CACHE: dict[str, object] = {
     "details": {},
 }
 
-_CACHE_LOCK = asyncio.Lock()
+_CACHE_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    WeakKeyDictionary()
+)
+
+
+def _get_cache_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _CACHE_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _CACHE_LOCKS[loop] = lock
+    return lock
 
 
 def _rpc_identity(url: Optional[str]) -> str:
@@ -355,7 +367,7 @@ class DiscoveryAgent:
     async def _cache_snapshot(
         self,
     ) -> tuple[List[str], Dict[str, Dict[str, Any]], float, int, str, str]:
-        async with _CACHE_LOCK:
+        async with _get_cache_lock():
             tokens_raw = _CACHE.get("tokens")
             details_raw = _CACHE.get("details")
             cache_ts = float(_CACHE.get("ts", 0.0))
@@ -730,7 +742,7 @@ class DiscoveryAgent:
         )
 
         if ttl > 0 and tokens and not fallback_used:
-            async with _CACHE_LOCK:
+            async with _get_cache_lock():
                 _CACHE["tokens"] = list(tokens)
                 _CACHE["ts"] = now
                 _CACHE["limit"] = self.limit
@@ -738,7 +750,7 @@ class DiscoveryAgent:
                 _CACHE["rpc_identity"] = current_rpc_identity
                 _CACHE["details"] = self._prepare_cache_details(details)
         elif fallback_used:
-            async with _CACHE_LOCK:
+            async with _get_cache_lock():
                 # Mark the cache as expired so the next call performs live discovery.
                 _CACHE["tokens"] = []
                 _CACHE["details"] = {}
