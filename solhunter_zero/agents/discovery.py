@@ -108,6 +108,9 @@ _CACHE_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
 )
 
 
+_UNSET = object()
+
+
 def _get_cache_lock() -> asyncio.Lock:
     loop = asyncio.get_running_loop()
     lock = _CACHE_LOCKS.get(loop)
@@ -330,7 +333,7 @@ def _resolve_limit_cap(default: int = DEFAULT_MAX_DISCOVERY_LIMIT) -> int:
 class DiscoveryAgent:
     """Token discovery orchestrator supporting multiple discovery methods."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, limit: object = _UNSET) -> None:
         rpc_env = os.getenv("SOLANA_RPC_URL") or DEFAULT_SOLANA_RPC
         os.environ.setdefault("SOLANA_RPC_URL", rpc_env)
         self.rpc_url = rpc_env
@@ -347,29 +350,11 @@ class DiscoveryAgent:
             logger.warning(
                 "BIRDEYE_API_KEY missing; BirdEye discovery disabled. Mempool and DEX sources remain active."
             )
-        limit = resolve_discovery_limit(default=60)
-        if limit < MIN_DISCOVERY_LIMIT:
-            logger.warning(
-                "Discovery limit %d below minimum %d; using minimum",
-                limit,
-                MIN_DISCOVERY_LIMIT,
-            )
-            limit = MIN_DISCOVERY_LIMIT
-        limit_cap = _resolve_limit_cap()
-        if limit > limit_cap:
-            logger.warning(
-                "Discovery limit %d above maximum %d; using maximum",
-                limit,
-                limit_cap,
-            )
-            limit = limit_cap
+        self.limit_cap = _resolve_limit_cap()
         self._disabled_skip_logged = False
-        if limit == 0:
-            logger.info(
-                "Discovery limit set to 0; discovery will remain disabled",
-            )
-        self.limit = limit
-        self.limit_cap = limit_cap
+        self.limit: Optional[int] = None
+        initial_limit = resolve_discovery_limit(default=60) if limit is _UNSET else limit
+        self.set_limit(initial_limit)
         cache_ttl_env = os.getenv("DISCOVERY_CACHE_TTL")
         cache_ttl_default = self._default_cache_ttl()
         if cache_ttl_env in {None, ""}:
@@ -450,6 +435,42 @@ class DiscoveryAgent:
         # disabled so we avoid noisy duplicate messages when discovery runs in a
         # tight loop.
         self._birdeye_notice_logged = False
+
+    def set_limit(self, limit: Any) -> None:
+        """Update the active discovery limit, applying caps and validation."""
+
+        self._disabled_skip_logged = False
+        if limit is None:
+            self.limit = None
+            return
+        try:
+            value = int(limit)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid discovery limit override %r; keeping existing limit %r",
+                limit,
+                self.limit,
+            )
+            return
+        if value < MIN_DISCOVERY_LIMIT:
+            logger.warning(
+                "Discovery limit %d below minimum %d; using minimum",
+                value,
+                MIN_DISCOVERY_LIMIT,
+            )
+            value = MIN_DISCOVERY_LIMIT
+        if value > self.limit_cap:
+            logger.warning(
+                "Discovery limit %d above maximum %d; using maximum",
+                value,
+                self.limit_cap,
+            )
+            value = self.limit_cap
+        self.limit = value
+        if value == 0:
+            logger.info(
+                "Discovery limit set to 0; discovery will remain disabled",
+            )
 
     @classmethod
     def _default_cache_ttl(cls) -> float:

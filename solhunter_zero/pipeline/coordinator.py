@@ -6,7 +6,7 @@ import logging
 import math
 import os
 import time
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Mapping, Optional, cast
 
 from .discovery_service import DiscoveryService
 from .evaluation_service import EvaluationService
@@ -28,6 +28,7 @@ class PipelineCoordinator:
         agent_manager,
         portfolio,
         *,
+        config: Mapping[str, Any] | None = None,
         discovery_interval: float = 5.0,
         discovery_cache_ttl: float = 20.0,
         scoring_batch: Optional[int] = None,
@@ -39,6 +40,7 @@ class PipelineCoordinator:
     ) -> None:
         self.agent_manager = agent_manager
         self.portfolio = portfolio
+        self.cfg: Dict[str, Any] = dict(config) if config is not None else {}
 
         fast_mode = os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
         self.fast_mode = fast_mode
@@ -163,12 +165,32 @@ class PipelineCoordinator:
         )
         self._portfolio_service = PortfolioManagementService(portfolio)
 
-        raw_discovery_limit = os.getenv("DISCOVERY_LIMIT")
-        resolved_limit = resolve_discovery_limit(default=0)
-        if raw_discovery_limit is None or not str(raw_discovery_limit).strip():
-            discovery_limit = None if resolved_limit <= 0 else resolved_limit
+        configured_limit: Optional[int] = None
+        raw_cfg_limit = self.cfg.get("discovery_limit") if self.cfg else None
+        if raw_cfg_limit not in (None, ""):
+            try:
+                configured_limit = int(str(raw_cfg_limit).strip())
+            except (TypeError, ValueError):
+                log.warning(
+                    "Invalid discovery_limit=%r in config; falling back to environment defaults",
+                    raw_cfg_limit,
+                )
+                configured_limit = None
+
+        if configured_limit is not None:
+            if configured_limit < 0:
+                log.warning(
+                    "Configured discovery_limit=%r below zero; disabling discovery",
+                    raw_cfg_limit,
+                )
+            discovery_limit = max(0, configured_limit)
         else:
-            discovery_limit = max(0, resolved_limit)
+            raw_discovery_limit = os.getenv("DISCOVERY_LIMIT")
+            resolved_limit = resolve_discovery_limit(default=0)
+            if raw_discovery_limit is None or not str(raw_discovery_limit).strip():
+                discovery_limit = None if resolved_limit <= 0 else resolved_limit
+            else:
+                discovery_limit = max(0, resolved_limit)
 
         self._discovery_service = DiscoveryService(
             self._discovery_queue,
