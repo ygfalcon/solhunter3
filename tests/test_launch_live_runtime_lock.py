@@ -587,3 +587,46 @@ def test_cleanup_removes_owned_runtime_lock(tmp_path: Path) -> None:
     )
 
     assert not lock_path.exists()
+
+
+def test_cleanup_unsets_runtime_lock_env_without_refresher(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = _cleanup_script(source)
+
+    stop_stub = "stop_runtime_lock_refresher() { :; }"
+    release_stub = "release_runtime_lock() { :; }"
+    bash_script = "\n".join(
+        [
+            "set -euo pipefail",
+            functions,
+            stop_stub,
+            release_stub,
+            "RUNTIME_LOCK_ATTEMPTED=1",
+            "RUNTIME_LOCK_ACQUIRED=1",
+            "RUNTIME_FS_LOCK_WRITTEN=0",
+            "RUNTIME_FS_LOCK_PAYLOAD=\"\"",
+            "CHILD_PIDS=()",
+            "RUNTIME_LOCK_KEY=key",
+            "export RUNTIME_LOCK_KEY",
+            "RUNTIME_LOCK_TOKEN=token",
+            "export RUNTIME_LOCK_TOKEN",
+            "cleanup",
+            "if [[ -n ${RUNTIME_LOCK_KEY+x} ]]; then echo RUNTIME_LOCK_KEY_PRESENT; else echo RUNTIME_LOCK_KEY_UNSET; fi",
+            "if [[ -n ${RUNTIME_LOCK_TOKEN+x} ]]; then echo RUNTIME_LOCK_TOKEN_PRESENT; else echo RUNTIME_LOCK_TOKEN_UNSET; fi",
+        ]
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    stdout = completed.stdout.splitlines()
+    assert "RUNTIME_LOCK_KEY_UNSET" in stdout
+    assert "RUNTIME_LOCK_TOKEN_UNSET" in stdout
+    assert "RUNTIME_LOCK_KEY_PRESENT" not in stdout
+    assert "RUNTIME_LOCK_TOKEN_PRESENT" not in stdout
