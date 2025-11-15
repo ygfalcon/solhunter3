@@ -78,6 +78,22 @@ def test_bootstrap_ui_environment_defaults_live(monkeypatch):
         ui._teardown_ui_environment()
 
 
+def test_bootstrap_ui_environment_preserves_redis_url(monkeypatch):
+    monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
+    monkeypatch.setattr(ui, "load_production_env", lambda: {})
+    monkeypatch.delenv("SOLHUNTER_MODE", raising=False)
+    monkeypatch.delenv("BROKER_CHANNEL", raising=False)
+    monkeypatch.setenv("REDIS_URL", "redis://cache.example:6380/2")
+
+    ui._bootstrap_ui_environment()
+    try:
+        assert os.environ["REDIS_URL"] == "redis://cache.example:6380/2"
+        assert os.environ["SOLHUNTER_MODE"] == "live"
+        assert os.environ["BROKER_CHANNEL"] == "solhunter-events-v3"
+    finally:
+        ui._teardown_ui_environment()
+
+
 def test_create_app_proxy_fix_opt_in(monkeypatch):
     monkeypatch.setenv("UI_PROXY_FIX", "1")
     previous_state = ui._get_active_ui_state()
