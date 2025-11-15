@@ -438,6 +438,40 @@ def test_check_ui_health_skips_when_port_zero(tmp_path: Path) -> None:
     assert "ui_url=unavailable" in completed.stdout
 
 
+def test_check_ui_health_rejects_non_numeric_ready_timeout(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "extract_ui_url")
+        + _extract_function(source, "check_ui_health")
+    )
+
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text("[ts] UI_READY url=http://127.0.0.1:1234\n")
+
+    python_bin = shlex.quote(sys.executable)
+    bash_script = (
+        "set -euo pipefail\n"
+        + functions
+        + f"PYTHON_BIN={python_bin}\n"
+        + "READY_TIMEOUT=abc\n"
+        + f"check_ui_health '{log_path}'\n"
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    assert "READY_TIMEOUT='abc' is not a valid integer; aborting UI health check" in completed.stderr
+
+
 def _start_meta_server(payload: dict[str, object]):
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # type: ignore[override]

@@ -1359,10 +1359,16 @@ PY
     return 1
   fi
   local target="${url%/}/ui/meta"
-  local total_timeout_raw="${READY_TIMEOUT:-30}"
-  local total_timeout=30
-  if [[ $total_timeout_raw =~ ^[0-9]+$ ]]; then
+  local total_timeout_default=30
+  local total_timeout_raw="${READY_TIMEOUT:-}"
+  local total_timeout=$total_timeout_default
+  if [[ -z $total_timeout_raw ]]; then
+    total_timeout=$total_timeout_default
+  elif [[ $total_timeout_raw =~ ^[0-9]+$ ]]; then
     total_timeout=$total_timeout_raw
+  else
+    log_warn "READY_TIMEOUT='$total_timeout_raw' is not a valid integer; aborting UI health check"
+    return 1
   fi
   if (( total_timeout <= 0 )); then
     total_timeout=1
