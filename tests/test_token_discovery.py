@@ -180,6 +180,94 @@ def test_merge_candidate_entry_strips_mint_whitespace(monkeypatch):
     assert entry_clean["sources"] == {"source-a", "source-b"}
 
 
+def test_merge_candidate_entry_canonicalises_aliases_preserving_sources(monkeypatch):
+    alias = "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v"
+    canonical = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    candidates: dict[str, dict] = {}
+
+    first = td._merge_candidate_entry(
+        candidates,
+        {
+            "address": alias,
+            "name": "Router",
+            "symbol": "JUP",
+            "liquidity": 1,
+            "volume": 2,
+        },
+        "birdeye",
+    )
+
+    assert first is not None
+    assert set(candidates.keys()) == {canonical}
+    assert first["address"] == canonical
+    assert first["sources"] == {"birdeye"}
+
+    second = td._merge_candidate_entry(
+        candidates,
+        {
+            "address": canonical,
+            "liquidity": 3,
+            "volume": 4,
+        },
+        "dexscreener",
+    )
+
+    assert second is first
+
+    third = td._merge_candidate_entry(
+        candidates,
+        {
+            "address": alias,
+            "liquidity": 5,
+            "volume": 6,
+        },
+        "pumpfun",
+    )
+
+    assert third is first
+    assert first["sources"] == {"birdeye", "dexscreener", "pumpfun"}
+    assert first["source_categories"] == {"market_data", "trending_signal"}
+
+
+def test_fallback_candidate_tokens_merges_canonical_sources(monkeypatch):
+    td._BIRDEYE_CACHE.clear()
+
+    alias = "JUP4Fb2cqiRUcaTHdrPC8G4wEGGkZwyTDt1v"
+    canonical = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    cache_key = td._current_cache_key(3)
+    td._cache_set(
+        cache_key,
+        [
+            {
+                "address": alias,
+                "sources": ["birdeye"],
+                "source_categories": ["market_data"],
+                "symbol": "JUP",
+                "name": "Alias",
+            },
+            {
+                "address": canonical,
+                "sources": ["dexscreener"],
+                "source_categories": ["market_data"],
+            },
+        ],
+    )
+
+    fallback = td._fallback_candidate_tokens(3)
+
+    matches = [entry for entry in fallback if entry["address"] == canonical]
+    assert len(matches) == 1
+    merged = matches[0]
+    assert merged["sources"] == {"birdeye", "dexscreener", "cache"}
+    assert merged["source_categories"] == {"market_data", "fallback"}
+
+
 def test_compute_feature_vector_converts_staleness_to_ms(monkeypatch):
     monkeypatch.setattr(td.time, "time", lambda: 200.0)
 
