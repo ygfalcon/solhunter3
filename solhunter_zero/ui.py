@@ -2983,6 +2983,7 @@ def _start_channel(
         state.ready.clear()
         state.ready_status = "failed"
         state.ready_detail = f"startup timeout: {exc}"
+        _clear_auto_env_values_for_channels((channel,))
         _shutdown_state(state)
         raise RuntimeError(f"Timeout starting {channel} websocket") from exc
 
@@ -2990,6 +2991,7 @@ def _start_channel(
         state.ready.clear()
         state.ready_status = "failed"
         state.ready_detail = str(result)
+        _clear_auto_env_values_for_channels((channel,))
         _shutdown_state(state)
         raise RuntimeError(
             f"{channel} websocket failed to bind on {host}:{port}: {result}"
@@ -3068,6 +3070,7 @@ def start_websockets() -> dict[str, threading.Thread]:
         except Exception:
             for state in _WS_CHANNELS.values():
                 _shutdown_state(state)
+            _clear_auto_env_values_for_channels(_WS_CHANNELS.keys())
             raise
 
         events_display_port = (

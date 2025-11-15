@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import builtins
 import importlib
 import logging
@@ -37,8 +38,7 @@ def test_start_websockets_requires_dependency(monkeypatch):
     monkeypatch.setitem(sys.modules, "solhunter_zero.production", production_stub)
 
     sys.modules.pop("solhunter_zero.ui", None)
-    from solhunter_zero import ui
-
+    ui = importlib.import_module("solhunter_zero.ui")
     importlib.reload(ui)
     assert ui.websockets is None
 
@@ -216,6 +216,115 @@ def test_websocket_env_updates_after_rebind(monkeypatch):
         assert key not in os.environ
     assert not ui._AUTO_WS_ENV_VALUES
     assert not ui._AUTO_WS_ENV_CHANNELS
+
+
+def test__start_channel_failure_clears_auto_env(monkeypatch):
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+
+    failing_ws = types.ModuleType("websockets")
+
+    def _serve(*args: Any, **kwargs: Any):
+        raise OSError(errno.EADDRINUSE, "port in use")
+
+    failing_ws.serve = _serve
+    monkeypatch.setitem(sys.modules, "websockets", failing_ws)
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault(
+        "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet")
+    )
+
+    sys.modules.pop("solhunter_zero.ui", None)
+    ui = importlib.import_module("solhunter_zero.ui")
+    importlib.reload(ui)
+
+    try:
+        auto_values = {
+            "UI_RL_WS_URL": "ws://previous/rl",
+            "UI_RL_WS": "ws://previous/rl",
+            "UI_RL_WS_PORT": "8765",
+        }
+        for key, value in auto_values.items():
+            monkeypatch.setenv(key, value)
+            ui._AUTO_WS_ENV_VALUES[key] = value
+            ui._AUTO_WS_ENV_CHANNELS[key] = ui._WS_ENV_KEY_CHANNEL_HINTS.get(
+                key, "rl"
+            )
+
+        with pytest.raises(RuntimeError, match="rl websocket failed to bind"):
+            ui._start_channel(
+                "rl",
+                host="127.0.0.1",
+                port=8765,
+                queue_size=1,
+                ping_interval=1.0,
+                ping_timeout=1.0,
+            )
+
+        for key in auto_values:
+            assert key not in os.environ
+            assert key not in ui._AUTO_WS_ENV_VALUES
+            assert key not in ui._AUTO_WS_ENV_CHANNELS
+    finally:
+        sys.modules.pop("solhunter_zero.ui", None)
+
+
+def test_start_websockets_failure_clears_auto_env(monkeypatch):
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+
+    stub_ws = types.ModuleType("websockets")
+
+    def _unexpected_serve(*args: Any, **kwargs: Any):
+        raise AssertionError("websockets.serve should not be called")
+
+    stub_ws.serve = _unexpected_serve
+    monkeypatch.setitem(sys.modules, "websockets", stub_ws)
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault(
+        "solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet")
+    )
+
+    sys.modules.pop("solhunter_zero.ui", None)
+    ui = importlib.import_module("solhunter_zero.ui")
+    importlib.reload(ui)
+
+    try:
+        auto_values = {
+            "UI_WS_URL": ("events", "ws://previous/events"),
+            "UI_EVENTS_WS_URL": ("events", "ws://previous/events"),
+            "UI_EVENTS_WS": ("events", "ws://previous/events"),
+            "UI_EVENT_WS_PORT": ("events", "8100"),
+            "UI_RL_WS_URL": ("rl", "ws://previous/rl"),
+            "UI_RL_WS": ("rl", "ws://previous/rl"),
+            "UI_RL_WS_PORT": ("rl", "8101"),
+            "UI_LOG_WS_URL": ("logs", "ws://previous/logs"),
+            "UI_LOGS_WS": ("logs", "ws://previous/logs"),
+            "UI_LOG_WS_PORT": ("logs", "8102"),
+        }
+        for key, (channel, value) in auto_values.items():
+            monkeypatch.setenv(key, value)
+            ui._AUTO_WS_ENV_VALUES[key] = value
+            ui._AUTO_WS_ENV_CHANNELS[key] = channel
+
+        def fake_start_channel(channel: str, **kwargs: Any):
+            if channel == "rl":
+                return threading.Thread()
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(ui, "_start_channel", fake_start_channel)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            ui.start_websockets()
+
+        for key in auto_values:
+            assert key not in os.environ
+            assert key not in ui._AUTO_WS_ENV_VALUES
+            assert key not in ui._AUTO_WS_ENV_CHANNELS
+    finally:
+        sys.modules.pop("solhunter_zero.ui", None)
 
 
 @pytest.mark.timeout(30)
