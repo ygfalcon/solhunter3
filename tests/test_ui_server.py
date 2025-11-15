@@ -43,6 +43,8 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         assert server.port == server._server.server_port
         assert server.port != 0
         assert server.serve_forever_started.wait(timeout=server.ready_timeout)
+        assert state.http_host in {"127.0.0.1", "localhost"}
+        assert state.http_port == server.port
     finally:
         server.stop()
 
@@ -183,11 +185,15 @@ def test_ui_server_stop_resets_environment_state() -> None:
         assert ui._get_active_ui_state() is state1
         assert ui._ENV_BOOTSTRAPPED is True
         assert state1.snapshot_discovery_recent(1) == [{"mint": "first"}]
+        assert state1.http_host in {"127.0.0.1", "localhost"}
+        assert state1.http_port == server1.port
     finally:
         server1.stop()
 
     assert ui._get_active_ui_state() is None
     assert ui._ENV_BOOTSTRAPPED is False
+    assert state1.http_host is None
+    assert state1.http_port is None
 
     state2 = UIState()
     state2.discovery_recent_provider = lambda limit: [{"mint": "second"}]
@@ -199,11 +205,15 @@ def test_ui_server_stop_resets_environment_state() -> None:
         assert active_state is state2
         assert active_state.snapshot_discovery_recent(1) == [{"mint": "second"}]
         assert ui._ENV_BOOTSTRAPPED is True
+        assert state2.http_host in {"127.0.0.1", "localhost"}
+        assert state2.http_port == server2.port
     finally:
         server2.stop()
 
     assert ui._get_active_ui_state() is None
     assert ui._ENV_BOOTSTRAPPED is False
+    assert state2.http_host is None
+    assert state2.http_port is None
 
 
 @pytest.mark.timeout(30)
