@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import contextlib
 import inspect
 import logging
@@ -356,8 +357,8 @@ class DiscoveryAgent:
         self,
     ) -> tuple[List[str], Dict[str, Dict[str, Any]], float, int, str, str]:
         async with _CACHE_LOCK:
-            tokens_raw = _CACHE.get("tokens")
-            details_raw = _CACHE.get("details")
+            tokens_raw = copy.deepcopy(_CACHE.get("tokens"))
+            details_raw = copy.deepcopy(_CACHE.get("details"))
             cache_ts = float(_CACHE.get("ts", 0.0))
             cache_limit = int(_CACHE.get("limit", 0))
             cache_method = str(_CACHE.get("method") or "").lower()
@@ -566,7 +567,7 @@ class DiscoveryAgent:
                     tokens = []
                 details: Dict[str, Dict[str, Any]] = {}
             else:
-                tokens = self._fallback_tokens()
+                tokens = await self._fallback_tokens()
                 fallback_reason = "cache" if tokens else ""
                 base_details: Dict[str, Dict[str, Any]] = {}
                 if tokens:
@@ -691,7 +692,7 @@ class DiscoveryAgent:
                 await asyncio.sleep(self.backoff)
 
         if not tokens:
-            tokens = self._fallback_tokens()
+            tokens = await self._fallback_tokens()
             fallback_reason = "cache" if tokens else ""
             base_details: Dict[str, Dict[str, Any]] = {}
             if tokens and fallback_reason == "cache":
@@ -1005,7 +1006,7 @@ class DiscoveryAgent:
             return mem_tokens, mem_details
 
         logger.warning("All discovery sources empty; returning fallback tokens")
-        fallback_tokens = self._fallback_tokens()
+        fallback_tokens = await self._fallback_tokens()
         fallback_reason = "cache" if fallback_tokens else ""
         base_details: Dict[str, Dict[str, Any]] = {}
         if fallback_tokens and fallback_reason == "cache":
@@ -1060,12 +1061,16 @@ class DiscoveryAgent:
                 break
         return filtered
 
-    def _fallback_tokens(self) -> List[str]:
-        cached = list(_CACHE.get("tokens", [])) if isinstance(_CACHE.get("tokens"), list) else []
+    async def _fallback_tokens(self) -> List[str]:
+        async with _CACHE_LOCK:
+            tokens_raw = copy.deepcopy(_CACHE.get("tokens"))
+            cached_identity_raw = _CACHE.get("rpc_identity")
+
+        cached = list(tokens_raw) if isinstance(tokens_raw, list) else []
         if not cached:
             return []
 
-        cached_identity = str(_CACHE.get("rpc_identity") or "")
+        cached_identity = str(cached_identity_raw or "")
         current_identity = _rpc_identity(self.rpc_url)
         identity_matches = bool(
             (not cached_identity and not current_identity)

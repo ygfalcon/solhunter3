@@ -1,8 +1,11 @@
 import asyncio
+import copy
 import sys
 import time
 import math
 import types
+
+import pytest
 
 if "base58" not in sys.modules:
     def _fake_b58decode(value):
@@ -19,6 +22,11 @@ from solhunter_zero.agents.discovery import DiscoveryAgent
 
 
 VALID_MINT = "So11111111111111111111111111111111111111112"
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 
 def _reset_cache():
@@ -345,7 +353,7 @@ def test_discover_tokens_retries_on_empty_scan(monkeypatch, caplog):
     async def fake_mempool(self):
         return [], {}
 
-    def fake_fallback(self):
+    async def fake_fallback(self):
         return []
 
     monkeypatch.setattr(
@@ -798,6 +806,53 @@ def test_discover_tokens_concurrent_cached_reads(monkeypatch):
     assert discovery_mod._CACHE["tokens"] == [VALID_MINT]
 
 
+@pytest.mark.anyio("asyncio")
+async def test_concurrent_discovery_cache_results_are_isolated(monkeypatch):
+    _reset_cache()
+
+    agent = DiscoveryAgent()
+    agent.cache_ttl = 60.0
+    identity = discovery_mod._rpc_identity(agent.rpc_url)
+    now = time.time()
+    expected_details = {
+        VALID_MINT: {
+            "address": VALID_MINT,
+            "sources": ["cache"],
+            "metadata": {"nested": ["value"]},
+        }
+    }
+
+    async with discovery_mod._CACHE_LOCK:
+        discovery_mod._CACHE.update(
+            {
+                "tokens": [VALID_MINT],
+                "details": copy.deepcopy(expected_details),
+                "ts": now,
+                "limit": agent.limit,
+                "method": agent.default_method
+                or discovery_mod.DEFAULT_DISCOVERY_METHOD,
+                "rpc_identity": identity,
+            }
+        )
+
+    async def mutate_social(self, tokens, details, *, offline=False):
+        del self, offline
+        if details:
+            for payload in details.values():
+                payload.setdefault("metadata", {})["touched"] = True
+        return tokens, details or {}
+
+    monkeypatch.setattr(DiscoveryAgent, "_apply_social_mentions", mutate_social)
+
+    tasks = [asyncio.create_task(agent.discover_tokens(offline=True)) for _ in range(3)]
+    results = await asyncio.gather(*tasks)
+
+    assert all(res == [VALID_MINT] for res in results)
+    assert len({id(res) for res in results}) == len(results)
+    assert discovery_mod._CACHE["details"] == expected_details
+    assert agent.last_details[VALID_MINT]["metadata"]["touched"] is True
+
+
 def test_cached_details_hydrate_with_weights(monkeypatch):
     _reset_cache()
 
@@ -910,7 +965,7 @@ def test_fallback_results_do_not_populate_cache(monkeypatch):
         call_counter["value"] += 1
         return [], {}
 
-    def fake_fallback_tokens(self):
+    async def fake_fallback_tokens(self):
         return list(fallback_tokens)
 
     def fake_static_fallback_tokens(self):
@@ -982,7 +1037,7 @@ def test_merge_failure_cache_fallback_details(monkeypatch):
     async def empty_mempool(self):
         return [], {}
 
-    def fake_fallback_tokens(self):
+    async def fake_fallback_tokens(self):
         return list(fallback_tokens)
 
     def fake_static_fallback_tokens(self):
@@ -1010,7 +1065,7 @@ def test_merge_failure_static_fallback_details(monkeypatch):
     async def empty_mempool(self):
         return [], {}
 
-    def fake_fallback_tokens(self):
+    async def fake_fallback_tokens(self):
         return list(fallback_tokens)
 
     def fake_static_fallback_tokens(self):
@@ -1098,7 +1153,10 @@ def test_offline_discovery_logs_fallback_reason(monkeypatch):
     _reset_cache()
     agent = DiscoveryAgent()
 
-    monkeypatch.setattr(agent, "_fallback_tokens", lambda: [VALID_MINT])
+    async def fake_cache_tokens():
+        return [VALID_MINT]
+
+    monkeypatch.setattr(agent, "_fallback_tokens", fake_cache_tokens)
     monkeypatch.setattr(agent, "_static_fallback_tokens", lambda: [])
 
     async def passthrough_social(self, tokens, details, *, offline=False):
@@ -1139,7 +1197,10 @@ def test_discovery_logs_fallback_reason(monkeypatch):
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", no_tokens)
     monkeypatch.setattr(DiscoveryAgent, "_apply_social_mentions", passthrough_social)
 
-    monkeypatch.setattr(agent, "_fallback_tokens", lambda: [])
+    async def fake_empty_cache():
+        return []
+
+    monkeypatch.setattr(agent, "_fallback_tokens", fake_empty_cache)
     monkeypatch.setattr(agent, "_static_fallback_tokens", lambda: [VALID_MINT])
 
     captured_details: list[str] = []
