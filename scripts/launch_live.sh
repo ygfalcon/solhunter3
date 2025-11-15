@@ -1952,6 +1952,8 @@ set -a
 source "$ENV_FILE"
 set +a
 
+validate_config_path "$CONFIG_PATH"
+
 # Environment files may override PYTHONPATH; ensure the repository root remains
 # importable even after sourcing overrides.
 ensure_repo_pythonpath
