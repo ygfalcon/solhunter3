@@ -48,6 +48,7 @@ class DiscoveryService:
         offline: bool = False,
         token_file: Optional[str] = None,
         startup_clones: Optional[int] = None,
+        startup_clone_concurrency: Optional[int] = None,
         emit_batch_size: Optional[int] = None,
     ) -> None:
         self.queue = queue
@@ -103,6 +104,24 @@ class DiscoveryService:
         if startup_clones is None:
             startup_clones = 5
         self.startup_clones = max(1, int(startup_clones))
+
+        concurrency_override: Optional[int] = None
+        raw_concurrency = os.getenv("DISCOVERY_STARTUP_CONCURRENCY")
+        if raw_concurrency:
+            try:
+                concurrency_override = int(raw_concurrency)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_STARTUP_CONCURRENCY=%r; ignoring",
+                    raw_concurrency,
+                )
+        if startup_clone_concurrency is None:
+            startup_clone_concurrency = concurrency_override
+        elif concurrency_override is not None:
+            startup_clone_concurrency = concurrency_override
+        if not startup_clone_concurrency or startup_clone_concurrency <= 0:
+            startup_clone_concurrency = 3
+        self._startup_clone_concurrency = max(1, int(startup_clone_concurrency))
         batch_override: Optional[int] = None
         raw_batch = os.getenv("DISCOVERY_EMIT_BATCH_SIZE")
         if raw_batch:
@@ -523,14 +542,22 @@ class DiscoveryService:
             log.info("DiscoveryService startup clones skipped (discovery disabled)")
             return
         clones = max(1, int(self.startup_clones))
+        concurrency = max(1, min(self._startup_clone_concurrency, clones))
         log.info(
             "DiscoveryService priming discovery with %d startup clone(s)", clones
         )
         tasks: list[asyncio.Task] = []
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _run_clone(idx: int) -> tuple[list[str], Dict[str, Dict[str, Any]]]:
+            async with semaphore:
+                return await self._clone_fetch(idx)
+
         for idx in range(clones):
             tasks.append(
                 asyncio.create_task(
-                    self._clone_fetch(idx), name=f"discovery_prime_{idx}"
+                    _run_clone(idx), name=f"discovery_prime_{idx}"
                 )
             )
         results = await asyncio.gather(*tasks, return_exceptions=True)
