@@ -687,7 +687,10 @@ class RuntimeOrchestrator:
             except Exception:
                 log.exception("Failed to initialise runtime wiring for UI state")
         app = _create_ui_app(state_obj)
-        ws_optional = parse_bool_env("UI_WS_OPTIONAL", False)
+        ws_optional_raw = os.getenv("UI_WS_OPTIONAL")
+        ws_optional_normalized = (ws_optional_raw or "").strip().lower()
+        ws_disabled = ws_optional_normalized in {"disabled", "headless"}
+        ws_optional = parse_bool_env("UI_WS_OPTIONAL", False) or ws_disabled
         threads: dict[str, Any] = {}
         ws_messages: list[str] = []
         ws_error: str | None = None
@@ -742,15 +745,26 @@ class RuntimeOrchestrator:
                 text = (message or "").strip()
                 if text and text not in detail_text_parts:
                     detail_text_parts.append(text)
-            failure_detail = "; ".join(detail_text_parts) or "websocket startup returned no threads"
-            if ws_optional:
-                ws_startup_detail = failure_detail
-                ws_status = "degraded"
+            if ws_disabled:
+                disable_note = "UI websockets disabled via UI_WS_OPTIONAL"
+                if disable_note not in detail_text_parts:
+                    detail_text_parts.append(disable_note)
+                ws_startup_detail = "; ".join(detail_text_parts)
+                ws_status = "disabled"
                 ws_ok = True
             else:
-                ws_startup_detail = failure_detail
-                ws_status = "failed"
-                ws_ok = False
+                failure_detail = (
+                    "; ".join(detail_text_parts)
+                    or "websocket startup returned no threads"
+                )
+                if ws_optional:
+                    ws_startup_detail = failure_detail
+                    ws_status = "degraded"
+                    ws_ok = True
+                else:
+                    ws_startup_detail = failure_detail
+                    ws_status = "failed"
+                    ws_ok = False
         else:
             detail_text_parts = []
             for message in ws_messages:
@@ -794,7 +808,7 @@ class RuntimeOrchestrator:
         if ws_detail:
             readiness_line += f" detail={ws_detail}"
         log.info(readiness_line)
-        if ws_status != "ok" and ws_detail:
+        if ws_status not in {"ok", "disabled"} and ws_detail:
             log.warning("UI_WS_DETAIL detail=%s", ws_detail)
         if not ws_ok and not ws_optional:
             raise RuntimeError(f"UI websocket startup failed: {ws_detail or 'unknown error'}")

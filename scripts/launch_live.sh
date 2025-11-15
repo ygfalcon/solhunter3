@@ -1389,7 +1389,7 @@ def _allow_ws_degraded() -> bool:
         if not raw:
             continue
         normalized = raw.strip().lower()
-        if normalized in {"1", "true", "yes", "on", "enabled"}:
+        if normalized in {"1", "true", "yes", "on", "enabled", "disabled", "headless"}:
             return True
     return False
 
@@ -1407,6 +1407,8 @@ def _status_ok(value, *, allow_ws_degraded=ALLOW_WS_DEGRADED):
         if not normalized:
             return False
         if normalized in {"ok", "running", "ready", "connected", "available", "true"}:
+            return True
+        if normalized in {"disabled", "headless"}:
             return True
         if normalized in {"fail", "failed", "error", "inactive", "down", "false", "unavailable"}:
             return False
@@ -2243,7 +2245,7 @@ wait_for_ready() {
   local allow_ws_raw="${LAUNCH_LIVE_ALLOW_WS_DEGRADED:-${UI_WS_OPTIONAL:-}}"
   if [[ -n ${allow_ws_raw:-} ]]; then
     case "${allow_ws_raw,,}" in
-      1|true|yes|on|enabled)
+      1|true|yes|on|enabled|disabled|headless)
         allow_ws_degraded=1
         ;;
     esac
@@ -2273,6 +2275,9 @@ wait_for_ready() {
         fi
         case "$ui_ws_status" in
           ok)
+            ui_ws_seen=1
+            ;;
+          disabled)
             ui_ws_seen=1
             ;;
           degraded)

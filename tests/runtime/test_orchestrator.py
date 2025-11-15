@@ -166,6 +166,57 @@ async def test_orchestrator_logs_ui_ws_ready(monkeypatch, caplog):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_orchestrator_logs_ws_disabled_when_optional(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    events: list[dict[str, object]] = []
+
+    def capture_publish(topic, payload, *_args, **_kwargs):
+        if topic == "runtime.stage_changed":
+            events.append(payload)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.event_bus.publish",
+        capture_publish,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    ui_stub = types.SimpleNamespace(UIState=lambda: object(), get_ws_urls=lambda: {})
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {},
+    )
+    monkeypatch.setenv("UI_WS_OPTIONAL", "disabled")
+
+    orch = RuntimeOrchestrator(run_http=False)
+    await orch.start_ui()
+
+    ws_logs = [message for message in caplog.messages if message.startswith("UI_WS_READY ")]
+    assert ws_logs, "expected UI_WS_READY log entry"
+    latest = ws_logs[-1]
+    assert "status=disabled" in latest
+
+    detail_logs = [message for message in caplog.messages if message.startswith("UI_WS_DETAIL ")]
+    assert not detail_logs, "disabled websockets should not emit detail warnings"
+
+    ws_events = [event for event in events if event.get("stage") == "ui:ws"]
+    assert ws_events, "expected ui:ws stage emission"
+    assert ws_events[-1]["ok"] is True
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_normalizes_ws_urls_on_wildcard_host(monkeypatch, caplog):
     caplog.set_level(logging.INFO)
 

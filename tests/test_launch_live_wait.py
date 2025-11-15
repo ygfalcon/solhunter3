@@ -370,6 +370,22 @@ def test_wait_for_ready_allows_degraded_when_optional(tmp_path: Path) -> None:
     assert completed.returncode == 0
 
 
+def test_wait_for_ready_accepts_disabled_status(tmp_path: Path) -> None:
+    completed = _run_wait_for_ready(
+        tmp_path,
+        [
+            "[ts] UI_READY url=http://localhost:1234",
+            "[ts] UI_WS_READY status=disabled detail=websocket startup returned no threads",
+            "[ts] Event bus: connected",
+            "[ts] GOLDEN_READY stage=liq",
+            "[ts] RUNTIME_READY",
+        ],
+        env={"UI_WS_OPTIONAL": "disabled"},
+    )
+
+    assert completed.returncode == 0
+
+
 def test_check_ui_health_skips_when_disabled_flag(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
@@ -578,6 +594,29 @@ def test_check_ui_health_allows_degraded_ws_with_opt_in(tmp_path: Path) -> None:
         host, port = server.server_address
         assert host == "127.0.0.1"
         completed = _run_health_check(tmp_path, port, env={"UI_WS_OPTIONAL": "1"})
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 0
+    assert "UI health payload reported issues" not in completed.stderr
+
+
+def test_check_ui_health_accepts_disabled_ws(tmp_path: Path) -> None:
+    payload = {
+        "ok": "disabled",
+        "status": {
+            "ui": "ok",
+            "rl_ws": {"status": "disabled", "detail": "ws disabled"},
+            "events_ws": "disabled",
+            "logs_ws": {"status": "disabled"},
+        },
+    }
+    server = _start_meta_server(payload)
+    try:
+        host, port = server.server_address
+        assert host == "127.0.0.1"
+        completed = _run_health_check(tmp_path, port, env={"UI_WS_OPTIONAL": "disabled"})
     finally:
         server.shutdown()
         server.server_close()
