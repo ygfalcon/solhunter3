@@ -1,6 +1,7 @@
 import asyncio
 import os
 import types
+from unittest.mock import patch
 
 from solhunter_zero.pipeline.discovery_service import DiscoveryService
 
@@ -185,5 +186,38 @@ def test_failure_counter_resets_on_success():
 
         assert service._consecutive_failures == 0
         assert service._current_backoff == 0.0
+
+    asyncio.run(runner())
+
+
+def test_metadata_fingerprint_map_respects_recent_limit():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        service = DiscoveryService(queue, emit_batch_size=25)
+        service._agent = types.SimpleNamespace(last_method="unit-test", last_details={})
+        service._recent_tokens_limit = 25
+
+        tokens = [f"Token{idx:03d}" for idx in range(200)]
+
+        with patch(
+            "solhunter_zero.pipeline.discovery_service.validate_mint",
+            return_value=True,
+        ), patch(
+            "solhunter_zero.pipeline.discovery_service.canonical_mint",
+            side_effect=lambda value: value,
+        ):
+            for offset in range(0, len(tokens) - 50, 5):
+                batch = tokens[offset : offset + 50]
+                for token in batch:
+                    service._agent.last_details[token] = {"price": float(offset)}
+                await service._emit_tokens(batch, fresh=True)
+                while not queue.empty():
+                    queue.get_nowait()
+                assert len(service._last_metadata_fingerprints) <= service._recent_tokens_limit
+                if service._recent_tokens_limit:
+                    expected = batch[-service._recent_tokens_limit :]
+                    if service._recent_tokens_limit >= len(batch):
+                        expected = batch
+                    assert list(service._last_metadata_fingerprints) == expected
 
     asyncio.run(runner())

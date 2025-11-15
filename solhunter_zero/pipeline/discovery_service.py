@@ -133,6 +133,18 @@ class DiscoveryService:
         self._limit_disabled_logged = False
         self._primed = False
         self._last_metadata_fingerprints: Dict[str, str] = {}
+        raw_recent_limit = os.getenv("UI_DISCOVERY_LIMIT")
+        recent_limit = 200
+        if raw_recent_limit:
+            try:
+                recent_limit = int(raw_recent_limit)
+            except ValueError:
+                log.warning(
+                    "Invalid UI_DISCOVERY_LIMIT=%r; defaulting recent token limit to %d",
+                    raw_recent_limit,
+                    recent_limit,
+                )
+        self._recent_tokens_limit = max(0, int(recent_limit))
 
     async def start(self) -> None:
         if self.limit == 0:
@@ -234,7 +246,7 @@ class DiscoveryService:
             if canonical != token:
                 metadata.setdefault("alias", token)
             fingerprint = self._fingerprint_metadata(metadata)
-            self._last_metadata_fingerprints[canonical] = fingerprint
+            self._remember_metadata_fingerprint(canonical, fingerprint)
             result.append(
                 TokenCandidate(
                     token=canonical,
@@ -359,6 +371,23 @@ class DiscoveryService:
         payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def _remember_metadata_fingerprint(self, token: str, fingerprint: str) -> None:
+        if token in self._last_metadata_fingerprints:
+            self._last_metadata_fingerprints.pop(token, None)
+        self._last_metadata_fingerprints[token] = fingerprint
+
+    def _prune_metadata_fingerprints(self, seq_set: frozenset[str]) -> None:
+        limit = self._recent_tokens_limit
+        if limit <= 0:
+            self._last_metadata_fingerprints.clear()
+            return
+        for token in list(self._last_metadata_fingerprints):
+            if token not in seq_set:
+                self._last_metadata_fingerprints.pop(token, None)
+        while len(self._last_metadata_fingerprints) > limit:
+            oldest_token = next(iter(self._last_metadata_fingerprints))
+            self._last_metadata_fingerprints.pop(oldest_token, None)
+
     async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
         seq: list[str] = []
         dropped = 0
@@ -402,7 +431,10 @@ class DiscoveryService:
                 self._last_emitted = list(seq)
                 self._last_emitted_set = seq_set
                 self._last_emitted_size = seq_size
-                self._last_metadata_fingerprints.update(metadata_fingerprints)
+                if metadata_fingerprints:
+                    for token, fingerprint in metadata_fingerprints.items():
+                        self._remember_metadata_fingerprint(token, fingerprint)
+                self._prune_metadata_fingerprints(seq_set)
                 log.debug(
                     "DiscoveryService skipping cached emission (%d tokens)", seq_size
                 )
@@ -433,11 +465,9 @@ class DiscoveryService:
                 chunk_count,
             )
         if metadata_fingerprints:
-            self._last_metadata_fingerprints.update(metadata_fingerprints)
-        # Drop metadata fingerprints for tokens no longer present in the sequence.
-        for token in list(self._last_metadata_fingerprints):
-            if token not in seq_set:
-                self._last_metadata_fingerprints.pop(token, None)
+            for token, fingerprint in metadata_fingerprints.items():
+                self._remember_metadata_fingerprint(token, fingerprint)
+        self._prune_metadata_fingerprints(seq_set)
         self._last_emitted = list(seq)
         self._last_emitted_set = seq_set
         self._last_emitted_size = seq_size
