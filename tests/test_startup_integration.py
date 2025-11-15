@@ -287,3 +287,59 @@ def test_launch_detached_times_out_waiting_for_readiness(monkeypatch, tmp_path):
     assert proc.terminated
     assert proc.killed
 
+
+def test_launch_detached_uses_notify_file_when_headless(monkeypatch, tmp_path):
+    import scripts.start_all as start_module
+
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(start_module, "RUNTIME_LOG_DIR", log_dir)
+
+    notify_path = tmp_path / "artifacts" / "prelaunch" / "live_ready"
+
+    class Proc:
+        def __init__(self):
+            self.pid = 777
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return None
+
+        def kill(self):
+            pass
+
+    proc = Proc()
+
+    def fake_popen(cmd, stdout, stderr, env):
+        assert stderr is start_module.subprocess.STDOUT
+        return proc
+
+    monkeypatch.setattr(start_module.subprocess, "Popen", fake_popen)
+
+    sleep_calls = {"count": 0}
+
+    def fake_sleep(_delay):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] >= 2:
+            notify_path.write_text("ready", encoding="utf-8")
+
+    monkeypatch.setattr(start_module.time, "sleep", fake_sleep)
+    monkeypatch.setenv("UI_ENABLED", "0")
+    monkeypatch.setattr(start_module, "_resolve_orchestrator_notify_path", lambda: notify_path)
+
+    args = SimpleNamespace(
+        ui_port=9999,
+        ui_host="127.0.0.1",
+        loop_delay=None,
+        min_delay=None,
+        max_delay=None,
+    )
+
+    assert start_module.launch_detached(args, "/tmp/config.toml") == 0
+    assert notify_path.read_text(encoding="utf-8") == "ready"
+

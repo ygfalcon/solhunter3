@@ -490,8 +490,54 @@ def _prepare_runtime_log() -> Path:
     return log_path
 
 
-def _resolve_runtime_ready_url(args: argparse.Namespace) -> str:
+_TRUTHY = {"1", "true", "yes", "on", "enabled"}
+_FALSY = {"0", "false", "no", "off", "disabled"}
+
+
+def _ui_http_disabled() -> bool:
+    """Return ``True`` when the UI HTTP server should not be started."""
+
+    ui_enabled = os.getenv("UI_ENABLED")
+    if ui_enabled is not None and ui_enabled.strip().lower() in _FALSY:
+        return True
+
+    disable_http = os.getenv("UI_DISABLE_HTTP_SERVER")
+    if disable_http is not None and disable_http.strip().lower() in _TRUTHY:
+        return True
+
+    return False
+
+
+def _resolve_orchestrator_notify_path() -> Path:
+    """Return the filesystem path that signals orchestrator readiness."""
+
+    override = (
+        os.getenv("START_ALL_READY_NOTIFY")
+        or os.getenv("START_ALL_NOTIFY_FILE")
+        or os.getenv("ORCHESTRATOR_NOTIFY_FILE")
+        or ""
+    ).strip()
+    if override:
+        return Path(override).expanduser()
+
+    artifact_root = Path(os.getenv("RUNTIME_ARTIFACT_ROOT", "artifacts")) / "prelaunch"
+    mode = (os.getenv("MODE") or os.getenv("SOLHUNTER_MODE") or "live").strip().lower()
+    if mode in {"paper", "live"}:
+        filename = f"{mode}_ready"
+    else:
+        filename = "runtime_ready"
+    return artifact_root / filename
+
+
+def _resolve_runtime_ready_url(args: argparse.Namespace) -> str | None:
     """Return the readiness probe URL for the launched runtime."""
+
+    if _ui_http_disabled():
+        log.info(
+            "UI HTTP server disabled (UI_ENABLED/UI_DISABLE_HTTP_SERVER); "
+            "skipping readiness URL resolution",
+        )
+        return None
 
     override = (os.getenv("START_ALL_READY_URL") or "").strip()
     if override:
@@ -532,6 +578,13 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
     ui_host = str(args.ui_host)
     os.environ["UI_PORT"] = ui_port
     os.environ["UI_HOST"] = ui_host
+    headless = _ui_http_disabled()
+    notify_path: Path | None = None
+    if headless:
+        notify_path = _resolve_orchestrator_notify_path()
+        notify_path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            notify_path.unlink()
     cmd = [
         sys.executable,
         "-m",
@@ -594,35 +647,73 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
             else:
                 retries = max(1, math.ceil(total_timeout / interval))
 
-    log.info(
-        "Waiting for runtime readiness at %s (retries=%s, interval=%.2fs)",
-        ready_url,
-        retries,
-        interval,
-    )
-
-    last_msg = "not attempted"
-    for attempt in range(retries):
-        ok, last_msg = http_ok(ready_url)
-        if ok:
-            log.info("Runtime readiness confirmed: %s — %s", ready_url, last_msg)
-            break
-        if proc.poll() is not None:
-            raise RuntimeError(
-                "Runtime process exited before readiness succeeded"
-                f" (code {proc.returncode}). Check logs at {log_path} for more details."
+    if ready_url is None:
+        if notify_path is None:
+            log.info(
+                "UI disabled but no notify path resolved; skipping readiness wait",
             )
-        log.debug(
-            "Runtime readiness probe %d/%d failed: %s", attempt + 1, retries, last_msg
+            return 0
+
+        log.info(
+            "Waiting for runtime readiness via notify file %s (retries=%s, interval=%.2fs)",
+            notify_path,
+            retries,
+            interval,
         )
-        if attempt < retries - 1:
-            time.sleep(interval)
+
+        for attempt in range(retries):
+            if notify_path.exists():
+                log.info("Runtime readiness confirmed via notify file: %s", notify_path)
+                break
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    "Runtime process exited before readiness succeeded"
+                    f" (code {proc.returncode}). Check logs at {log_path} for more details."
+                )
+            log.debug(
+                "Runtime notify probe %d/%d missing file %s",
+                attempt + 1,
+                retries,
+                notify_path,
+            )
+            if attempt < retries - 1:
+                time.sleep(interval)
+        else:
+            _terminate_process(proc)
+            raise RuntimeError(
+                "Runtime readiness notify file %s not observed after %d attempts (~%.1fs)"
+                % (notify_path, retries, retries * interval)
+            )
     else:
-        _terminate_process(proc)
-        raise RuntimeError(
-            "Runtime readiness check timed out after "
-            f"{retries} attempts (~{retries * interval:.1f}s): {last_msg}"
+        log.info(
+            "Waiting for runtime readiness at %s (retries=%s, interval=%.2fs)",
+            ready_url,
+            retries,
+            interval,
         )
+
+        last_msg = "not attempted"
+        for attempt in range(retries):
+            ok, last_msg = http_ok(ready_url)
+            if ok:
+                log.info("Runtime readiness confirmed: %s — %s", ready_url, last_msg)
+                break
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    "Runtime process exited before readiness succeeded"
+                    f" (code {proc.returncode}). Check logs at {log_path} for more details."
+                )
+            log.debug(
+                "Runtime readiness probe %d/%d failed: %s", attempt + 1, retries, last_msg
+            )
+            if attempt < retries - 1:
+                time.sleep(interval)
+        else:
+            _terminate_process(proc)
+            raise RuntimeError(
+                "Runtime readiness check timed out after "
+                f"{retries} attempts (~{retries * interval:.1f}s): {last_msg}"
+            )
 
     return 0
 

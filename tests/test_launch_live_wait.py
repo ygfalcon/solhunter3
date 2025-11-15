@@ -75,14 +75,19 @@ def _run_wait_for_ready(
     log_lines: list[str],
     *,
     env: dict[str, str] | None = None,
+    notify_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     log_path = tmp_path / "runtime.log"
     log_path.write_text("\n".join(log_lines) + "\n")
+    if notify_path is not None:
+        notify_path.parent.mkdir(parents=True, exist_ok=True)
     bash_script = (
         "set -euo pipefail\n"
         + WAIT_FOR_READY_SNIPPET
         + "EXIT_HEALTH=4\n"
-        + f"READY_TIMEOUT=2\nwait_for_ready '{log_path}' ''\n"
+        + f"READY_TIMEOUT=2\nwait_for_ready '{log_path}' "
+        + ("''" if notify_path is None else shlex.quote(str(notify_path)))
+        + "\n"
     )
     env_vars = os.environ.copy()
     if env:
@@ -316,6 +321,26 @@ def test_wait_for_ready_accepts_disabled(tmp_path: Path, golden_line: str) -> No
             golden_line,
             "[ts] RUNTIME_READY",  # Runtime ready marker
         ],
+    )
+
+    assert completed.returncode == 0
+
+
+def test_wait_for_ready_uses_notify_file_when_ui_disabled(tmp_path: Path) -> None:
+    notify_path = tmp_path / "prelaunch" / "live_ready"
+    notify_path.parent.mkdir(parents=True, exist_ok=True)
+    notify_path.write_text("ready")
+    completed = _run_wait_for_ready(
+        tmp_path,
+        [
+            "[ts] TradingRuntime: UI disabled via UI_ENABLED",
+            "[ts] UI_READY disabled",
+            "[ts] UI_WS_READY status=ok detail=http disabled",
+            "[ts] Event bus: connected",
+            "[ts] GOLDEN_READY stage=liq",
+        ],
+        env={"UI_DISABLE_HTTP_SERVER": "1"},
+        notify_path=notify_path,
     )
 
     assert completed.returncode == 0
