@@ -47,6 +47,21 @@ def _extract_connectivity_soak_block(source: str) -> str:
     return source[start:end]
 
 
+def _extract_connectivity_probe_block(source: str) -> str:
+    start_marker = "CONNECTIVITY_SKIP_UI_PROBES_FORCED=0"
+    start = source.find(start_marker)
+    if start == -1:
+        raise ValueError("Failed to locate connectivity probe block in launch_live.sh")
+    end_marker = 'log_info "Connectivity probes succeeded"'
+    end = source.find(end_marker, start)
+    if end == -1:
+        raise ValueError("Failed to locate connectivity probe block terminator in launch_live.sh")
+    end = source.find("\n", end)
+    if end == -1:
+        end = len(source)
+    return source[start:end]
+
+
 def test_validate_connectivity_soak_aborts_on_failures(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
@@ -188,13 +203,25 @@ def _write_connectivity_stub(target_dir: Path) -> None:
         "        marker = os.environ.get(\"PROBE_MARKER\")\n"
         "        self._marker = Path(marker) if marker else None\n\n"
         "    async def check_all(self):\n"
-        "        return [\n"
+        "        skip_marker = os.environ.get(\"SKIP_MARKER\")\n"
+        "        if skip_marker:\n"
+        "            value = os.environ.get(\"CONNECTIVITY_SKIP_UI_PROBES\", \"__unset__\")\n"
+        "            Path(skip_marker).write_text(value, encoding=\"utf-8\")\n"
+        "        results = [\n"
         "            _Result(\"redis\", \"redis://localhost/0\"),\n"
         "            _Result(\"solana-rpc\", \"https://solana-rpc.local\"),\n"
         "            _Result(\"solana-ws\", \"wss://solana-ws.local\"),\n"
         "            _Result(\"helius-rest\", \"https://helius-rest.local\"),\n"
         "            _Result(\"helius-das\", \"https://helius-das.local\"),\n"
-        "        ]\n\n"
+        "        ]\n"
+        "        mode = os.environ.get(\"UI_RESULT_MODE\", \"present\").strip().lower()\n"
+        "        if mode != \"absent\":\n"
+        "            ws_ok = http_ok = mode != \"fail\"\n"
+        "            ws_error = None if ws_ok else \"unreachable\"\n"
+        "            http_error = None if http_ok else \"unreachable\"\n"
+        "            results.append(_Result(\"ui-ws\", \"wss://ui.local/ws/events\", ok=ws_ok, error=ws_error))\n"
+        "            results.append(_Result(\"ui-http\", \"https://ui.local/health\", ok=http_ok, error=http_error))\n"
+        "        return results\n\n"
         "    async def _probe_ws(self, name: str, target: str):\n"
         "        if self._marker is not None:\n"
         "            self._marker.write_text(f\"{name} {target}\", encoding=\"utf-8\")\n"
@@ -275,6 +302,8 @@ def test_run_connectivity_probes_skips_local_event_bus(tmp_path: Path) -> None:
         "Event bus: SKIPPED → runtime-managed local endpoint ws://127.0.0.1:8779 "
         "(post-launch readiness checks will verify availability)" in completed.stdout
     )
+    assert "UI WebSocket: OK → wss://ui.local/ws/events (12.3 ms)" in completed.stdout
+    assert "UI HTTP: OK → https://ui.local/health (12.3 ms)" in completed.stdout
     assert not marker_path.exists()
 
 
@@ -320,7 +349,199 @@ def test_run_connectivity_probes_requires_remote_event_bus(tmp_path: Path) -> No
     assert (
         "Event bus connectivity check failed: unreachable (wss://bus.example.com/ws)" in completed.stderr
     )
+    assert "UI WebSocket: OK → wss://ui.local/ws/events (12.3 ms)" in completed.stdout
+    assert "UI HTTP: OK → https://ui.local/health (12.3 ms)" in completed.stdout
     assert marker_path.read_text(encoding="utf-8") == "event-bus wss://bus.example.com/ws"
+
+
+def test_run_connectivity_probes_requires_ui_targets_without_skip(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_ui_missing"
+    _write_connectivity_stub(stub_root)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        export UI_RESULT_MODE=absent
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "UI WebSocket: missing target" in completed.stdout
+    assert "UI HTTP: missing target" in completed.stdout
+    assert (
+        "UI WebSocket connectivity probe skipped (no target configured)" in completed.stderr
+    )
+    assert "UI HTTP connectivity probe skipped (no target configured)" in completed.stderr
+
+
+def test_run_connectivity_probes_skips_missing_ui_with_flag(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_ui_skip"
+    _write_connectivity_stub(stub_root)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        export UI_RESULT_MODE=absent
+        export CONNECTIVITY_SKIP_UI_PROBES=1
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (
+        "UI WebSocket: SKIPPED → UI connectivity probes disabled (CONNECTIVITY_SKIP_UI_PROBES=1)"
+        in completed.stdout
+    )
+    assert (
+        "UI HTTP: SKIPPED → UI connectivity probes disabled (CONNECTIVITY_SKIP_UI_PROBES=1)"
+        in completed.stdout
+    )
+
+
+def test_connectivity_probes_force_skip_when_ui_disabled(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+    probe_block = _extract_connectivity_probe_block(source)
+
+    stub_root = tmp_path / "stub_probe"
+    _write_connectivity_stub(stub_root)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+    skip_marker = tmp_path / "skip_marker.txt"
+    quoted_skip_marker = shlex.quote(str(skip_marker))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        timestamp() {{ printf 'stub'; }}
+        log_info() {{ printf 'INFO:%s\n' "$*"; }}
+        log_warn() {{ printf 'WARN:%s\n' "$*"; }}
+        EXIT_CONNECTIVITY=55
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export SKIP_MARKER={quoted_skip_marker}
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        unset UI_HOST
+        unset UI_PORT
+        export UI_ENABLED=0
+        {probe_block}
+        if [[ -n ${{CONNECTIVITY_SKIP_UI_PROBES+x}} ]]; then
+            printf 'skip-after=%s\n' "$CONNECTIVITY_SKIP_UI_PROBES"
+        else
+            printf 'skip-after=__unset__\n'
+        fi
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "UI connectivity probes disabled for connectivity check (UI_ENABLED=0)" in completed.stdout
+    assert "skip-after=__unset__" in completed.stdout
+    assert skip_marker.read_text(encoding="utf-8") == "1"
+
+
+def test_connectivity_probes_force_skip_when_ui_host_missing(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+    probe_block = _extract_connectivity_probe_block(source)
+
+    stub_root = tmp_path / "stub_probe_host"
+    _write_connectivity_stub(stub_root)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+    skip_marker = tmp_path / "skip_marker_host.txt"
+    quoted_skip_marker = shlex.quote(str(skip_marker))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        timestamp() {{ printf 'stub'; }}
+        log_info() {{ printf 'INFO:%s\n' "$*"; }}
+        log_warn() {{ printf 'WARN:%s\n' "$*"; }}
+        EXIT_CONNECTIVITY=77
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export SKIP_MARKER={quoted_skip_marker}
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        unset UI_HOST
+        unset UI_PORT
+        {probe_block}
+        if [[ -n ${{CONNECTIVITY_SKIP_UI_PROBES+x}} ]]; then
+            printf 'skip-after=%s\n' "$CONNECTIVITY_SKIP_UI_PROBES"
+        else
+            printf 'skip-after=__unset__\n'
+        fi
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "UI connectivity probes disabled for connectivity check (UI host/port not configured)" in completed.stdout
+    assert "skip-after=__unset__" in completed.stdout
+    assert skip_marker.read_text(encoding="utf-8") == "1"
 
 
 def test_redis_health_falls_back_when_redis_cli_lacks_url_support(tmp_path: Path) -> None:
