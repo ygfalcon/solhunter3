@@ -94,6 +94,19 @@ def test_negative_env_limit(monkeypatch, caplog):
     assert "below minimum" in caplog.text
 
 
+def test_env_limit_above_cap(monkeypatch, caplog):
+    _reset_cache()
+    monkeypatch.setenv("DISCOVERY_LIMIT", "500")
+    monkeypatch.setenv("DISCOVERY_LIMIT_CAP", "200")
+
+    with caplog.at_level("WARNING", logger="solhunter_zero.agents.discovery"):
+        agent = DiscoveryAgent()
+
+    assert agent.limit == 200
+    assert agent.limit_cap == 200
+    assert "above maximum" in caplog.text
+
+
 def test_invalid_retry_env(monkeypatch, caplog):
     _reset_cache()
     monkeypatch.setenv("TOKEN_DISCOVERY_RETRIES", "not-a-number")

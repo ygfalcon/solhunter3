@@ -160,6 +160,7 @@ _STATIC_FALLBACK = [
 DEFAULT_DISCOVERY_METHOD = "helius"
 
 MIN_DISCOVERY_LIMIT = 0
+DEFAULT_MAX_DISCOVERY_LIMIT = 200
 
 DEFAULT_MEMPOOL_MAX_WAIT = 10.0
 
@@ -205,6 +206,35 @@ def resolve_discovery_method(value: Any) -> Optional[str]:
     return None
 
 
+def _resolve_limit_cap(default: int = DEFAULT_MAX_DISCOVERY_LIMIT) -> int:
+    """Return the maximum allowed discovery limit."""
+
+    raw_value = os.getenv("DISCOVERY_LIMIT_CAP")
+    if raw_value in {None, ""}:
+        return default
+
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid DISCOVERY_LIMIT_CAP=%r; defaulting to %d",
+            raw_value,
+            default,
+        )
+        return default
+
+    if value < MIN_DISCOVERY_LIMIT:
+        logger.warning(
+            "DISCOVERY_LIMIT_CAP=%r below minimum %d; defaulting to %d",
+            raw_value,
+            MIN_DISCOVERY_LIMIT,
+            default,
+        )
+        return default
+
+    return value
+
+
 class DiscoveryAgent:
     """Token discovery orchestrator supporting multiple discovery methods."""
 
@@ -233,12 +263,21 @@ class DiscoveryAgent:
                 MIN_DISCOVERY_LIMIT,
             )
             limit = MIN_DISCOVERY_LIMIT
+        limit_cap = _resolve_limit_cap()
+        if limit > limit_cap:
+            logger.warning(
+                "Discovery limit %d above maximum %d; using maximum",
+                limit,
+                limit_cap,
+            )
+            limit = limit_cap
         self._disabled_skip_logged = False
         if limit == 0:
             logger.info(
                 "Discovery limit set to 0; discovery will remain disabled",
             )
         self.limit = limit
+        self.limit_cap = limit_cap
         cache_ttl_env = os.getenv("DISCOVERY_CACHE_TTL")
         cache_ttl_default = self._default_cache_ttl()
         if cache_ttl_env in {None, ""}:
