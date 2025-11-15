@@ -31,6 +31,7 @@ from .providers import orca as orca_provider
 from .providers import raydium as raydium_provider
 from .lru import TTLCache
 from .mempool_scanner import stream_ranked_mempool_tokens_with_depth
+from .token_aliases import canonical_mint
 from .util.mints import is_valid_solana_mint
 
 logger = logging.getLogger(__name__)
@@ -556,35 +557,68 @@ def _cache_set(key: str, value: List[TokenEntry]) -> None:
 def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
     """Return cached BirdEye tokens or static seeds for configuration fallbacks."""
 
-    seen: set[str] = set()
     fallback: List[TokenEntry] = []
+    entry_map: Dict[str, TokenEntry] = {}
 
     cache_key = _current_cache_key(limit)
     cached = _cache_get(cache_key) or []
     for item in cached:
         if not isinstance(item, Mapping):
             continue
-        address = str(item.get("address") or "").strip()
-        if not address or address in seen:
+        raw_address = str(item.get("address") or "").strip()
+        canonical = canonical_mint(raw_address)
+        if not canonical or not is_valid_solana_mint(canonical):
             continue
-        entry = dict(item)
-        entry["sources"] = _normalize_string_collection(entry.get("sources"))
-        entry["source_categories"] = _normalize_string_collection(
-            entry.get("source_categories")
-        )
-        _register_source(entry, "cache")
-        entry.setdefault("score", 0.0)
-        entry.setdefault("_stage_b_eligible", False)
-        fallback.append(entry)
-        seen.add(address)
-        if len(fallback) >= limit:
-            return fallback
+        existing = entry_map.get(canonical)
+        if existing is None:
+            entry = dict(item)
+            entry["address"] = canonical
+            entry["sources"] = _normalize_string_collection(entry.get("sources"))
+            entry["source_categories"] = _normalize_string_collection(
+                entry.get("source_categories")
+            )
+            _register_source(entry, "cache")
+            entry.setdefault("score", 0.0)
+            entry.setdefault("_stage_b_eligible", False)
+            fallback.append(entry)
+            entry_map[canonical] = entry
+            if len(fallback) >= limit:
+                return fallback
+        else:
+            sources = _normalize_string_collection(item.get("sources"))
+            if sources:
+                if isinstance(existing.get("sources"), set):
+                    existing["sources"].update(sources)
+                else:
+                    merged = _normalize_string_collection(existing.get("sources"))
+                    merged.update(sources)
+                    existing["sources"] = merged
+            categories = _normalize_string_collection(item.get("source_categories"))
+            if categories:
+                if isinstance(existing.get("source_categories"), set):
+                    existing["source_categories"].update(categories)
+                else:
+                    merged_cats = _normalize_string_collection(
+                        existing.get("source_categories")
+                    )
+                    merged_cats.update(categories)
+                    existing["source_categories"] = merged_cats
+            if not existing.get("symbol") and item.get("symbol"):
+                existing["symbol"] = item.get("symbol")
+            if not existing.get("name") and item.get("name"):
+                existing["name"] = item.get("name")
+            _register_source(existing, "cache")
+            existing.setdefault("score", 0.0)
+            existing.setdefault("_stage_b_eligible", False)
 
-    for address, symbol, name in _STATIC_CANDIDATE_SEEDS:
-        if address in seen:
+    for raw_address, symbol, name in _STATIC_CANDIDATE_SEEDS:
+        canonical = canonical_mint(raw_address)
+        if not canonical or not is_valid_solana_mint(canonical):
+            continue
+        if canonical in entry_map:
             continue
         entry: TokenEntry = {
-            "address": address,
+            "address": canonical,
             "symbol": symbol,
             "name": name,
             "sources": {"static"},
@@ -593,7 +627,7 @@ def _fallback_candidate_tokens(limit: int) -> List[TokenEntry]:
             "_stage_b_eligible": False,
         }
         fallback.append(entry)
-        seen.add(address)
+        entry_map[canonical] = entry
         if len(fallback) >= limit:
             break
 
@@ -1009,7 +1043,10 @@ def _merge_candidate_entry(
     address = str(raw_address).strip()
     if not address:
         return None
-    if not is_valid_solana_mint(address):
+    canonical_address = canonical_mint(address)
+    if not canonical_address:
+        return None
+    if not is_valid_solana_mint(canonical_address):
         return None
 
     liquidity = _coerce_numeric(
@@ -1029,7 +1066,7 @@ def _merge_candidate_entry(
     name = token.get("name") or token.get("tokenName")
     symbol = token.get("symbol") or token.get("tokenSymbol")
 
-    entry = candidates.get(address)
+    entry = candidates.get(canonical_address)
     incoming_venues = _normalize_venues_field(token.get("venues"))
     discovered_at = _parse_timestamp(
         token.get("discovered_at")
@@ -1040,9 +1077,9 @@ def _merge_candidate_entry(
 
     if entry is None:
         entry = {
-            "address": address,
+            "address": canonical_address,
             "symbol": str(symbol or ""),
-            "name": str(name or symbol or address),
+            "name": str(name or symbol or canonical_address),
             "liquidity": liquidity,
             "volume": volume,
             "price": price,
@@ -1065,7 +1102,7 @@ def _merge_candidate_entry(
         ):
             if extra_key in token and token[extra_key] is not None:
                 entry[extra_key] = token[extra_key]
-        candidates[address] = entry
+        candidates[canonical_address] = entry
     else:
         venues_field = entry.get("venues")
         if isinstance(venues_field, list):
