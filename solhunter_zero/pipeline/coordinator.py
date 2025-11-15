@@ -198,6 +198,8 @@ class PipelineCoordinator:
             cache_ttl=self.discovery_cache_ttl,
             limit=discovery_limit,
             emit_batch_size=1 if fast_mode else None,
+            startup_clones=1 if fast_mode else None,
+            startup_clone_concurrency=1 if fast_mode else None,
         )
         self._scoring_service = ScoringService(
             self._discovery_queue,

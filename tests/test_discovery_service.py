@@ -1,6 +1,7 @@
 import asyncio
 import os
 import types
+from typing import Dict, List
 
 from solhunter_zero.pipeline.discovery_service import DiscoveryService
 
@@ -110,6 +111,52 @@ def test_emit_tokens_ignores_metadata_changes_when_not_fresh():
         await service._emit_tokens([token], fresh=False)
 
         assert queue.qsize() == 0
+
+    asyncio.run(runner())
+
+
+def test_startup_clone_concurrency_throttles_parallelism():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        service = DiscoveryService(queue, startup_clones=5, emit_batch_size=10)
+        service._agent = types.SimpleNamespace(
+            last_method="unit-test", last_details={}
+        )
+
+        # Force concurrency lower than clones to ensure throttling takes effect.
+        service._startup_clone_concurrency = 2
+
+        active = 0
+        max_active = 0
+
+        async def fake_clone(self, idx: int) -> tuple[List[str], Dict[str, Dict[str, float]]]:
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return [f"mint-{idx}"], {}
+
+        service._clone_fetch = types.MethodType(fake_clone, service)
+
+        emitted_batches: List[List[str]] = []
+
+        async def fake_emit(self, tokens: List[str], *, fresh: bool) -> None:
+            emitted_batches.append(list(tokens))
+
+        service._emit_tokens = types.MethodType(fake_emit, service)
+
+        await service._prime_startup_clones()
+
+        assert max_active <= 2
+        # Ensure tokens were emitted despite throttling.
+        assert emitted_batches == [[
+            "mint-0",
+            "mint-1",
+            "mint-2",
+            "mint-3",
+            "mint-4",
+        ]]
 
     asyncio.run(runner())
 
