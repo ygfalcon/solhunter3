@@ -117,7 +117,7 @@ class DiscoveryService:
         if emit_batch_size is None or emit_batch_size <= 0:
             emit_batch_size = 1
         self._emit_batch_size = int(emit_batch_size)
-        self._agent = DiscoveryAgent()
+        self._agent = DiscoveryAgent(limit=limit)
         self._last_tokens: list[str] = []
         self._last_fetch_ts: float = 0.0
         self._cooldown_until: float = 0.0

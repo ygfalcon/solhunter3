@@ -1148,6 +1148,7 @@ class TradingRuntime:
             self.pipeline = PipelineCoordinator(
                 self.agent_manager,
                 self.portfolio,
+                config=self.cfg,
                 discovery_interval=discovery_interval_cfg,
                 discovery_cache_ttl=discovery_cache_ttl,
                 scoring_batch=scoring_batch,
