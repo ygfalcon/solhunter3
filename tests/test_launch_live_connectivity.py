@@ -32,16 +32,30 @@ def _extract_function(source: str, name: str) -> str:
     return source[start:end] + "\n"
 
 
+def _extract_ui_skip_helpers(source: str) -> str:
+    functions = [
+        "connectivity_flag_truthy",
+        "connectivity_ui_offline_requested",
+        "connectivity_ui_probes_skipped",
+        "connectivity_skip_ui_probes_push",
+        "connectivity_skip_ui_probes_pop",
+    ]
+    return "".join(_extract_function(source, name) for name in functions)
+
+
 def _extract_connectivity_soak_block(source: str) -> str:
     start_marker = "# Preserve the caller's CONNECTIVITY_SKIP_UI_PROBES configuration while the"
     start = source.find(start_marker)
     if start == -1:
         raise ValueError("Failed to locate connectivity soak block in launch_live.sh")
-    end_marker = 'log_info "UI connectivity probes re-enabled for live launch"'
-    end = source.find(end_marker, start)
+    pop_marker = "connectivity_skip_ui_probes_pop"
+    pop_index = source.find(pop_marker, start)
+    if pop_index == -1:
+        raise ValueError("Failed to locate connectivity soak cleanup in launch_live.sh")
+    end = source.find("\nfi", pop_index)
     if end == -1:
         raise ValueError("Failed to locate connectivity soak block terminator in launch_live.sh")
-    end = source.find("\n", end)
+    end = source.find("\n", end + 1)
     if end == -1:
         end = len(source)
     return source[start:end]
@@ -101,6 +115,7 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
     soak_block = _extract_connectivity_soak_block(source)
+    helpers = _extract_ui_skip_helpers(source)
 
     report_path = tmp_path / "connectivity_report.json"
     artifact_dir = tmp_path / "artifacts"
@@ -145,6 +160,7 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
         export PYTHON_BIN={python_bin}
         export PYTHONPATH={quoted_stub_root}
         export EXIT_CONNECTIVITY=99
+        {helpers}
         {soak_block}
         if [[ -n ${{CONNECTIVITY_SKIP_UI_PROBES+x}} ]]; then
             printf 'restored=%s\n' "$CONNECTIVITY_SKIP_UI_PROBES"
@@ -164,6 +180,75 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
 
     assert completed.returncode == 0, completed.stderr
     assert "restored=restore-me" in completed.stdout
+
+
+def test_connectivity_skip_ui_probes_headless_launch_retains_flag(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    soak_block = _extract_connectivity_soak_block(source)
+    helpers = _extract_ui_skip_helpers(source)
+
+    report_path = tmp_path / "connectivity_report.json"
+    artifact_dir = tmp_path / "artifacts"
+    stub_root = tmp_path / "stub_headless"
+    package_dir = stub_root / "solhunter_zero"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    stub_source = (
+        "from __future__ import annotations\n"
+        "from pathlib import Path\n\n"
+        "class _Summary:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.duration = 0.0\n"
+        "        self.reconnect_count = 0\n"
+        "        self.metrics = {}\n\n"
+        "class ConnectivityChecker:\n"
+        "    async def run_soak(self, duration: float, output_path):\n"
+        "        path = Path(output_path)\n"
+        "        path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "        path.write_text('{}', encoding='utf-8')\n"
+        "        return _Summary()\n"
+    )
+    (package_dir / "production.py").write_text(stub_source, encoding="utf-8")
+    python_bin = shlex.quote(sys.executable)
+    quoted_report = shlex.quote(str(report_path))
+    quoted_artifact_dir = shlex.quote(str(artifact_dir))
+    quoted_stub_root = shlex.quote(str(stub_root))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        timestamp() {{ printf 'stub'; }}
+        log_info() {{ :; }}
+        log_warn() {{ :; }}
+        runtime_lock_ttl_check() {{ return 0; }}
+        export UI_DISABLE_HTTP_SERVER=1
+        export SOAK_DURATION=0
+        export SOAK_REPORT={quoted_report}
+        export ARTIFACT_DIR={quoted_artifact_dir}
+        export PYTHON_BIN={python_bin}
+        export PYTHONPATH={quoted_stub_root}
+        export EXIT_CONNECTIVITY=99
+        {helpers}
+        {soak_block}
+        if [[ -n ${{CONNECTIVITY_SKIP_UI_PROBES+x}} ]]; then
+            printf 'headless_flag=%s\n' "$CONNECTIVITY_SKIP_UI_PROBES"
+        else
+            printf 'headless_flag=__unset__\n'
+        fi
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "headless_flag=1" in completed.stdout
 
 
 def _write_connectivity_stub(target_dir: Path) -> None:
@@ -239,7 +324,8 @@ def _create_python_wrapper(target_dir: Path) -> Path:
 def test_run_connectivity_probes_skips_local_event_bus(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
-    run_probes = _extract_function(source, "run_connectivity_probes")
+    helpers = _extract_ui_skip_helpers(source)
+    run_probes = helpers + _extract_function(source, "run_connectivity_probes")
 
     stub_root = tmp_path / "stub_local"
     _write_connectivity_stub(stub_root)
@@ -281,7 +367,8 @@ def test_run_connectivity_probes_skips_local_event_bus(tmp_path: Path) -> None:
 def test_run_connectivity_probes_requires_remote_event_bus(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
-    run_probes = _extract_function(source, "run_connectivity_probes")
+    helpers = _extract_ui_skip_helpers(source)
+    run_probes = helpers + _extract_function(source, "run_connectivity_probes")
 
     stub_root = tmp_path / "stub_remote"
     _write_connectivity_stub(stub_root)
@@ -321,6 +408,48 @@ def test_run_connectivity_probes_requires_remote_event_bus(tmp_path: Path) -> No
         "Event bus connectivity check failed: unreachable (wss://bus.example.com/ws)" in completed.stderr
     )
     assert marker_path.read_text(encoding="utf-8") == "event-bus wss://bus.example.com/ws"
+
+
+def test_run_connectivity_probes_retains_skip_flag_for_headless(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    helpers = _extract_ui_skip_helpers(source)
+    run_probes = helpers + _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_headless_probes"
+    _write_connectivity_stub(stub_root)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export UI_DISABLE_HTTP_SERVER=1
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        run_connectivity_probes
+        if [[ -n ${{CONNECTIVITY_SKIP_UI_PROBES+x}} ]]; then
+            printf 'flag=%s\n' "$CONNECTIVITY_SKIP_UI_PROBES"
+        else
+            printf 'flag=__unset__\n'
+        fi
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "flag=1" in completed.stdout
 
 
 def test_redis_health_falls_back_when_redis_cli_lacks_url_support(tmp_path: Path) -> None:

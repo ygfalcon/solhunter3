@@ -114,6 +114,67 @@ LIVE_SOLHUNTER_MODE_WAS_SET=0
 CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS=""
 CONNECTIVITY_SKIP_UI_PROBES_WAS_SET=0
 
+connectivity_flag_truthy() {
+  local raw=${1:-}
+  if [[ -z $raw ]]; then
+    return 1
+  fi
+  local normalized=${raw,,}
+  normalized=${normalized//[$'\t\r\n ']/}
+  case $normalized in
+    1|true|yes|on|enabled)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+connectivity_ui_offline_requested() {
+  local disable_env=${UI_DISABLE_HTTP_SERVER:-}
+  if connectivity_flag_truthy "$disable_env"; then
+    return 0
+  fi
+
+  local http_url=${UI_HTTP_URL:-}
+  if [[ -n $http_url ]]; then
+    local normalized=${http_url,,}
+    normalized=${normalized//[$'\t\r\n ']/}
+    if [[ $normalized == "unavailable" ]]; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+connectivity_ui_probes_skipped() {
+  if connectivity_flag_truthy "${CONNECTIVITY_SKIP_UI_PROBES:-}"; then
+    return 0
+  fi
+  return 1
+}
+
+connectivity_skip_ui_probes_push() {
+  CONNECTIVITY_SKIP_UI_PROBES_WAS_SET=0
+  if [[ -n ${CONNECTIVITY_SKIP_UI_PROBES+x} ]]; then
+    CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS="$CONNECTIVITY_SKIP_UI_PROBES"
+    CONNECTIVITY_SKIP_UI_PROBES_WAS_SET=1
+  fi
+  export CONNECTIVITY_SKIP_UI_PROBES=1
+}
+
+connectivity_skip_ui_probes_pop() {
+  if connectivity_ui_offline_requested; then
+    export CONNECTIVITY_SKIP_UI_PROBES=1
+  elif (( CONNECTIVITY_SKIP_UI_PROBES_WAS_SET )); then
+    export CONNECTIVITY_SKIP_UI_PROBES="$CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS"
+  else
+    unset CONNECTIVITY_SKIP_UI_PROBES
+  fi
+  CONNECTIVITY_SKIP_UI_PROBES_WAS_SET=0
+  return 0
+}
+
 export RUNTIME_LOCK_TTL_SECONDS="${RUNTIME_LOCK_TTL_SECONDS:-60}"
 export RUNTIME_LOCK_REFRESH_INTERVAL="${RUNTIME_LOCK_REFRESH_INTERVAL:-20}"
 
@@ -652,6 +713,17 @@ PY
 }
 
 run_connectivity_probes() {
+  local push_skip=0
+  if connectivity_ui_offline_requested; then
+    push_skip=1
+  elif connectivity_ui_probes_skipped; then
+    push_skip=1
+  fi
+
+  if (( push_skip )); then
+    connectivity_skip_ui_probes_push
+  fi
+
   "$PYTHON_BIN" - <<'PY'
 import asyncio
 import ipaddress
@@ -760,6 +832,13 @@ async def _run() -> None:
 
 asyncio.run(_run())
 PY
+  local status=$?
+
+  if (( push_skip )); then
+    connectivity_skip_ui_probes_pop
+  fi
+
+  return $status
 }
 
 wait_for_socket_release() {
@@ -2436,12 +2515,7 @@ log_info "Paper runtime stopped after preflight"
 
 # Preserve the caller's CONNECTIVITY_SKIP_UI_PROBES configuration while the
 # paper runtime is offline for the soak.
-CONNECTIVITY_SKIP_UI_PROBES_WAS_SET=0
-if [[ -n ${CONNECTIVITY_SKIP_UI_PROBES+x} ]]; then
-  CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS="$CONNECTIVITY_SKIP_UI_PROBES"
-  CONNECTIVITY_SKIP_UI_PROBES_WAS_SET=1
-fi
-export CONNECTIVITY_SKIP_UI_PROBES=1
+connectivity_skip_ui_probes_push
 log_info "Paper runtime offline; skipping UI connectivity probes during soak"
 log_info "Starting connectivity soak for ${SOAK_DURATION}s"
 runtime_lock_ttl_check "soak" || true
@@ -2554,12 +2628,14 @@ fi
 
 runtime_lock_ttl_check "post-soak" || true
 log_info "Connectivity soak complete: $SOAK_RESULT"
-if (( CONNECTIVITY_SKIP_UI_PROBES_WAS_SET )); then
-  export CONNECTIVITY_SKIP_UI_PROBES="$CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS"
+connectivity_skip_ui_probes_pop
+if connectivity_ui_offline_requested; then
+  log_info "UI connectivity probes remain disabled (headless launch)"
+elif connectivity_ui_probes_skipped; then
+  log_info "UI connectivity probes remain disabled (caller configuration)"
 else
-  unset CONNECTIVITY_SKIP_UI_PROBES
+  log_info "UI connectivity probes re-enabled for live launch"
 fi
-log_info "UI connectivity probes re-enabled for live launch"
 
 LIVE_SOLHUNTER_MODE_WAS_SET=0
 if [[ -n ${SOLHUNTER_MODE+x} ]]; then
