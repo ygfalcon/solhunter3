@@ -32,6 +32,8 @@ def _reset_cache():
             "details": {},
         }
     )
+    if hasattr(discovery_mod, "_CACHE_LOCKS"):
+        discovery_mod._CACHE_LOCKS.clear()
 
 
 async def fake_stream(url, **_):
@@ -714,7 +716,11 @@ def test_discover_tokens_concurrent_calls_use_cache_lock(monkeypatch):
                 self._lock.release()
 
         instrumented_lock = InstrumentedLock()
-        monkeypatch.setattr(discovery_mod, "_CACHE_LOCK", instrumented_lock)
+        monkeypatch.setattr(
+            discovery_mod,
+            "_get_cache_lock",
+            lambda: instrumented_lock,
+        )
 
         agent = DiscoveryAgent()
         agent.cache_ttl = 60.0
@@ -756,6 +762,44 @@ def test_discover_tokens_concurrent_calls_use_cache_lock(monkeypatch):
     assert discovery_mod._CACHE["tokens"] == [VALID_MINT]
 
 
+def test_discover_tokens_separate_event_loops(monkeypatch):
+    _reset_cache()
+
+    call_counter = {"value": 0}
+
+    async def fake_discover_once(self, *, method, offline, token_file):
+        del method, offline, token_file
+        call_counter["value"] += 1
+        return [VALID_MINT], {}
+
+    async def passthrough_social(self, tokens, details, *, offline=False):
+        del offline
+        return tokens, details or {}
+
+    monkeypatch.setattr(DiscoveryAgent, "_discover_once", fake_discover_once)
+    monkeypatch.setattr(DiscoveryAgent, "_apply_social_mentions", passthrough_social)
+
+    def run_in_new_loop() -> list[str]:
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            agent = DiscoveryAgent()
+            agent.cache_ttl = 60.0
+            result = loop.run_until_complete(agent.discover_tokens())
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            return result
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    tokens_first = run_in_new_loop()
+    tokens_second = run_in_new_loop()
+
+    assert tokens_first == [VALID_MINT]
+    assert tokens_second == [VALID_MINT]
+    assert call_counter["value"] == 1
+
+
 def test_discover_tokens_concurrent_cached_reads(monkeypatch):
     _reset_cache()
 
@@ -766,7 +810,7 @@ def test_discover_tokens_concurrent_cached_reads(monkeypatch):
         now = time.time()
         identity = discovery_mod._rpc_identity(agent.rpc_url)
 
-        async with discovery_mod._CACHE_LOCK:
+        async with discovery_mod._get_cache_lock():
             discovery_mod._CACHE.update(
                 {
                     "tokens": [VALID_MINT],
@@ -818,7 +862,7 @@ def test_cached_details_hydrate_with_weights(monkeypatch):
     )
 
     async def seed_cache():
-        async with discovery_mod._CACHE_LOCK:
+        async with discovery_mod._get_cache_lock():
             discovery_mod._CACHE.update(
                 {
                     "tokens": [VALID_MINT],
@@ -871,7 +915,7 @@ def test_stale_cache_fallback_preserves_metadata(monkeypatch):
     )
 
     async def seed_cache():
-        async with discovery_mod._CACHE_LOCK:
+        async with discovery_mod._get_cache_lock():
             discovery_mod._CACHE.update(
                 {
                     "tokens": [VALID_MINT],
