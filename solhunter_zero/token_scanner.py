@@ -30,6 +30,7 @@ from .util.mints import clean_candidate_mints
 
 def _default_enrich_rpc() -> str:
     candidate = (os.environ.get("HELIUS_RPC_URL") or os.environ.get("SOLANA_RPC_URL") or "").strip()
+    logger = logging.getLogger(__name__)
     if candidate:
         lowered = candidate.lower()
         if "helius" in lowered and "api-key=" not in lowered:
@@ -38,9 +39,19 @@ def _default_enrich_rpc() -> str:
                 f"helius-enrich-missing-key-{candidate}",
                 "Helius RPC URL missing api-key query parameter: %s",
                 candidate,
-                logger=logging.getLogger(__name__),
+                logger=logger,
             )
-    return candidate
+        return candidate
+
+    default_url = "https://api.mainnet-beta.solana.com"
+    warn_once_per(
+        30.0,
+        "enrich-defaulting-to-public-rpc",
+        "No enrich RPC configured; defaulting to public Solana RPC: %s",
+        default_url,
+        logger=logger,
+    )
+    return default_url
 
 
 DEFAULT_SOLANA_RPC = _default_enrich_rpc()
