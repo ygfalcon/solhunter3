@@ -1594,6 +1594,9 @@ for _channel_name, _env_keys in _WS_PORT_ENV_KEYS.items():
         _WS_ENV_KEY_CHANNEL_HINTS.setdefault(_env_key, _channel_name)
 
 
+_WS_READINESS_METADATA: dict[str, Any] = {}
+
+
 def _update_auto_env_value(
     key: str, value: str, descriptor: str, *, channel: str | None = None
 ) -> None:
@@ -1639,6 +1642,18 @@ def _clear_auto_env_values_for_channels(channels: Iterable[str]) -> None:
         if auto_value is not None and os.environ.get(key) == auto_value:
             os.environ.pop(key, None)
         _AUTO_WS_ENV_CHANNELS.pop(key, None)
+
+
+def get_ws_readiness_metadata() -> Dict[str, Any]:
+    """Return metadata captured during websocket startup."""
+
+    metadata: Dict[str, Any] = {}
+    for key, value in _WS_READINESS_METADATA.items():
+        if isinstance(value, dict):
+            metadata[key] = dict(value)
+        else:
+            metadata[key] = value
+    return metadata
 
 
 def _resolve_host() -> str:
@@ -3042,6 +3057,19 @@ def start_websockets() -> dict[str, threading.Thread]:
         log_port = _resolve_port("UI_LOG_WS_PORT", default=_LOG_WS_PORT_DEFAULT)
         event_port = _resolve_port("UI_EVENT_WS_PORT", "EVENT_WS_PORT", default=_EVENT_WS_PORT_DEFAULT)
 
+        resolved_ports = {
+            "rl": rl_port,
+            "events": event_port,
+            "logs": log_port,
+        }
+        _WS_READINESS_METADATA["resolved_ports"] = dict(resolved_ports)
+        log.info(
+            "UI websockets resolved ports rl=%s events=%s logs=%s",
+            resolved_ports["rl"],
+            resolved_ports["events"],
+            resolved_ports["logs"],
+        )
+
         try:
             threads["rl"] = _start_channel(
                 "rl",
@@ -3094,6 +3122,11 @@ def start_websockets() -> dict[str, threading.Thread]:
         }
         for key, value in defaults.items():
             _update_auto_env_value(key, value, "URL")
+        _WS_READINESS_METADATA["bound_ports"] = {
+            "rl": _RL_WS_PORT,
+            "events": _EVENT_WS_PORT,
+            "logs": _LOG_WS_PORT,
+        }
         log.info(
             "UI websockets listening on rl=%s events=%s logs=%s",
             _RL_WS_PORT,
@@ -3112,6 +3145,7 @@ def stop_websockets() -> None:
             _shutdown_state(state)
             stopped_channels.append(name)
         _clear_auto_env_values_for_channels(stopped_channels)
+        _WS_READINESS_METADATA.clear()
 
 
 StatusProvider = Callable[[], Dict[str, Any]]

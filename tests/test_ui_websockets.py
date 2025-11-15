@@ -327,6 +327,57 @@ def test_start_websockets_failure_clears_auto_env(monkeypatch):
         sys.modules.pop("solhunter_zero.ui", None)
 
 
+def test_start_websockets_logs_resolved_ports(monkeypatch, caplog):
+    ui = _reload_ui_module()
+
+    monkeypatch.setenv("UI_RL_WS_PORT", "7123")
+    monkeypatch.setenv("UI_EVENT_WS_PORT", "7124")
+    monkeypatch.setenv("UI_LOG_WS_PORT", "7125")
+
+    class DummyThread:
+        def __init__(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None):  # pragma: no cover - no thread work to join
+            return None
+
+    captured_ports: dict[str, int] = {}
+
+    def _fake_start_channel(channel: str, *, host: str, port: int, **kwargs: Any):
+        captured_ports[channel] = port
+        state = ui._WS_CHANNELS[channel]
+        state.host = host
+        state.port = port
+        state.thread = DummyThread()
+        state.ready.set()
+        state.ready_status = "ok"
+        return state.thread
+
+    monkeypatch.setattr(ui, "_start_channel", _fake_start_channel)
+
+    with caplog.at_level(logging.INFO):
+        ui.start_websockets()
+
+    try:
+        assert captured_ports == {"rl": 7123, "events": 7124, "logs": 7125}
+        assert any(
+            "UI websockets resolved ports rl=7123 events=7124 logs=7125"
+            in record.getMessage()
+            for record in caplog.records
+        )
+        readiness_metadata = ui.get_ws_readiness_metadata()
+        assert readiness_metadata.get("resolved_ports") == {
+            "rl": 7123,
+            "events": 7124,
+            "logs": 7125,
+        }
+    finally:
+        ui.stop_websockets()
+
+
 @pytest.mark.timeout(30)
 def test_websocket_env_preserves_preconfigured_url(monkeypatch):
     for name in list(sys.modules):
