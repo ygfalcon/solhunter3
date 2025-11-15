@@ -11,10 +11,18 @@ from solhunter_zero import token_scanner
 
 
 class _DummyResponse:
-    def __init__(self, payload: Dict[str, Any], *, status: int = 200, reason: str = "OK"):
+    def __init__(
+        self,
+        payload: Dict[str, Any],
+        *,
+        status: int = 200,
+        reason: str = "OK",
+        headers: Dict[str, str] | None = None,
+    ):
         self._payload = payload
         self.status = status
         self.reason = reason
+        self.headers = headers or {}
 
     async def __aenter__(self) -> "_DummyResponse":
         return self
@@ -76,6 +84,24 @@ class _DummySession:
         if not self._responses:
             raise AssertionError("No more responses queued")
         return self._responses.pop(0)
+
+
+class _StubClientTimeout:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+class _StubConnector:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+aiohttp.ClientTimeout = _StubClientTimeout  # type: ignore[attr-defined]
+setattr(token_scanner.aiohttp, "ClientTimeout", _StubClientTimeout)
+aiohttp.TCPConnector = _StubConnector  # type: ignore[attr-defined]
+setattr(token_scanner.aiohttp, "TCPConnector", _StubConnector)
+aiohttp.ClientError = Exception  # type: ignore[attr-defined]
+setattr(token_scanner.aiohttp, "ClientError", Exception)
 
 
 def test_birdeye_trending_uses_new_route(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,6 +209,108 @@ def test_scan_tokens_enters_cooldown_after_400(monkeypatch: pytest.MonkeyPatch, 
 
     assert not calls, "Cooldown should prevent additional Birdeye calls"
     assert first[0] == second[0]
+
+
+def test_scan_tokens_resets_cooldown_after_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    base_state = {"mints": [], "metadata": {}, "timestamp": 0.0}
+    monkeypatch.setattr(token_scanner, "_LAST_TRENDING_RESULT", base_state)
+    monkeypatch.setattr(token_scanner, "_FAILURE_COUNT", 0)
+    monkeypatch.setattr(token_scanner, "_COOLDOWN_UNTIL", 0.0)
+
+    monkeypatch.setattr(token_scanner, "_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(token_scanner, "_FAILURE_COOLDOWN", 60.0)
+    monkeypatch.setattr(token_scanner, "_FATAL_FAILURE_COOLDOWN", 60.0)
+    monkeypatch.setattr(token_scanner, "_THROTTLE_COOLDOWN", 60.0)
+    monkeypatch.setattr(token_scanner, "_MIN_SCAN_INTERVAL", 0.0)
+    monkeypatch.setattr(token_scanner, "_PARTIAL_THRESHOLD", 2)
+
+    class _DummyTimeout:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    class _DummyConnector:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    monkeypatch.setattr(token_scanner.aiohttp, "ClientTimeout", _DummyTimeout)
+    monkeypatch.setattr(token_scanner.aiohttp, "TCPConnector", _DummyConnector)
+    monkeypatch.setattr(token_scanner.aiohttp, "ClientError", Exception, raising=False)
+
+    async def _collect_empty(
+        session: aiohttp.ClientSession,
+        *,
+        limit: int,
+        birdeye_api_key: str | None = None,
+        rpc_url: str | None = None,
+    ) -> List[Dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(token_scanner, "_collect_trending_seeds", _collect_empty)
+
+    async def _helius_empty(session: aiohttp.ClientSession, *, limit: int) -> List[Dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(token_scanner, "_helius_trending", _helius_empty)
+
+    async def _pump_empty(session: aiohttp.ClientSession, limit: int) -> List[Dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(token_scanner, "_pump_trending", _pump_empty)
+
+    def _failure_session_factory(*args: Any, **kwargs: Any) -> _DummySession:
+        response = _DummyErrorResponse(status=400, message="invalid api key")
+        return _DummySession([response], [])
+
+    monkeypatch.setattr(token_scanner.aiohttp, "ClientSession", _failure_session_factory)
+
+    asyncio.run(token_scanner.scan_tokens_async(limit=2, api_key="invalid"))
+
+    assert token_scanner._FAILURE_COUNT == token_scanner._FAILURE_THRESHOLD
+    initial_reason = token_scanner._LAST_TRENDING_RESULT.get("cooldown_reason")
+    assert initial_reason
+
+    monkeypatch.setattr(token_scanner, "_COOLDOWN_UNTIL", 0.0)
+
+    async def _collect_failure(
+        session: aiohttp.ClientSession,
+        *,
+        limit: int,
+        birdeye_api_key: str | None = None,
+        rpc_url: str | None = None,
+    ) -> List[Dict[str, Any]]:
+        raise token_scanner.BirdeyeFatalError(500, "upstream failure")
+
+    monkeypatch.setattr(token_scanner, "_collect_trending_seeds", _collect_failure)
+
+    helius_entries = [
+        {"address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "source": "helius"},
+        {"address": "So11111111111111111111111111111111111111112", "source": "helius"},
+        {"address": "Es9vMFrzaCERo4PwniDPYZ6BtMqADdJe1na43EwxrsT", "source": "helius"},
+    ]
+
+    async def _helius_success(
+        session: aiohttp.ClientSession,
+        *,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        return helius_entries[:limit]
+
+    monkeypatch.setattr(token_scanner, "_helius_trending", _helius_success)
+    monkeypatch.setattr(token_scanner, "ENABLE_HELIUS_TRENDING", True)
+    monkeypatch.setattr(token_scanner, "_birdeye_enabled", lambda *_: False)
+    monkeypatch.setattr(token_scanner, "_birdeye_trending_allowed", lambda: False)
+
+    def _success_session_factory(*args: Any, **kwargs: Any) -> _DummySession:
+        return _DummySession([], [])
+
+    monkeypatch.setattr(token_scanner.aiohttp, "ClientSession", _success_session_factory)
+
+    recovered = asyncio.run(token_scanner.scan_tokens_async(limit=3, api_key="valid"))
+
+    assert recovered == [entry["address"] for entry in helius_entries]
+    assert token_scanner._FAILURE_COUNT == 0
+    assert "cooldown_reason" not in token_scanner._LAST_TRENDING_RESULT
+    assert "cooldown_until" not in token_scanner._LAST_TRENDING_RESULT
 
 
 def test_scan_tokens_uses_cache_after_compute_units_throttle(

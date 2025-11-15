@@ -2752,6 +2752,15 @@ async def _scan_tokens_async_locked(
             _LAST_TRENDING_RESULT.pop("metadata", None)
 
         cooldown_reason_to_set: str | None = None
+        threshold_met = success and len(final_result) >= threshold
+        if threshold_met:
+            forced_cooldown_reason = None
+            forced_cooldown_seconds = None
+            _FAILURE_COUNT = 0
+            _COOLDOWN_UNTIL = 0.0
+            _LAST_TRENDING_RESULT.pop("cooldown_reason", None)
+            _LAST_TRENDING_RESULT.pop("cooldown_until", None)
+
         if forced_cooldown_reason:
             _FAILURE_COUNT = _FAILURE_THRESHOLD
             cooldown_window = forced_cooldown_seconds or _FAILURE_COOLDOWN
