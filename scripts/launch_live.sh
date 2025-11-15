@@ -1863,6 +1863,13 @@ def live_trading_requested():
         state = _parse_bool(os.getenv(name))
         if state:
             return False
+    upcoming_mode = os.getenv("UPCOMING_CONTROLLER_MODE")
+    if upcoming_mode:
+        lowered = upcoming_mode.strip().lower()
+        if lowered == "paper":
+            return False
+        if lowered == "live":
+            return True
     for name in ("MODE", "SOLHUNTER_MODE"):
         raw = os.getenv(name)
         if raw:
