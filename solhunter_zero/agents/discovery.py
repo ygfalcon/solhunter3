@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import logging
 import os
+import re
 import time
 import urllib.parse
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Mapping
@@ -150,12 +151,103 @@ def _rpc_identity(url: Optional[str]) -> str:
         base = lower_text
 
     return f"{cluster}:{base}"
-_STATIC_FALLBACK = [
+_STATIC_FALLBACK_ENV_KEY = "DISCOVERY_STATIC_FALLBACK_TOKENS"
+_DEFAULT_STATIC_FALLBACK_MIN_SEEDS = 12
+_DEFAULT_STATIC_FALLBACK: List[str] = [
     "So11111111111111111111111111111111111111112",  # SOL
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERbGZ7FHYg5UvRntnQvQFNR7GWhLZNnzG",  # USDT
     "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
     "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",  # JUP
+    "7dHbWXmci3uvZ5mRSa3sLPj5FDQkptczkXZdSDmR6uFQ",  # stSOL
+    "mSoLzHC1RPuJgC2qYGMxE8VUipPNo8Gszrj8wCN7P1w",  # mSOL
+    "7vfCXTUXQ5sZevj4B6ipZDwBauCg1cjSXo59p7u2L2MF",  # soETH
+    "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",  # soBTC
+    "9wFFyRfR75bMusT2PwnVr2RAqvMwXUasPdD3Z2Y6X5VW",  # SRM
+    "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3dEHs66",  # RAY
+    "orcaEKTdK7VKaeQuhXA1iG1inEDXSLjYH5SMhtcCbLt",  # ORCA
+    "7xKXtg2FWu4SLWLGq1y8bDYt8BbwRwvf3X8sv6ELPvLt",  # SAMO
+    "MNDEeF3W9YKaL8Z1ZNnFWsyd4SBhMZ859WJbz1b7fGz",  # MNDE
+    "hntyVP9w9Jt8j6E7XEsVNpMPKS2X4WaNo7i6j7KduJw",  # HNT
+    "J4sWktT7pVcFqj3Adxpv8uKUaX4nHCqB6SmRwZmL6sdr",  # PYTH
+    "UXPhBoR4yYTGwFohHJM7KD3gjpDxb4JtXY6BskBFoxS",  # UXP
+    "DUSTawucrTsGU8hcqRdHDCbuYhCPADMLM2VcCb8VnFnQ",  # DUST
 ]
+
+
+def _resolve_static_fallback_min_seeds() -> int:
+    raw_value = os.getenv("DISCOVERY_STATIC_FALLBACK_MIN_SEEDS")
+    if raw_value in {None, ""}:
+        return _DEFAULT_STATIC_FALLBACK_MIN_SEEDS
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid DISCOVERY_STATIC_FALLBACK_MIN_SEEDS=%r; defaulting to %d",
+            raw_value,
+            _DEFAULT_STATIC_FALLBACK_MIN_SEEDS,
+        )
+        return _DEFAULT_STATIC_FALLBACK_MIN_SEEDS
+    if value <= 0:
+        logger.warning(
+            "DISCOVERY_STATIC_FALLBACK_MIN_SEEDS must be positive; defaulting to %d",
+            _DEFAULT_STATIC_FALLBACK_MIN_SEEDS,
+        )
+        return _DEFAULT_STATIC_FALLBACK_MIN_SEEDS
+    return value
+
+
+def _iter_fallback_tokens(raw_value: str | None) -> Iterable[str]:
+    if not raw_value:
+        return []
+    if not isinstance(raw_value, str):
+        raw_value = str(raw_value)
+    for part in re.split(r"[,\s]+", raw_value):
+        candidate = part.strip()
+        if candidate:
+            yield candidate
+
+
+def _load_static_fallback_tokens() -> List[str]:
+    seen: set[str] = set()
+    tokens: List[str] = []
+
+    def _add(raw: str) -> None:
+        canonical = canonical_mint(raw)
+        if not canonical or canonical in seen:
+            return
+        if not validate_mint(canonical):
+            logger.debug("Ignoring invalid static fallback token: %s", raw)
+            return
+        seen.add(canonical)
+        tokens.append(canonical)
+
+    env_tokens = list(_iter_fallback_tokens(os.getenv(_STATIC_FALLBACK_ENV_KEY)))
+    if env_tokens:
+        logger.debug(
+            "Loaded %d configured static discovery fallback token(s)",
+            len(env_tokens),
+        )
+    for token in env_tokens:
+        _add(token)
+    for token in _DEFAULT_STATIC_FALLBACK:
+        _add(token)
+
+    minimum = _resolve_static_fallback_min_seeds()
+    if len(tokens) < minimum:
+        logger.warning(
+            "Static fallback token pool below minimum (%d < %d); padding with defaults",
+            len(tokens),
+            minimum,
+        )
+        for token in _DEFAULT_STATIC_FALLBACK:
+            if len(tokens) >= minimum:
+                break
+            _add(token)
+    return tokens
+
+
+_STATIC_FALLBACK = _load_static_fallback_tokens()
 
 DEFAULT_DISCOVERY_METHOD = "helius"
 
