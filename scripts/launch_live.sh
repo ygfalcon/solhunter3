@@ -1780,6 +1780,7 @@ PY
 check_live_keypair_paths() {
   local keypair_report
   if ! keypair_report=$(CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" - <<'PY'
+import json
 import os
 import sys
 from pathlib import Path
@@ -1869,6 +1870,31 @@ for path, labels in candidates.items():
             continue
     except OSError as exc:  # pragma: no cover - filesystem edge cases
         issues.append((path, labels, f"is not accessible ({exc})"))
+        continue
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        issues.append((path, labels, f"could not be read ({exc})"))
+        continue
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        issues.append((path, labels, f"could not be decoded as JSON ({exc})"))
+        continue
+
+    if not isinstance(payload, list) or len(payload) != 64 or any(
+        not isinstance(item, int) for item in payload
+    ):
+        issues.append(
+            (
+                path,
+                labels,
+                "is not a valid Solana keypair (expected JSON array of 64 integers)",
+            )
+        )
+        continue
 
 if issues:
     parts = []

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -93,7 +94,7 @@ def test_launch_live_config_relative_keypair(tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     keypair_path = config_dir / "id.json"
-    keypair_path.write_text("[]", encoding="utf-8")
+    keypair_path.write_text(json.dumps([0] * 64), encoding="utf-8")
 
     config_path = config_dir / "live.toml"
     config_path.write_text("solana_keypair = \"id.json\"\n", encoding="utf-8")
@@ -125,6 +126,46 @@ def test_launch_live_config_relative_keypair(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == ""
     assert completed.stderr.strip() == ""
+
+
+def test_launch_live_keypair_invalid_json(tmp_path: Path) -> None:
+    keypair_path = tmp_path / "id.json"
+    keypair_path.write_text("not json", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["MODE"] = "live"
+    env["KEYPAIR_PATH"] = str(keypair_path)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", CHECK_LIVE_KEYPAIR_SNIPPET],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 1
+    assert "could not be decoded as JSON" in completed.stdout
+
+
+def test_launch_live_keypair_invalid_schema(tmp_path: Path) -> None:
+    keypair_path = tmp_path / "id.json"
+    keypair_path.write_text(json.dumps([0] * 10), encoding="utf-8")
+
+    env = os.environ.copy()
+    env["MODE"] = "live"
+    env["KEYPAIR_PATH"] = str(keypair_path)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", CHECK_LIVE_KEYPAIR_SNIPPET],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 1
+    assert "expected JSON array of 64 integers" in completed.stdout
 
 
 def test_launch_live_invalid_preflight_value(tmp_path: Path) -> None:
