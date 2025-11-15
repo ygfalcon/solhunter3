@@ -1253,6 +1253,72 @@ def test_offline_discovery_returns_static_fallback(monkeypatch, caplog):
     assert agent.last_details[tokens[0]]["fallback_reason"] == "static"
 
 
+def test_static_fallback_minimum_seed_count(monkeypatch):
+    _reset_cache()
+    monkeypatch.setenv(
+        "DISCOVERY_STATIC_FALLBACK_TOKENS",
+        ",".join(
+            [
+                "So11111111111111111111111111111111111111112",
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            ]
+        ),
+    )
+    monkeypatch.setenv("DISCOVERY_STATIC_FALLBACK_MIN_SEEDS", "5")
+
+    tokens = discovery_mod._load_static_fallback_tokens()
+
+    assert tokens[:2] == [
+        discovery_mod.canonical_mint("So11111111111111111111111111111111111111112"),
+        discovery_mod.canonical_mint("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+    ]
+    assert len(tokens) >= 5
+
+
+def test_offline_static_fallback_uses_configured_tokens(monkeypatch):
+    _reset_cache()
+    monkeypatch.setenv(
+        "DISCOVERY_STATIC_FALLBACK_TOKENS",
+        ",".join(
+            [
+                VALID_MINT,
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            ]
+        ),
+    )
+    monkeypatch.setenv("DISCOVERY_STATIC_FALLBACK_MIN_SEEDS", "4")
+
+    configured = discovery_mod._load_static_fallback_tokens()
+    monkeypatch.setattr(discovery_mod, "_STATIC_FALLBACK", configured)
+
+    agent = DiscoveryAgent()
+    agent.limit = 6
+
+    tokens = asyncio.run(agent.discover_tokens(offline=True))
+
+    assert tokens[:2] == [
+        VALID_MINT,
+        discovery_mod.canonical_mint("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+    ]
+    assert len(tokens) >= 4
+
+
+def test_offline_static_fallback_meets_minimum(monkeypatch):
+    _reset_cache()
+    monkeypatch.setenv("DISCOVERY_STATIC_FALLBACK_TOKENS", VALID_MINT)
+    monkeypatch.setenv("DISCOVERY_STATIC_FALLBACK_MIN_SEEDS", "8")
+
+    configured = discovery_mod._load_static_fallback_tokens()
+    monkeypatch.setattr(discovery_mod, "_STATIC_FALLBACK", configured)
+
+    agent = DiscoveryAgent()
+    agent.limit = 20
+
+    tokens = asyncio.run(agent.discover_tokens(offline=True))
+
+    assert len(tokens) >= 8
+
+
 def test_offline_discovery_logs_fallback_reason(monkeypatch):
     _reset_cache()
     agent = DiscoveryAgent()

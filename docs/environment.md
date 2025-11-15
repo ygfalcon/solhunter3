@@ -52,6 +52,8 @@ files unless the loader is invoked with `overwrite=True`.
 | `DISCOVERY_SOCIAL_LIMIT` | `12` | Maximum number of social tokens to merge into discovery |
 | `DISCOVERY_SOCIAL_MIN_MENTIONS` | `2` | Minimum mention count required for social candidates |
 | `DISCOVERY_SOCIAL_SAMPLE_LIMIT` | `3` | Maximum example snippets stored per social token |
+| `DISCOVERY_STATIC_FALLBACK_MIN_SEEDS` | `12` | Minimum number of seed tokens returned when every discovery source fails |
+| `DISCOVERY_STATIC_FALLBACK_TOKENS` | `SOL, USDC, USDT, BONK, JUP, stSOL, ...` | Comma or newline separated list of static discovery fallback mints |
 | `DISCOVERY_MAX_BACKOFF` | `60` | Maximum cooldown applied to repeated empty discovery fetches (set to `0` to disable) |
 | `DYNAMIC_CONCURRENCY_INTERVAL` | `` | Interval for dynamic concurrency |
 | `EDGE_CACHE_TTL` | `60` | TTL for edge cache cache |
