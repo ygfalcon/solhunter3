@@ -133,6 +133,21 @@ class DiscoveryService:
         self._limit_disabled_logged = False
         self._primed = False
         self._last_metadata_fingerprints: Dict[str, str] = {}
+        raw_details_cap = os.getenv("DISCOVERY_LAST_DETAILS_CAP")
+        details_cap: Optional[int] | None
+        if raw_details_cap in {None, ""}:
+            details_cap = 4096
+        else:
+            try:
+                parsed_cap = int(raw_details_cap)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_LAST_DETAILS_CAP=%r; using default", raw_details_cap
+                )
+                details_cap = 4096
+            else:
+                details_cap = None if parsed_cap <= 0 else parsed_cap
+        self._last_details_cap: Optional[int] = details_cap
 
     async def start(self) -> None:
         if self.limit == 0:
@@ -435,12 +450,62 @@ class DiscoveryService:
         if metadata_fingerprints:
             self._last_metadata_fingerprints.update(metadata_fingerprints)
         # Drop metadata fingerprints for tokens no longer present in the sequence.
+        removed_tokens: list[str] = []
         for token in list(self._last_metadata_fingerprints):
             if token not in seq_set:
                 self._last_metadata_fingerprints.pop(token, None)
+                removed_tokens.append(token)
+        if removed_tokens or (self._last_details_cap is not None and self._last_details_cap > 0):
+            self._prune_agent_last_details(seq_set, removed_tokens)
         self._last_emitted = list(seq)
         self._last_emitted_set = seq_set
         self._last_emitted_size = seq_size
+
+    def _prune_agent_last_details(
+        self, current_tokens: frozenset[str], removed_tokens: Iterable[str]
+    ) -> None:
+        if not hasattr(self._agent, "last_details"):
+            return
+        details_obj = getattr(self._agent, "last_details")
+        if not isinstance(details_obj, dict):
+            return
+
+        for token in removed_tokens:
+            details_obj.pop(token, None)
+
+        for token in list(details_obj):
+            if token not in current_tokens:
+                details_obj.pop(token, None)
+
+        if not details_obj:
+            return
+
+        cap = self._last_details_cap
+        if cap is None or cap <= 0 or len(details_obj) <= cap:
+            return
+
+        overflow = len(details_obj) - cap
+        if overflow <= 0:
+            return
+
+        # Preferentially drop entries that are no longer part of the current token set.
+        for token in list(details_obj):
+            if overflow <= 0:
+                break
+            if token in current_tokens:
+                continue
+            details_obj.pop(token, None)
+            overflow -= 1
+
+        if overflow <= 0:
+            return
+
+        # If we still exceed the cap, drop the oldest entries regardless of membership.
+        for token in list(details_obj):
+            if overflow <= 0:
+                break
+            details_obj.pop(token, None)
+            overflow -= 1
 
     def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
         payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]

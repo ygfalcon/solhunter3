@@ -62,6 +62,35 @@ def test_emit_tokens_detects_metadata_changes():
     asyncio.run(runner())
 
 
+def test_emit_tokens_purges_stale_details():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        token_a = "So11111111111111111111111111111111111111112"
+        token_b = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        agent = types.SimpleNamespace(
+            last_method="unit-test",
+            last_details={
+                token_a: {"price": 1.0},
+                token_b: {"price": 2.0},
+            },
+        )
+        service = DiscoveryService(queue, emit_batch_size=10)
+        service._agent = agent
+
+        await service._emit_tokens([token_a, token_b], fresh=True)
+        first_batch = queue.get_nowait()
+        assert {candidate.token for candidate in first_batch} == {token_a, token_b}
+
+        await service._emit_tokens([token_b], fresh=True)
+
+        assert queue.qsize() == 1
+        second_batch = queue.get_nowait()
+        assert {candidate.token for candidate in second_batch} == {token_b}
+        assert token_a not in agent.last_details
+
+    asyncio.run(runner())
+
+
 def test_emit_tokens_ignores_metadata_changes_when_not_fresh():
     async def runner() -> None:
         queue: asyncio.Queue[list] = asyncio.Queue()
