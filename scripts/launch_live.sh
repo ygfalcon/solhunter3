@@ -1741,6 +1741,17 @@ placeholder_prefixes = (
     "PLACEHOLDER",
     "TODO",
 )
+high_risk_value_patterns = [
+    re.compile(
+        r"""
+        ^(?P<scheme>[a-z][a-z0-9+.-]*)://
+        (?P<userinfo>[^:@\s]+:[^@/\s]+)@
+        """,
+        re.IGNORECASE | re.VERBOSE,
+    ),
+    re.compile(r"-----BEGIN [A-Z0-9 ]+-----"),
+    re.compile(r"ssh-(rsa|ed25519|dss) [A-Za-z0-9+/]+=*(?: .*)?", re.IGNORECASE),
+]
 values: dict[str, str] = {}
 for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
     line = raw_line.strip()
@@ -1768,7 +1779,10 @@ for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
 manifest = []
 for key, value in sorted(values.items()):
     lowered = key.lower()
-    if any(tok in lowered for tok in ("secret", "key", "token", "pass", "private", "pwd")):
+    value_is_high_risk = any(pat.search(value) for pat in high_risk_value_patterns)
+    if value_is_high_risk or any(
+        tok in lowered for tok in ("secret", "key", "token", "pass", "private", "pwd")
+    ):
         masked = "***"
     else:
         masked = value
