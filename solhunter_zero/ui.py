@@ -3975,6 +3975,8 @@ class UIServer:
         ready: Queue[BaseException | None] = Queue(maxsize=1)
         self._serve_forever_started.clear()
 
+        startup_succeeded = False
+
         def _serve() -> None:
             server: BaseWSGIServer | None = None
             reuse_enabled = False
@@ -4067,39 +4069,44 @@ class UIServer:
         self._ready_timeout = ready_timeout
 
         try:
-            result = ready.get(timeout=ready_timeout)
-        except Empty as exc:
-            self._thread = None
-            thread.join(timeout=2)
-            raise RuntimeError(
-                f"Timed out waiting for UI server to bind on {self.host}:{self.port}"
-            ) from exc
+            try:
+                result = ready.get(timeout=ready_timeout)
+            except Empty as exc:
+                self._thread = None
+                thread.join(timeout=2)
+                raise RuntimeError(
+                    f"Timed out waiting for UI server to bind on {self.host}:{self.port}"
+                ) from exc
 
-        if isinstance(result, BaseException):
-            thread.join(timeout=2)
-            self._thread = None
-            if isinstance(result, SystemExit) and isinstance(result.__context__, OSError):
-                os_error = result.__context__
-                errno_value = os_error.errno if os_error.errno is not None else "unknown"
-                details = os_error.strerror or str(os_error)
-                message = (
-                    f"Failed to start UI server on {self.host}:{self.port} "
-                    f"(errno {errno_value}): {details}"
-                )
-                raise RuntimeError(message) from os_error
-            if isinstance(result, OSError):
-                errno_value = result.errno if result.errno is not None else "unknown"
-                details = result.strerror or str(result)
-                message = (
-                    f"Failed to start UI server on {self.host}:{self.port} "
-                    f"(errno {errno_value}): {details}"
-                )
-                raise RuntimeError(message) from result
-            if isinstance(result, SystemExit) and result.__context__ is not None:
-                raise result.__context__ from None  # type: ignore[misc]
-            raise result
+            if isinstance(result, BaseException):
+                thread.join(timeout=2)
+                self._thread = None
+                if isinstance(result, SystemExit) and isinstance(result.__context__, OSError):
+                    os_error = result.__context__
+                    errno_value = os_error.errno if os_error.errno is not None else "unknown"
+                    details = os_error.strerror or str(os_error)
+                    message = (
+                        f"Failed to start UI server on {self.host}:{self.port} "
+                        f"(errno {errno_value}): {details}"
+                    )
+                    raise RuntimeError(message) from os_error
+                if isinstance(result, OSError):
+                    errno_value = result.errno if result.errno is not None else "unknown"
+                    details = result.strerror or str(result)
+                    message = (
+                        f"Failed to start UI server on {self.host}:{self.port} "
+                        f"(errno {errno_value}): {details}"
+                    )
+                    raise RuntimeError(message) from result
+                if isinstance(result, SystemExit) and result.__context__ is not None:
+                    raise result.__context__ from None  # type: ignore[misc]
+                raise result
 
-        _register_ui_server(self)
+            _register_ui_server(self)
+            startup_succeeded = True
+        finally:
+            if not startup_succeeded:
+                _teardown_ui_environment()
 
     def stop(self) -> None:
         try:
