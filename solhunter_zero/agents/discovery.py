@@ -1065,6 +1065,17 @@ class DiscoveryAgent:
         if not cached:
             return []
 
+        cache_ts = float(_CACHE.get("ts", 0.0))
+        cache_age = time.time() - cache_ts if cache_ts > 0.0 else float("inf")
+        ttl = float(self.cache_ttl)
+        if ttl <= 0.0 or cache_age >= ttl:
+            logger.warning(
+                "DiscoveryAgent cached tokens expired (age=%.2fs >= ttl=%.2fs); using static fallback",
+                cache_age,
+                ttl,
+            )
+            return []
+
         cached_identity = str(_CACHE.get("rpc_identity") or "")
         current_identity = _rpc_identity(self.rpc_url)
         identity_matches = bool(
