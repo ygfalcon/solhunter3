@@ -903,7 +903,7 @@ def test_cached_details_hydrate_with_weights(monkeypatch):
     assert detail["score_breakdown"][0]["value"] == 1.0
 
 
-def test_stale_cache_fallback_preserves_metadata(monkeypatch):
+def test_stale_cache_triggers_static_fallback(monkeypatch):
     _reset_cache()
 
     agent = DiscoveryAgent()
@@ -911,7 +911,8 @@ def test_stale_cache_fallback_preserves_metadata(monkeypatch):
     agent.max_attempts = 1
     identity = discovery_mod._rpc_identity(agent.rpc_url)
     stale_ts = time.time() - 10.0
-    features = {"alpha": 0.5}
+    static_token = "Fallback111111111111111111111111111111111111111"
+    static_calls = {"value": 0}
 
     async def empty_discover(self, *, method, offline, token_file):
         return [], {}
@@ -919,20 +920,21 @@ def test_stale_cache_fallback_preserves_metadata(monkeypatch):
     async def passthrough_social(self, tokens, details, *, offline=False):
         return tokens, details or {}
 
+    def fake_static_fallback(self):
+        static_calls["value"] += 1
+        return [static_token]
+
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", empty_discover)
     monkeypatch.setattr(DiscoveryAgent, "_apply_social_mentions", passthrough_social)
-    monkeypatch.setattr(
-        discovery_mod,
-        "get_scoring_context",
-        lambda: (0.0, {"alpha": 2.0}),
-    )
+    monkeypatch.setattr(DiscoveryAgent, "_static_fallback_tokens", fake_static_fallback)
+    monkeypatch.setattr(discovery_mod, "get_scoring_context", lambda: (0.0, {}))
 
     async def seed_cache():
         async with discovery_mod._get_cache_lock():
             discovery_mod._CACHE.update(
                 {
                     "tokens": [VALID_MINT],
-                    "details": {VALID_MINT: {"score_features": features}},
+                    "details": {VALID_MINT: {"cached": True}},
                     "ts": stale_ts,
                     "limit": agent.limit,
                     "method": agent.default_method,
@@ -944,15 +946,14 @@ def test_stale_cache_fallback_preserves_metadata(monkeypatch):
 
     tokens = asyncio.run(agent.discover_tokens())
 
-    assert tokens == [VALID_MINT]
-    detail = agent.last_details[VALID_MINT]
-    expected_score = 1.0 / (1.0 + math.exp(-1.0))
-    assert math.isclose(detail["score"], expected_score, rel_tol=1e-6)
-    assert detail["cached"] is True
-    assert detail["cache_stale"] is True
-    assert detail["fallback_reason"] == "cache"
-    sources = detail["sources"]
-    assert "cache" in sources and "cache:stale" in sources and "fallback" in sources
+    assert tokens == [static_token]
+    assert static_calls["value"] == 1
+    detail = agent.last_details[static_token]
+    assert detail["fallback_reason"] == "static"
+    assert detail.get("cached", False) is False
+    assert detail.get("cache_stale", False) is False
+    sources = set(detail.get("sources", []))
+    assert sources == {"fallback"}
     assert agent.last_fallback_used is True
 
 
@@ -1021,11 +1022,17 @@ def test_cached_fallback_cycle_clears_cache(monkeypatch):
         del method, offline, token_file
         return [], {}
 
+    static_tokens = ["Fallback111111111111111111111111111111111111111"]
+
+    def fake_static_fallback(self):
+        return list(static_tokens)
+
     monkeypatch.setattr(DiscoveryAgent, "_discover_once", fail_discover_once)
+    monkeypatch.setattr(DiscoveryAgent, "_static_fallback_tokens", fake_static_fallback)
 
     tokens = asyncio.run(agent.discover_tokens())
 
-    assert tokens == cached_tokens
+    assert tokens == static_tokens
     assert agent.last_fallback_used is True
     assert discovery_mod._CACHE["tokens"] == []
     assert discovery_mod._CACHE["details"] == {}
