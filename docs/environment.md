@@ -241,6 +241,21 @@ With this split configuration, health endpoints and WebSocket URLs in the REST
 manifest reflect the proxy address instead of defaulting to `127.0.0.1`, so SPA
 clients can connect without hard-coded overrides.
 
+### UI WebSocket authentication
+
+When exposing the UI websocket endpoints beyond localhost, require callers to
+authenticate before the server streams metadata or backlog messages:
+
+- Set `UI_WS_AUTH_TOKEN` to a shared secret. Clients must pass
+  `Authorization: Bearer <token>` or append `?token=<token>`/`?auth=<token>` to
+  the websocket URL.
+- For time-bound, session-style links set `UI_WS_SESSION_SECRET` and optionally
+  `UI_WS_SESSION_TTL` (defaults to 300 seconds). Clients include `session`,
+  `ts` (Unix seconds), and `sig` query params where `sig` is the
+  `HMAC_SHA256(secret, "<session>:<path>:<channel>:<ts>")`. Connections with
+  invalid signatures or stale timestamps are closed with code `4401` before any
+  meta frames are sent.
+
 ## PyTorch Metal versions
 
 When running on Apple Silicon the Metal builds of ``torch`` and

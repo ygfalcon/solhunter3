@@ -1,9 +1,13 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
+import socket
 import threading
 import time
+import types
 from typing import Any, Dict, Iterable
 
 import pytest
@@ -453,6 +457,41 @@ def test_health_endpoint_reports_ws_unavailable(client):
         ui._AUTO_WS_ENV_CHANNELS.clear()
 
 
+def test_ws_handler_rejects_unauthorized(monkeypatch):
+    websockets = pytest.importorskip("websockets")
+    ws_exceptions = pytest.importorskip("websockets.exceptions")
+    state = ui._WS_CHANNELS["events"]
+
+    monkeypatch.setenv("UI_WS_AUTH_TOKEN", "letmein")
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    _ = ui._start_channel(
+        "events", host="127.0.0.1", port=port, queue_size=8, ping_interval=20.0, ping_timeout=20.0
+    )
+
+    try:
+        assert state.ready.wait(timeout=5)
+        uri = f"ws://127.0.0.1:{state.port}/ws/events"
+
+        async def attempt() -> None:
+            with pytest.raises(ws_exceptions.ConnectionClosedError) as excinfo:
+                async with websockets.connect(uri) as ws:
+                    await ws.recv()
+
+            assert excinfo.value.code == 4401
+            assert excinfo.value.reason == "unauthorized"
+
+        asyncio.run(attempt())
+    finally:
+        ui._shutdown_state(state)
+        state.ready.clear()
+        state.ready_status = "stopped"
+        state.ready_detail = None
+        ui._clear_auto_env_values_for_channels(ui._WS_CHANNELS.keys())
+
+
 def test_logs_tail_endpoint(monkeypatch, client):
     state = _active_state()
     monkeypatch.setattr(state, "logs_provider", lambda: [{"msg": "a"}, {"msg": "b"}])
@@ -467,6 +506,37 @@ def test_logs_tail_endpoint_zero_lines(monkeypatch, client):
     resp = client.get("/api/logs/tail?lines=0")
     assert resp.status_code == 200
     assert resp.get_json() == []
+
+
+def test_ws_connection_authorized(monkeypatch):
+    parsed = ui.urlparse("/ws/events")
+    websocket = types.SimpleNamespace(request_headers={"Authorization": "Bearer secret"})
+
+    monkeypatch.setenv("UI_WS_AUTH_TOKEN", "secret")
+    ok, reason = ui._ws_connection_authorized(websocket, parsed, "events")
+
+    assert ok is True
+    assert reason is None
+
+
+def test_ws_signed_query_authorization(monkeypatch):
+    parsed = ui.urlparse("/ws/events")
+    secret = "s3cr3t"
+    session_id = "abc123"
+    now = int(time.time())
+    payload = f"{session_id}:{parsed.path}:{'events'}:{now}"
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    signed = ui.urlparse(
+        f"/ws/events?session={session_id}&ts={now}&sig={signature}"
+    )
+
+    websocket = types.SimpleNamespace(request_headers={})
+    monkeypatch.setenv("UI_WS_SESSION_SECRET", secret)
+
+    ok, reason = ui._ws_connection_authorized(websocket, signed, "events")
+
+    assert ok is True
+    assert reason is None
 
 
 def test_token_depth_endpoint(monkeypatch, client):

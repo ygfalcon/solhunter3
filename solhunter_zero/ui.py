@@ -6,6 +6,7 @@ import contextlib
 import errno
 import functools
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -1543,6 +1544,86 @@ else:
     if BACKLOG_MAX < 0:
         log.warning("Negative backlog %s not allowed; using default 64", BACKLOG_MAX)
         BACKLOG_MAX = 64
+
+
+def _first_query_param(values: Mapping[str, list[str]], key: str) -> str | None:
+    entries = values.get(key)
+    if not entries:
+        return None
+    for entry in entries:
+        if entry not in (None, ""):
+            return str(entry)
+    return None
+
+
+def _parse_session_ttl(default: float = 300.0) -> float:
+    ttl_value = os.getenv("UI_WS_SESSION_TTL")
+    ttl = _maybe_float(ttl_value)
+    if ttl is None or ttl <= 0:
+        return default
+    return ttl
+
+
+def _validate_ws_session_signature(
+    secret: str,
+    parsed: Any,
+    query_params: Mapping[str, list[str]],
+    channel: str,
+) -> bool:
+    session_id = _first_query_param(query_params, "session") or _first_query_param(
+        query_params, "auth"
+    )
+    ts_raw = _first_query_param(query_params, "ts") or _first_query_param(
+        query_params, "expires"
+    )
+    signature = _first_query_param(query_params, "sig") or _first_query_param(
+        query_params, "signature"
+    )
+
+    if not (session_id and ts_raw and signature):
+        return False
+
+    try:
+        timestamp = float(ts_raw)
+    except (TypeError, ValueError):
+        return False
+
+    now = time.time()
+    ttl = _parse_session_ttl()
+    if timestamp < now - ttl or timestamp > now + ttl:
+        return False
+
+    payload = f"{session_id}:{parsed.path or '/'}:{channel}:{int(timestamp)}"
+    expected = hmac.new(
+        secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+def _ws_connection_authorized(websocket: Any, parsed: Any, channel: str) -> tuple[bool, str | None]:
+    token = os.getenv("UI_WS_AUTH_TOKEN")
+    secret = os.getenv("UI_WS_SESSION_SECRET")
+    if not token and not secret:
+        return True, None
+
+    headers = getattr(websocket, "request_headers", {}) or {}
+    auth_header = headers.get("Authorization") or headers.get("authorization")
+    if token and auth_header:
+        header_value = auth_header.strip()
+        if header_value == token or header_value == f"Bearer {token}":
+            return True, None
+
+    query_params = parse_qs(getattr(parsed, "query", "") or "")
+    token_param = _first_query_param(query_params, "token") or _first_query_param(
+        query_params, "auth"
+    )
+    if token and token_param == token:
+        return True, None
+
+    if secret and _validate_ws_session_signature(secret, parsed, query_params, channel):
+        return True, None
+
+    return False, "unauthorized"
 _ADDR_IN_USE_ERRNOS = {errno.EADDRINUSE}
 
 
@@ -2766,6 +2847,11 @@ def _start_channel(
             }
             if req_path not in allowed_paths:
                 await websocket.close(code=1008, reason="invalid path")
+                return
+            authorized, reason = _ws_connection_authorized(websocket, parsed, channel)
+            if not authorized:
+                with contextlib.suppress(Exception):
+                    await websocket.close(code=4401, reason=reason or "unauthorized")
                 return
             with state.lock:
                 state.clients.add(websocket)
