@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -91,6 +92,53 @@ def _clear_state_http_binding(state: "UIState" | None) -> None:
 _QUEUE_DROP_WARNING_INTERVAL = float(os.getenv("UI_QUEUE_DROP_WARNING_INTERVAL", "10") or 10.0)
 
 DEFAULT_UI_HTTP_READY_TIMEOUT = 15.0
+
+
+def _build_http_ssl_context() -> ssl.SSLContext | None:
+    """Return an SSL context for the UI HTTP server when certificates are provided.
+
+    If :envvar:`UI_HTTP_SCHEME` (or :envvar:`UI_SCHEME`) is set to ``https`` but no
+    certificate material is available, a :class:`RuntimeError` is raised with
+    guidance on how to enable HTTPS.
+    """
+
+    cert_path = (
+        os.getenv("UI_HTTP_CERT_FILE")
+        or os.getenv("UI_HTTP_CERT_PATH")
+        or os.getenv("UI_CERT_FILE")
+        or os.getenv("UI_CERT_PATH")
+    )
+    key_path = (
+        os.getenv("UI_HTTP_KEY_FILE")
+        or os.getenv("UI_HTTP_KEY_PATH")
+        or os.getenv("UI_KEY_FILE")
+        or os.getenv("UI_KEY_PATH")
+    )
+
+    scheme = (
+        os.getenv("UI_HTTP_SCHEME")
+        or os.getenv("UI_SCHEME")
+        or "http"
+    ).strip().lower()
+
+    if cert_path or key_path:
+        if not cert_path:
+            raise RuntimeError(
+                "UI_HTTP_CERT_FILE (or UI_HTTP_CERT_PATH) must be set when configuring HTTPS"
+            )
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            context.load_cert_chain(certfile=cert_path, keyfile=key_path or None)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load UI TLS certificate: {exc}") from exc
+        return context
+
+    if scheme == "https":
+        raise RuntimeError(
+            "UI_HTTP_SCHEME=https requires TLS termination or UI_HTTP_CERT_FILE/UI_HTTP_KEY_FILE"
+        )
+
+    return None
 
 if Counter is not None:  # pragma: no branch - optional metrics
     _WS_QUEUE_DROP_TOTAL = Counter(
@@ -4185,7 +4233,24 @@ class UIServer:
             server: BaseWSGIServer | None = None
             reuse_enabled = False
             try:
+                ssl_context = _build_http_ssl_context()
+
                 server = make_server(self.host, self.port, self.app)
+
+                if ssl_context is not None:
+                    socket_obj = getattr(server, "socket", None)
+                    if socket_obj is None:
+                        raise RuntimeError(
+                            "UI HTTP TLS requested but no server socket is available"
+                        )
+                    try:
+                        server.socket = ssl_context.wrap_socket(  # type: ignore[assignment]
+                            socket_obj, server_side=True
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Failed to wrap UI server socket with TLS: {exc}"
+                        ) from exc
 
                 sock = getattr(server, "socket", None)
                 if (

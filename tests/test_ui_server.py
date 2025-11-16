@@ -1,8 +1,14 @@
+import contextlib
 import errno
 import importlib
+import json
 import socket
+import ssl
+import subprocess
 import sys
 import threading
+import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +51,72 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         assert server.serve_forever_started.wait(timeout=server.ready_timeout)
         assert state.http_host in {"127.0.0.1", "localhost"}
         assert state.http_port == server.port
+    finally:
+        server.stop()
+
+
+def test_ui_server_https_requires_cert(monkeypatch) -> None:
+    monkeypatch.setenv("UI_HTTP_SCHEME", "https")
+    monkeypatch.delenv("UI_HTTP_CERT_FILE", raising=False)
+    monkeypatch.delenv("UI_HTTP_KEY_FILE", raising=False)
+
+    server = UIServer(UIState(), host="127.0.0.1", port=0)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server.start()
+
+    message = str(excinfo.value)
+    assert "UI_HTTP_SCHEME=https" in message
+    assert "UI_HTTP_CERT_FILE" in message
+
+    assert server._server is None
+    assert server._thread is None or not server._thread.is_alive()
+
+
+def test_ui_server_https_with_local_cert(monkeypatch, tmp_path) -> None:
+    cert_path = Path(tmp_path) / "cert.pem"
+    key_path = Path(tmp_path) / "key.pem"
+
+    openssl_cmd = [
+        "openssl",
+        "req",
+        "-x509",
+        "-nodes",
+        "-newkey",
+        "rsa:2048",
+        "-keyout",
+        str(key_path),
+        "-out",
+        str(cert_path),
+        "-days",
+        "1",
+        "-subj",
+        "/CN=localhost",
+    ]
+
+    try:
+        subprocess.run(openssl_cmd, check=True, capture_output=True)
+    except FileNotFoundError:
+        pytest.skip("openssl not available for generating HTTPS certificates")
+
+    monkeypatch.setenv("UI_HTTP_SCHEME", "https")
+    monkeypatch.setenv("UI_HTTP_CERT_FILE", str(cert_path))
+    monkeypatch.setenv("UI_HTTP_KEY_FILE", str(key_path))
+
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+    server.start()
+
+    try:
+        url = f"https://{server.host}:{server.port}/health/runtime"
+        context = ssl._create_unverified_context()
+        with contextlib.closing(
+            urllib.request.urlopen(url, context=context, timeout=5)
+        ) as response:
+            payload = json.load(response)
+
+        assert isinstance(payload, dict)
+        assert "ok" in payload
     finally:
         server.stop()
 
