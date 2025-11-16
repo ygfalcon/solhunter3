@@ -43,13 +43,6 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-_MAX_POS_USD = _env_float("MAX_POSITION_USD_PER_TOKEN", 5000.0)
-_MAX_NOTIONAL_USD = _env_float("MAX_NOTIONAL_USD_PER_ORDER", 2000.0)
-_MAX_OPEN_ORDERS = _env_int("MAX_OPEN_ORDERS", 32)
-_ALLOW_PARTIAL_SELL = _env_bool("ALLOW_PARTIAL_SELL", True)
-_DRY_RUN = _env_bool("TRADING_DRY_RUN", False)
-
-
 class _TransientExecutionError(RuntimeError):
     """Internal marker for retryable failures."""
 
@@ -122,6 +115,11 @@ class ExecutionService:
         self._receipt_timeout = _env_float(
             "EXECUTION_RECEIPT_TIMEOUT", default_receipt_timeout
         )
+        self._max_pos_usd = _env_float("MAX_POSITION_USD_PER_TOKEN", 5000.0)
+        self._max_notional_usd = _env_float("MAX_NOTIONAL_USD_PER_ORDER", 2000.0)
+        self._max_open_orders = _env_int("MAX_OPEN_ORDERS", 32)
+        self._allow_partial_sell = _env_bool("ALLOW_PARTIAL_SELL", True)
+        self._dry_run = _env_bool("TRADING_DRY_RUN", False)
 
     async def start(self) -> None:
         if self._task is None:
@@ -260,7 +258,7 @@ class ExecutionService:
                 },
             )
 
-        if _DRY_RUN:
+        if self._dry_run:
             finished = time.perf_counter()
             receipt_metadata = {
                 "bundle_id": bundle_id,
@@ -450,23 +448,25 @@ class ExecutionService:
         except Exception:
             side, qty, notional = None, 0.0, 0.0
 
-        if notional and notional > _MAX_NOTIONAL_USD:
-            errors.append(f"order notional exceeds cap: {notional} > {_MAX_NOTIONAL_USD}")
+        if notional and notional > self._max_notional_usd:
+            errors.append(
+                f"order notional exceeds cap: {notional} > {self._max_notional_usd}"
+            )
 
         open_orders = getattr(port, "open_orders", 0) if port else 0
-        if isinstance(open_orders, int) and open_orders >= _MAX_OPEN_ORDERS:
+        if isinstance(open_orders, int) and open_orders >= self._max_open_orders:
             errors.append("max open orders reached")
 
         try:
             pos_usd = (getattr(port, "position_value_usd", {}) or {}).get(bundle.token, 0.0) if port else 0.0
-            if pos_usd and (pos_usd + max(notional, 0.0)) > _MAX_POS_USD and side in {"buy", "long"}:
+            if pos_usd and (pos_usd + max(notional, 0.0)) > self._max_pos_usd and side in {"buy", "long"}:
                 errors.append(
-                    f"position cap would be exceeded: {pos_usd}+{notional} > {_MAX_POS_USD}"
+                    f"position cap would be exceeded: {pos_usd}+{notional} > {self._max_pos_usd}"
                 )
         except Exception:
             pass
 
-        if side in {"sell", "short"} and _ALLOW_PARTIAL_SELL and port:
+        if side in {"sell", "short"} and self._allow_partial_sell and port:
             try:
                 held_qty = (getattr(port, "position_qty", {}) or {}).get(bundle.token, 0.0)
                 if held_qty is not None and qty > held_qty > 0:
