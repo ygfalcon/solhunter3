@@ -95,17 +95,19 @@ class DiscoveryStage:
     async def submit(self, candidate: DiscoveryCandidate) -> bool:
         """Validate and forward ``candidate`` if it passes all gates."""
 
-        async with self._lock:
-            accepted = False
-            deduped = False
+        accepted = False
+        deduped = False
+        emit_candidate: DiscoveryCandidate | None = None
+        rejected = False
 
+        async with self._lock:
             self._maybe_reset_bloom()
 
             if self._breaker.is_open:
                 log.debug("Discovery circuit breaker open; dropping %s", candidate.mint)
             elif not self._validate(candidate.mint):
                 log.debug("Rejected discovery candidate %s", candidate.mint)
-                self._record_failure()
+                rejected = True
             else:
                 if not self._bloom.add(candidate.mint):
                     deduped = True
@@ -139,16 +141,21 @@ class DiscoveryStage:
                 if deduped:
                     self._metrics.dedupe_drops += 1
                 else:
-                    try:
-                        await self._emit(candidate)
-                    except Exception:  # pragma: no cover - defensive
-                        log.exception(
-                            "Failed to emit discovery candidate %s", candidate.mint
-                        )
-                        self._record_failure()
-                    else:
-                        self._record_success()
-                        accepted = True
+                    emit_candidate = candidate
+
+        if rejected:
+            self._record_failure()
+        elif emit_candidate:
+            try:
+                await self._emit(emit_candidate)
+            except Exception:  # pragma: no cover - defensive
+                log.exception(
+                    "Failed to emit discovery candidate %s", candidate.mint
+                )
+                self._record_failure()
+            else:
+                self._record_success()
+                accepted = True
 
         self._forward_metrics()
         return accepted
