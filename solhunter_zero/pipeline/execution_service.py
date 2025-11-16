@@ -6,7 +6,7 @@ import inspect
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, List, Optional
+from typing import Any, Awaitable, Callable, List, Mapping, Optional, Sequence
 
 from ..event_bus import publish
 from ..lru import TTLCache
@@ -14,6 +14,8 @@ from ..schemas import ActionExecuted
 from .types import ActionBundle, ExecutionReceipt
 
 log = logging.getLogger(__name__)
+
+_DEFAULT_VENUES: list[str] = ["raydium", "orca", "jupiter", "phoenix"]
 
 
 def _env_float(name: str, default: float) -> float:
@@ -74,9 +76,18 @@ class ExecutionService:
         *,
         lane_workers: int = 2,
         on_receipt: Optional[Callable[[ExecutionReceipt], Awaitable[None] | None]] = None,
+        config: Mapping[str, Any] | None = None,
     ) -> None:
         self.input_queue = input_queue
         self.agent_manager = agent_manager
+        self._config = dict(config) if config is not None else {}
+        env_venues = os.getenv("EXECUTION_VENUES")
+        self._configured_venues = self._normalize_venues(
+            self._config.get("execution_venues")
+            or self._config.get("venue_chain")
+            or self._config.get("venues")
+            or env_venues
+        )
         self._fast_mode = os.getenv("FAST_PIPELINE_MODE", "").strip().lower() in {
             "1",
             "true",
@@ -219,6 +230,60 @@ class ExecutionService:
         except Exception:  # pragma: no cover - defensive logging
             log.exception("Receipt callback failed")
 
+    @staticmethod
+    def _normalize_venues(raw: Any) -> list[str]:
+        if raw is None:
+            return []
+        if isinstance(raw, Mapping):
+            for key in ("execution_venues", "venue_chain", "venues"):
+                if key in raw:
+                    return ExecutionService._normalize_venues(raw.get(key))
+            return []
+        if isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray, str)):
+            return [str(item).strip() for item in raw if str(item).strip()]
+        if isinstance(raw, str):
+            raw_list = raw.replace(";", ",").split(",")
+            return [item.strip() for item in raw_list if item.strip()]
+        return []
+
+    def _build_venue_chain(self, bundle_metadata: Mapping[str, Any] | None) -> list[str]:
+        venues: list[str] = []
+        seen: set[str] = set()
+
+        def _extend(candidates: Sequence[str] | None) -> None:
+            if not candidates:
+                return
+            for venue in candidates:
+                try:
+                    candidate = str(venue).strip()
+                except Exception:
+                    continue
+                if not candidate:
+                    continue
+                key = candidate.lower()
+                if key in seen:
+                    continue
+                venues.append(candidate)
+                seen.add(key)
+
+        metadata = bundle_metadata or {}
+        venue_hint = metadata.get("venue_hint")
+        if venue_hint:
+            _extend([str(venue_hint)])
+
+        bundle_chain = self._normalize_venues(
+            metadata.get("venue_chain") or metadata.get("venues")
+        )
+        _extend(bundle_chain)
+
+        manager_meta = getattr(self.agent_manager, "metadata", None)
+        _extend(self._normalize_venues(manager_meta))
+
+        _extend(self._configured_venues)
+        _extend(_DEFAULT_VENUES)
+
+        return venues
+
     async def _execute_bundle(
         self,
         bundle: ActionBundle,
@@ -279,7 +344,6 @@ class ExecutionService:
                 metadata=receipt_metadata,
             )
 
-        venue_hint = metadata.get("venue_hint")
         limit_price = metadata.get("limit_price")
         slippage_bps = metadata.get("slippage_bps")
         commitment = metadata.get("commitment")
@@ -288,18 +352,7 @@ class ExecutionService:
         except (TypeError, ValueError):
             total_budget = 6.0
         deadline = time.perf_counter() + max(0.1, total_budget)
-        venues: list[str] = []
-        seen: set[str] = set()
-        if venue_hint:
-            hint_str = str(venue_hint)
-            venues.append(hint_str)
-            seen.add(hint_str.lower())
-        for fallback in ["raydium", "orca", "jupiter", "phoenix"]:
-            key = fallback.lower()
-            if key in seen:
-                continue
-            venues.append(fallback)
-            seen.add(key)
+        venues = self._build_venue_chain(metadata)
         memory_agent = getattr(self.agent_manager, "memory_agent", None)
 
         results: List[Any] = []
