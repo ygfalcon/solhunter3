@@ -668,6 +668,8 @@ REQUIRED_TARGETS = [
     ("solana-ws", "Solana WebSocket"),
     ("helius-rest", "Helius REST"),
     ("helius-das", "Helius DAS"),
+    ("jito-rpc", "Jito RPC"),
+    ("jito-ws", "Jito WebSocket"),
     ("event-bus", "Event bus"),
 ]
 
@@ -2050,6 +2052,7 @@ import sys
 providers = [
     Provider("Solana", ("SOLANA_RPC_URL", "SOLANA_WS_URL")),
     Provider("Helius", ("HELIUS_API_KEY",)),
+    Provider("Jito", ("JITO_RPC_URL", "JITO_AUTH", "JITO_WS_URL", "JITO_WS_AUTH")),
     Provider("Redis", ("REDIS_URL",), optional=True),
     Provider("UI", ("UI_WS_URL",), optional=True),
     Provider("Helius-DAS", ("DAS_BASE_URL",), optional=True),

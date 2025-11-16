@@ -28,9 +28,14 @@ def test_validate_providers_success(monkeypatch):
     monkeypatch.setenv("SOLANA_RPC_URL", "https://solhunter.dev/rpc")
     monkeypatch.setenv("SOLANA_WS_URL", "wss://solhunter.dev/ws")
     monkeypatch.setenv("HELIUS_API_KEY", "abc123")
+    monkeypatch.setenv("JITO_RPC_URL", "https://jito.invalid/rpc")
+    monkeypatch.setenv("JITO_AUTH", "token")
+    monkeypatch.setenv("JITO_WS_URL", "wss://jito.invalid/ws")
+    monkeypatch.setenv("JITO_WS_AUTH", "token")
     providers = [
         Provider("Solana", ("SOLANA_RPC_URL", "SOLANA_WS_URL")),
         Provider("Helius", ("HELIUS_API_KEY",)),
+        Provider("Jito", ("JITO_RPC_URL", "JITO_AUTH", "JITO_WS_URL", "JITO_WS_AUTH")),
     ]
     missing, placeholders = validate_providers(providers)
     assert not missing
@@ -43,6 +48,16 @@ def test_validate_providers_failure(monkeypatch):
     providers = [Provider("Helius", ("HELIUS_API_KEY",))]
     missing, placeholders = validate_providers(providers)
     assert missing and not placeholders
+    with pytest.raises(RuntimeError):
+        assert_providers_ok(providers)
+
+
+def test_validate_providers_failure_jito(monkeypatch):
+    monkeypatch.setenv("JITO_RPC_URL", "https://jito.invalid/rpc")
+    monkeypatch.delenv("JITO_AUTH", raising=False)
+    providers = [Provider("Jito", ("JITO_RPC_URL", "JITO_AUTH", "JITO_WS_URL", "JITO_WS_AUTH"))]
+    missing, placeholders = validate_providers(providers)
+    assert missing
     with pytest.raises(RuntimeError):
         assert_providers_ok(providers)
 

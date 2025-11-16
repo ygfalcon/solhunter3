@@ -772,6 +772,7 @@ def summarize_stages(stage_results: list[StageResult]) -> None:
 PRODUCTION_PROVIDERS: list[Provider] = [
     Provider("Solana", ("SOLANA_RPC_URL", "SOLANA_WS_URL")),
     Provider("Helius", ("HELIUS_API_KEY",)),
+    Provider("Jito", ("JITO_RPC_URL", "JITO_AUTH", "JITO_WS_URL", "JITO_WS_AUTH")),
     Provider("Redis", ("REDIS_URL",), optional=True),
     Provider("UI", ("UI_WS_URL", "UI_HOST", "UI_PORT"), optional=True),
     Provider("Helius-DAS", ("DAS_BASE_URL",), optional=True),
@@ -785,6 +786,8 @@ _PROBE_PROVIDER_MAP: dict[str, str] = {
     "solana-ws": "Solana",
     "helius-rest": "Helius",
     "helius-das": "Helius-DAS",
+    "jito-rpc": "Jito",
+    "jito-ws": "Jito",
     "redis": "Redis",
     "ui-ws": "UI",
     "ui-http": "UI",

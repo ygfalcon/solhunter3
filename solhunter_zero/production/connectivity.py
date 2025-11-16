@@ -86,6 +86,16 @@ class ConnectivityChecker:
         )
         self.targets = self._build_targets()
 
+    @staticmethod
+    def _target_url_repr(target: Any) -> str:
+        if isinstance(target, Mapping):
+            candidate = target.get("url") or target.get("endpoint")
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        if target is None:
+            return ""
+        return str(target)
+
     def _refresh_environment(self, *, override: bool) -> None:
         for key, value in os.environ.items():
             if not (key.startswith("UI_") or key.startswith("CONNECTIVITY_")):
@@ -212,6 +222,10 @@ class ConnectivityChecker:
         env = self.env
         rpc = env.get("SOLANA_RPC_URL") or env.get("HELIUS_RPC_URL")
         ws = env.get("SOLANA_WS_URL") or env.get("HELIUS_WS_URL")
+        jito_rpc = env.get("JITO_RPC_URL")
+        jito_auth = env.get("JITO_AUTH")
+        jito_ws = env.get("JITO_WS_URL")
+        jito_ws_auth = env.get("JITO_WS_AUTH")
         das_base = env.get("DAS_BASE_URL") or "https://api.helius.xyz/v1"
         das = das_base.rstrip("/")
         rest = env.get("HELIUS_PRICE_REST_URL")
@@ -254,6 +268,28 @@ class ConnectivityChecker:
             targets.append({"name": "solana-rpc", "type": "http", "url": rpc})
         if ws:
             targets.append({"name": "solana-ws", "type": "ws", "url": ws})
+        if jito_rpc:
+            headers: dict[str, str] | None = None
+            if jito_auth:
+                headers = {"Authorization": f"Bearer {jito_auth}"}
+            targets.append(
+                {
+                    "name": "jito-rpc",
+                    "type": "http",
+                    "url": {"url": jito_rpc, "headers": headers},
+                }
+            )
+        if jito_ws:
+            headers: dict[str, str] | None = None
+            if jito_ws_auth:
+                headers = {"Authorization": f"Bearer {jito_ws_auth}"}
+            targets.append(
+                {
+                    "name": "jito-ws",
+                    "type": "ws",
+                    "url": {"url": jito_ws, "headers": headers},
+                }
+            )
         if das:
             search_candidates = []
             configured = env.get("DAS_SEARCH_PATH")
@@ -514,7 +550,22 @@ class ConnectivityChecker:
     # Probes
     # ------------------------------------------------------------------
 
-    async def _probe_http(self, name: str, url: str) -> ConnectivityResult:
+    async def _probe_http(self, name: str, target: Any) -> ConnectivityResult:
+        headers: Mapping[str, str] | None = None
+        url = target
+        if isinstance(target, Mapping):
+            url = target.get("url") or target.get("endpoint")
+            headers = target.get("headers") if isinstance(target.get("headers"), Mapping) else None
+        target_display = self._target_url_repr(url)
+        if not isinstance(url, str) or not url:
+            return ConnectivityResult(
+                name=name,
+                target=target_display,
+                ok=False,
+                status="error",
+                error="missing url",
+                attempts=0,
+            )
         async def attempt(force_ipv4: bool = False) -> ConnectivityResult:
             start = time.perf_counter()
             session = None
@@ -544,7 +595,7 @@ class ConnectivityChecker:
                                 self._record_error(name, f"HTTP_{resp.status}")
                                 return ConnectivityResult(
                                     name=name,
-                                    target=url,
+                                    target=target_display,
                                     ok=False,
                                     latency_ms=latency,
                                     status="error",
@@ -578,7 +629,7 @@ class ConnectivityChecker:
                                     detail = "missing status payload"
                                 return ConnectivityResult(
                                     name=name,
-                                    target=url,
+                                    target=target_display,
                                     ok=False,
                                     latency_ms=latency,
                                     status="error",
@@ -588,7 +639,7 @@ class ConnectivityChecker:
                                 )
                             return ConnectivityResult(
                                 name=name,
-                                target=url,
+                                target=target_display,
                                 ok=True,
                                 latency_ms=latency,
                                 status="ok",
@@ -596,14 +647,16 @@ class ConnectivityChecker:
                                 attempts=1,
                             )
                 try:
-                    async with session.head(url, timeout=self.http_timeout) as resp:
+                    async with session.head(url, headers=headers, timeout=self.http_timeout) as resp:
                         latency = (time.perf_counter() - start) * 1000
                         self._record_latency(name, latency)
                         self._record_status(name, resp.status)
                         ok = resp.status < 400
                         if not ok and resp.status in {405, 501}:
                             # Some providers reject HEAD; fall back to GET
-                            async with session.get(url, timeout=self.http_timeout) as get_resp:
+                            async with session.get(
+                                url, headers=headers, timeout=self.http_timeout
+                            ) as get_resp:
                                 latency = (time.perf_counter() - start) * 1000
                                 self._record_latency(name, latency)
                                 self._record_status(name, get_resp.status)
@@ -612,7 +665,7 @@ class ConnectivityChecker:
                                     self._record_error(name, f"HTTP_{get_resp.status}")
                                     return ConnectivityResult(
                                         name=name,
-                                        target=url,
+                                        target=target_display,
                                         ok=False,
                                         latency_ms=latency,
                                         status="error",
@@ -642,11 +695,11 @@ class ConnectivityChecker:
                         self._record_error(name, f"HTTP_{resp.status}")
                         return ConnectivityResult(
                             name=name,
-                            target=url,
-                            ok=False,
-                            latency_ms=latency,
-                            status="error",
-                            status_code=resp.status,
+                                    target=target_display,
+                                    ok=False,
+                                    latency_ms=latency,
+                                    status="error",
+                                    status_code=resp.status,
                             error=f"HTTP {resp.status}",
                             attempts=1,
                         )
@@ -663,7 +716,13 @@ class ConnectivityChecker:
             result = await self._with_backoff(name, lambda: attempt(False))
         except Exception as exc:
             self._register_failure(name)
-            return ConnectivityResult(name=name, target=url, ok=False, error=str(exc), attempts=self.max_attempts)
+            return ConnectivityResult(
+                name=name,
+                target=target_display,
+                ok=False,
+                error=str(exc),
+                attempts=self.max_attempts,
+            )
         else:
             if result.ok:
                 self._register_success(name)
@@ -671,15 +730,32 @@ class ConnectivityChecker:
                 self._register_failure(name)
             return result
 
-    async def _probe_ws(self, name: str, url: Any) -> ConnectivityResult:
+    async def _probe_ws(self, name: str, target: Any) -> ConnectivityResult:
         if name == "ui-ws":
-            return await self._probe_ui_ws(name, url)
+            return await self._probe_ui_ws(name, target)
+
+        headers: Mapping[str, str] | None = None
+        url = target
+        if isinstance(target, Mapping):
+            url = target.get("url") or target.get("endpoint")
+            headers = target.get("headers") if isinstance(target.get("headers"), Mapping) else None
+        target_display = self._target_url_repr(url)
+        if not isinstance(url, str) or not url:
+            return ConnectivityResult(
+                name=name,
+                target=target_display,
+                ok=False,
+                status="error",
+                error="missing url",
+                attempts=0,
+            )
 
         async def attempt() -> ConnectivityResult:
             started = time.perf_counter()
             try:
                 async with websockets.connect(
                     url,
+                    extra_headers=headers,
                     ping_interval=20,
                     ping_timeout=self.http_timeout,
                     close_timeout=self.http_timeout,
@@ -690,7 +766,7 @@ class ConnectivityChecker:
                     self._record_latency(name, latency)
                     return ConnectivityResult(
                         name=name,
-                        target=url,
+                        target=target_display,
                         ok=True,
                         latency_ms=latency,
                         status="ok",
@@ -701,12 +777,12 @@ class ConnectivityChecker:
                 raise
 
         if not self._breaker_allows(name):
-            return ConnectivityResult(name=name, target=url, ok=False, error="circuit-open")
+            return ConnectivityResult(name=name, target=target_display, ok=False, error="circuit-open")
         try:
             result = await self._with_backoff(name, attempt)
         except Exception as exc:
             self._register_failure(name)
-            return ConnectivityResult(name=name, target=url, ok=False, error=str(exc))
+            return ConnectivityResult(name=name, target=target_display, ok=False, error=str(exc))
         else:
             if result.ok:
                 self._register_success(name)
@@ -777,9 +853,10 @@ class ConnectivityChecker:
         results: list[ConnectivityResult] = []
         for target in self.targets:
             name = target["name"]
+            target_display = self._target_url_repr(target.get("url"))
             if not self._breaker_allows(name):
                 results.append(
-                    ConnectivityResult(name=name, target=target["url"], ok=False, error="circuit-open")
+                    ConnectivityResult(name=name, target=target_display, ok=False, error="circuit-open")
                 )
                 continue
             if target["type"] == "http":

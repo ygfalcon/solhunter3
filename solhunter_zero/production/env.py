@@ -180,6 +180,7 @@ def load_production_env(
         file_loaded = load_env_file(candidate, overwrite=overwrite, env=env_map)
         if file_loaded:
             env_map.update(file_loaded)
+            os.environ.update(file_loaded)
             loaded.update(file_loaded)
     return loaded
 

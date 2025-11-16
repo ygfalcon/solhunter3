@@ -15,6 +15,23 @@ def anyio_backend():
     return "asyncio"
 
 
+def test_connectivity_targets_include_jito():
+    checker = ConnectivityChecker(
+        env={
+            "JITO_RPC_URL": "https://jito.invalid/rpc",
+            "JITO_AUTH": "rpc-token",
+            "JITO_WS_URL": "wss://jito.invalid/ws",
+            "JITO_WS_AUTH": "ws-token",
+        }
+    )
+
+    targets = {target["name"]: target for target in checker.targets}
+    assert "jito-rpc" in targets
+    assert "jito-ws" in targets
+    assert targets["jito-rpc"]["url"]["headers"]["Authorization"] == "Bearer rpc-token"
+    assert targets["jito-ws"]["url"]["headers"]["Authorization"] == "Bearer ws-token"
+
+
 @pytest.mark.anyio("asyncio")
 async def test_probe_ui_ws_hello(monkeypatch):
     from solhunter_zero.production import connectivity as connectivity_mod
@@ -63,6 +80,56 @@ async def test_probe_ui_ws_hello(monkeypatch):
     assert result.ok
     assert result.status == "ok"
     assert result.latency_ms is not None
+
+
+@pytest.mark.anyio("asyncio")
+async def test_probe_ws_passes_headers(monkeypatch):
+    from solhunter_zero.production import connectivity as connectivity_mod
+
+    captured_headers: dict[str, object] = {}
+
+    class DummyWS:
+        async def ping(self):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyConnect:
+        def __init__(self, *_args, **kwargs):
+            captured_headers["headers"] = kwargs.get("extra_headers")
+
+        def __await__(self):
+            async def _inner():
+                return self
+
+            return _inner().__await__()
+
+        async def __aenter__(self):
+            return DummyWS()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def dummy_connect(url, *args, **kwargs):
+        return DummyConnect(*args, **kwargs)
+
+    monkeypatch.setattr(
+        connectivity_mod,
+        "websockets",
+        types.SimpleNamespace(connect=dummy_connect),
+    )
+
+    checker = ConnectivityChecker(env={})
+    result = await checker._probe_ws(
+        "jito-ws", {"url": "ws://example/ws", "headers": {"Authorization": "Bearer ws"}}
+    )
+
+    assert result.ok
+    assert captured_headers["headers"]["Authorization"] == "Bearer ws"
 
 
 @pytest.mark.anyio("asyncio")
@@ -194,6 +261,32 @@ async def test_probe_ui_http_success():
         port = site._server.sockets[0].getsockname()[1]
         checker = ConnectivityChecker(env={})
         result = await checker._probe_http("ui-http", f"http://127.0.0.1:{port}/health")
+        assert result.ok
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_probe_http_passes_headers():
+    app = web.Application()
+
+    async def secured(request):
+        if request.headers.get("Authorization") != "Bearer allow":
+            return web.Response(status=401)
+        return web.Response(text="ok")
+
+    app.router.add_get("/secure", secured)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+
+    try:
+        port = site._server.sockets[0].getsockname()[1]
+        checker = ConnectivityChecker(env={})
+        target = {"url": f"http://127.0.0.1:{port}/secure", "headers": {"Authorization": "Bearer allow"}}
+        result = await checker._probe_http("jito-rpc", target)
         assert result.ok
     finally:
         await runner.cleanup()
