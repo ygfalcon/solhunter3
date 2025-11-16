@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -3737,6 +3738,43 @@ def _json_ready(obj: Any) -> Any:
     return obj
 
 
+def _authorize_golden_demo(req: Request) -> tuple[bool, Response | None]:
+    """Return ``(authorized, response)`` for the golden demo endpoint.
+
+    The handler is disabled by default. Setting ``GOLDEN_DEMO_ENABLED=true``
+    opt-in to the route. When ``GOLDEN_DEMO_SECRET`` is set the caller must
+    present either ``Authorization: Bearer <secret>`` or
+    ``X-Golden-Demo-Secret: <secret>``. 401/403 responses are returned before
+    any subprocess work begins.
+    """
+
+    if not parse_bool_env("GOLDEN_DEMO_ENABLED", False):
+        payload = {"ok": False, "error": "golden demo disabled"}
+        return False, (jsonify(payload), 403)
+
+    shared_secret = os.getenv("GOLDEN_DEMO_SECRET")
+    if not shared_secret:
+        return True, None
+
+    headers = getattr(req, "headers", {}) or {}
+
+    auth_header = headers.get("Authorization", "")
+    bearer_prefix = "bearer "
+    provided = None
+    if auth_header.lower().startswith(bearer_prefix):
+        provided = auth_header[len(bearer_prefix) :].strip()
+    if not provided:
+        provided = headers.get("X-Golden-Demo-Secret", "").strip()
+
+    if provided and secrets.compare_digest(provided, shared_secret):
+        return True, None
+
+    payload = {"ok": False, "error": "unauthorized"}
+    response = jsonify(payload)
+    response.headers["WWW-Authenticate"] = "Bearer"
+    return False, (response, 401)
+
+
 def create_app(state: UIState | None = None) -> Flask:
     """Return a configured Flask application bound to *state*."""
 
@@ -3991,6 +4029,10 @@ def create_app(state: UIState | None = None) -> Flask:
 
     @app.post("/ops/golden-demo")
     def ui_run_golden_demo() -> Any:
+        authorized, response = _authorize_golden_demo(request)
+        if not authorized:
+            return response
+
         script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_golden_demo.sh"
         if not script_path.exists():
             return jsonify({"ok": False, "error": f"script not found: {script_path}"}), 404

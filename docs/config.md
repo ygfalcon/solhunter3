@@ -43,6 +43,14 @@ additional instrumentation.
 * `scripts/bus_smoke.py` proves the event bus can create streams, publish
   messages, and respect TTLs.
 
+## Golden demo safeguards
+
+The `/ops/golden-demo` route is disabled unless you explicitly opt-in with
+`GOLDEN_DEMO_ENABLED=true`. Add `GOLDEN_DEMO_SECRET` to require callers to send
+`Authorization: Bearer <secret>` (or `X-Golden-Demo-Secret: <secret>`) before
+the golden demo script will run. These checks prevent untrusted environments
+from executing the demo workflow.
+
 ## Momentum tuning
 
 Momentum enrichment exposes a small number of knobs through
