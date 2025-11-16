@@ -78,6 +78,32 @@ def test_bootstrap_ui_environment_defaults_live(monkeypatch):
         ui._teardown_ui_environment()
 
 
+def test_ui_meta_reports_redis_not_broker(monkeypatch):
+    previous_cache = ui._ui_meta_cache
+    previous_state = ui._get_active_ui_state()
+    monkeypatch.setattr(ui, "_ui_meta_cache", None)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("MEMPOOL_STREAM_REDIS_URL", raising=False)
+    monkeypatch.delenv("AMM_WATCH_REDIS_URL", raising=False)
+    monkeypatch.setenv("MINT_STREAM_REDIS_URL", "redis://cache.example:6380/1")
+    monkeypatch.setenv("BROKER_URL", "wss://broker.example:8779")
+
+    app = ui.create_app(previous_state)
+    try:
+        client = app.test_client()
+        resp = client.get("/api/ui/meta")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        redis_block = payload.get("redis") or {}
+        assert redis_block.get("url") == "redis://cache.example:6380/1"
+        assert redis_block.get("host") == "cache.example"
+        assert redis_block.get("port") == 6380
+        assert redis_block.get("db") == 1
+    finally:
+        ui._set_active_ui_state(previous_state)
+        ui._ui_meta_cache = previous_cache
+
+
 def test_bootstrap_ui_environment_preserves_redis_url(monkeypatch):
     monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
     monkeypatch.setattr(ui, "load_production_env", lambda: {})
