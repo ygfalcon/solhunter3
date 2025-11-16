@@ -90,7 +90,7 @@ class EvaluationService:
             worker_count = int(workers)
         except (TypeError, ValueError):
             worker_count = os.cpu_count() or 4
-        self._worker_limit = max(5, worker_count)
+        self._worker_limit = max(1, worker_count)
         self._on_result = on_result
         self._should_skip = should_skip
         self._min_volume = self._parse_threshold("DISCOVERY_MIN_VOLUME_USD")

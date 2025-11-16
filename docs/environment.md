@@ -57,6 +57,7 @@ files unless the loader is invoked with `overwrite=True`.
 | `DISCOVERY_MAX_BACKOFF` | `60` | Maximum cooldown applied to repeated empty discovery fetches (set to `0` to disable) |
 | `DYNAMIC_CONCURRENCY_INTERVAL` | `` | Interval for dynamic concurrency |
 | `EDGE_CACHE_TTL` | `60` | TTL for edge cache cache |
+| `EVALUATION_WORKERS` | `` | Override evaluation worker pool size; minimum 1 and defaults to CPU count or fast-mode heuristics when unset |
 | `EVENT_BATCH_MS` | `` | Configures event batch ms |
 | `EVENT_BUS_COMPRESSION` | `` | Configures event bus compression |
 | `EVENT_BUS_MMAP` | `` | Configures event bus mmap |
