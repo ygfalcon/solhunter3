@@ -280,3 +280,23 @@ def test_resolve_ui_ws_urls_falls_back_to_manifest(tmp_path: Path):
     urls = checker._resolve_ui_ws_urls()
     assert urls["events"] == "ws://127.0.0.1:9000/ws/events"
     assert urls["logs"] == "ws://127.0.0.1:9002/ws/logs"
+
+
+def test_build_targets_include_jito_and_mempool_endpoints():
+    checker = ConnectivityChecker(
+        env={
+            "SOLANA_RPC_URL": "https://rpc.example",
+            "SOLANA_WS_URL": "wss://ws.example",
+            "JITO_RPC_URL": "https://jito.rpc",
+            "JITO_WS_URL": "wss://jito.ws",
+            "MEMPOOL_STREAM_WS_URL": "wss://mempool/ws",
+            "MEMPOOL_STREAM_REDIS_URL": "redis://mempool/2",
+        }
+    )
+    names = {target["name"] for target in checker.targets}
+    assert {
+        "jito-rpc",
+        "jito-ws",
+        "mempool-stream-ws",
+        "mempool-stream-redis",
+    } <= names

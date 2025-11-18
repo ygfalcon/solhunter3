@@ -668,6 +668,10 @@ REQUIRED_TARGETS = [
     ("solana-ws", "Solana WebSocket"),
     ("helius-rest", "Helius REST"),
     ("helius-das", "Helius DAS"),
+    ("jito-rpc", "Jito RPC"),
+    ("jito-ws", "Jito WebSocket"),
+    ("mempool-stream-ws", "Mempool stream WebSocket"),
+    ("mempool-stream-redis", "Mempool stream Redis"),
     ("event-bus", "Event bus"),
 ]
 

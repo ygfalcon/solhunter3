@@ -212,6 +212,8 @@ class ConnectivityChecker:
         env = self.env
         rpc = env.get("SOLANA_RPC_URL") or env.get("HELIUS_RPC_URL")
         ws = env.get("SOLANA_WS_URL") or env.get("HELIUS_WS_URL")
+        jito_rpc = env.get("JITO_RPC_URL")
+        jito_ws = env.get("JITO_WS_URL")
         das_base = env.get("DAS_BASE_URL") or "https://api.helius.xyz/v1"
         das = das_base.rstrip("/")
         rest = env.get("HELIUS_PRICE_REST_URL")
@@ -219,6 +221,8 @@ class ConnectivityChecker:
             price_base = env.get("HELIUS_PRICE_BASE_URL") or "https://api.helius.xyz"
             rest = f"{price_base.rstrip('/')}/v0/token-metadata"
         redis_url = env.get("REDIS_URL") or "redis://127.0.0.1:6379/1"
+        mempool_redis = env.get("MEMPOOL_STREAM_REDIS_URL")
+        mempool_ws = env.get("MEMPOOL_STREAM_WS_URL")
         ui_ws_map = self._resolve_ui_ws_urls()
         ui_ws: str | Mapping[str, str] | None = None
         if ui_ws_map:
@@ -254,6 +258,10 @@ class ConnectivityChecker:
             targets.append({"name": "solana-rpc", "type": "http", "url": rpc})
         if ws:
             targets.append({"name": "solana-ws", "type": "ws", "url": ws})
+        if jito_rpc:
+            targets.append({"name": "jito-rpc", "type": "http", "url": jito_rpc})
+        if jito_ws:
+            targets.append({"name": "jito-ws", "type": "ws", "url": jito_ws})
         if das:
             search_candidates = []
             configured = env.get("DAS_SEARCH_PATH")
@@ -272,7 +280,13 @@ class ConnectivityChecker:
             targets.append({"name": "helius-rest", "type": "http", "url": rest})
         if redis_url:
             targets.append({"name": "redis", "type": "redis", "url": redis_url})
+        if mempool_redis:
+            targets.append(
+                {"name": "mempool-stream-redis", "type": "redis", "url": mempool_redis}
+            )
         ui_http = None
+        if mempool_ws:
+            targets.append({"name": "mempool-stream-ws", "type": "ws", "url": mempool_ws})
         if not self.skip_ui_probes:
             ui_http = env.get("UI_HEALTH_URL")
             if not ui_http:
