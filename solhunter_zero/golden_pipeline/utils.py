@@ -28,8 +28,9 @@ class TTLCache:
     def add(self, key: Any, ttl: float) -> bool:
         """Return ``True`` if the key was added (i.e. not present or expired)."""
 
-        expiry = self._data.get(key)
         now = now_ts()
+        self.clear_expired(now=now)
+        expiry = self._data.get(key)
         if expiry and expiry > now:
             return False
         if ttl <= 0:
@@ -47,8 +48,8 @@ class TTLCache:
             return False
         return True
 
-    def clear_expired(self) -> None:
-        now = now_ts()
+    def clear_expired(self, *, now: float | None = None) -> None:
+        now = now_ts() if now is None else now
         expired = [key for key, expiry in self._data.items() if expiry <= now]
         for key in expired:
             self._data.pop(key, None)
