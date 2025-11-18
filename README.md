@@ -249,6 +249,13 @@ partner, keep the Helius entry first so that `load_dex_config()` can fall back t
 `jupiter` as the last resort automatically. If you supply `dex_priorities`, include the
 new partner alongside `helius` and `jupiter` to preserve the cascade.
 
+Execution venues can be prioritised with an `execution_venues` list (or a comma-separated
+string) in the runtime configuration. The pipeline passes this chain to the execution
+service so trades iterate through your preferred venues before falling back to the default
+`raydium → orca → jupiter → phoenix` order. The same list can be supplied via the
+`EXECUTION_VENUES` environment variable or injected into `agent_manager.metadata` under
+`execution_venues` when bootstrapping custom runtimes.
+
 You can optionally tailor buy criteria for each detected market regime by
 defining a `decision_thresholds` table. Provide a `default` section for shared
 values and override individual fields such as `min_success`, `min_roi`,

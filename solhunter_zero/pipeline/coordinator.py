@@ -222,6 +222,7 @@ class PipelineCoordinator:
             agent_manager,
             lane_workers=exec_lanes or 2,
             on_receipt=self._on_execution_receipt,
+            config=self.cfg,
         )
         self._feedback_service = FeedbackService(
             on_no_action=self._register_no_action,
