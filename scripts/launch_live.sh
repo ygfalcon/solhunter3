@@ -651,6 +651,34 @@ PY
     fi
 }
 
+rl_health_check() {
+  "$PYTHON_BIN" - <<'PY'
+import json
+import sys
+
+from solhunter_zero.health_runtime import (
+    check_rl_daemon_health,
+    resolve_rl_health_url,
+)
+
+
+def main() -> int:
+    try:
+        url = resolve_rl_health_url(require_health_file=True)
+    except Exception as exc:  # pragma: no cover - configuration guard
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
+
+    ok, msg = check_rl_daemon_health(url, require_health_file=True)
+    print(json.dumps({"ok": bool(ok), "url": url, "message": msg}))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PY
+}
+
 run_connectivity_probes() {
   "$PYTHON_BIN" - <<'PY'
 import asyncio
@@ -2176,6 +2204,58 @@ if ! redis_health; then
   exit $EXIT_HEALTH
 fi
 log_info "Redis health check passed"
+
+log_info "Checking RL daemon health endpoint"
+rl_health_payload=""
+if ! rl_health_payload=$(rl_health_check); then
+  rl_health_detail=$(printf '%s' "$rl_health_payload" | "$PYTHON_BIN" - <<'PY'
+import json
+import sys
+
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+
+print(data.get("error") or data.get("message") or "")
+PY
+  )
+  if [[ -n ${rl_health_detail:-} ]]; then
+    log_warn "RL daemon health check failed: $rl_health_detail"
+  else
+    log_warn "RL daemon health check failed"
+  fi
+  exit $EXIT_HEALTH
+fi
+
+rl_health_url=$(printf '%s' "$rl_health_payload" | "$PYTHON_BIN" - <<'PY'
+import json
+import sys
+
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+
+print(data.get("url", ""))
+PY
+)
+rl_health_message=$(printf '%s' "$rl_health_payload" | "$PYTHON_BIN" - <<'PY'
+import json
+import sys
+
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+
+print(data.get("message", ""))
+PY
+)
+if [[ -n ${rl_health_url:-} ]]; then
+  export RL_HEALTH_URL="$rl_health_url"
+fi
+log_info "RL daemon healthy (${rl_health_message:-ok})"
 
 declare -a CHILD_PIDS=()
 START_CONTROLLER_STDERR_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/start_controller.XXXXXX")

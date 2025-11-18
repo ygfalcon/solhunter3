@@ -154,9 +154,11 @@ bash scripts/launch_live.sh \
 ```
 
 The script performs two full preflight passes (micro on/off), validates environment
-secrets, ensures Redis is reachable, and starts both paper and live runtime controllers
-before flipping the live executor on. Watch `artifacts/prelaunch/logs/live_runtime.log`
-for the `RUNTIME_READY` marker and the console summary before lifting notional caps.
+secrets, ensures Redis is reachable, confirms the RL daemon health endpoint
+(`RL_HEALTH_URL` or `rl_daemon.health.json`) returns 200, and starts both paper and
+live runtime controllers before flipping the live executor on. Watch
+`artifacts/prelaunch/logs/live_runtime.log` for the `RUNTIME_READY` marker and the
+console summary before lifting notional caps.
 
 If the event bus port is slow to release between runs (for example when a previous
 runtime is still winding down), set `EVENT_BUS_RELEASE_TIMEOUT` (seconds, default 30)
