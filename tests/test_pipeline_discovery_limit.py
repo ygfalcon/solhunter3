@@ -81,3 +81,19 @@ async def test_pipeline_respects_configured_discovery_limit(tmp_path, monkeypatc
 
     tokens = await service._fetch()
     assert tokens == generated[:3]
+
+
+def test_pipeline_honors_eval_workers_env(monkeypatch):
+    monkeypatch.setenv("EVALUATION_WORKERS", "1")
+
+    agent_manager = _StubAgentManager()
+    portfolio = _StubPortfolio()
+
+    coordinator = PipelineCoordinator(
+        agent_manager,
+        portfolio,
+        config={},
+    )
+
+    service = coordinator._evaluation_service
+    assert service._worker_limit == 1
