@@ -30,6 +30,48 @@ VALIDATE_ENV_SNIPPET = _extract_python_snippet(
 )
 
 
+def _build_complete_env(tmp_path: Path) -> dict[str, str]:
+    keypair_path = tmp_path / "id.json"
+    keypair_path.write_text("[]", encoding="utf-8")
+
+    return {
+        "SOLANA_RPC_URL": "https://solana.rpc",
+        "SOLANA_WS_URL": "wss://solana.ws",
+        "REDIS_URL": "redis://localhost:6379/0",
+        "KEYPAIR_PATH": str(keypair_path),
+        "EVENT_BUS_URL": "redis://localhost:6379/1",
+        "HELIUS_API_KEY": "helius-api-key",
+        "HELIUS_API_KEYS": "helius-api-keys",
+        "HELIUS_API_TOKEN": "helius-token",
+        "HELIUS_RPC_URL": "https://helius.rpc",
+        "HELIUS_WS_URL": "wss://helius.ws",
+        "HELIUS_PRICE_RPC_URL": "https://helius.price.rpc",
+        "HELIUS_PRICE_REST_URL": "https://helius.price.rest",
+        "HELIUS_PRICE_BASE_URL": "https://helius.price.base",
+        "BIRDEYE_API_KEY": "birdeye-key",
+        "SOLSCAN_API_KEY": "solscan-key",
+        "DEX_BASE_URL": "https://dex.base",
+        "DEX_TESTNET_URL": "https://dex.testnet",
+        "ORCA_API_URL": "https://orca.api",
+        "RAYDIUM_API_URL": "https://raydium.api",
+        "PHOENIX_API_URL": "https://phoenix.api",
+        "METEORA_API_URL": "https://meteora.api",
+        "JUPITER_WS_URL": "wss://jupiter.ws",
+        "JITO_RPC_URL": "https://jito.rpc",
+        "JITO_AUTH": "jito-auth",
+        "JITO_WS_URL": "wss://jito.ws",
+        "JITO_WS_AUTH": "jito-ws-auth",
+        "NEWS_FEEDS": "https://news.feed",
+        "TWITTER_FEEDS": "https://twitter.feed",
+        "DISCORD_FEEDS": "https://discord.feed",
+    }
+
+
+def _write_env_file(path: Path, values: dict[str, str]) -> None:
+    payload = "\n".join(f"{key}={value}" for key, value in values.items()) + "\n"
+    path.write_text(payload, encoding="utf-8")
+
+
 def test_launch_live_missing_config(tmp_path: Path) -> None:
     env_file = tmp_path / "env"
     env_file.write_text(f"PYTHONPATH={tmp_path / 'alt_pythonpath'}\n")
@@ -245,7 +287,9 @@ def test_launch_live_invalid_preflight_value(tmp_path: Path) -> None:
 
 def test_validate_env_allows_shell_expansion(tmp_path: Path) -> None:
     env_file = tmp_path / "env"
-    env_file.write_text("DATA_DIR=${HOME}/.config\n", encoding="utf-8")
+    env_values = _build_complete_env(tmp_path)
+    env_values["DATA_DIR"] = "${HOME}/.config"
+    _write_env_file(env_file, env_values)
 
     completed = subprocess.run(
         [sys.executable, "-c", VALIDATE_ENV_SNIPPET, str(env_file)],
@@ -260,10 +304,9 @@ def test_validate_env_allows_shell_expansion(tmp_path: Path) -> None:
 
 def test_validate_env_masks_credentialed_urls(tmp_path: Path) -> None:
     env_file = tmp_path / "env"
-    env_file.write_text(
-        "DATABASE_URL=https://user:pass@secure.test\n",
-        encoding="utf-8",
-    )
+    env_values = _build_complete_env(tmp_path)
+    env_values["DATABASE_URL"] = "https://user:pass@secure.test"
+    _write_env_file(env_file, env_values)
 
     completed = subprocess.run(
         [sys.executable, "-c", VALIDATE_ENV_SNIPPET, str(env_file)],
@@ -290,3 +333,38 @@ def test_validate_env_rejects_placeholder_tokens(tmp_path: Path) -> None:
 
     assert completed.returncode == 1
     assert "placeholder detected for DATA_DIR" in completed.stderr
+
+
+def test_validate_env_reports_runbook_keys(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_values = _build_complete_env(tmp_path)
+    env_values.pop("HELIUS_RPC_URL")
+    _write_env_file(env_file, env_values)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", VALIDATE_ENV_SNIPPET, str(env_file)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 1
+    assert "Environment file is missing required entries:" in completed.stderr
+    assert "HELIUS_RPC_URL (Helius RPC URL)" in completed.stderr
+
+
+def test_validate_env_rejects_runbook_placeholders(tmp_path: Path) -> None:
+    env_file = tmp_path / "env"
+    env_values = _build_complete_env(tmp_path)
+    env_values["BIRDEYE_API_KEY"] = "YOUR_BIRDEYE_KEY"
+    _write_env_file(env_file, env_values)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", VALIDATE_ENV_SNIPPET, str(env_file)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 1
+    assert "placeholder detected for BIRDEYE_API_KEY" in completed.stderr
