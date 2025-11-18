@@ -327,6 +327,16 @@ def test_start_websockets_failure_clears_auto_env(monkeypatch):
         sys.modules.pop("solhunter_zero.ui", None)
 
 
+def test_ws_scheme_requires_tls_for_override(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+    monkeypatch.setenv("UI_WS_SCHEME", "wss")
+
+    with pytest.raises(RuntimeError, match="TLS support.*UI_WS_CERT/UI_WS_KEY"):
+        ui._infer_ws_scheme()
+
+
 def test_start_websockets_logs_resolved_ports(monkeypatch, caplog):
     ui = _reload_ui_module()
 
@@ -376,6 +386,61 @@ def test_start_websockets_logs_resolved_ports(monkeypatch, caplog):
         }
     finally:
         ui.stop_websockets()
+
+
+def test_start_channel_uses_ssl_context(monkeypatch):
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+
+    captured: dict[str, Any] = {}
+
+    class DummyServer:
+        def __init__(self) -> None:
+            self.sockets = [types.SimpleNamespace(getsockname=lambda: ("", 8100))]
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            return None
+
+    stub_ws = types.ModuleType("websockets")
+
+    async def _serve(*args: Any, **kwargs: Any):
+        captured["ssl"] = kwargs.get("ssl")
+        return DummyServer()
+
+    stub_ws.serve = _serve
+    monkeypatch.setitem(sys.modules, "websockets", stub_ws)
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault("solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet"))
+
+    sys.modules.pop("solhunter_zero.ui", None)
+    ui = importlib.import_module("solhunter_zero.ui")
+    importlib.reload(ui)
+
+    ssl_marker = object()
+    monkeypatch.setattr(ui, "_resolve_ws_ssl_context", lambda: ssl_marker)
+    ui._WS_SSL_CONTEXT_INITIALIZED = False
+
+    thread: threading.Thread | None = None
+    try:
+        thread = ui._start_channel(
+            "events",
+            host="127.0.0.1",
+            port=0,
+            queue_size=1,
+            ping_interval=1.0,
+            ping_timeout=1.0,
+            ssl_context=ssl_marker,
+        )
+    finally:
+        ui.stop_websockets()
+        if thread is not None:
+            thread.join(timeout=0.25)
+
+    assert captured.get("ssl") is ssl_marker
 
 
 @pytest.mark.timeout(30)
@@ -1085,6 +1150,35 @@ def test_manifest_prefers_event_bus_url(monkeypatch):
 
     manifest = ui.build_ui_manifest(None)
     assert manifest["events_ws"] == "wss://bus.example:9443/ws/events"
+    assert manifest["events_ws_available"] is True
+
+
+def test_manifest_reflects_tls_support(monkeypatch):
+    ui = _reload_ui_module()
+
+    _clear_ws_env(monkeypatch)
+
+    for state in ui._WS_CHANNELS.values():
+        state.port = 0
+        state.host = None
+
+    ui._RL_WS_PORT = 9101
+    ui._EVENT_WS_PORT = 9100
+    ui._LOG_WS_PORT = 9102
+
+    ssl_marker = object()
+    monkeypatch.setattr(ui, "_resolve_ws_ssl_context", lambda: ssl_marker)
+    ui._WS_SSL_CONTEXT_INITIALIZED = False
+
+    scheme, context = ui._infer_ws_scheme()
+    assert scheme == "wss"
+    assert context is ssl_marker
+
+    urls = ui.get_ws_urls()
+    assert urls["events"].startswith("wss://")
+
+    manifest = ui.build_ui_manifest(None)
+    assert manifest["events_ws"].startswith("wss://")
     assert manifest["events_ws_available"] is True
 
 

@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import ssl
 import socket
 import subprocess
 import sys
@@ -2368,13 +2369,53 @@ def _normalize_ws_url(value: str | None) -> str | None:
     return None
 
 
-def _infer_ws_scheme(request_scheme: str | None = None) -> str:
+_WS_SSL_CONTEXT: ssl.SSLContext | None = None
+_WS_SSL_CONTEXT_INITIALIZED = False
+
+
+def _resolve_ws_ssl_context() -> ssl.SSLContext | None:
+    cert_path = os.getenv("UI_WS_CERT")
+    key_path = os.getenv("UI_WS_KEY")
+
+    if not cert_path and not key_path:
+        return None
+    if not cert_path or not key_path:
+        raise RuntimeError("UI_WS_CERT and UI_WS_KEY must both be set to enable TLS websockets")
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        context.load_cert_chain(certfile=os.fspath(cert_path), keyfile=os.fspath(key_path))
+    except Exception as exc:  # pragma: no cover - depends on cert validity
+        raise RuntimeError(f"Unable to load TLS cert/key for websockets: {exc}") from exc
+    return context
+
+
+def _get_ws_ssl_context() -> ssl.SSLContext | None:
+    global _WS_SSL_CONTEXT_INITIALIZED, _WS_SSL_CONTEXT
+    if _WS_SSL_CONTEXT_INITIALIZED:
+        return _WS_SSL_CONTEXT
+
+    _WS_SSL_CONTEXT = _resolve_ws_ssl_context()
+    _WS_SSL_CONTEXT_INITIALIZED = True
+    return _WS_SSL_CONTEXT
+
+
+def _infer_ws_scheme(request_scheme: str | None = None) -> tuple[str, ssl.SSLContext | None]:
+    ssl_context = _get_ws_ssl_context()
     override = (os.getenv("UI_WS_SCHEME") or os.getenv("WS_SCHEME") or "").strip().lower()
     if override in {"ws", "wss"}:
-        return override
+        if override == "wss" and ssl_context is None:
+            raise RuntimeError(
+                "UI_WS_SCHEME=wss requires TLS support; set UI_WS_CERT/UI_WS_KEY or terminate TLS upstream"
+            )
+        if override == "ws":
+            return "ws", None
+        return "wss", ssl_context
+    if ssl_context is not None:
+        return "wss", ssl_context
     if request_scheme and request_scheme.lower() in {"https", "wss"}:
-        return "wss"
-    return "ws"
+        return "wss", None
+    return "ws", None
 
 
 def _split_netloc(netloc: str | None) -> tuple[str | None, int | None, str | None]:
@@ -2515,7 +2556,7 @@ def get_ws_urls(request_host: str | None = None) -> dict[str, str | None]:
                 continue
             display_port = public_port if public_port not in (None, 0) else port
             path = _channel_path(channel)
-            scheme = _infer_ws_scheme()
+            scheme, _ = _infer_ws_scheme()
             host_component = _format_host_for_url(public_host)
             resolved = f"{scheme}://{host_component}:{display_port}{path}"
         urls[channel] = resolved
@@ -2545,7 +2586,7 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
         return None
 
     override_scheme = _scheme_from_hint(public_scheme)
-    fallback_scheme = _infer_ws_scheme(request_scheme)
+    fallback_scheme, _ = _infer_ws_scheme(request_scheme)
 
     manifest: Dict[str, Any] = {}
     for channel in ("rl", "events", "logs"):
@@ -2677,6 +2718,7 @@ def _start_channel(
     queue_size: int,
     ping_interval: float,
     ping_timeout: float,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> threading.Thread:
     state = _WS_CHANNELS[channel]
     state.ready.clear()
@@ -2906,6 +2948,7 @@ def _start_channel(
                         candidate_port,
                         ping_interval=ping_interval,
                         ping_timeout=ping_timeout,
+                        ssl=ssl_context,
                     )
                 )
             except OSError as exc:
@@ -3088,6 +3131,10 @@ def _mark_websockets_unavailable(reason: str) -> None:
     for key, value in defaults.items():
         _update_auto_env_value(key, value, "URL")
 
+    global _WS_SSL_CONTEXT, _WS_SSL_CONTEXT_INITIALIZED
+    _WS_SSL_CONTEXT = None
+    _WS_SSL_CONTEXT_INITIALIZED = False
+
     for state in _WS_CHANNELS.values():
         state.ready.clear()
         state.ready_status = "failed"
@@ -3149,9 +3196,9 @@ def start_websockets() -> dict[str, threading.Thread]:
         ping_timeout = _parse_positive_float(
             ping_timeout_raw, _WS_PING_TIMEOUT_DEFAULT
         )
+        scheme, ssl_context = _infer_ws_scheme()
         public_host, public_port = _resolve_public_host(host)
         host_component = _format_host_for_url(public_host)
-        scheme = _infer_ws_scheme()
 
         rl_port = _resolve_port("UI_RL_WS_PORT", "RL_WS_PORT", default=_RL_WS_PORT_DEFAULT)
         log_port = _resolve_port("UI_LOG_WS_PORT", default=_LOG_WS_PORT_DEFAULT)
@@ -3178,6 +3225,7 @@ def start_websockets() -> dict[str, threading.Thread]:
                 queue_size=queue_size,
                 ping_interval=ping_interval,
                 ping_timeout=ping_timeout,
+                ssl_context=ssl_context,
             )
             threads["events"] = _start_channel(
                 "events",
@@ -3186,6 +3234,7 @@ def start_websockets() -> dict[str, threading.Thread]:
                 queue_size=queue_size,
                 ping_interval=ping_interval,
                 ping_timeout=ping_timeout,
+                ssl_context=ssl_context,
             )
             threads["logs"] = _start_channel(
                 "logs",
@@ -3194,6 +3243,7 @@ def start_websockets() -> dict[str, threading.Thread]:
                 queue_size=queue_size,
                 ping_interval=ping_interval,
                 ping_timeout=ping_timeout,
+                ssl_context=ssl_context,
             )
         except Exception:
             for state in _WS_CHANNELS.values():
