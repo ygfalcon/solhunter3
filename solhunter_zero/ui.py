@@ -1483,7 +1483,15 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         run_state = _default_run_state()
         http_server_snapshot = {}
 
-    redis_url = os.getenv("REDIS_URL") or os.getenv("BROKER_URL") or "redis://localhost:6379/1"
+    redis_candidates = (
+        os.getenv("REDIS_URL"),
+        os.getenv("MINT_STREAM_REDIS_URL"),
+        os.getenv("MEMPOOL_STREAM_REDIS_URL"),
+        os.getenv("AMM_WATCH_REDIS_URL"),
+        _env_or_default("REDIS_URL"),
+        "redis://localhost:6379/1",
+    )
+    redis_url = next((candidate for candidate in redis_candidates if candidate), None)
     redis_info = _parse_redis_url(redis_url)
     event_bus_url = os.getenv("EVENT_BUS_URL") or _discover_broker_url() or "ws://127.0.0.1:8779"
     broker_channel = os.getenv("BROKER_CHANNEL") or "solhunter-events-v3"
