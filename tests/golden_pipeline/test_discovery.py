@@ -1,6 +1,17 @@
+import asyncio
 from collections import Counter
 
+import pytest
+
+from solhunter_zero.golden_pipeline.discovery import DiscoveryStage
+from solhunter_zero.golden_pipeline.types import DiscoveryCandidate
+
 from tests.golden_pipeline.conftest import BASE58_MINTS
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 def test_discovery_sources_deduplicate(golden_harness):
@@ -38,3 +49,35 @@ def test_discovery_sources_deduplicate(golden_harness):
     assert (failure_stats.get("max") or 0.0) >= 3.0
     assert (dedupe_stats.get("max") or 0.0) >= 1.0
     assert (breaker_stats.get("max") or 0.0) >= 1.0
+
+
+@pytest.mark.anyio
+async def test_discovery_candidates_emit_concurrently():
+    gate = asyncio.Event()
+    concurrency = 0
+    max_concurrency = 0
+
+    async def emit(_: DiscoveryCandidate) -> None:
+        nonlocal concurrency, max_concurrency
+        await gate.wait()
+        concurrency += 1
+        max_concurrency = max(max_concurrency, concurrency)
+        await asyncio.sleep(0.05)
+        concurrency -= 1
+
+    stage = DiscoveryStage(emit)
+    candidates = [
+        DiscoveryCandidate(mint=BASE58_MINTS["alpha"], asof=0.0),
+        DiscoveryCandidate(mint=BASE58_MINTS["beta"], asof=0.0),
+    ]
+
+    tasks = [asyncio.create_task(stage.submit(candidate)) for candidate in candidates]
+
+    # Ensure both submissions reach the emit gate before releasing them.
+    await asyncio.sleep(0.01)
+    gate.set()
+
+    results = await asyncio.gather(*tasks)
+
+    assert results == [True, True]
+    assert max_concurrency >= 2
