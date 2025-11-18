@@ -181,6 +181,20 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
     assert "restored=restore-me" in completed.stdout
 
 
+def test_run_connectivity_probes_includes_jito_and_mempool_labels() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    for label in (
+        "Jito RPC",
+        "Jito WebSocket",
+        "Mempool stream WebSocket",
+        "Mempool stream Redis",
+    ):
+        assert label in run_probes
+
+
 def _write_connectivity_stub(target_dir: Path) -> None:
     package_dir = target_dir / "solhunter_zero"
     package_dir.mkdir(parents=True)
@@ -213,6 +227,10 @@ def _write_connectivity_stub(target_dir: Path) -> None:
         "            _Result(\"solana-ws\", \"wss://solana-ws.local\"),\n"
         "            _Result(\"helius-rest\", \"https://helius-rest.local\"),\n"
         "            _Result(\"helius-das\", \"https://helius-das.local\"),\n"
+        "            _Result(\"jito-rpc\", \"https://jito-rpc.local\"),\n"
+        "            _Result(\"jito-ws\", \"wss://jito-ws.local\"),\n"
+        "            _Result(\"mempool-stream-ws\", \"wss://mempool-stream.local/ws\"),\n"
+        "            _Result(\"mempool-stream-redis\", \"redis://localhost/2\"),\n"
         "        ]\n"
         "        mode = os.environ.get(\"UI_RESULT_MODE\", \"present\").strip().lower()\n"
         "        if mode != \"absent\":\n"
