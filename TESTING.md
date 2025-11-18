@@ -47,6 +47,28 @@ archives the `docs/observability` bundle, while the chaos job publishes both
 `artifacts/chaos` and the generated runbook so investigators can download the
 latest remediation bundle from the Actions UI even when tests fail.
 
+## Running the Flask UI over HTTPS locally
+
+The Flask development server can terminate TLS directly when provided with a
+certificate/key pair. Generate a short-lived self-signed certificate with
+``openssl`` and point the server at the resulting paths:
+
+```bash
+openssl req -x509 -nodes -newkey rsa:2048 \
+  -keyout /tmp/solhunter-ui-key.pem \
+  -out /tmp/solhunter-ui-cert.pem \
+  -days 1 -subj "/CN=localhost"
+
+UI_HTTP_SCHEME=https \
+UI_HTTP_CERT_FILE=/tmp/solhunter-ui-cert.pem \
+UI_HTTP_KEY_FILE=/tmp/solhunter-ui-key.pem \
+python -m solhunter_zero.ui --host 127.0.0.1 --port 5443
+```
+
+When ``UI_HTTP_SCHEME`` is set to ``https`` without either TLS termination in
+front of the Flask server or the certificate environment variables above, the
+runtime will abort with guidance on how to enable HTTPS.
+
 ## Golden depth adapter checks
 
 The routed Golden depth adapter has a pair of focused tests that exercise the
