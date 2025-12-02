@@ -200,6 +200,7 @@ class PipelineCoordinator:
             emit_batch_size=1 if fast_mode else None,
             startup_clones=1 if fast_mode else None,
             startup_clone_concurrency=1 if fast_mode else None,
+            on_metrics=self._record_discovery_metrics,
         )
         self._scoring_service = ScoringService(
             self._discovery_queue,
@@ -332,6 +333,9 @@ class PipelineCoordinator:
         await self._portfolio_service.put(receipt)
         if self.on_execution:
             asyncio.create_task(self._run_callback(self.on_execution, receipt))
+
+    async def _record_discovery_metrics(self, payload: Dict[str, Any]) -> None:
+        await self._record_telemetry("discovery", payload)
 
     async def _run_callback(self, cb, arg) -> None:
         if not cb:

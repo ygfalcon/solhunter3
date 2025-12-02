@@ -35,6 +35,35 @@ def test_emit_tokens_skips_reordered_batches():
     asyncio.run(runner())
 
 
+def test_emit_tokens_emits_metrics_summary():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        token = "So11111111111111111111111111111111111111112"
+        metrics: list[dict] = []
+
+        async def on_metrics(payload: dict) -> None:
+            metrics.append(payload)
+
+        agent = types.SimpleNamespace(
+            last_method="unit-test", last_details={token: {"sources": ["das"]}}
+        )
+        service = DiscoveryService(queue, emit_batch_size=10, on_metrics=on_metrics)
+        service._agent = agent
+
+        await service._emit_tokens([token, "not_base58", token], fresh=True)
+
+        assert queue.qsize() == 1
+        batch = metrics[-1]
+        assert batch["batch"]["input"] == 3
+        assert batch["batch"]["dropped_invalid"] == 1
+        assert batch["batch"]["dropped_duplicates"] == 1
+        assert batch["batch"]["emitted"] == 1
+        assert batch["duplicates"] == [token]
+        assert batch.get("last_sources", {}).get(token)
+
+    asyncio.run(runner())
+
+
 def test_emit_tokens_detects_metadata_changes():
     async def runner() -> None:
         queue: asyncio.Queue[list] = asyncio.Queue()

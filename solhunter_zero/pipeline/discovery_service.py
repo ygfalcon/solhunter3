@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, Iterable, Optional, cast
+from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, cast
 
 from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
@@ -50,6 +50,7 @@ class DiscoveryService:
         startup_clones: Optional[int] = None,
         startup_clone_concurrency: Optional[int] = None,
         emit_batch_size: Optional[int] = None,
+        on_metrics: Callable[[Dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> None:
         self.queue = queue
         self.interval = max(0.1, float(interval))
@@ -152,6 +153,7 @@ class DiscoveryService:
         self._limit_disabled_logged = False
         self._primed = False
         self._last_metadata_fingerprints: Dict[str, str] = {}
+        self._last_sources: Dict[str, tuple[str, ...]] = {}
         raw_details_cap = os.getenv("DISCOVERY_LAST_DETAILS_CAP")
         details_cap: Optional[int] | None
         if raw_details_cap in {None, ""}:
@@ -167,6 +169,13 @@ class DiscoveryService:
             else:
                 details_cap = None if parsed_cap <= 0 else parsed_cap
         self._last_details_cap: Optional[int] = details_cap
+        raw_log_interval = os.getenv("DISCOVERY_DEBUG_LOG_INTERVAL", "5.0")
+        try:
+            self._debug_log_interval = max(0.0, float(raw_log_interval))
+        except Exception:
+            self._debug_log_interval = 5.0
+        self._last_metrics_log_ts: float = 0.0
+        self._on_metrics = on_metrics
 
     async def start(self) -> None:
         if self.limit == 0:
@@ -360,6 +369,7 @@ class DiscoveryService:
 
         if source_set:
             metadata["sources"] = sorted(source_set)
+            self._last_sources[token] = tuple(sorted(source_set))
 
         return metadata
 
@@ -396,15 +406,45 @@ class DiscoveryService:
     async def _emit_tokens(self, tokens: Iterable[str], *, fresh: bool) -> None:
         seq: list[str] = []
         dropped = 0
+        duplicates: list[str] = []
         seen: set[str] = set()
+        raw_count = 0
+        seq_size = 0
+
+        async def _report_metrics(emitted: int, *, reason: str | None = None) -> None:
+            duplicate_set = list(dict.fromkeys(duplicates))
+            last_sources: Dict[str, list[str]] = {}
+            for mint in duplicate_set:
+                sources = self._last_sources.get(mint)
+                if sources:
+                    last_sources[mint] = list(sources)
+            payload: Dict[str, Any] = {
+                "event": "discovery_batch",
+                "batch": {
+                    "input": raw_count,
+                    "unique": seq_size,
+                    "emitted": emitted,
+                    "dropped_invalid": dropped,
+                    "dropped_duplicates": len(duplicates),
+                    "fresh": bool(fresh),
+                },
+                "duplicates": duplicate_set,
+            }
+            if reason:
+                payload["reason"] = reason
+            if last_sources:
+                payload["last_sources"] = last_sources
+            await self._emit_metrics(payload)
         for tok in tokens:
             if not isinstance(tok, str) or not tok:
                 continue
+            raw_count += 1
             canonical = canonical_mint(tok)
             if not validate_mint(canonical):
                 dropped += 1
                 continue
             if canonical in seen:
+                duplicates.append(canonical)
                 continue
             seen.add(canonical)
             seq.append(canonical)
@@ -413,6 +453,8 @@ class DiscoveryService:
                 log.debug(
                     "DiscoveryService skipped %d invalid token candidate(s)", dropped
                 )
+            seq_size = 0
+            await _report_metrics(0, reason="empty")
             return
         seq_size = len(seq)
         seq_set = frozenset(seq)
@@ -440,12 +482,14 @@ class DiscoveryService:
                 log.debug(
                     "DiscoveryService skipping cached emission (%d tokens)", seq_size
                 )
+                await _report_metrics(0, reason="cached_fresh")
                 return
             seq_to_emit = list(changed_tokens)
         elif same_as_last:
             log.debug(
                 "DiscoveryService skipping cached emission (%d tokens)", seq_size
             )
+            await _report_metrics(0, reason="cached")
             return
         else:
             seq_to_emit = list(seq)
@@ -479,6 +523,7 @@ class DiscoveryService:
         self._last_emitted = list(seq)
         self._last_emitted_set = seq_set
         self._last_emitted_size = seq_size
+        await _report_metrics(total_enqueued)
 
     def _prune_agent_last_details(
         self, current_tokens: frozenset[str], removed_tokens: Iterable[str]
@@ -491,10 +536,12 @@ class DiscoveryService:
 
         for token in removed_tokens:
             details_obj.pop(token, None)
+            self._last_sources.pop(token, None)
 
         for token in list(details_obj):
             if token not in current_tokens:
                 details_obj.pop(token, None)
+                self._last_sources.pop(token, None)
 
         if not details_obj:
             return
@@ -525,6 +572,24 @@ class DiscoveryService:
                 break
             details_obj.pop(token, None)
             overflow -= 1
+
+    async def _emit_metrics(self, payload: Dict[str, Any]) -> None:
+        cb = self._on_metrics
+        if cb:
+            try:
+                result = cb(dict(payload))
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                log.exception("DiscoveryService metrics callback failed")
+        now = time.time()
+        if self._debug_log_interval <= 0:
+            log.debug("DiscoveryService metrics: %s", payload)
+            return
+        if now - self._last_metrics_log_ts < self._debug_log_interval:
+            return
+        self._last_metrics_log_ts = now
+        log.debug("DiscoveryService metrics: %s", payload)
 
     def _apply_fetch_stats(self, tokens: Iterable[str], fetch_ts: float) -> None:
         payload = [str(tok) for tok in tokens if isinstance(tok, str) and tok]
