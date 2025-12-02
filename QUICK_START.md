@@ -30,6 +30,7 @@
 3. During startup the console will surface the readiness handshake in order:
 
    - `UI_READY url=http://127.0.0.1:XXXX …`
+   - `UI_WS_READY status=ok …` (or `status=degraded detail=handshake drops before subscription (events:2)`)
    - `Event bus: connected redis broker redis://localhost:6379/1 channel=solhunter-events-v3`
    - `runtime.stage_changed stage=wallet:balance ok=true …` (live wallet verified before trading)
    - `GOLDEN_READY topic=x:mint.golden providers=<n>`

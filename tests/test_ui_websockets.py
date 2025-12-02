@@ -933,6 +933,74 @@ def test_enqueue_message_handles_closed_loop(caplog):
         ui._WS_QUEUE_DROP_TOTAL = previous_counter
 
 
+def test_enqueue_message_tracks_handshake_drops(monkeypatch):
+    ui = _reload_ui_module()
+    state = ui._WS_CHANNELS["events"]
+
+    class ImmediateLoop:
+        def call_soon_threadsafe(self, callback, *args, **kwargs):
+            callback()
+
+    class FullQueue(asyncio.Queue):
+        def __init__(self):
+            super().__init__(maxsize=1)
+            self._dropped_once = False
+            self._current_size = 1
+
+        def qsize(self) -> int:
+            return self._current_size
+
+        def put_nowait(self, item):  # type: ignore[override]
+            if self._current_size >= self.maxsize:
+                if not self._dropped_once:
+                    self._dropped_once = True
+                    raise asyncio.QueueFull
+            self._current_size += 1
+            return None
+
+        def get_nowait(self):  # type: ignore[override]
+            if self._current_size <= 0:
+                raise asyncio.QueueEmpty
+            self._current_size -= 1
+            return None
+
+        def task_done(self):  # type: ignore[override]
+            return None
+
+    original_loop = state.loop
+    original_queue = state.queue
+    with state.lock:
+        prev_drop_count = state.drop_count
+        prev_handshake_drop_count = getattr(state, "handshake_drop_count", 0)
+        prev_handshake_complete = getattr(state, "handshake_complete", False)
+        state.drop_count = 0
+        state.handshake_drop_count = 0
+        state.handshake_complete = False
+    state.loop = ImmediateLoop()
+    state.queue = FullQueue()
+
+    try:
+        assert ui._enqueue_message("events", {"value": 2}) is True
+        with state.lock:
+            assert state.drop_count == 1
+            assert state.handshake_drop_count == 1
+        with state.lock:
+            state.handshake_complete = True
+        assert ui._enqueue_message("events", {"value": 3}) is True
+        with state.lock:
+            assert state.drop_count == 1
+            assert state.handshake_drop_count == 1
+        readiness_meta = ui.get_ws_readiness_metadata()
+        assert readiness_meta.get("handshake_drops", {}).get("events") == 1
+    finally:
+        state.loop = original_loop
+        state.queue = original_queue
+        with state.lock:
+            state.drop_count = prev_drop_count
+            state.handshake_drop_count = prev_handshake_drop_count
+            state.handshake_complete = prev_handshake_complete
+
+
 def _reload_ui_module():
     for name in list(sys.modules):
         if name.startswith("websockets"):

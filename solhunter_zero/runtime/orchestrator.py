@@ -271,6 +271,21 @@ def _collect_ws_urls() -> tuple[dict[str, str | None], str]:
     return urls, failure_detail
 
 
+def _collect_ws_readiness_metadata() -> dict[str, Any]:
+    """Return websocket readiness metadata from the UI module."""
+
+    metadata: dict[str, Any] = {}
+    if hasattr(_ui_module, "get_ws_readiness_metadata"):
+        try:
+            raw_metadata = _ui_module.get_ws_readiness_metadata()  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - defensive logging
+            log.debug("Failed to resolve websocket readiness metadata", exc_info=True)
+        else:
+            if isinstance(raw_metadata, Mapping):
+                metadata.update(raw_metadata)
+    return metadata
+
+
 @dataclass
 class RuntimeHandles:
     ui_app: Any | None = None
@@ -760,6 +775,29 @@ class RuntimeOrchestrator:
             ws_startup_detail = "; ".join(detail_text_parts)
             ws_ok = True
         ws_urls, ws_url_detail = _collect_ws_urls()
+        readiness_metadata = _collect_ws_readiness_metadata()
+        handshake_drop_detail = ""
+        raw_handshake_drops = (
+            readiness_metadata.get("handshake_drops")
+            if isinstance(readiness_metadata, Mapping)
+            else None
+        )
+        if isinstance(raw_handshake_drops, Mapping):
+            drop_parts: list[str] = []
+            for channel, count in sorted(raw_handshake_drops.items()):
+                try:
+                    parsed = int(count) if count is not None else 0
+                except (TypeError, ValueError):
+                    continue
+                if parsed > 0:
+                    drop_parts.append(f"{channel}:{parsed}")
+            if drop_parts:
+                handshake_drop_detail = (
+                    "handshake drops before subscription (" + ", ".join(drop_parts) + ")"
+                )
+                if ws_status == "ok":
+                    ws_status = "degraded"
+                ws_ok = False
         if ws_url_detail and ws_status == "ok":
             ws_status = "degraded"
         env_map = {
@@ -776,7 +814,9 @@ class RuntimeOrchestrator:
         self.handles.ui_app = app
         self.handles.ui_threads = threads
         self.handles.ui_state = state_obj
-        ws_detail_parts = [part for part in (ws_startup_detail, ws_url_detail) if part]
+        ws_detail_parts = [
+            part for part in (ws_startup_detail, ws_url_detail, handshake_drop_detail) if part
+        ]
         ws_detail = " | ".join(ws_detail_parts)
         self.handles.ui_ws_status = ws_status
         self.handles.ui_ws_detail = ws_detail
