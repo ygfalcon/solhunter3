@@ -72,6 +72,7 @@ EXIT_HEALTH=4
 EXIT_DEPS=5
 EXIT_SCHEMA=6
 EXIT_SOCKET=7
+EXIT_EVENT_BUS=8
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VENV_DIR="$ROOT_DIR/.venv"
@@ -761,9 +762,16 @@ async def _run() -> None:
     raw_bus_url = os.environ.get("EVENT_BUS_URL")
     bus_result = None
     bus_skip_message: str | None = None
+    bus_exit_code = int(os.environ.get("EXIT_EVENT_BUS", "8") or "8")
     skip_ui = _env_flag("CONNECTIVITY_SKIP_UI_PROBES")
 
-    if raw_bus_url:
+    if _env_flag("CONNECTIVITY_SKIP_BUS"):
+        bus_skip_message = (
+            "Event bus: SKIPPED → bus connectivity probes disabled"
+            " (CONNECTIVITY_SKIP_BUS=1)"
+        )
+        lookup.setdefault("event-bus", None)
+    elif raw_bus_url:
         bus_host, bus_port, bus_display = _runtime_bus_target(raw_bus_url)
         if _is_local_host(bus_host):
             target = bus_display or f"ws://{bus_host}:{bus_port}"
@@ -779,7 +787,12 @@ async def _run() -> None:
                 raise SystemExit(1)
             lookup["event-bus"] = bus_result
     else:
-        lookup.setdefault("event-bus", None)
+        print(
+            "Event bus target missing: set EVENT_BUS_URL or "
+            "CONNECTIVITY_SKIP_BUS=1 to bypass pre-flight connectivity checks.",
+            file=sys.stderr,
+        )
+        raise SystemExit(bus_exit_code)
 
     failures: list[str] = []
     for key, label in REQUIRED_TARGETS:
@@ -2158,7 +2171,11 @@ fi
 
 log_info "Running connectivity probes"
 if ! CONNECTIVITY_REPORT=$(run_connectivity_probes 2>&1); then
+  status=$?
   log_warn "Connectivity probes failed:\n$CONNECTIVITY_REPORT"
+  if (( status == EXIT_EVENT_BUS )); then
+    exit $EXIT_EVENT_BUS
+  fi
   if (( CONNECTIVITY_SKIP_UI_PROBES_FORCED )); then
     if (( CONNECTIVITY_SKIP_UI_PROBES_RESTORE )); then
       export CONNECTIVITY_SKIP_UI_PROBES="$CONNECTIVITY_SKIP_UI_PROBES_PREVIOUS_VALUE"

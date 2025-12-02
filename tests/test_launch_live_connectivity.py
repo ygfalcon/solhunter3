@@ -372,6 +372,78 @@ def test_run_connectivity_probes_requires_remote_event_bus(tmp_path: Path) -> No
     assert marker_path.read_text(encoding="utf-8") == "event-bus wss://bus.example.com/ws"
 
 
+def test_run_connectivity_probes_requires_event_bus_or_skip(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_missing_bus"
+    _write_connectivity_stub(stub_root)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 8
+    assert (
+        "Event bus target missing: set EVENT_BUS_URL or CONNECTIVITY_SKIP_BUS=1 to bypass"
+        in completed.stderr
+    )
+
+
+def test_run_connectivity_probes_skips_missing_event_bus_with_flag(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_skip_bus"
+    _write_connectivity_stub(stub_root)
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export CONNECTIVITY_SKIP_BUS=1
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Event bus: SKIPPED → bus connectivity probes disabled (CONNECTIVITY_SKIP_BUS=1)" in completed.stdout
+
+
 def test_run_connectivity_probes_requires_ui_targets_without_skip(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
