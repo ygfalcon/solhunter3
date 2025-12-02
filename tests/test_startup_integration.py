@@ -4,11 +4,71 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+
+
+def test_start_all_sample_contains_readiness_markers():
+    sample = Path(__file__).resolve().parents[1] / "start_all.out"
+    text = sample.read_text(encoding="utf-8")
+    assert "UI_READY" in text
+    assert "UI_WS_READY" in text
+    assert "DiscoveryService" in text
+
+
+def test_pipe_runtime_logs_emits_markers_under_limit(tmp_path, capsys):
+    import sys
+    import types
+
+    sys.modules.setdefault("yaml", types.SimpleNamespace(safe_load=lambda *_a, **_k: {}))
+    import scripts.start_all as start_module
+
+    log_path = tmp_path / "runtime.log"
+    log_path.write_text("")
+
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=start_module._pipe_runtime_logs,
+        args=(log_path, 1, stop_event),
+        kwargs={"poll_interval": 0.01},
+        daemon=True,
+    )
+    thread.start()
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("first line\n")
+        handle.flush()
+        time.sleep(0.05)
+        handle.write("UI_READY url=http://example\n")
+        handle.flush()
+        time.sleep(0.05)
+        handle.write("DiscoveryService primed\n")
+        handle.flush()
+        time.sleep(0.05)
+        handle.write("skipped non marker\n")
+        handle.flush()
+
+    time.sleep(0.1)
+    stop_event.set()
+    thread.join(timeout=1.0)
+
+    output_lines = capsys.readouterr().out.splitlines()
+    assert any("UI_READY" in line for line in output_lines)
+    assert any("DiscoveryService primed" in line for line in output_lines)
+
+    non_marker_lines = [
+        line
+        for line in output_lines
+        if "ready" not in line.lower()
+        and "discovery" not in line.lower()
+        and "preview limit" not in line.lower()
+    ]
+    assert len(non_marker_lines) <= 1
 
 
 def test_connectivity_check_aborts_on_required_probe_failure(monkeypatch):

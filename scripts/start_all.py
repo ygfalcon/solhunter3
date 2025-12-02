@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from dataclasses import dataclass
@@ -206,6 +207,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--non-interactive",
         action="store_true",
         help="Compatibility flag; implies detached mode",
+    )
+    parser.add_argument(
+        "--preview-log-lines",
+        type=int,
+        default=120,
+        metavar="N",
+        help=(
+            "Maximum number of runtime log lines to mirror to stdout while waiting for "
+            "readiness when running non-interactively (0 disables non-marker mirroring)"
+        ),
     )
     parser.add_argument("--loop-delay", type=float, default=None, help="Override loop delay")
     parser.add_argument("--min-delay", type=float, default=None, help="Minimum inter-iteration delay")
@@ -490,6 +501,65 @@ def _prepare_runtime_log() -> Path:
     return log_path
 
 
+def _is_readiness_marker(line: str) -> bool:
+    lowered = line.lower()
+    return "ready" in lowered or "discovery" in lowered
+
+
+def _pipe_runtime_logs(
+    log_path: Path,
+    max_non_marker_lines: int | None,
+    stop_event: threading.Event,
+    *,
+    poll_interval: float = 0.25,
+) -> None:
+    """Mirror runtime logs to stdout with optional limits.
+
+    Always forwards readiness markers (lines containing "ready" or "discovery") even
+    after the non-marker limit is reached. This keeps critical progress signals
+    visible in `--non-interactive` mode without overwhelming the console.
+    """
+
+    if log_path is None:
+        return
+
+    emitted = 0
+    notified_limit = False
+    normalized_limit = None if max_non_marker_lines is None else int(max_non_marker_lines)
+
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(0, os.SEEK_END)
+            while not stop_event.is_set():
+                pos = handle.tell()
+                line = handle.readline()
+                if not line:
+                    handle.seek(pos)
+                    stop_event.wait(poll_interval)
+                    continue
+
+                stripped = line.rstrip("\n")
+                marker = _is_readiness_marker(stripped)
+
+                if marker:
+                    print(stripped, flush=True)
+                    continue
+
+                if normalized_limit is None or normalized_limit < 0 or emitted < normalized_limit:
+                    print(stripped, flush=True)
+                    emitted += 1
+                    continue
+
+                if not notified_limit:
+                    print(
+                        "... (log preview limit reached; monitoring readiness markers)",
+                        flush=True,
+                    )
+                    notified_limit = True
+    except FileNotFoundError:
+        return
+
+
 _TRUTHY = {"1", "true", "yes", "on", "enabled"}
 _FALSY = {"0", "false", "no", "off", "disabled"}
 
@@ -606,6 +676,8 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
     env = os.environ.copy()
     env["UI_PORT"] = ui_port
     env["UI_HOST"] = ui_host
+    preview_stop_event: threading.Event | None = None
+    preview_thread: threading.Thread | None = None
     with log_path.open("ab", buffering=0) as log_file:
         proc = subprocess.Popen(
             cmd,
@@ -621,6 +693,16 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
                 f" {proc.returncode}. Check logs at {log_path} for more details."
             )
     log.info("Launched runtime pid=%s", proc.pid)
+
+    if args.non_interactive:
+        preview_stop_event = threading.Event()
+        preview_thread = threading.Thread(
+            target=_pipe_runtime_logs,
+            args=(log_path, getattr(args, "preview_log_lines", 0), preview_stop_event),
+            kwargs={"poll_interval": 0.1},
+            daemon=True,
+        )
+        preview_thread.start()
 
     ready_url = _resolve_runtime_ready_url(args)
     retries = _parse_int_env("START_ALL_READY_RETRIES", 60)
@@ -647,75 +729,81 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
             else:
                 retries = max(1, math.ceil(total_timeout / interval))
 
-    if ready_url is None:
-        if notify_path is None:
+    try:
+        if ready_url is None:
+            if notify_path is None:
+                log.info(
+                    "UI disabled but no notify path resolved; skipping readiness wait",
+                )
+                return 0
+
             log.info(
-                "UI disabled but no notify path resolved; skipping readiness wait",
-            )
-            return 0
-
-        log.info(
-            "Waiting for runtime readiness via notify file %s (retries=%s, interval=%.2fs)",
-            notify_path,
-            retries,
-            interval,
-        )
-
-        for attempt in range(retries):
-            if notify_path.exists():
-                log.info("Runtime readiness confirmed via notify file: %s", notify_path)
-                break
-            if proc.poll() is not None:
-                raise RuntimeError(
-                    "Runtime process exited before readiness succeeded"
-                    f" (code {proc.returncode}). Check logs at {log_path} for more details."
-                )
-            log.debug(
-                "Runtime notify probe %d/%d missing file %s",
-                attempt + 1,
-                retries,
+                "Waiting for runtime readiness via notify file %s (retries=%s, interval=%.2fs)",
                 notify_path,
+                retries,
+                interval,
             )
-            if attempt < retries - 1:
-                time.sleep(interval)
-        else:
-            _terminate_process(proc)
-            raise RuntimeError(
-                "Runtime readiness notify file %s not observed after %d attempts (~%.1fs)"
-                % (notify_path, retries, retries * interval)
-            )
-    else:
-        log.info(
-            "Waiting for runtime readiness at %s (retries=%s, interval=%.2fs)",
-            ready_url,
-            retries,
-            interval,
-        )
 
-        last_msg = "not attempted"
-        for attempt in range(retries):
-            ok, last_msg = http_ok(ready_url)
-            if ok:
-                log.info("Runtime readiness confirmed: %s — %s", ready_url, last_msg)
-                break
-            if proc.poll() is not None:
-                raise RuntimeError(
-                    "Runtime process exited before readiness succeeded"
-                    f" (code {proc.returncode}). Check logs at {log_path} for more details."
+            for attempt in range(retries):
+                if notify_path.exists():
+                    log.info("Runtime readiness confirmed via notify file: %s", notify_path)
+                    break
+                if proc.poll() is not None:
+                    raise RuntimeError(
+                        "Runtime process exited before readiness succeeded"
+                        f" (code {proc.returncode}). Check logs at {log_path} for more details."
+                    )
+                log.debug(
+                    "Runtime notify probe %d/%d missing file %s",
+                    attempt + 1,
+                    retries,
+                    notify_path,
                 )
-            log.debug(
-                "Runtime readiness probe %d/%d failed: %s", attempt + 1, retries, last_msg
-            )
-            if attempt < retries - 1:
-                time.sleep(interval)
+                if attempt < retries - 1:
+                    time.sleep(interval)
+            else:
+                _terminate_process(proc)
+                raise RuntimeError(
+                    "Runtime readiness notify file %s not observed after %d attempts (~%.1fs)"
+                    % (notify_path, retries, retries * interval)
+                )
         else:
-            _terminate_process(proc)
-            raise RuntimeError(
-                "Runtime readiness check timed out after "
-                f"{retries} attempts (~{retries * interval:.1f}s): {last_msg}"
+            log.info(
+                "Waiting for runtime readiness at %s (retries=%s, interval=%.2fs)",
+                ready_url,
+                retries,
+                interval,
             )
 
-    return 0
+            last_msg = "not attempted"
+            for attempt in range(retries):
+                ok, last_msg = http_ok(ready_url)
+                if ok:
+                    log.info("Runtime readiness confirmed: %s — %s", ready_url, last_msg)
+                    break
+                if proc.poll() is not None:
+                    raise RuntimeError(
+                        "Runtime process exited before readiness succeeded"
+                        f" (code {proc.returncode}). Check logs at {log_path} for more details."
+                    )
+                log.debug(
+                    "Runtime readiness probe %d/%d failed: %s", attempt + 1, retries, last_msg
+                )
+                if attempt < retries - 1:
+                    time.sleep(interval)
+            else:
+                _terminate_process(proc)
+                raise RuntimeError(
+                    "Runtime readiness check timed out after "
+                    f"{retries} attempts (~{retries * interval:.1f}s): {last_msg}"
+                )
+
+        return 0
+    finally:
+        if preview_stop_event is not None:
+            preview_stop_event.set()
+            if preview_thread is not None:
+                preview_thread.join(timeout=1.0)
 
 
 def launch_foreground(args: argparse.Namespace, cfg_path: str) -> int:
