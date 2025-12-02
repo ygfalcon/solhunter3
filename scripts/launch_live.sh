@@ -955,6 +955,18 @@ def _read_port(raw: str | None) -> int | None:
     return port if port > 0 else None
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
 def _is_local_host(hostname: str) -> bool:
     normalized = (hostname or "").strip().lower()
     if not normalized or normalized in {"localhost", "127.0.0.1"}:
@@ -978,12 +990,29 @@ def _probe_host(hostname: str) -> str:
 
 
 host = os.environ.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
-port = _read_port(os.environ.get("UI_PORT", "5001"))
+raw_port = os.environ.get("UI_PORT", "5001")
+port = _read_port(raw_port)
+ui_enabled = _env_flag("UI_ENABLED", True)
+disable_http = _env_flag("UI_DISABLE_HTTP_SERVER", False)
 timeout = _read_timeout(os.environ.get("UI_SOCKET_RELEASE_TIMEOUT"))
 
+if not ui_enabled:
+    display_port = raw_port if raw_port is not None else "0"
+    print(f"free {host} {display_port} disabled UI_ENABLED={os.environ.get('UI_ENABLED', '')}")
+    raise SystemExit(0)
+
+if disable_http:
+    display_port = raw_port if raw_port is not None else "0"
+    print(
+        "free "
+        + f"{host} {display_port} disabled UI_DISABLE_HTTP_SERVER="
+        + os.environ.get("UI_DISABLE_HTTP_SERVER", "")
+    )
+    raise SystemExit(0)
+
 if port is None:
-    raw_port = os.environ.get("UI_PORT") or "0"
-    print(f"free {host} {raw_port} disabled")
+    display_port = raw_port if raw_port is not None else "0"
+    print(f"free {host} {display_port} disabled UI_PORT")
     raise SystemExit(0)
 
 if not _is_local_host(host):
@@ -2533,6 +2562,16 @@ wait_for_ready() {
   local allow_ws_degraded=0
   local allow_ws_raw="${LAUNCH_LIVE_ALLOW_WS_DEGRADED:-${UI_WS_OPTIONAL:-}}"
   local ui_disabled=0
+  local ui_port_disabled=0
+  if [[ -n ${UI_PORT+x} ]]; then
+    if [[ -z ${UI_PORT//[[:space:]]/} ]]; then
+      ui_port_disabled=1
+    elif ! [[ ${UI_PORT} =~ ^[0-9]+$ ]]; then
+      ui_port_disabled=1
+    elif (( UI_PORT <= 0 )); then
+      ui_port_disabled=1
+    fi
+  fi
   if [[ -n ${UI_ENABLED:-} ]]; then
     local normalized="${UI_ENABLED,,}"
     case $normalized in
@@ -2549,7 +2588,7 @@ wait_for_ready() {
         ;;
     esac
   fi
-  if [[ $ui_disabled -eq 1 ]]; then
+  if [[ $ui_disabled -eq 1 || $ui_port_disabled -eq 1 ]]; then
     ui_seen=1
     ui_ws_seen=1
   fi

@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_launch_live_config import _build_complete_env
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -463,6 +465,7 @@ def test_wait_for_ready_allows_degraded_when_optional(tmp_path: Path) -> None:
     [
         {"UI_ENABLED": "0"},
         {"UI_DISABLE_HTTP_SERVER": "1"},
+        {"UI_PORT": "0"},
     ],
 )
 def test_wait_for_ready_short_circuits_when_ui_headless(
@@ -816,6 +819,40 @@ def test_wait_for_socket_release_skips_remote_hosts() -> None:
     )
 
     assert "free example.com 443 remote" in completed.stdout
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"UI_ENABLED": "0"},
+        {"UI_DISABLE_HTTP_SERVER": "1"},
+    ],
+)
+def test_wait_for_ui_socket_release_skips_when_disabled(env: dict[str, str]) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    wait_function = _extract_function(source, "wait_for_ui_socket_release")
+
+    env_vars = os.environ.copy()
+    env_vars.update({"PYTHON_BIN": sys.executable, "UI_HOST": "127.0.0.1"})
+    env_vars.update(env)
+
+    bash_script = (
+        "set -euo pipefail\n"
+        + wait_function
+        + "wait_for_ui_socket_release\n"
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        check=True,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env_vars,
+    )
+
+    assert "disabled" in completed.stdout
 
 
 def test_runtime_bus_target_defaults_wss_port() -> None:
@@ -1277,15 +1314,16 @@ def test_validate_env_file_handles_export(tmp_path: Path) -> None:
     validate_fn = source[start : end + len("\n}\n")]
 
     env_file = tmp_path / "env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "API_KEY=alpha",  # simple assignment
-                "export PUBLIC_URL=https://service.invalid",  # exported assignment
-                "export SECRET_TOKEN=beta",  # exported secret should be masked
-            ]
-        )
+    env_values = _build_complete_env(tmp_path)
+    env_lines = [f"{key}={value}" for key, value in env_values.items()]
+    env_lines.extend(
+        [
+            "API_KEY=alpha",  # simple assignment
+            "export PUBLIC_URL=https://service.invalid",  # exported assignment
+            "export SECRET_TOKEN=beta",  # exported secret should be masked
+        ]
     )
+    env_file.write_text("\n".join(env_lines))
 
     env = os.environ.copy()
     env.update(
