@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import contextlib
 import errno
+import json
 import logging
 import math
 import os
@@ -29,6 +30,8 @@ from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable, TypeVar
 from urllib.parse import urlunparse
+import urllib.parse
+import urllib.request
 
 from solhunter_zero.runtime.trading_runtime import TradingRuntime
 from solhunter_zero.config import (
@@ -158,6 +161,18 @@ class StageResult:
     success: bool
     duration: float
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class KillSwitchDefinition:
+    """Represents a toggle that must propagate through runtime controls."""
+
+    name: str
+    endpoint: str
+    state_key: str
+    payload: Mapping[str, Any] | None = None
+    config_key: str | None = None
+    test_value: Any = 1
 
 
 def _mask_value(key: str, value: object) -> object:
@@ -764,6 +779,201 @@ def summarize_stages(stage_results: list[StageResult]) -> None:
         log.info("  [%s] %s (%.2fs)%s", status, result.name, result.duration, extra)
 
 
+def _kill_switch_definitions() -> list[KillSwitchDefinition]:
+    """Return the kill switch controls that must persist after launch."""
+
+    return [
+        KillSwitchDefinition(
+            name="Global Pause",
+            endpoint="/api/control/pause",
+            state_key="control:execution:paused",
+            payload={"paused": True},
+            test_value=True,
+        ),
+        KillSwitchDefinition(
+            name="Paper-only",
+            endpoint="/api/control/paper",
+            state_key="control:execution:paper_only",
+            payload={"paper_only": True},
+            test_value=True,
+        ),
+        KillSwitchDefinition(
+            name="Family Budget",
+            endpoint="/api/control/budget/default",
+            state_key="control:budget",
+            payload={"budget": 0.1},
+            test_value=0.1,
+        ),
+        KillSwitchDefinition(
+            name="Spread Gate",
+            endpoint="/api/control/spread",
+            state_key="MAX_SPREAD_BPS",
+            payload={"value": 80},
+            config_key="MAX_SPREAD_BPS",
+            test_value=80,
+        ),
+        KillSwitchDefinition(
+            name="Depth Gate",
+            endpoint="/api/control/depth",
+            state_key="MIN_DEPTH1PCT_USD",
+            payload={"value": 8000},
+            config_key="MIN_DEPTH1PCT_USD",
+            test_value=8000,
+        ),
+        KillSwitchDefinition(
+            name="RL Toggle",
+            endpoint="/api/control/rl",
+            state_key="RL_WEIGHTS_DISABLED",
+            payload={"value": 1},
+            config_key="RL_WEIGHTS_DISABLED",
+            test_value=1,
+        ),
+        KillSwitchDefinition(
+            name="Blacklist",
+            endpoint="/api/control/blacklist",
+            state_key="control:blacklist",
+            payload={"mints": []},
+            test_value=[],
+        ),
+    ]
+
+
+def _vote_window_seconds() -> float:
+    """Return the configured vote window in seconds (defaults to 0.4s)."""
+
+    raw_window = os.getenv("VOTE_WINDOW_MS", "400")
+    try:
+        window_ms = float(raw_window)
+    except Exception:
+        window_ms = 400.0
+    return max(window_ms / 1000.0, 0.1)
+
+
+def _resolve_control_base_url(args: argparse.Namespace | None) -> str:
+    override = (os.getenv("START_ALL_CONTROL_BASE_URL") or "").strip()
+    if override:
+        return override.rstrip("/")
+    host = os.getenv("START_ALL_CONTROL_HOST") or getattr(args, "ui_host", "127.0.0.1")
+    port = os.getenv("START_ALL_CONTROL_PORT") or getattr(args, "ui_port", 5001)
+    scheme = os.getenv("START_ALL_CONTROL_SCHEME") or os.getenv("UI_HTTP_SCHEME") or "http"
+    return f"{scheme}://{host}:{port}"
+
+
+def _http_post_json(url: str, payload: Mapping[str, Any], timeout: float = 1.0) -> Mapping[str, Any]:
+    data = json.dumps(dict(payload)).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        body = resp.read()
+    if not body:
+        return {}
+    try:
+        return json.loads(body.decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _init_redis_client():  # pragma: no cover - exercised via integration tests
+    url = os.getenv("REDIS_URL") or os.getenv("BROKER_URL") or os.getenv("BROKER_URLS")
+    if not url:
+        return None
+    try:
+        import redis  # type: ignore
+
+        if hasattr(redis, "Redis"):
+            return redis.Redis.from_url(str(url))
+    except Exception:
+        return None
+    return None
+
+
+def _normalize_state(value: Any) -> Any:
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value
+    return value
+
+
+def _read_control_state(defn: KillSwitchDefinition, redis_client=None) -> Any:
+    client = redis_client or _init_redis_client()
+    if client is not None:
+        try:
+            value = client.get(defn.state_key)
+        except Exception:
+            value = None
+        if value is not None:
+            return _normalize_state(value)
+
+    if defn.config_key and isinstance(_PIPELINE_CONFIG, Mapping):
+        if defn.config_key in _PIPELINE_CONFIG:
+            return _PIPELINE_CONFIG[defn.config_key]
+
+    env_val = os.getenv(defn.state_key) or (defn.config_key and os.getenv(defn.config_key))
+    if env_val is not None:
+        return env_val
+    return None
+
+
+def _state_matches(target: Any, observed: Any) -> bool:
+    observed = _normalize_state(observed)
+    if isinstance(observed, str) and isinstance(target, (int, float, bool)):
+        try:
+            return float(observed) == float(target)
+        except Exception:
+            normalized = observed.strip().lower()
+            if isinstance(target, bool):
+                return (normalized in _TRUTHY) if target else (normalized in _FALSY)
+            return False
+    return observed == target
+
+
+def verify_kill_switch_toggles(
+    base_url: str,
+    *,
+    vote_window_ms: float | None = None,
+    http_post: Callable[[str, Mapping[str, Any], float], Mapping[str, Any]] | None = None,
+    state_reader: Callable[[KillSwitchDefinition], Any] | None = None,
+) -> dict[str, Any]:
+    """Toggle each kill switch via the control API and assert persistence."""
+
+    if _ui_http_disabled():
+        log.info("UI HTTP server disabled; skipping kill switch propagation checks")
+        return {}
+
+    post_func = http_post or _http_post_json
+    reader = state_reader or _read_control_state
+    window_seconds = (vote_window_ms if vote_window_ms is not None else 400.0) / 1000.0
+    window_seconds = max(window_seconds, _vote_window_seconds())
+    results: dict[str, Any] = {}
+    redis_client = _init_redis_client()
+
+    for defn in _kill_switch_definitions():
+        payload = {"state_key": defn.state_key, "name": defn.name, "value": defn.test_value}
+        if defn.payload:
+            payload.update(defn.payload)
+        endpoint = urllib.parse.urljoin(base_url.rstrip("/") + "/", defn.endpoint.lstrip("/"))
+        log.info("Toggling kill switch %s via %s", defn.name, endpoint)
+        post_func(endpoint, payload, 1.0)
+
+        deadline = time.time() + window_seconds
+        observed = None
+        while time.time() < deadline:
+            observed = reader(defn) if state_reader else _read_control_state(defn, redis_client)
+            if _state_matches(defn.test_value, observed):
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(
+                f"{defn.name} toggle did not persist within {window_seconds:.3f}s"
+            )
+
+        results[defn.name] = observed
+    log.info("Kill switch propagation checks passed: %s", list(results))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Production helpers
 # ---------------------------------------------------------------------------
@@ -944,6 +1154,15 @@ def main(argv: list[str] | None = None) -> int:
                 run_stage("launch-detached", lambda: launch_detached(args, cfg_path), stage_results)
             else:
                 run_stage("launch-detached", lambda: launch_detached(args, cfg_path), stage_results)
+
+            run_stage(
+                "post-launch-kill-switches",
+                lambda: verify_kill_switch_toggles(
+                    _resolve_control_base_url(args),
+                    vote_window_ms=_parse_float_env("VOTE_WINDOW_MS", 400.0),
+                ),
+                stage_results,
+            )
         except Exception as exc:
             exit_code = 1
             log.critical("Startup pipeline aborted: %s", exc)
