@@ -3221,6 +3221,9 @@ def start_websockets() -> dict[str, threading.Thread]:
     if websockets is None:
         return _handle_missing_websockets_dependency()
 
+    if not _ACTIVE_HTTP_SERVERS:
+        _clear_state_http_binding(_get_active_ui_state())
+
     with _WS_CHANNEL_LOCK:
         if all(state.loop is not None for state in _WS_CHANNELS.values()):
             return {
@@ -4371,6 +4374,7 @@ class UIServer:
                     with contextlib.suppress(Exception):
                         server.server_close()
             finally:
+                _clear_state_http_binding(self.state)
                 self._server = None
 
         thread = threading.Thread(target=_serve, name="ui-http-server", daemon=True)
@@ -4446,6 +4450,7 @@ class UIServer:
             startup_succeeded = True
         finally:
             if not startup_succeeded:
+                _clear_state_http_binding(self.state)
                 _teardown_ui_environment()
 
     def stop(self) -> None:
