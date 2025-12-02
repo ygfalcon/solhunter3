@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping
@@ -94,6 +95,11 @@ EVENT_SEQUENCE: list[tuple[str, Mapping[str, Any]]] = [
 ]
 
 
+async def _prime_discovery(bus: EventBus, token: str = MINT) -> None:
+    await asyncio.sleep(0)
+    bus.publish("token_discovered", {"tokens": [token]})
+
+
 class DeterministicClock:
     def __init__(self, start: float = 1_700_000_000.0, step: float = 0.05) -> None:
         self._wall = start
@@ -183,6 +189,51 @@ def _summarise_outputs(outputs: Mapping[str, list[Mapping[str, Any]]]) -> dict[s
     }
 
 
+def test_documented_sequence_emits_pipeline_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        reset_event_bus()
+        clock = DeterministicClock()
+        _patch_clock(monkeypatch, clock)
+
+        portfolio = Portfolio(path=None)
+        manager = DummyAgentManager()
+        service = GoldenPipelineService(
+            agent_manager=manager,
+            portfolio=portfolio,
+            enrichment_fetcher=_fake_enrichment_fetcher,
+            event_bus=RUNTIME_BUS,
+        )
+        outputs, unsubs = _subscribe_ui()
+        primer = asyncio.create_task(_prime_discovery(RUNTIME_BUS))
+
+        try:
+            await service.start()
+            primer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await primer
+
+            for topic, payload in EVENT_SEQUENCE:
+                RUNTIME_BUS.publish(topic, payload)
+                await asyncio.sleep(0.05)
+
+            await asyncio.sleep(0.25)
+            await service.pipeline.flush_market()
+            await asyncio.sleep(0.25)
+
+            assert outputs[STREAMS.golden_snapshot], "expected Golden snapshots"
+            assert outputs[STREAMS.market_depth], "expected depth emissions"
+            assert outputs[STREAMS.trade_suggested], "expected agent suggestions"
+        finally:
+            for unsub in unsubs:
+                unsub()
+            await service.stop()
+            reset_event_bus()
+
+    asyncio.run(_run())
+
+
 async def _fake_enrichment_fetcher(mints: Iterable[str]) -> dict[str, TokenSnapshot]:
     snapshots: dict[str, TokenSnapshot] = {}
     for mint in mints:
@@ -220,6 +271,7 @@ def test_service_flushes_buffered_bars_on_startup(monkeypatch: pytest.MonkeyPatc
         service: GoldenPipelineService | None = None
         outputs: dict[str, list[Mapping[str, Any]]]
         unsubscribers: list[Callable[[], None]] = []
+        primer: asyncio.Task | None = None
         try:
             service = GoldenPipelineService(
                 agent_manager=manager,
@@ -228,6 +280,7 @@ def test_service_flushes_buffered_bars_on_startup(monkeypatch: pytest.MonkeyPatc
                 event_bus=RUNTIME_BUS,
             )
             outputs, unsubscribers = _subscribe_ui()
+            primer = asyncio.create_task(_prime_discovery(RUNTIME_BUS))
 
             base_ts = clock.time()
             event = TapeEvent(
@@ -261,6 +314,10 @@ def test_service_flushes_buffered_bars_on_startup(monkeypatch: pytest.MonkeyPatc
                 unsub()
             if service is not None:
                 await service.stop()
+            if primer is not None:
+                primer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await primer
             reset_event_bus()
 
     asyncio.run(_run())
@@ -280,7 +337,11 @@ async def _drive_and_capture(path: Path) -> tuple[dict[str, list[Mapping[str, An
             enrichment_fetcher=_fake_enrichment_fetcher,
             event_bus=RUNTIME_BUS,
         )
+        primer = asyncio.create_task(_prime_discovery(RUNTIME_BUS))
         await service.start()
+        primer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await primer
 
         outputs, unsubs = _subscribe_ui()
         config = CaptureConfig(
@@ -328,7 +389,11 @@ async def _drive_and_replay(path: Path) -> tuple[dict[str, list[Mapping[str, Any
             enrichment_fetcher=_fake_enrichment_fetcher,
             event_bus=RUNTIME_BUS,
         )
+        primer = asyncio.create_task(_prime_discovery(RUNTIME_BUS))
         await service.start()
+        primer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await primer
 
         outputs, unsubs = _subscribe_ui()
         config = ReplayConfig(path=path, speed=0.0, topics=INPUT_TOPICS, bus=RUNTIME_BUS)
