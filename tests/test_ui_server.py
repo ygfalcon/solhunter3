@@ -2,6 +2,8 @@ import contextlib
 import errno
 import importlib
 import json
+import logging
+import shutil
 import socket
 import ssl
 import subprocess
@@ -57,6 +59,7 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
 
 def test_ui_server_https_requires_cert(monkeypatch) -> None:
     monkeypatch.setenv("UI_HTTP_SCHEME", "https")
+    monkeypatch.delenv("UI_ALLOW_SELF_SIGNED", raising=False)
     monkeypatch.delenv("UI_HTTP_CERT_FILE", raising=False)
     monkeypatch.delenv("UI_HTTP_KEY_FILE", raising=False)
 
@@ -68,9 +71,44 @@ def test_ui_server_https_requires_cert(monkeypatch) -> None:
     message = str(excinfo.value)
     assert "UI_HTTP_SCHEME=https" in message
     assert "UI_HTTP_CERT_FILE" in message
+    assert "UI_ALLOW_SELF_SIGNED" in message
 
     assert server._server is None
     assert server._thread is None or not server._thread.is_alive()
+
+
+def test_ui_server_https_self_signed_fallback(monkeypatch, caplog) -> None:
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl not available for generating HTTPS certificates")
+
+    monkeypatch.setenv("UI_HTTP_SCHEME", "https")
+    monkeypatch.setenv("UI_ALLOW_SELF_SIGNED", "1")
+    monkeypatch.delenv("UI_HTTP_CERT_FILE", raising=False)
+    monkeypatch.delenv("UI_HTTP_KEY_FILE", raising=False)
+
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    with caplog.at_level(logging.WARNING):
+        server.start()
+
+    try:
+        url = f"https://{server.host}:{server.port}/health/runtime"
+        context = ssl._create_unverified_context()
+        with contextlib.closing(
+            urllib.request.urlopen(url, context=context, timeout=5)
+        ) as response:
+            payload = json.load(response)
+
+        assert any(
+            "temporary self-signed certificate" in record.getMessage()
+            for record in caplog.records
+        )
+
+        assert isinstance(payload, dict)
+        assert "ok" in payload
+    finally:
+        server.stop()
 
 
 def test_ui_server_https_with_local_cert(monkeypatch, tmp_path) -> None:
