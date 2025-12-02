@@ -2600,13 +2600,14 @@ start_controller() {
 print_log_excerpt() {
   local log=$1
   local reason=${2:-}
-  local header="---- Runtime log excerpt ($log) ----"
+  local tail_lines=${READY_LOG_EXCERPT_LINES:-200}
+  local header="---- Last ${tail_lines} lines of runtime log ($log) ----"
   if [[ -n $reason ]]; then
     echo "$reason" >&2
   fi
   if [[ -f $log ]]; then
     echo "$header" >&2
-    tail -n 200 "$log" >&2 || true
+    tail -n "$tail_lines" "$log" >&2 || true
     echo "---- End runtime log ----" >&2
   else
     echo "Log file $log not found" >&2
@@ -2641,6 +2642,7 @@ print_ui_location() {
 }
 
 READY_TIMEOUT="${READY_TIMEOUT:-120}"
+UI_READY_TIMEOUT="${UI_READY_TIMEOUT:-$READY_TIMEOUT}"
 wait_for_ready() {
   local log=$1
   local notify=$2
@@ -2767,6 +2769,22 @@ wait_for_ready() {
     if [[ $runtime_seen -eq 0 ]] && grep -q "RUNTIME_READY" "$log" 2>/dev/null; then
       runtime_seen=1
     fi
+    if [[ $waited -ge $UI_READY_TIMEOUT ]]; then
+      local -a ui_missing=()
+      if [[ $ui_seen -eq 0 ]]; then
+        ui_missing+=("UI_READY")
+      fi
+      if [[ $ui_ws_seen -eq 0 ]]; then
+        ui_missing+=("UI_WS_READY")
+      fi
+      if [[ ${#ui_missing[@]} -gt 0 ]]; then
+        local missing_list
+        missing_list=$(printf '%s ' "${ui_missing[@]}")
+        missing_list=${missing_list% }
+        print_log_excerpt "$log" "Timed out after ${UI_READY_TIMEOUT}s waiting for UI readiness (missing: ${missing_list})"
+        return 1
+      fi
+    fi
     if [[ $ui_seen -eq 1 && $ui_ws_seen -eq 1 && $bus_seen -eq 1 && $golden_seen -eq 1 && $runtime_seen -eq 1 ]]; then
       return 0
     fi
@@ -2793,7 +2811,7 @@ wait_for_ready() {
   if [[ $runtime_seen -eq 0 ]]; then
     missing+=" RUNTIME_READY"
   fi
-  print_log_excerpt "$log" "Timed out waiting for runtime readiness (missing:${missing:- none})"
+  print_log_excerpt "$log" "Timed out after ${READY_TIMEOUT}s waiting for runtime readiness (missing:${missing:- none})"
   return 1
 }
 

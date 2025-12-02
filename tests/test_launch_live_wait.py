@@ -85,6 +85,9 @@ def _run_wait_for_ready(
     *,
     env: dict[str, str] | None = None,
     notify_path: Path | None = None,
+    ready_timeout: int = 2,
+    ui_ready_timeout: int | None = None,
+    log_excerpt_lines: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     log_path = tmp_path / "runtime.log"
     log_path.write_text("\n".join(log_lines) + "\n")
@@ -94,7 +97,16 @@ def _run_wait_for_ready(
         "set -euo pipefail\n"
         + WAIT_FOR_READY_SNIPPET
         + "EXIT_HEALTH=4\n"
-        + f"READY_TIMEOUT=2\nwait_for_ready '{log_path}' "
+        + f"READY_TIMEOUT={ready_timeout}\n"
+        + "UI_READY_TIMEOUT=${UI_READY_TIMEOUT:-$READY_TIMEOUT}\n"
+        + "READY_LOG_EXCERPT_LINES=${READY_LOG_EXCERPT_LINES:-200}\n"
+        + (
+            ""
+            if ui_ready_timeout is None
+            else f"UI_READY_TIMEOUT={ui_ready_timeout}\n"
+        )
+        + ("" if log_excerpt_lines is None else f"READY_LOG_EXCERPT_LINES={log_excerpt_lines}\n")
+        + f"wait_for_ready '{log_path}' "
         + ("''" if notify_path is None else shlex.quote(str(notify_path)))
         + "\n"
     )
@@ -389,6 +401,47 @@ def test_wait_for_ready_accepts_disabled(tmp_path: Path, golden_line: str) -> No
     )
 
     assert completed.returncode == 0
+
+
+def test_wait_for_ready_times_out_when_ui_missing(tmp_path: Path) -> None:
+    log_lines = [
+        "[ts] bootstrap starting",
+        "[ts] GOLDEN_READY stage=liq",
+        "[ts] Event bus: connected",
+        "[ts] some later line",
+        "[ts] final line for excerpt",
+    ]
+    completed = _run_wait_for_ready(
+        tmp_path,
+        log_lines,
+        ready_timeout=6,
+        ui_ready_timeout=2,
+        log_excerpt_lines=3,
+    )
+
+    assert completed.returncode == 1
+    assert "Timed out after 2s waiting for UI readiness" in completed.stderr
+    assert "some later line" in completed.stderr
+    assert "final line for excerpt" in completed.stderr
+    assert "bootstrap starting" not in completed.stderr
+
+
+def test_wait_for_ready_succeeds_before_ui_timeout(tmp_path: Path) -> None:
+    completed = _run_wait_for_ready(
+        tmp_path,
+        [
+            "[ts] UI_READY url=http://localhost:1234",
+            "[ts] UI_WS_READY status=ok detail=connected",
+            "[ts] Event bus: connected",
+            "[ts] GOLDEN_READY stage=liq",
+            "[ts] RUNTIME_READY",
+        ],
+        ready_timeout=10,
+        ui_ready_timeout=2,
+    )
+
+    assert completed.returncode == 0
+    assert "Timed out" not in completed.stderr
 
 
 def test_wait_for_ready_uses_notify_file_when_ui_disabled(tmp_path: Path) -> None:
