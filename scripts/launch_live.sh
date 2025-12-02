@@ -827,6 +827,7 @@ wait_for_socket_release() {
 import ipaddress
 import os
 import socket
+import sys
 import time
 from urllib.parse import urlparse
 
@@ -907,6 +908,7 @@ wait_for_ui_socket_release() {
 import ipaddress
 import os
 import socket
+import sys
 import time
 
 DEFAULT_TIMEOUT = 30.0
@@ -935,6 +937,13 @@ def _read_port(raw: str | None) -> int | None:
     return port if port > 0 else None
 
 
+def _http_server_disabled() -> bool:
+    raw = os.environ.get("UI_DISABLE_HTTP_SERVER")
+    if not raw:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
 def _is_local_host(hostname: str) -> bool:
     normalized = (hostname or "").strip().lower()
     if not normalized or normalized in {"localhost", "127.0.0.1"}:
@@ -958,13 +967,23 @@ def _probe_host(hostname: str) -> str:
 
 
 host = os.environ.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
-port = _read_port(os.environ.get("UI_PORT", "5001"))
+port = _read_port(os.environ.get("UI_PORT"))
 timeout = _read_timeout(os.environ.get("UI_SOCKET_RELEASE_TIMEOUT"))
+
+http_disabled = _http_server_disabled()
 
 if port is None:
     raw_port = os.environ.get("UI_PORT") or "0"
-    print(f"free {host} {raw_port} disabled")
-    raise SystemExit(0)
+    if http_disabled:
+        print(f"free {host} {raw_port} disabled")
+        raise SystemExit(0)
+
+    print(
+        "UI HTTP server enabled but UI_PORT is not configured or set to 0; "
+        "set UI_PORT to a non-zero port or set UI_DISABLE_HTTP_SERVER to disable the UI HTTP server.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 if not _is_local_host(host):
     print(f"free {host} {port} remote")

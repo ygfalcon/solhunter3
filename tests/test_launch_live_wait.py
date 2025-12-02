@@ -905,6 +905,30 @@ def test_launch_live_ui_port_busy_exit() -> None:
         server_sock.close()
 
 
+def test_wait_for_ui_socket_release_requires_port() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    wait_function = _extract_function(source, "wait_for_ui_socket_release")
+
+    env = os.environ.copy()
+    env.update({"PYTHON_BIN": sys.executable, "UI_PORT": "0"})
+    env.pop("UI_DISABLE_HTTP_SERVER", None)
+
+    bash_script = "set -euo pipefail\n" + wait_function + "wait_for_ui_socket_release\n"
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        check=False,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "UI HTTP server enabled but UI_PORT is not configured" in completed.stderr
+
+
 def test_normalize_bus_configuration_exports() -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
