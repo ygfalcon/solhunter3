@@ -265,6 +265,53 @@ async def test_orchestrator_emits_ready_when_ws_discovery_fails(monkeypatch, cap
 
 
 @pytest.mark.anyio("asyncio")
+async def test_orchestrator_marks_ws_degraded_on_handshake_drops(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._create_ui_app",
+        lambda _state: object(),
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator.initialise_runtime_wiring",
+        lambda _state: None,
+    )
+
+    readiness_meta = {"handshake_drops": {"events": 2, "logs": 1}}
+    ui_stub = types.SimpleNamespace(
+        UIState=lambda: object(),
+        get_ws_urls=lambda: {},
+        get_ws_readiness_metadata=lambda: readiness_meta,
+    )
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._ui_module",
+        ui_stub,
+        raising=False,
+    )
+
+    monkeypatch.setattr(
+        "solhunter_zero.runtime.orchestrator._start_ui_ws",
+        lambda: {"events": object(), "logs": object()},
+    )
+
+    orch = RuntimeOrchestrator(run_http=False)
+    with pytest.raises(RuntimeError):
+        await orch.start_ui()
+
+    assert orch.handles.ui_ws_status == "degraded"
+    assert "handshake drops" in orch.handles.ui_ws_detail
+    assert "events:2" in orch.handles.ui_ws_detail
+    assert "logs:1" in orch.handles.ui_ws_detail
+
+    ws_logs = [message for message in caplog.messages if message.startswith("UI_WS_READY ")]
+    assert ws_logs, "expected UI_WS_READY log entry"
+    latest = ws_logs[-1]
+    assert "status=degraded" in latest
+    assert "events:2" in latest
+    assert "logs:1" in latest
+
+
+@pytest.mark.anyio("asyncio")
 async def test_orchestrator_waits_for_delayed_http_server(monkeypatch):
     events: list[tuple[str, bool, str]] = []
 

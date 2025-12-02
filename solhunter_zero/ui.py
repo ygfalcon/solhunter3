@@ -1628,12 +1628,14 @@ class _WebsocketState:
         "queue_depth",
         "queue_high",
         "drop_count",
+        "handshake_drop_count",
         "last_drop_warning_at",
         "recent_close_codes",
         "lock",
         "ready",
         "ready_status",
         "ready_detail",
+        "handshake_complete",
     )
 
     def __init__(self, name: str) -> None:
@@ -1651,12 +1653,14 @@ class _WebsocketState:
         self.queue_depth: int = 0
         self.queue_high: int = 0
         self.drop_count: int = 0
+        self.handshake_drop_count: int = 0
         self.last_drop_warning_at: float = 0.0
         self.recent_close_codes: Deque[int | None] = deque(maxlen=10)
         self.lock = threading.Lock()
         self.ready = threading.Event()
         self.ready_status: str = "stopped"
         self.ready_detail: str | None = None
+        self.handshake_complete: bool = False
 
 
 _WS_CHANNELS: dict[str, _WebsocketState] = {
@@ -1754,6 +1758,19 @@ def get_ws_readiness_metadata() -> Dict[str, Any]:
             metadata[key] = dict(value)
         else:
             metadata[key] = value
+
+    handshake_drops: Dict[str, int] = {}
+    handshake_status: Dict[str, str] = {}
+    for name, state in _WS_CHANNELS.items():
+        with state.lock:
+            if state.handshake_drop_count:
+                handshake_drops[name] = state.handshake_drop_count
+            handshake_status[name] = "complete" if state.handshake_complete else "pending"
+
+    if handshake_drops:
+        metadata["handshake_drops"] = handshake_drops
+    if handshake_status:
+        metadata["handshake_status"] = handshake_status
     return metadata
 
 
@@ -2183,6 +2200,8 @@ def _enqueue_message(
             should_log = False
             with state.lock:
                 state.drop_count += 1
+                if not state.handshake_complete:
+                    state.handshake_drop_count += 1
                 depth = state.queue.qsize()
                 state.queue_depth = depth
                 if depth > state.queue_high:
@@ -2224,6 +2243,8 @@ def _enqueue_message(
         warn_drops = 0
         with state.lock:
             state.drop_count += 1
+            if not state.handshake_complete:
+                state.handshake_drop_count += 1
             warn_drops = state.drop_count
             if _WS_QUEUE_DROP_TOTAL is not None:
                 try:
@@ -2308,6 +2329,8 @@ def get_ws_channel_metrics() -> Dict[str, Dict[str, Any]]:
                 "drops": state.drop_count,
                 "clients": len(state.clients),
                 "recent_close_codes": list(state.recent_close_codes),
+                "handshake_drops": state.handshake_drop_count,
+                "handshake_complete": state.handshake_complete,
             }
     return metrics
 
@@ -2325,6 +2348,7 @@ def get_ws_status_snapshot() -> Dict[str, Dict[str, Any]]:
         ready = state.ready.is_set()
         status = "ok"
         detail: str | None = None
+        handshake_drops = state.handshake_drop_count
         if not (ready and thread_alive and loop_active and server_active):
             status = "failed"
             if state.ready_detail:
@@ -2337,6 +2361,10 @@ def get_ws_status_snapshot() -> Dict[str, Dict[str, Any]]:
                 detail = "server unavailable"
             else:
                 detail = "loop inactive"
+        elif handshake_drops:
+            status = "degraded"
+            drop_summary = f"{state.name}:{handshake_drops}"
+            detail = f"handshake drops before subscription ({drop_summary})"
         snapshot[name] = {
             "status": status,
             "ready": ready,
@@ -2347,6 +2375,8 @@ def get_ws_status_snapshot() -> Dict[str, Dict[str, Any]]:
             "detail": detail,
             "host": state.host,
             "port": state.port,
+            "handshake_drops": handshake_drops,
+            "handshake_complete": state.handshake_complete,
         }
     return snapshot
 
@@ -2753,8 +2783,10 @@ def _close_server(loop: asyncio.AbstractEventLoop, state: _WebsocketState) -> No
         state.queue_depth = 0
         state.queue_high = 0
         state.drop_count = 0
+        state.handshake_drop_count = 0
         state.last_drop_warning_at = 0.0
         state.recent_close_codes.clear()
+        state.handshake_complete = False
         state.client_filters.clear()
 
 
@@ -2799,8 +2831,10 @@ def _start_channel(
             state.queue_depth = 0
             state.queue_high = 0
             state.drop_count = 0
+            state.handshake_drop_count = 0
             state.last_drop_warning_at = 0.0
             state.recent_close_codes = deque(maxlen=10)
+            state.handshake_complete = False
 
         async def _broadcast_loop() -> None:
             while True:
@@ -2938,6 +2972,8 @@ def _start_channel(
                 with contextlib.suppress(Exception):
                     await timeout_task
                 return
+            with state.lock:
+                state.handshake_complete = True
 
             async def _decode_client_message(raw: Any) -> Dict[str, Any] | None:
                 if isinstance(raw, bytes):
@@ -3201,8 +3237,10 @@ def _mark_websockets_unavailable(reason: str) -> None:
             state.queue_depth = 0
             state.queue_high = 0
             state.drop_count = 0
+            state.handshake_drop_count = 0
             state.last_drop_warning_at = 0.0
             state.recent_close_codes.clear()
+            state.handshake_complete = False
 
 
 def _handle_missing_websockets_dependency() -> dict[str, threading.Thread]:
