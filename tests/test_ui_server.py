@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import types
 import urllib.request
 from pathlib import Path
 
@@ -245,6 +246,43 @@ def test_ui_server_worker_bind_failure_surfaces_exception(monkeypatch) -> None:
 
     assert server._server is None
     assert server._thread is None or not server._thread.is_alive()
+
+
+def test_ui_server_crash_clears_http_binding(monkeypatch) -> None:
+    crash_event = threading.Event()
+
+    class _CrashingServer:
+        def __init__(self) -> None:
+            self.server_port = 9123
+            self.server_address = ("127.0.0.1", self.server_port)
+            self.server_name = "127.0.0.1"
+            self.socket = types.SimpleNamespace(setsockopt=lambda *args, **kwargs: None)
+            self.daemon_threads = False
+
+        def serve_forever(self) -> None:
+            crash_event.set()
+            raise RuntimeError("boom")
+
+        def shutdown(self) -> None:
+            crash_event.set()
+
+        def server_close(self) -> None:
+            pass
+
+    monkeypatch.setattr(ui, "make_server", lambda *args, **kwargs: _CrashingServer())
+
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    server.start()
+    try:
+        assert crash_event.wait(timeout=5)
+        if server._thread:
+            server._thread.join(timeout=2)
+        assert state.http_host is None
+        assert state.http_port is None
+    finally:
+        server.stop()
 
 
 def test_ui_server_stop_resets_environment_state() -> None:

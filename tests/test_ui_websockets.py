@@ -45,6 +45,52 @@ def test_start_websockets_requires_dependency(monkeypatch):
     with pytest.raises(RuntimeError, match="UI websockets require"):
         ui.start_websockets()
 
+
+def test_start_websockets_clears_stale_http_binding(monkeypatch):
+    for name in list(sys.modules):
+        if name.startswith("websockets"):
+            sys.modules.pop(name, None)
+
+    stub_ws = types.ModuleType("websockets")
+
+    class _DummyServer:
+        def __init__(self, port: int) -> None:
+            self.sockets = [types.SimpleNamespace(getsockname=lambda: ("127.0.0.1", port))]
+
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:  # pragma: no cover - simple stub
+            return None
+
+    async def _serve(_handler, _host, port, **kwargs: Any):  # pragma: no cover - simple stub
+        return _DummyServer(int(port or 8765))
+
+    stub_ws.serve = _serve
+    monkeypatch.setitem(sys.modules, "websockets", stub_ws)
+    sys.modules.setdefault("sqlparse", types.SimpleNamespace())
+    sys.modules.setdefault("solhunter_zero.wallet", types.ModuleType("solhunter_zero.wallet"))
+
+    sys.modules.pop("solhunter_zero.ui", None)
+    ui = importlib.import_module("solhunter_zero.ui")
+    importlib.reload(ui)
+
+    state = ui.UIState()
+    state.http_host = "stale-host"
+    state.http_port = 4321
+    ui._set_active_ui_state(state)
+
+    threads: dict[str, threading.Thread] = {}
+    try:
+        threads = ui.start_websockets()
+        assert state.http_host is None
+        assert state.http_port is None
+    finally:
+        ui.stop_websockets()
+        ui._set_active_ui_state(None)
+        for thread in threads.values():
+            thread.join(timeout=1)
+
 @pytest.mark.timeout(30)
 def test_websocket_threads_bind():
     # ``tests.stubs`` replaces ``websockets`` with a lightweight stub. Remove the
