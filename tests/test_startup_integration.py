@@ -190,6 +190,118 @@ def test_start_all_allows_when_rl_healthy(monkeypatch):
                 assert "RL daemon gate failed" not in str(e)
 
 
+def test_kill_switch_propagation_runs_after_launch(monkeypatch):
+    import sys
+    import types
+
+    sys.modules.setdefault(
+        "yaml", types.SimpleNamespace(safe_load=lambda *a, **k: {}, safe_dump=lambda *a, **k: "")
+    )
+
+    import start_all
+    import scripts.start_all as start_module
+
+    monkeypatch.setenv("SELFTEST_SKIP_ARTIFACTS", "1")
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("USE_REDIS", "0")
+    monkeypatch.setenv("CHECK_UI_HEALTH", "0")
+    monkeypatch.setenv("RL_HEALTH_URL", "http://rl:7070/health")
+    monkeypatch.setenv("VOTE_WINDOW_MS", "250")
+
+    monkeypatch.setattr(start_module, "kill_lingering_processes", lambda: None)
+    monkeypatch.setattr(
+        start_module,
+        "ensure_environment",
+        lambda _cfg: {"config_path": "/tmp/config.toml", "config": {}},
+    )
+    monkeypatch.setattr(start_module, "_load_production_environment", lambda: {})
+    monkeypatch.setattr(start_module, "apply_production_defaults", lambda *_: {})
+    monkeypatch.setattr(start_module, "_validate_keys", lambda: "ok")
+    monkeypatch.setattr(start_module, "_write_manifest", lambda *_: Path("/tmp/manifest.json"))
+    monkeypatch.setattr(start_module, "_connectivity_check", lambda: [])
+    monkeypatch.setattr(start_module, "_connectivity_soak", lambda: {"disabled": True})
+    monkeypatch.setattr(start_module, "rl_health_gate", lambda: (True, "ok"))
+
+    def _fake_live_keypair(_cfg):
+        os.environ["KEYPAIR_PATH"] = "/tmp/key.json"
+        os.environ["SOLANA_KEYPAIR"] = "/tmp/key.json"
+        return {"keypair_path": "/tmp/key.json", "keypair_pubkey": "pub"}
+
+    monkeypatch.setattr(start_module, "ensure_live_keypair", _fake_live_keypair)
+
+    captured: dict[str, object] = {}
+
+    def fake_verify(base_url: str, vote_window_ms: float | None = None, **_kwargs):
+        captured["base_url"] = base_url
+        captured["vote_window_ms"] = vote_window_ms
+        return {}
+
+    monkeypatch.setattr(start_module, "verify_kill_switch_toggles", fake_verify)
+
+    with patch("scripts.start_all.launch_detached", return_value=0, create=True):
+        start_all.main([])
+
+    assert captured["base_url"].startswith("http://")
+    assert captured["vote_window_ms"] == 250.0
+
+
+def test_kill_switch_propagation_fails_on_stale_state(monkeypatch):
+    import sys
+    import types
+
+    sys.modules.setdefault(
+        "yaml", types.SimpleNamespace(safe_load=lambda *a, **k: {}, safe_dump=lambda *a, **k: "")
+    )
+
+    import scripts.start_all as start_module
+
+    calls: list[str] = []
+
+    def fake_post(url, payload, timeout):
+        calls.append(url)
+        return {"ok": True}
+
+    with pytest.raises(RuntimeError):
+        start_module.verify_kill_switch_toggles(
+            "http://localhost:5001",
+            vote_window_ms=150,
+            http_post=fake_post,
+            state_reader=lambda _defn: None,
+        )
+
+    assert calls  # ensured toggles were attempted
+
+
+def test_verify_kill_switch_toggles_accepts_state_within_window(monkeypatch):
+    import sys
+    import types
+
+    sys.modules.setdefault(
+        "yaml", types.SimpleNamespace(safe_load=lambda *a, **k: {}, safe_dump=lambda *a, **k: "")
+    )
+
+    import scripts.start_all as start_module
+
+    state: dict[str, object] = {}
+
+    def fake_post(url, payload, timeout):
+        state[payload["state_key"]] = payload.get("value")
+        return {"ok": True}
+
+    def fake_read(defn):
+        return state.get(defn.state_key)
+
+    result = start_module.verify_kill_switch_toggles(
+        "http://localhost:5001",
+        vote_window_ms=200,
+        http_post=fake_post,
+        state_reader=fake_read,
+    )
+
+    assert result
+    for definition in start_module._kill_switch_definitions():
+        assert definition.name in result
+
 def test_launch_detached_writes_runtime_log(tmp_path, monkeypatch):
     import scripts.start_all as start_module
 
