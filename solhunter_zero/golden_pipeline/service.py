@@ -777,6 +777,14 @@ class GoldenPipelineService:
             self._depth_near_fresh_ms = depth_cache_ttl * 2000.0
         else:
             self._depth_near_fresh_ms = None
+        raw_markers = os.getenv("ENRICHMENT_CACHE_MARKERS", "")
+        markers = tuple(part.strip() for part in raw_markers.split(",") if part.strip())
+        self._enrichment_cache_markers: tuple[str, ...] = markers
+        try:
+            timeout = float(os.getenv("ENRICHMENT_CACHE_MARKER_TIMEOUT", "5"))
+        except Exception:
+            timeout = 5.0
+        self._enrichment_cache_timeout = max(0.0, timeout)
         shared_bus = EventBusAdapter(self._event_bus)
         manager_agent = AgentManagerAgent(
             agent_manager,
@@ -908,6 +916,7 @@ class GoldenPipelineService:
         self._subscriptions.append(
             self._event_bus.subscribe("depth_update", self._on_depth)
         )
+        await self._await_enrichment_cache_markers()
         await self.pipeline.flush_market()
         await self._depth_adapter.start()
         await self._publish_warm_start_depth()
@@ -1446,6 +1455,54 @@ class GoldenPipelineService:
                 asof=now,
             )
         return snapshots
+
+    async def _await_enrichment_cache_markers(self) -> None:
+        """Block snapshotter activation until enrichment cache markers appear or timeout."""
+
+        if not self._enrichment_cache_markers:
+            return
+
+        kv = getattr(self.pipeline, "_kv", None)
+        if kv is None or not hasattr(kv, "get"):
+            log.info(
+                "Skipping enrichment cache latch; kv unavailable (markers=%s)",
+                self._enrichment_cache_markers,
+            )
+            return
+
+        deadline = time.time() + self._enrichment_cache_timeout
+        markers_text = ", ".join(self._enrichment_cache_markers)
+        log.info("Waiting for enrichment cache markers: %s", markers_text)
+
+        while True:
+            now = time.time()
+            inspected: Dict[str, float | None] = {}
+            ready = True
+            for marker in self._enrichment_cache_markers:
+                value = await kv.get(marker)
+                ts: float | None = None
+                if value is not None:
+                    try:
+                        ts = float(value)
+                    except Exception:
+                        ts = None
+                inspected[marker] = ts
+                if ts is None:
+                    ready = False
+
+            log.info("Enrichment cache markers inspected: %s", inspected)
+
+            if ready:
+                return
+
+            if now >= deadline:
+                log.warning(
+                    "Timed out waiting for enrichment cache markers %s; proceeding",
+                    self._enrichment_cache_markers,
+                )
+                return
+
+            await asyncio.sleep(0.25)
 
 
 __all__ = [

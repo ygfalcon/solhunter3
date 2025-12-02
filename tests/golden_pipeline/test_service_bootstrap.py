@@ -1,8 +1,9 @@
 import asyncio
-import os
+import logging
 import sys
 import time
 import types
+from collections import defaultdict
 from types import SimpleNamespace
 from typing import Iterable
 
@@ -66,6 +67,28 @@ class RecordingAgentManager:
     async def evaluate_with_swarm(self, mint: str, portfolio: object) -> SimpleNamespace:
         self.calls.append(mint)
         return SimpleNamespace(actions=[])
+
+
+class StubEventBus:
+    def __init__(self) -> None:
+        self._subscribers: dict[str, list] = defaultdict(list)
+
+    def publish(self, topic: str, payload: object, *, dedupe_key: str | None = None, _broadcast: bool = True) -> None:
+        handlers = list(self._subscribers.get(topic, ()))
+        for handler in handlers:
+            result = handler(payload)
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result)
+
+    def subscribe(self, topic: str, handler):
+        self._subscribers[topic].append(handler)
+
+        def unsubscribe() -> None:
+            handlers = self._subscribers.get(topic)
+            if handlers and handler in handlers:
+                handlers.remove(handler)
+
+        return unsubscribe
 
 
 MINT = "MintAphex1111111111111111111111111111111"
@@ -176,6 +199,60 @@ def test_depth_cache_ttl_config_override() -> None:
         service.pipeline._agent_stage._depth_near_fresh_ms
         == pytest.approx(37_000.0)
     )
+
+
+@pytest.mark.anyio("asyncio")
+async def test_start_waits_for_enrichment_cache_markers(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    marker = "cache:enrich:ready"
+    monkeypatch.setenv("ENRICHMENT_CACHE_MARKERS", marker)
+    monkeypatch.setenv("ENRICHMENT_CACHE_MARKER_TIMEOUT", "1.0")
+
+    async def _noop_enrichment(mints: Iterable[str]) -> dict[str, TokenSnapshot]:
+        return {}
+
+    manager = RecordingAgentManager()
+    portfolio = Portfolio(path=None)
+    bus = StubEventBus()
+
+    service = GoldenPipelineService(
+        agent_manager=manager,
+        portfolio=portfolio,
+        enrichment_fetcher=_noop_enrichment,
+        event_bus=bus,
+    )
+
+    kv = service.pipeline._kv  # type: ignore[attr-defined]
+    flush_called: dict[str, float] = {}
+
+    async def _fake_flush() -> None:
+        flush_called["ts"] = time.time()
+
+    async def _noop() -> None:
+        return None
+
+    monkeypatch.setattr(service.pipeline, "flush_market", _fake_flush)
+    monkeypatch.setattr(service, "_ensure_bus_visible", _noop)
+    monkeypatch.setattr(service, "_log_bus_configuration", lambda: None)
+    monkeypatch.setattr(service, "_bootstrap_trending_metadata", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(service._depth_adapter, "start", _noop)
+    monkeypatch.setattr(service, "_publish_warm_start_depth", _noop)
+    monkeypatch.setattr(service, "_market_flush_loop", lambda: _noop())
+    monkeypatch.setattr(service, "_heartbeat_loop", lambda: _noop())
+
+    caplog.set_level(logging.INFO)
+    start_task = asyncio.create_task(service.start())
+    await asyncio.sleep(0.05)
+    set_at = time.time()
+    await kv.set(marker, str(set_at))
+
+    await start_task
+    await service.stop()
+
+    assert flush_called["ts"] >= set_at
+    inspected_logs = [record.message for record in caplog.records if marker in record.message]
+    assert inspected_logs, "cache marker inspections were not logged"
 
 
 def test_depth_cache_ttl_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
