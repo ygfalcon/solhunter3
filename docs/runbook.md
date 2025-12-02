@@ -90,8 +90,51 @@ each section passes with recorded latency.
 
 ## 5. UI Verification
 
-Open the dashboard and confirm that each panel reports fresh data and no red staleness badges.  Use
-the topic map in `docs/ui_topic_map.md` to cross-reference stream subscriptions.
+Open the dashboard and confirm that each panel reports fresh data and no red staleness badges. Use
+the topic map in `docs/ui_topic_map.md` to cross-reference stream subscriptions and expected
+payloads per panel.
+
+- **Header Signals** ([topic map](ui_topic_map.md#header-signals)): Bus latency <3s, depth lag
+  <10s, OHLCV lag <2m, golden lag <60s.
+- **Discovery panel** ([topic map](ui_topic_map.md#discovery-panel)): Latest discovered mint
+  within 120s.
+- **Token Facts panel** ([topic map](ui_topic_map.md#token-facts-panel)): Metadata present and
+  refreshed within 5m.
+- **OHLCV (5m)** ([topic map](ui_topic_map.md#ohlcv-5m)): Closing candle data fresh within 2m.
+- **Depth & Spread** ([topic map](ui_topic_map.md#depth--spread)): Order book snapshot fresh
+  within 30s and spread within guardrails.
+- **Golden snapshot** ([topic map](ui_topic_map.md#golden-panel)): Snapshot fresh within 60s,
+  sentiment badge present when social data available.
+- **Agent Suggestions** ([topic map](ui_topic_map.md#agent-suggestions)): Suggestions inside their
+  TTL; rolling suggestions/sec and acceptance metrics updating.
+- **Vote Windows** ([topic map](ui_topic_map.md#vote-windows)): Decision emitted within the
+  configured vote window.
+- **Decisions** ([topic map](ui_topic_map.md#decisions)): Last decision within 3m.
+- **Shadow Fills (Paper)** ([topic map](ui_topic_map.md#shadow-fills-paper)): Recent fill per
+  active mint within 15m.
+- **Paper Positions** ([topic map](ui_topic_map.md#paper-positions)): Position snapshot fresher
+  than 1m.
+- **Live Fills** ([topic map](ui_topic_map.md#live-fills)): Live fills present within 10m once
+  trading is enabled.
+- **PnL Summary** ([topic map](ui_topic_map.md#pnl-summary)): Summary data refreshed within 5m.
+- **Exit Diagnostics** ([topic map](ui_topic_map.md#exit-diagnostics)): Exit state changes within
+  2m when positions are open.
+- **RL Weights** ([topic map](ui_topic_map.md#rl-weights)): Weight updates emitted at least once
+  every 2 windows.
+- **RL Uplift** ([topic map](ui_topic_map.md#rl-uplift)): Uplift computation refreshed within 10m.
+
+Reusable acceptance checklist for UI automation:
+
+```markdown
+- [ ] Header signals below alert thresholds (latency, OHLCV lag, depth lag, golden lag).
+- [ ] Discovery stream produced within 120s; token facts refreshed within 5m.
+- [ ] Market state fresh (OHLCV <2m, depth <30s, spread within guardrails).
+- [ ] Golden snapshot <60s with sentiment badge when available.
+- [ ] Agent suggestions and vote windows current (within TTL/window) with recent decisions (<3m).
+- [ ] Execution panels active (paper fills <15m, live fills <10m when enabled, positions <1m).
+- [ ] PnL summary <5m and exit diagnostics refreshed when positions open.
+- [ ] RL weights updated within 2 windows; RL uplift refreshed within 10m.
+```
 
 ## 6. Kill Switches
 
