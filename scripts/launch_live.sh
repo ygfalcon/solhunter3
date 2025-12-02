@@ -1785,6 +1785,43 @@ PY
   fi
 }
 
+READY_TIMEOUT_MINIMUM=120
+READY_TIMEOUT_MARGIN=60
+READY_TIMEOUT_PREFLIGHT_MARGIN=45
+derive_ready_timeout() {
+  local ready_timeout_raw="${READY_TIMEOUT:-}"
+  local ui_ready_timeout_raw="${UI_READY_TIMEOUT:-}"
+  local legacy_timeout_flag="${LAUNCH_LIVE_READY_TIMEOUT_LEGACY:-}"
+  local soak_value="${SOAK_DURATION:-0}"
+  local preflight_runs="${PREFLIGHT_RUNS:-1}"
+  if [[ -n ${legacy_timeout_flag:-} ]]; then
+    READY_TIMEOUT="${ready_timeout_raw:-$READY_TIMEOUT_MINIMUM}"
+  elif [[ -n ${ready_timeout_raw:-} ]]; then
+    READY_TIMEOUT="$ready_timeout_raw"
+  else
+    READY_TIMEOUT=$(READY_TIMEOUT_MINIMUM=$READY_TIMEOUT_MINIMUM READY_TIMEOUT_MARGIN=$READY_TIMEOUT_MARGIN READY_TIMEOUT_PREFLIGHT_MARGIN=$READY_TIMEOUT_PREFLIGHT_MARGIN SOAK_DURATION=$soak_value PREFLIGHT_RUNS=$preflight_runs "${PYTHON_BIN:-python3}" - <<'PY'
+import math
+import os
+
+soak = float(os.environ.get("SOAK_DURATION", "0"))
+preflight_runs = int(os.environ.get("PREFLIGHT_RUNS", "1"))
+minimum = int(os.environ.get("READY_TIMEOUT_MINIMUM", "120"))
+margin = float(os.environ.get("READY_TIMEOUT_MARGIN", "60"))
+preflight_margin = float(os.environ.get("READY_TIMEOUT_PREFLIGHT_MARGIN", "45"))
+
+derived = max(minimum, math.ceil(soak + margin + preflight_runs * preflight_margin))
+print(int(derived))
+PY
+    )
+  fi
+  if [[ -n ${ui_ready_timeout_raw:-} ]]; then
+    UI_READY_TIMEOUT="$ui_ready_timeout_raw"
+  else
+    UI_READY_TIMEOUT="$READY_TIMEOUT"
+  fi
+  log_info "Readiness timeouts: READY_TIMEOUT=${READY_TIMEOUT}s UI_READY_TIMEOUT=${UI_READY_TIMEOUT}s (soak=${soak_value}s preflight_runs=${preflight_runs} margin=${READY_TIMEOUT_MARGIN}s legacy=${legacy_timeout_flag:-0})"
+}
+
 ENV_FILE=""
 MICRO_FLAG=""
 CANARY_MODE=0
@@ -1913,6 +1950,8 @@ if ! [[ $SOAK_DURATION =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
 fi
 
 log_info "Starting launch_live with env=$ENV_FILE micro=$MICRO_FLAG canary=$CANARY_MODE preflight_runs=$PREFLIGHT_RUNS soak=${SOAK_DURATION}s"
+
+derive_ready_timeout
 
 ensure_virtualenv
 log_python_environment
@@ -2641,8 +2680,6 @@ print_ui_location() {
   fi
 }
 
-READY_TIMEOUT="${READY_TIMEOUT:-120}"
-UI_READY_TIMEOUT="${UI_READY_TIMEOUT:-$READY_TIMEOUT}"
 wait_for_ready() {
   local log=$1
   local notify=$2
@@ -2683,6 +2720,7 @@ wait_for_ready() {
         ;;
     esac
   fi
+  log_info "Waiting for runtime readiness (timeout=${READY_TIMEOUT}s ui_timeout=${UI_READY_TIMEOUT}s log=${log})"
   if [[ $ui_disabled -eq 1 || $ui_port_disabled -eq 1 ]]; then
     ui_seen=1
     ui_ws_seen=1
