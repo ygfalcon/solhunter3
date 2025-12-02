@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import types
 from typing import Dict, List
 
@@ -261,5 +262,74 @@ def test_failure_counter_resets_on_success():
 
         assert service._consecutive_failures == 0
         assert service._current_backoff == 0.0
+
+    asyncio.run(runner())
+
+
+def test_failure_pause_triggers_and_emits(monkeypatch):
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        published: list[tuple[str, dict]] = []
+
+        monkeypatch.setattr(
+            "solhunter_zero.pipeline.discovery_service.event_bus.publish",
+            lambda topic, payload: published.append((topic, payload)),
+        )
+
+        service = DiscoveryService(
+            queue,
+            empty_cache_ttl=1.0,
+            failure_pause_threshold=2,
+            failure_pause_reset=5.0,
+        )
+
+        base_ts = time.time()
+        service._apply_failure_backoff(base_ts)
+        paused, _ = service._failure_pause_active()
+        assert not paused
+
+        service._apply_failure_backoff(base_ts + 1.0)
+
+        paused, remaining = service._failure_pause_active()
+        assert paused
+        assert remaining is None or remaining <= service.failure_pause_reset + 1.0
+        assert published
+        topic, payload = published[-1]
+        assert topic == "discovery.status"
+        assert payload["paused"] is True
+        assert payload["manual_reset_required"] is False
+
+    asyncio.run(runner())
+
+
+def test_manual_failure_pause_reset(monkeypatch):
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        published: list[tuple[str, dict]] = []
+
+        monkeypatch.setattr(
+            "solhunter_zero.pipeline.discovery_service.event_bus.publish",
+            lambda topic, payload: published.append((topic, payload)),
+        )
+
+        service = DiscoveryService(
+            queue,
+            empty_cache_ttl=1.0,
+            failure_pause_threshold=1,
+            failure_pause_reset=0.0,
+        )
+
+        service._apply_failure_backoff(time.time())
+        paused, _ = service._failure_pause_active()
+        assert paused
+        assert published and published[-1][1]["manual_reset_required"] is True
+
+        service.reset_failure_pause()
+        paused, _ = service._failure_pause_active()
+        assert not paused
+        topic, payload = published[-1]
+        assert topic == "discovery.status"
+        assert payload["paused"] is False
+        assert payload.get("reset_reason") == "manual"
 
     asyncio.run(runner())

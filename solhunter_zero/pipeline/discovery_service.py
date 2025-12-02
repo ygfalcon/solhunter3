@@ -5,9 +5,11 @@ import hashlib
 import json
 import logging
 import os
+import math
 import time
 from typing import Any, Dict, Iterable, Optional, cast
 
+from .. import event_bus
 from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
 from ..token_aliases import canonical_mint, validate_mint
@@ -50,6 +52,8 @@ class DiscoveryService:
         startup_clones: Optional[int] = None,
         startup_clone_concurrency: Optional[int] = None,
         emit_batch_size: Optional[int] = None,
+        failure_pause_threshold: Optional[int] = None,
+        failure_pause_reset: Optional[float] = None,
     ) -> None:
         self.queue = queue
         self.interval = max(0.1, float(interval))
@@ -136,12 +140,51 @@ class DiscoveryService:
         if emit_batch_size is None or emit_batch_size <= 0:
             emit_batch_size = 1
         self._emit_batch_size = int(emit_batch_size)
+
+        raw_pause_threshold = os.getenv("DISCOVERY_FAILURE_PAUSE_THRESHOLD")
+        threshold_override: Optional[int] = None
+        if raw_pause_threshold:
+            try:
+                threshold_override = int(raw_pause_threshold)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_FAILURE_PAUSE_THRESHOLD=%r; ignoring",
+                    raw_pause_threshold,
+                )
+        if failure_pause_threshold is None:
+            failure_pause_threshold = threshold_override
+        elif threshold_override is not None:
+            failure_pause_threshold = threshold_override
+        if failure_pause_threshold is None:
+            failure_pause_threshold = 5
+        self.failure_pause_threshold = max(0, int(failure_pause_threshold))
+
+        raw_pause_reset = os.getenv("DISCOVERY_FAILURE_RESET_AFTER")
+        pause_reset_override: Optional[float] = None
+        if raw_pause_reset:
+            try:
+                pause_reset_override = float(raw_pause_reset)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_FAILURE_RESET_AFTER=%r; ignoring", raw_pause_reset
+                )
+        if failure_pause_reset is None:
+            failure_pause_reset = pause_reset_override
+        elif pause_reset_override is not None:
+            failure_pause_reset = pause_reset_override
+        if failure_pause_reset is None:
+            failure_pause_reset = 300.0
+        self.failure_pause_reset = max(0.0, float(failure_pause_reset))
+
         self._agent = DiscoveryAgent(limit=limit)
         self._last_tokens: list[str] = []
         self._last_fetch_ts: float = 0.0
         self._cooldown_until: float = 0.0
         self._consecutive_empty: int = 0
         self._consecutive_failures: int = 0
+        self._failure_pause_until: float = 0.0
+        self._failure_pause_reason: str | None = None
+        self._pause_notice_logged = False
         self._current_backoff: float = 0.0
         self._task: Optional[asyncio.Task] = None
         self._stopped = asyncio.Event()
@@ -196,6 +239,21 @@ class DiscoveryService:
 
     async def _run(self) -> None:
         while not self._stopped.is_set():
+            paused, remaining = self._failure_pause_active()
+            if paused:
+                if not self._pause_notice_logged:
+                    wait_msg = "manual reset required"
+                    if remaining is not None:
+                        wait_msg = f"cooldown for {remaining:.0f}s"
+                    log.warning(
+                        "DiscoveryService paused after %d consecutive failures; %s",
+                        self._consecutive_failures,
+                        wait_msg,
+                    )
+                    self._pause_notice_logged = True
+                sleep_for = max(self.interval, remaining or self.interval)
+                await asyncio.sleep(sleep_for)
+                continue
             try:
                 tokens = await self._fetch()
                 fresh = self._last_fetch_fresh
@@ -222,6 +280,84 @@ class DiscoveryService:
             else:
                 if self._current_backoff > 0.0:
                     self._current_backoff = max(0.0, self._current_backoff - sleep_for)
+
+    def reset_failure_pause(self) -> None:
+        """Manually clear the failure pause and reset counters."""
+
+        self._clear_failure_pause(manual=True)
+
+    def _failure_pause_active(self) -> tuple[bool, float | None]:
+        if self._failure_pause_until <= 0.0:
+            return False, None
+        now = time.time()
+        if math.isinf(self._failure_pause_until):
+            return True, None
+        if self._failure_pause_until > now:
+            return True, max(0.0, self._failure_pause_until - now)
+        self._clear_failure_pause(manual=False)
+        return False, None
+
+    def _enter_failure_pause(self, *, at: float) -> None:
+        manual_only = self.failure_pause_reset <= 0.0
+        resume_at = math.inf if manual_only else at + self.failure_pause_reset
+        self._failure_pause_until = resume_at
+        self._failure_pause_reason = "consecutive_failures"
+        self._pause_notice_logged = False
+        self._current_backoff = 0.0
+        self._cooldown_until = resume_at if not math.isinf(resume_at) else at
+        self._last_fetch_fresh = False
+        remaining = None if math.isinf(resume_at) else max(0.0, resume_at - at)
+        self._emit_pause_status(
+            paused=True,
+            remaining=remaining,
+            manual_reset_required=manual_only,
+        )
+        wait_msg = "manual reset required" if manual_only else f"will retry after {remaining:.0f}s"
+        log.warning(
+            "DiscoveryService pausing discovery after %d consecutive failures; %s",
+            self._consecutive_failures,
+            wait_msg,
+        )
+
+    def _clear_failure_pause(self, *, manual: bool) -> None:
+        was_paused = self._failure_pause_until > 0.0 or self._failure_pause_reason
+        self._failure_pause_until = 0.0
+        self._failure_pause_reason = None
+        self._pause_notice_logged = False
+        self._consecutive_failures = 0
+        if was_paused:
+            self._emit_pause_status(
+                paused=False,
+                remaining=None,
+                manual_reset_required=False,
+                reset_reason="manual" if manual else "cooldown",
+            )
+            log.info(
+                "DiscoveryService failure pause cleared (%s)",
+                "manual" if manual else "cooldown",
+            )
+
+    def _emit_pause_status(
+        self,
+        *,
+        paused: bool,
+        remaining: float | None,
+        manual_reset_required: bool,
+        reset_reason: str | None = None,
+    ) -> None:
+        payload = {
+            "paused": paused,
+            "remaining": remaining,
+            "manual_reset_required": manual_reset_required,
+            "reason": self._failure_pause_reason,
+            "consecutive_failures": self._consecutive_failures,
+        }
+        if not paused and reset_reason:
+            payload["reset_reason"] = reset_reason
+        try:
+            event_bus.publish("discovery.status", payload)
+        except Exception:
+            log.debug("Failed to publish discovery.status", exc_info=True)
 
     async def _fetch(self, *, agent: DiscoveryAgent | None = None) -> list[str]:
         now = time.time()
@@ -575,6 +711,13 @@ class DiscoveryService:
 
     def _apply_failure_backoff(self, failure_ts: float) -> None:
         self._consecutive_failures += 1
+
+        if (
+            self.failure_pause_threshold
+            and self._consecutive_failures >= self.failure_pause_threshold
+        ):
+            self._enter_failure_pause(at=failure_ts)
+            return
 
         cooldown = 0.0
         base_ttl = self.empty_cache_ttl
