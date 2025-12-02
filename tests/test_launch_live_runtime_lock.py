@@ -24,6 +24,8 @@ STATE_PATH = os.environ.get("REDIS_STATE_PATH")
 if not STATE_PATH:
     raise RuntimeError("REDIS_STATE_PATH not set")
 
+FAIL_MODE = os.environ.get("REDIS_STUB_FAIL")
+
 
 def _load_state():
     try:
@@ -44,6 +46,8 @@ class Redis:
 
     @classmethod
     def from_url(cls, url: str, socket_timeout: float | None = None):  # noqa: D401
+        if FAIL_MODE == "connect":
+            raise ConnectionError("connect failure")
         return cls(url)
 
     def get(self, key: str):  # noqa: D401
@@ -59,6 +63,8 @@ class Redis:
         return item["value"].encode("utf-8")
 
     def set(self, key: str, value: str, nx: bool = False, ex: int | None = None):  # noqa: D401
+        if FAIL_MODE == "set":
+            raise ConnectionError("set failure")
         data = _load_state()
         now = time.time()
         item = data["store"].get(key)
@@ -189,7 +195,7 @@ def _make_acquire_script(
         "stop_runtime_lock_refresher() { :; }",
         start_stub or "start_runtime_lock_refresher() { RUNTIME_LOCK_REFRESH_PID=$$; }",
     )
-    parts = ["set -euo pipefail", "EXIT_HEALTH=4", functions, *stubs]
+    parts = ["set -euo pipefail", "EXIT_HEALTH=4", "EXIT_SOCKET=7", functions, *stubs]
     if commands:
         parts.extend(commands)
     else:
@@ -378,6 +384,68 @@ def test_acquire_runtime_lock_exits_when_refresher_missing(tmp_path: Path) -> No
     assert "Runtime lock refresher did not start" in completed.stderr
 
 
+def test_acquire_runtime_lock_exits_on_redis_client_failure(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "acquire_runtime_lock")
+    )
+
+    stub_root = _write_stub_redis(tmp_path)
+    env = _base_env(tmp_path, stub_root)
+    env.update({"REDIS_STUB_FAIL": "connect"})
+
+    bash_script = _make_acquire_script(functions)
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == 7
+    assert "Failed to initialize Redis client for runtime lock" in completed.stderr
+    assert "url=redis://localhost:6379/1" in completed.stderr
+    assert '"channel": "solhunter-events-v3"' in completed.stderr
+
+
+def test_acquire_runtime_lock_exits_on_redis_set_failure(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    functions = (
+        _extract_function(source, "timestamp")
+        + _extract_function(source, "log_info")
+        + _extract_function(source, "log_warn")
+        + _extract_function(source, "acquire_runtime_lock")
+    )
+
+    stub_root = _write_stub_redis(tmp_path)
+    env = _base_env(tmp_path, stub_root)
+    env.update({"REDIS_STUB_FAIL": "set"})
+
+    bash_script = _make_acquire_script(functions)
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == 7
+    assert "Failed to store runtime lock" in completed.stderr
+    assert "url=redis://localhost:6379/1" in completed.stderr
+    assert '"channel": "solhunter-events-v3"' in completed.stderr
+
+
 def test_release_runtime_lock_requires_matching_token(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
@@ -477,6 +545,8 @@ def test_runtime_lock_refresher_keeps_ttl(tmp_path: Path) -> None:
     bash_script = "\n".join(
         [
             "set -euo pipefail",
+            "EXIT_HEALTH=4",
+            "EXIT_SOCKET=7",
             functions,
             "acquire_runtime_lock",
             "start_runtime_lock_refresher",
