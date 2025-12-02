@@ -17,6 +17,49 @@ STREAMS=(
   x:live.fills
 )
 
+check_cursor_freshness() {
+  local cursor_key=${PREFLIGHT_CURSOR_KEY:-discovery:cursor}
+  local cursor_ttl_hint=${DISCOVERY_RECENT_TTL_SEC:-86400}
+  local cursor_max_age=${PREFLIGHT_CURSOR_MAX_AGE_SEC:-21600}
+
+  local ttl
+  ttl=$(redis TTL "$cursor_key" 2>/dev/null || true)
+
+  local detail_json
+  if [[ -z ${ttl:-} || $ttl -lt 0 ]]; then
+    fail "cursor metadata missing (key=$cursor_key)"
+    failures=$((failures + 1))
+    detail_json=$(jq -n --arg key "$cursor_key" '{type:"cursor",key:$key,status:"fail",reason:"missing"}')
+    check_details+=("$detail_json")
+    record_audit fail "cursor_freshness:$cursor_key:missing" "$detail_json"
+    return
+  fi
+
+  local age=$((cursor_ttl_hint - ttl))
+  if (( age < 0 )); then
+    age=0
+  fi
+  if (( ttl > cursor_ttl_hint )); then
+    cursor_ttl_hint=$ttl
+  fi
+
+  local stale_hint="Hint: clear the cursor to trigger DAS backfill (redis-cli -u \"$REDIS_URL\" DEL $cursor_key)"
+
+  if (( age > cursor_max_age )); then
+    fail "cursor $cursor_key stale (~${age}s > ${cursor_max_age}s). ${stale_hint}"
+    failures=$((failures + 1))
+    detail_json=$(jq -n --arg key "$cursor_key" --argjson ttl "$ttl" --argjson age "$age" --argjson max_age "$cursor_max_age" --arg hint "$stale_hint" '{type:"cursor",key:$key,status:"fail",ttl:$ttl,age:$age,max_age:$max_age,hint:$hint}')
+    check_details+=("$detail_json")
+    record_audit fail "cursor_freshness:$cursor_key:stale" "$detail_json"
+    return
+  fi
+
+  pass "cursor $cursor_key fresh (~${age}s old)"
+  detail_json=$(jq -n --arg key "$cursor_key" --argjson ttl "$ttl" --argjson age "$age" --argjson max_age "$cursor_max_age" '{type:"cursor",key:$key,status:"pass",ttl:$ttl,age:$age,max_age:$max_age}')
+  check_details+=("$detail_json")
+  record_audit pass "cursor_freshness:$cursor_key:fresh" "$detail_json"
+}
+
 main() {
   local failures=0
   local -a check_details=()
@@ -77,6 +120,10 @@ main() {
     check_details+=("$(jq -n --arg key "$ttl_key" '{type:"kv",key:$key,status:"fail",reason:"set"}')")
     record_audit fail "ttl:$ttl_key:set"
   fi
+
+  printf '\n'
+  log INFO "cursor freshness"
+  check_cursor_freshness
 
   local extra_json
   if (( ${#check_details[@]} )); then
