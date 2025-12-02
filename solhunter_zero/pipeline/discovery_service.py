@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from collections import OrderedDict
 from typing import Any, Dict, Iterable, Optional, cast
 
 from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, DiscoveryAgent
@@ -14,6 +15,84 @@ from ..token_aliases import canonical_mint, validate_mint
 from .types import TokenCandidate
 
 log = logging.getLogger(__name__)
+
+
+class _MetadataFingerprintCache:
+    """LRU cache with time-based expiry for metadata fingerprints."""
+
+    def __init__(self, maxsize: Optional[int], ttl: float = 1800.0) -> None:
+        self.maxsize = maxsize if maxsize and maxsize > 0 else None
+        self.ttl = max(0.0, float(ttl))
+        self._data: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
+
+    def _purge_expired(self) -> None:
+        if self.ttl <= 0.0:
+            return
+        cutoff = time.monotonic() - self.ttl
+        for key in list(self._data):
+            _, ts = self._data.get(key, (None, 0.0))
+            if ts <= cutoff:
+                self._data.pop(key, None)
+
+    def _evict_overflow(self) -> None:
+        if self.maxsize is None:
+            return
+        overflow = len(self._data) - self.maxsize
+        if overflow <= 0:
+            return
+        evicted = 0
+        while len(self._data) > self.maxsize:
+            self._data.popitem(last=False)
+            evicted += 1
+        if evicted:
+            log.info(
+                "DiscoveryService evicted %d metadata fingerprint(s) due to cap", evicted
+            )
+
+    def get(self, key: str, default: Any = None) -> Any:
+        self._purge_expired()
+        item = self._data.get(key)
+        if item is None:
+            return default
+        value, ts = item
+        if self.ttl > 0.0 and (time.monotonic() - ts) >= self.ttl:
+            self._data.pop(key, None)
+            return default
+        now = time.monotonic()
+        self._data.move_to_end(key)
+        self._data[key] = (value, now)
+        return value
+
+    def __setitem__(self, key: str, value: str) -> None:
+        self._purge_expired()
+        self._data[key] = (value, time.monotonic())
+        self._data.move_to_end(key)
+        self._evict_overflow()
+
+    def update(self, mapping: Dict[str, str]) -> None:
+        if not mapping:
+            return
+        self._purge_expired()
+        now = time.monotonic()
+        for key, value in mapping.items():
+            self._data[key] = (value, now)
+            self._data.move_to_end(key)
+        self._evict_overflow()
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        self._purge_expired()
+        item = self._data.pop(key, None)
+        if item is None:
+            return default
+        return item[0]
+
+    def __iter__(self):  # pragma: no cover - trivial
+        self._purge_expired()
+        return iter(self._data.keys())
+
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        self._purge_expired()
+        return len(self._data)
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -151,7 +230,24 @@ class DiscoveryService:
         self._last_fetch_fresh: bool = True
         self._limit_disabled_logged = False
         self._primed = False
-        self._last_metadata_fingerprints: Dict[str, str] = {}
+        raw_fingerprint_cap = os.getenv("DISCOVERY_METADATA_FINGERPRINT_CAP")
+        fingerprint_cap: Optional[int]
+        if raw_fingerprint_cap in {None, ""}:
+            fingerprint_cap = 4096
+        else:
+            try:
+                parsed_cap = int(raw_fingerprint_cap)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_METADATA_FINGERPRINT_CAP=%r; using default",
+                    raw_fingerprint_cap,
+                )
+                fingerprint_cap = 4096
+            else:
+                fingerprint_cap = None if parsed_cap <= 0 else parsed_cap
+        self._last_metadata_fingerprints = _MetadataFingerprintCache(
+            fingerprint_cap, ttl=1800.0
+        )
         raw_details_cap = os.getenv("DISCOVERY_LAST_DETAILS_CAP")
         details_cap: Optional[int] | None
         if raw_details_cap in {None, ""}:
