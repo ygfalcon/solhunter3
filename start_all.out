@@ -1,4 +1,7 @@
 BIRDEYE_API_KEY not set. Falling back to on-chain scanning by default
+INFO:solhunter_zero.runtime.orchestrator:UI_READY url=http://127.0.0.1:5001 rl_ws=ws://127.0.0.1:8768/rl events_ws=ws://127.0.0.1:8769/events logs_ws=ws://127.0.0.1:8770/logs
+INFO:solhunter_zero.runtime.orchestrator:UI_WS_READY status=ok rl_ws=ws://127.0.0.1:8768/rl events_ws=ws://127.0.0.1:8769/events logs_ws=ws://127.0.0.1:8770/logs
+INFO:solhunter_zero.pipeline.discovery_service:DiscoveryService disabled (DISCOVERY_LIMIT=0); discovery loop will not start
 INFO:solhunter_zero.bootstrap:Using keypair 'default'.
 INFO:solhunter_zero.bootstrap:Using keypair 'default'.
 INFO:websockets.server:server listening on 127.0.0.1:8769
