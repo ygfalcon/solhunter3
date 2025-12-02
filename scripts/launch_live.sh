@@ -65,6 +65,64 @@ sys.exit(1)
 PY
 }
 
+append_offline_remediation_hint() {
+  local deps_log=$1
+  local artifact_root="${RUNTIME_ARTIFACT_ROOT:-$DEFAULT_ARTIFACT_ROOT}"
+  {
+    echo
+    echo "Offline remediation: add requirements*.lock files or wheel artifacts under $artifact_root for fallback installs."
+  } >>"$deps_log"
+}
+
+artifact_fallback_install() {
+  local deps_log=$1
+  local artifact_root="${RUNTIME_ARTIFACT_ROOT:-$DEFAULT_ARTIFACT_ROOT}"
+  local -a lock_files=()
+  while IFS= read -r -d '' file; do
+    lock_files+=("$file")
+  done < <(find "$artifact_root" -type f -name 'requirements*.lock' -print0 2>/dev/null)
+
+  local -a wheel_dirs=()
+  while IFS= read -r -d '' wheel; do
+    wheel_dirs+=("$(dirname "$wheel")")
+  done < <(find "$artifact_root" -type f -name '*.whl' -print0 2>/dev/null)
+
+  if (( ${#wheel_dirs[@]} )); then
+    mapfile -t wheel_dirs < <(printf '%s\n' "${wheel_dirs[@]}" | sort -u)
+  fi
+
+  if (( ${#lock_files[@]} == 0 && ${#wheel_dirs[@]} == 0 )); then
+    return 1
+  fi
+
+  local -a pip_args=(install --no-index)
+  for dir in "${wheel_dirs[@]}"; do
+    pip_args+=(--find-links "$dir")
+  done
+
+  if (( ${#lock_files[@]} )); then
+    for lock_file in "${lock_files[@]}"; do
+      pip_args+=(-r "$lock_file")
+    done
+  else
+    pip_args+=(-r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-tests.txt" "jsonschema[format-nongpl]==4.23.0")
+  fi
+
+  log_info "Attempting offline installation from artifacts at $artifact_root"
+  set +e
+  {
+    "$PIP_BIN" "${pip_args[@]}"
+  } 2>&1 | tee -a "$deps_log" >/dev/null
+  local install_status=${PIPESTATUS[0]:-1}
+  local tee_status=${PIPESTATUS[1]:-0}
+  set -e
+  if [[ $install_status -ne 0 || $tee_status -ne 0 ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
 EXIT_KEYS=1
 EXIT_PREFLIGHT=2
 EXIT_CONNECTIVITY=3
@@ -165,13 +223,21 @@ ensure_virtualenv() {
 
   log_info "Installing Python dependencies (see $DEPS_LOG for details)"
   if (( offline_mode )); then
+    set +e
     {
       "$PIP_BIN" install --no-index "${find_links[@]}" -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-tests.txt" \
         "jsonschema[format-nongpl]==4.23.0"
     } 2>&1 | tee "$DEPS_LOG" >/dev/null
-    if [[ ${PIPESTATUS[0]} -ne 0 || ${PIPESTATUS[1]} -ne 0 ]]; then
-      log_warn "Failed to install Python dependencies (see $DEPS_LOG)"
-      exit $EXIT_DEPS
+    local install_status=${PIPESTATUS[0]:-1}
+    local tee_status=${PIPESTATUS[1]:-0}
+    set -e
+    if [[ $install_status -ne 0 || $tee_status -ne 0 ]]; then
+      log_warn "Failed to install Python dependencies from cache; checking artifacts for offline fallback"
+      append_offline_remediation_hint "$DEPS_LOG"
+      if ! artifact_fallback_install "$DEPS_LOG"; then
+        log_warn "Failed to install Python dependencies after artifact fallback (see $DEPS_LOG)"
+        exit $EXIT_DEPS
+      fi
     fi
     if ! "$PIP_BIN" check >/dev/null 2>&1; then
       log_warn "Offline installation succeeded but dependency check still reports issues (see $DEPS_LOG for cached wheel details)"
