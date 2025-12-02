@@ -2,13 +2,36 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
+from textwrap import dedent
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCH_LIVE_PATH = REPO_ROOT / "scripts" / "launch_live.sh"
 _LAUNCH_LIVE_SOURCE = LAUNCH_LIVE_PATH.read_text()
+
+
+def _extract_function(source: str, name: str) -> str:
+    marker = f"{name}() {{"
+    start = source.find(marker)
+    if start == -1:
+        raise ValueError(f"Function {name} not found in launch_live.sh")
+    brace_depth = 0
+    end = None
+    for idx in range(start, len(source)):
+        char = source[idx]
+        if char == "{":
+            brace_depth += 1
+        elif char == "}":
+            brace_depth -= 1
+            if brace_depth == 0:
+                end = idx + 1
+                break
+    if end is None:
+        raise ValueError(f"Failed to parse function {name} from launch_live.sh")
+    return source[start:end] + "\n"
 
 
 def _extract_python_snippet(source: str, marker: str) -> str:
@@ -29,6 +52,123 @@ VALIDATE_ENV_SNIPPET = _extract_python_snippet(
     '"$PYTHON_BIN" - "$ENV_FILE" <<\'PY\'',
 )
 
+
+def test_launch_live_offline_install_falls_back_to_artifacts(tmp_path: Path) -> None:
+    ensure_fn = _extract_function(_LAUNCH_LIVE_SOURCE, "ensure_virtualenv")
+    detect_fn = _extract_function(_LAUNCH_LIVE_SOURCE, "detect_pip_online")
+    remediation_fn = _extract_function(
+        _LAUNCH_LIVE_SOURCE, "append_offline_remediation_hint"
+    )
+    fallback_fn = _extract_function(_LAUNCH_LIVE_SOURCE, "artifact_fallback_install")
+
+    venv_dir = tmp_path / "venv"
+    bin_dir = venv_dir / "bin"
+    bin_dir.mkdir(parents=True)
+
+    python_bin = bin_dir / "python3"
+    python_bin.write_text("#!/usr/bin/env bash\nexit 0\n")
+    python_bin.chmod(0o755)
+
+    activate = bin_dir / "activate"
+    activate.write_text("#!/usr/bin/env bash\nexport VIRTUAL_ENV=$VENV_DIR\n")
+    activate.chmod(0o755)
+
+    cache_dir = tmp_path / "pip_cache"
+    cache_dir.mkdir()
+
+    artifact_root = tmp_path / "artifacts"
+    wheel_dir = artifact_root / "wheels"
+    wheel_dir.mkdir(parents=True)
+    (wheel_dir / "example-0.1-py3-none-any.whl").write_text("wheel", encoding="utf-8")
+
+    lock_file = artifact_root / "requirements-art.lock"
+    lock_file.write_text("# compiled requirements\n", encoding="utf-8")
+
+    pip_log = tmp_path / "pip_called.log"
+    pip_state_dir = tmp_path / "pip_state"
+    pip_state_dir.mkdir()
+
+    pip_bin = bin_dir / "pip"
+    pip_bin.write_text(
+        dedent(
+            """
+            #!/usr/bin/env bash
+            printf '%s\n' "$*" >> __PIP_LOG__
+            state_dir=__STATE_DIR__
+            mkdir -p "$state_dir"
+            fail_marker="$state_dir/fail_once"
+            check_ok="$state_dir/check_ok"
+
+            if [[ $1 == 'cache' && ${2-} == 'dir' ]]; then
+              echo __CACHE_DIR__
+              exit 0
+            fi
+
+            if [[ $1 == 'install' ]]; then
+              if [[ ! -f "$fail_marker" ]]; then
+                touch "$fail_marker"
+                echo 'missing wheels' >&2
+                exit 1
+              fi
+              touch "$check_ok"
+              exit 0
+            fi
+
+            if [[ $1 == 'check' ]]; then
+              if [[ -f "$check_ok" ]]; then
+                exit 0
+              fi
+              echo 'dependency issue' >&2
+              exit 1
+            fi
+
+            exit 0
+            """
+        )
+        .replace("__PIP_LOG__", shlex.quote(str(pip_log)))
+        .replace("__STATE_DIR__", shlex.quote(str(pip_state_dir)))
+        .replace("__CACHE_DIR__", shlex.quote(str(cache_dir)))
+    )
+    pip_bin.chmod(0o755)
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        ROOT_DIR={shlex.quote(str(REPO_ROOT))}
+        VENV_DIR={shlex.quote(str(venv_dir))}
+        PYTHON_BIN={shlex.quote(str(python_bin))}
+        PIP_BIN={shlex.quote(str(pip_bin))}
+        LOG_DIR={shlex.quote(str(tmp_path))}
+        RUNTIME_ARTIFACT_ROOT={shlex.quote(str(artifact_root))}
+        EXIT_DEPS=5
+        timestamp() {{ echo ts; }}
+        log_info() {{ printf '%s\\n' "$*"; }}
+        log_warn() {{ printf '%s\\n' "$*" >&2; }}
+        {detect_fn}
+        {remediation_fn}
+        {fallback_fn}
+        {ensure_fn}
+        export PIP_NO_INDEX=1
+        ensure_virtualenv
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = pip_log.read_text().splitlines()
+    install_calls = [line for line in calls if line.startswith("install ")]
+    assert len(install_calls) >= 2
+    assert any(str(lock_file) in line for line in calls)
+    assert any("find-links" in line and str(wheel_dir) in line for line in calls)
+
+    deps_log = tmp_path / "deps_install.log"
+    assert "Offline remediation" in deps_log.read_text()
 
 def _build_complete_env(tmp_path: Path) -> dict[str, str]:
     keypair_path = tmp_path / "id.json"
