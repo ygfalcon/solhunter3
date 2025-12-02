@@ -2462,7 +2462,29 @@ print_captured_start_controller_stderr() {
   return 1
 }
 
+terminate_runtime_pid() {
+  local pid=${1:-}
+  local label=${2:-runtime}
+  if [[ -z ${pid:-} ]]; then
+    return
+  fi
+  if (( pid <= 0 )); then
+    return
+  fi
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return
+  fi
+  log_warn "Terminating ${label} runtime (pid=${pid})"
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  wait "$pid" 2>/dev/null || true
+}
+
 cleanup() {
+  local exit_status=${1:-$?}
+  if (( CLEANUP_DONE == 1 )); then
+    return
+  fi
+  CLEANUP_DONE=1
   stop_runtime_lock_refresher
   release_runtime_lock
   if [[ -n ${RUNTIME_LOCK_KEY+x} ]]; then
@@ -2470,6 +2492,10 @@ cleanup() {
   fi
   if [[ -n ${RUNTIME_LOCK_TOKEN+x} ]]; then
     unset RUNTIME_LOCK_TOKEN
+  fi
+  if [[ $exit_status -ne 0 ]]; then
+    terminate_runtime_pid "${LIVE_PID:-}" "live"
+    terminate_runtime_pid "${PAPER_PID:-}" "paper"
   fi
   if (( RUNTIME_LOCK_ATTEMPTED == 1 && RUNTIME_LOCK_ACQUIRED == 1 && RUNTIME_FS_LOCK_WRITTEN == 1 )); then
     if [[ -e $RUNTIME_FS_LOCK ]]; then
@@ -2503,23 +2529,23 @@ cleanup() {
     fi
     LIVE_MODE_ENV_APPLIED=0
   fi
-  if [[ -z ${CHILD_PIDS+x} ]]; then
-    return
+  if [[ -n ${CHILD_PIDS+x} ]]; then
+    for pid in "${CHILD_PIDS[@]}"; do
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        kill "$pid" >/dev/null 2>&1 || true
+        wait "$pid" 2>/dev/null || true
+      fi
+    done
   fi
-  for pid in "${CHILD_PIDS[@]}"; do
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      kill "$pid" >/dev/null 2>&1 || true
-      wait "$pid" 2>/dev/null || true
-    fi
-  done
   if [[ -n ${START_CONTROLLER_STDERR_STATE_DIR:-} && -d ${START_CONTROLLER_STDERR_STATE_DIR:-} ]]; then
     rm -rf "$START_CONTROLLER_STDERR_STATE_DIR" || true
   fi
 }
 
-trap cleanup EXIT
-trap 'cleanup; exit $EXIT_HEALTH' ERR
-trap 'cleanup; exit 0' INT TERM
+CLEANUP_DONE=0
+trap 'cleanup $?; exit $EXIT_HEALTH' ERR
+trap 'cleanup $?; exit 0' INT TERM
+trap 'cleanup $?' EXIT
 
 RUNTIME_LOCK_ATTEMPTED=1
 acquire_runtime_lock

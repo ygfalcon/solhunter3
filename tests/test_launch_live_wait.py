@@ -57,6 +57,11 @@ START_CONTROLLER_SNIPPET = (
     + _extract_function(_LAUNCH_LIVE_SOURCE, "print_log_excerpt")
 )
 
+CLEANUP_SNIPPET = (
+    _extract_function(_LAUNCH_LIVE_SOURCE, "terminate_runtime_pid")
+    + _extract_function(_LAUNCH_LIVE_SOURCE, "cleanup")
+)
+
 
 def _extract_python_function(source: str, name: str) -> str:
     marker = f"def {name}"
@@ -1408,3 +1413,95 @@ def test_validate_env_file_handles_export(tmp_path: Path) -> None:
     assert "API_KEY=***" in output_lines
     assert "SECRET_TOKEN=***" in output_lines
     assert "PUBLIC_URL=https://service.invalid" in output_lines
+
+
+def test_cleanup_terminates_runtimes_on_failure(tmp_path: Path) -> None:
+    stderr_dir = tmp_path / "stderr_state"
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        log_info() {{ echo "INFO:$*"; }}
+        log_warn() {{ echo "WARN:$*"; }}
+        stop_runtime_lock_refresher() {{ echo stop_refresher; }}
+        release_runtime_lock() {{ echo release_lock; }}
+        RUNTIME_LOCK_ATTEMPTED=0
+        RUNTIME_LOCK_ACQUIRED=0
+        RUNTIME_FS_LOCK_WRITTEN=0
+        RUNTIME_FS_LOCK=""
+        LIVE_MODE_ENV_APPLIED=0
+        START_CONTROLLER_STDERR_STATE_DIR={shlex.quote(str(stderr_dir))}
+        mkdir -p "$START_CONTROLLER_STDERR_STATE_DIR"
+        echo "stderr" >"$START_CONTROLLER_STDERR_STATE_DIR/sample.stderr"
+        declare -a CHILD_PIDS=()
+        CLEANUP_DONE=0
+        {CLEANUP_SNIPPET}
+        sleep 60 &
+        PAPER_PID=$!
+        sleep 60 &
+        LIVE_PID=$!
+        cleanup 1
+        if kill -0 "$PAPER_PID" 2>/dev/null; then echo "paper_alive"; fi
+        if kill -0 "$LIVE_PID" 2>/dev/null; then echo "live_alive"; fi
+        if [[ -d "$START_CONTROLLER_STDERR_STATE_DIR" ]]; then echo "stderr_dir_exists"; fi
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "paper_alive" not in completed.stdout
+    assert "live_alive" not in completed.stdout
+    assert "stderr_dir_exists" not in completed.stdout
+
+
+def test_cleanup_preserves_runtimes_when_succeeding(tmp_path: Path) -> None:
+    stderr_dir = tmp_path / "stderr_state"
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        log_info() {{ echo "INFO:$*"; }}
+        log_warn() {{ echo "WARN:$*"; }}
+        stop_runtime_lock_refresher() {{ echo stop_refresher; }}
+        release_runtime_lock() {{ echo release_lock; }}
+        RUNTIME_LOCK_ATTEMPTED=0
+        RUNTIME_LOCK_ACQUIRED=0
+        RUNTIME_FS_LOCK_WRITTEN=0
+        RUNTIME_FS_LOCK=""
+        LIVE_MODE_ENV_APPLIED=0
+        START_CONTROLLER_STDERR_STATE_DIR={shlex.quote(str(stderr_dir))}
+        mkdir -p "$START_CONTROLLER_STDERR_STATE_DIR"
+        echo "stderr" >"$START_CONTROLLER_STDERR_STATE_DIR/sample.stderr"
+        declare -a CHILD_PIDS=()
+        CLEANUP_DONE=0
+        {CLEANUP_SNIPPET}
+        sleep 60 &
+        PAPER_PID=$!
+        sleep 60 &
+        LIVE_PID=$!
+        cleanup 0
+        if kill -0 "$PAPER_PID" 2>/dev/null; then echo "paper_alive"; fi
+        if kill -0 "$LIVE_PID" 2>/dev/null; then echo "live_alive"; fi
+        if [[ -d "$START_CONTROLLER_STDERR_STATE_DIR" ]]; then echo "stderr_dir_exists"; fi
+        kill "$PAPER_PID" "$LIVE_PID" 2>/dev/null || true
+        wait "$PAPER_PID" "$LIVE_PID" 2>/dev/null || true
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "paper_alive" in completed.stdout
+    assert "live_alive" in completed.stdout
+    assert "stderr_dir_exists" not in completed.stdout
