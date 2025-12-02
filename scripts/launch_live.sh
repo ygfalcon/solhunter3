@@ -2643,6 +2643,7 @@ print_ui_location() {
 
 READY_TIMEOUT="${READY_TIMEOUT:-120}"
 UI_READY_TIMEOUT="${UI_READY_TIMEOUT:-$READY_TIMEOUT}"
+RUNTIME_PROBE_SUMMARY=""
 wait_for_ready() {
   local log=$1
   local notify=$2
@@ -2654,10 +2655,14 @@ wait_for_ready() {
   local golden_seen=0
   local golden_disabled_seen=0
   local runtime_seen=0
+  local runtime_base_ready=0
+  local runtime_probe_ok=0
+  local runtime_probe_summary=""
   local allow_ws_degraded=0
   local allow_ws_raw="${LAUNCH_LIVE_ALLOW_WS_DEGRADED:-${UI_WS_OPTIONAL:-}}"
   local ui_disabled=0
   local ui_port_disabled=0
+  local runtime_ready_url="${RUNTIME_READY_URL:-${RL_HEALTH_URL:-}}"
   if [[ -n ${UI_PORT+x} ]]; then
     if [[ -z ${UI_PORT//[[:space:]]/} ]]; then
       ui_port_disabled=1
@@ -2695,8 +2700,12 @@ wait_for_ready() {
     esac
   fi
   while [[ $waited -lt $READY_TIMEOUT ]]; do
-    if [[ -n $notify && -f $notify ]]; then
-      runtime_seen=1
+    if [[ $runtime_base_ready -eq 0 ]]; then
+      if [[ -n $notify && -f $notify ]]; then
+        runtime_base_ready=1
+      elif grep -q "RUNTIME_READY" "$log" 2>/dev/null; then
+        runtime_base_ready=1
+      fi
     fi
     if [[ $ui_seen -eq 0 ]] && grep -q "UI_READY" "$log" 2>/dev/null; then
       ui_seen=1
@@ -2766,8 +2775,110 @@ wait_for_ready() {
         golden_seen=1
       fi
     fi
-    if [[ $runtime_seen -eq 0 ]] && grep -q "RUNTIME_READY" "$log" 2>/dev/null; then
+    if [[ $runtime_probe_ok -eq 0 ]]; then
+      local runtime_probe_line=""
+      runtime_probe_line="$(grep -m1 -E '(RL_READY|TRADING_READY)' "$log" 2>/dev/null || true)"
+      if [[ -n $runtime_probe_line ]]; then
+        local runtime_probe_status=""
+        local runtime_probe_detail=""
+        local runtime_probe_label="runtime readiness"
+        if [[ $runtime_probe_line =~ status=([^[:space:]]+) ]]; then
+          runtime_probe_status="${BASH_REMATCH[1]}"
+        fi
+        if [[ $runtime_probe_line =~ detail=(.*) ]]; then
+          runtime_probe_detail="${BASH_REMATCH[1]}"
+        fi
+        if [[ $runtime_probe_line =~ (RL_READY|TRADING_READY) ]]; then
+          runtime_probe_label="${BASH_REMATCH[1]}"
+        fi
+        if [[ -z $runtime_probe_status ]]; then
+          print_log_excerpt "$log" "$runtime_probe_label readiness line missing status: $runtime_probe_line"
+          exit "$EXIT_HEALTH"
+        fi
+        case "$runtime_probe_status" in
+          ok|ready)
+            runtime_probe_ok=1
+            runtime_probe_summary="$runtime_probe_label status=$runtime_probe_status"
+            if [[ -n $runtime_probe_detail ]]; then
+              runtime_probe_summary+=" detail=$runtime_probe_detail"
+            fi
+            ;;
+          failed)
+            local reason="$runtime_probe_label reported status=failed"
+            if [[ -n $runtime_probe_detail ]]; then
+              reason+=" detail=$runtime_probe_detail"
+            fi
+            print_log_excerpt "$log" "$reason"
+            exit "$EXIT_HEALTH"
+            ;;
+          *)
+            local reason="$runtime_probe_label reported status=$runtime_probe_status"
+            if [[ -n $runtime_probe_detail ]]; then
+              reason+=" detail=$runtime_probe_detail"
+            fi
+            print_log_excerpt "$log" "$reason"
+            exit "$EXIT_HEALTH"
+            ;;
+        esac
+      fi
+    fi
+    if [[ $runtime_probe_ok -eq 0 && -n $runtime_ready_url ]]; then
+      local runtime_probe_output=""
+      if runtime_probe_output=$(RUNTIME_READY_URL="$runtime_ready_url" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+url = os.environ.get("RUNTIME_READY_URL")
+
+try:
+    with urllib.request.urlopen(url, timeout=1.0) as resp:  # noqa: S310
+        status = resp.status
+        payload = resp.read().decode("utf-8")
+except Exception as exc:  # pragma: no cover - startup guard
+    print(json.dumps({"ok": None, "message": str(exc)}))
+    sys.exit(2)
+
+message = f"http {status}"
+ok = 200 <= int(status) < 400
+
+data = None
+try:
+    data = json.loads(payload)
+except Exception:
+    data = None
+
+if isinstance(data, dict):
+    if "ok" in data:
+        ok = bool(data.get("ok"))
+    detail = data.get("message") or data.get("detail") or data.get("status") or data.get("state")
+    if detail:
+        message = str(detail)
+
+print(json.dumps({"ok": ok, "message": message}))
+sys.exit(0 if ok else 1)
+PY
+      ); then
+        runtime_probe_ok=1
+        runtime_probe_summary="http readiness ok (${runtime_ready_url}): ${runtime_probe_output}"
+      else
+        local runtime_probe_status=$?
+        if [[ $runtime_probe_status -eq 1 ]]; then
+          local reason="Runtime readiness probe failed via ${runtime_ready_url}"
+          if [[ -n $runtime_probe_output ]]; then
+            reason+=": ${runtime_probe_output}"
+          fi
+          print_log_excerpt "$log" "$reason"
+          exit "$EXIT_HEALTH"
+        fi
+      fi
+    fi
+    if [[ $runtime_base_ready -eq 1 && $runtime_probe_ok -eq 1 ]]; then
       runtime_seen=1
+      if [[ -z $runtime_probe_summary ]]; then
+        runtime_probe_summary="runtime readiness probe passed"
+      fi
     fi
     if [[ $waited -ge $UI_READY_TIMEOUT ]]; then
       local -a ui_missing=()
@@ -2786,6 +2897,7 @@ wait_for_ready() {
       fi
     fi
     if [[ $ui_seen -eq 1 && $ui_ws_seen -eq 1 && $bus_seen -eq 1 && $golden_seen -eq 1 && $runtime_seen -eq 1 ]]; then
+      RUNTIME_PROBE_SUMMARY="$runtime_probe_summary"
       return 0
     fi
     if [[ -n $pid ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
@@ -2810,6 +2922,9 @@ wait_for_ready() {
   fi
   if [[ $runtime_seen -eq 0 ]]; then
     missing+=" RUNTIME_READY"
+  fi
+  if [[ $runtime_probe_ok -eq 0 ]]; then
+    missing+=" runtime probe"
   fi
   print_log_excerpt "$log" "Timed out after ${READY_TIMEOUT}s waiting for runtime readiness (missing:${missing:- none})"
   return 1
@@ -3050,6 +3165,7 @@ fi
 LIVE_LOG="$LOG_DIR/live_runtime.log"
 LIVE_NOTIFY="$ARTIFACT_DIR/live_ready"
 rm -f "$LIVE_NOTIFY"
+RUNTIME_PROBE_SUMMARY=""
 log_info "Launching runtime controller (mode=live, log=$LIVE_LOG)"
 LIVE_PID=$(start_controller "live" "$LIVE_LOG" "$LIVE_NOTIFY")
 start_log_stream "$LIVE_LOG" "live"
@@ -3067,7 +3183,8 @@ if ! check_ui_health "$LIVE_LOG"; then
 fi
 micro_label=$([[ "$MICRO_FLAG" == "1" ]] && echo "on" || echo "off")
 canary_label=$([[ $CANARY_MODE -eq 1 ]] && echo " | Canary limits applied" || echo "")
-GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (${PREFLIGHT_RUNS}/${PREFLIGHT_RUNS}) | Soak PASSED | MODE=live | MICRO=${micro_label}${canary_label}"
+probe_label=${RUNTIME_PROBE_SUMMARY:-ok}
+GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (${PREFLIGHT_RUNS}/${PREFLIGHT_RUNS}) | Soak PASSED | Runtime probe=${probe_label} | MODE=live | MICRO=${micro_label}${canary_label}"
 log_info "$GO_NO_GO"
 
 wait "$LIVE_PID"
