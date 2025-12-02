@@ -24,6 +24,11 @@ def test_emit_tokens_skips_reordered_batches():
 
         first_batch = queue.get_nowait()
         assert {candidate.token for candidate in first_batch} == set(tokens)
+        assert all(candidate.metadata.get("discovery_method") == "unit-test" for candidate in first_batch)
+        assert all(
+            "discovery:unit-test" in candidate.metadata.get("sources", [])
+            for candidate in first_batch
+        )
 
         await service._emit_tokens(list(reversed(tokens)), fresh=True)
 
@@ -49,6 +54,8 @@ def test_emit_tokens_detects_metadata_changes():
         await service._emit_tokens([token], fresh=True)
         first_batch = queue.get_nowait()
         assert first_batch[0].metadata["price"] == 1.0
+        assert first_batch[0].metadata.get("discovery_method") == "unit-test"
+        assert "discovery:unit-test" in first_batch[0].metadata.get("sources", [])
 
         assert queue.qsize() == 0
 
@@ -59,6 +66,8 @@ def test_emit_tokens_detects_metadata_changes():
         assert queue.qsize() == 1
         second_batch = queue.get_nowait()
         assert second_batch[0].metadata["price"] == 2.0
+        assert second_batch[0].metadata.get("discovery_method") == "unit-test"
+        assert "discovery:unit-test" in second_batch[0].metadata.get("sources", [])
 
     asyncio.run(runner())
 
@@ -81,6 +90,7 @@ def test_emit_tokens_purges_stale_details():
         await service._emit_tokens([token_a, token_b], fresh=True)
         first_batch = queue.get_nowait()
         assert {candidate.token for candidate in first_batch} == {token_a, token_b}
+        assert all("discovery:unit-test" in cand.metadata.get("sources", []) for cand in first_batch)
 
         await service._emit_tokens([token_b], fresh=True)
 
@@ -261,5 +271,27 @@ def test_failure_counter_resets_on_success():
 
         assert service._consecutive_failures == 0
         assert service._current_backoff == 0.0
+
+    asyncio.run(runner())
+
+
+def test_candidates_include_default_discovery_tags_when_missing():
+    async def runner() -> None:
+        queue: asyncio.Queue[list] = asyncio.Queue()
+        service = DiscoveryService(queue, emit_batch_size=10)
+        service._agent = types.SimpleNamespace(
+            last_method=None,
+            default_method="configured",
+            last_details={},
+        )
+
+        token = "So11111111111111111111111111111111111111112"
+
+        await service._emit_tokens([token], fresh=True)
+
+        assert queue.qsize() == 1
+        batch = queue.get_nowait()
+        assert batch[0].metadata.get("discovery_method") == "configured"
+        assert "discovery:configured" in batch[0].metadata.get("sources", [])
 
     asyncio.run(runner())

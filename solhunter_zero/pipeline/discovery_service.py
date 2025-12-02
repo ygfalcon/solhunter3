@@ -8,7 +8,7 @@ import os
 import time
 from typing import Any, Dict, Iterable, Optional, cast
 
-from ..agents.discovery import DiscoveryAgent
+from ..agents.discovery import DEFAULT_DISCOVERY_METHOD, DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
 from ..token_aliases import canonical_mint, validate_mint
 from .types import TokenCandidate
@@ -265,6 +265,7 @@ class DiscoveryService:
             if base_metadata is None:
                 base_metadata = self._candidate_metadata(canonical)
             metadata = dict(base_metadata)
+            self._ensure_discovery_tags(metadata)
             if canonical != token:
                 metadata.setdefault("alias", token)
             fingerprint = self._fingerprint_metadata(metadata)
@@ -283,6 +284,39 @@ class DiscoveryService:
                 dropped,
             )
         return result
+
+    def _ensure_discovery_tags(self, metadata: Dict[str, Any]) -> None:
+        method: str | None = None
+        raw_method = metadata.get("discovery_method")
+        if isinstance(raw_method, str) and raw_method:
+            method = raw_method
+        else:
+            agent_method = getattr(self._agent, "last_method", None)
+            default_method = getattr(self._agent, "default_method", None)
+            for candidate in (agent_method, default_method, DEFAULT_DISCOVERY_METHOD):
+                if isinstance(candidate, str) and candidate:
+                    method = candidate
+                    break
+            if method is not None:
+                metadata["discovery_method"] = method
+
+        source_set: set[str] = set()
+        existing_sources = metadata.get("sources")
+        if isinstance(existing_sources, (list, tuple, set, frozenset)):
+            for src in existing_sources:
+                if isinstance(src, str) and src:
+                    source_set.add(src)
+        elif isinstance(existing_sources, str) and existing_sources:
+            source_set.add(existing_sources)
+
+        if method:
+            source_set.add(f"discovery:{method}")
+        if not source_set and method:
+            source_set.add(method)
+        if not source_set:
+            source_set.add("discovery")
+
+        metadata["sources"] = sorted(source_set)
 
     def _candidate_metadata(self, token: str) -> Dict[str, Any]:
         """Return enriched metadata for ``token`` when available."""
@@ -454,6 +488,17 @@ class DiscoveryService:
             batch = self._build_candidates(chunk, metadata_cache=metadata_cache)
             if not batch:
                 continue
+            missing_tags = [
+                cand.token
+                for cand in batch
+                if not cand.metadata.get("discovery_method")
+                or not cand.metadata.get("sources")
+            ]
+            if missing_tags:
+                log.warning(
+                    "DiscoveryService emitting candidates missing metadata tags: %s",
+                    ", ".join(sorted(missing_tags)),
+                )
             await self.queue.put(batch)
             total_enqueued += len(batch)
             log.debug("DiscoveryService queued chunk of %d token(s)", len(batch))
