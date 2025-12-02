@@ -796,6 +796,7 @@ async def _run() -> None:
             reason = result.error or result.status or "unavailable"
             failures.append(f"{label} connectivity check failed: {reason} ({result.target})")
 
+    missing_ui: list[str] = []
     for key, label in UI_TARGETS:
         result = lookup.get(key)
         if result is None:
@@ -806,12 +807,18 @@ async def _run() -> None:
                 )
                 continue
             print(_format_result(label, result))
-            failures.append(f"{label} connectivity probe skipped (no target configured)")
+            missing_ui.append(label)
             continue
         print(_format_result(label, result))
         if not result.ok:
             reason = result.error or result.status or "unavailable"
             failures.append(f"{label} connectivity check failed: {reason} ({result.target})")
+
+    if missing_ui and not skip_ui:
+        failure = ", ".join(missing_ui)
+        failures.append(
+            f"Missing UI connectivity targets: {failure} (set CONNECTIVITY_SKIP_UI_PROBES=1 to bypass)"
+        )
 
     if failures:
         print("\n".join(failures), file=sys.stderr)

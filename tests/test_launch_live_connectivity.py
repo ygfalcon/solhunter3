@@ -408,9 +408,9 @@ def test_run_connectivity_probes_requires_ui_targets_without_skip(tmp_path: Path
     assert "UI WebSocket: missing target" in completed.stdout
     assert "UI HTTP: missing target" in completed.stdout
     assert (
-        "UI WebSocket connectivity probe skipped (no target configured)" in completed.stderr
+        "Missing UI connectivity targets: UI WebSocket, UI HTTP (set"
+        " CONNECTIVITY_SKIP_UI_PROBES=1 to bypass)" in completed.stderr
     )
-    assert "UI HTTP connectivity probe skipped (no target configured)" in completed.stderr
 
 
 def test_run_connectivity_probes_skips_missing_ui_with_flag(tmp_path: Path) -> None:
@@ -455,6 +455,7 @@ def test_run_connectivity_probes_skips_missing_ui_with_flag(tmp_path: Path) -> N
         "UI HTTP: SKIPPED → UI connectivity probes disabled (CONNECTIVITY_SKIP_UI_PROBES=1)"
         in completed.stdout
     )
+    assert "Missing UI connectivity targets" not in completed.stderr
 
 
 def test_connectivity_probes_force_skip_when_ui_disabled(tmp_path: Path) -> None:
