@@ -74,6 +74,12 @@ main() {
     bus_status="fail"
   fi
 
+  local discovery_audit
+  local discovery_status="pass"
+  if ! discovery_audit=$(run_with_audit discovery_health python -m scripts.discovery_health); then
+    discovery_status="fail"
+  fi
+
   local -a preflight_runs=()
   local -a modes=()
   if [[ -n ${PREFLIGHT_MICRO_STATES:-} ]]; then
@@ -114,9 +120,9 @@ main() {
   fi
 
   local overall_status
-  overall_status=$(jq -n --arg env "$env_status" --arg bus "$bus_status" --argjson runs "$preflight_json" '
+  overall_status=$(jq -n --arg env "$env_status" --arg bus "$bus_status" --arg discovery "$discovery_status" --argjson runs "$preflight_json" '
     def runs_all_pass: (runs | length) == 0 or (runs | all(.[]; .status == "pass"));
-    if ($env == "pass" and $bus == "pass" and runs_all_pass) then "pass" else "fail" end
+    if ($env == "pass" and $bus == "pass" and $discovery == "pass" and runs_all_pass) then "pass" else "fail" end
   ')
 
   local timestamp
@@ -136,8 +142,10 @@ main() {
     --arg env_audit "${env_audit:-}" \
     --arg bus_status "$bus_status" \
     --arg bus_audit "${bus_audit:-}" \
+    --arg discovery_status "$discovery_status" \
+    --arg discovery_audit "${discovery_audit:-}" \
     --argjson preflight "$preflight_json" \
-    '{ts:$ts,epoch:$epoch,commit:$commit,status:$status,env:{status:$env_status,audit:($env_audit // null)},bus:{status:$bus_status,audit:($bus_audit // null)},preflight:$preflight}')
+    '{ts:$ts,epoch:$epoch,commit:$commit,status:$status,env:{status:$env_status,audit:($env_audit // null)},bus:{status:$bus_status,audit:($bus_audit // null)},discovery:{status:$discovery_status,audit:($discovery_audit // null)},preflight:$preflight}')
 
   printf '%s\n' "$history_entry" >> "$HISTORY_FILE"
   log INFO "History appended to $HISTORY_FILE"
