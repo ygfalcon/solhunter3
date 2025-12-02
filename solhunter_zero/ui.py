@@ -10,7 +10,6 @@ import json
 import logging
 import math
 import os
-import ssl
 import socket
 import ssl
 import subprocess
@@ -27,6 +26,8 @@ from typing import Any, Callable, Deque, Dict, FrozenSet, Iterable, List, Mappin
 from urllib.parse import parse_qs, urlparse, urlunparse
 from weakref import WeakSet
 
+from redis import Redis
+from redis.exceptions import RedisError
 from flask import Flask, Request, Response, jsonify, render_template, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.serving import BaseWSGIServer, make_server
@@ -55,6 +56,7 @@ _active_ui_state: "UIState" | None = None
 _ACTIVE_UI_STATE_LOCK = threading.Lock()
 _ENV_BOOTSTRAPPED = False
 _ACTIVE_HTTP_SERVERS: WeakSet["UIServer"] = WeakSet()
+_REDIS_PING_STATUS: Dict[str, Any] = {}
 
 
 def _update_state_http_binding(
@@ -176,6 +178,21 @@ def _bootstrap_ui_environment() -> None:
             current,
             default,
         )
+
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/1")
+    status = _ping_redis(redis_url)
+    _REDIS_PING_STATUS.clear()
+    _REDIS_PING_STATUS.update(status)
+    if status.get("ok") is not True:
+        detail = status.get("error") or "unknown error"
+        log.error("Redis PING failed for %s: %s", redis_url, detail)
+        log.warning("UI startup continuing in degraded mode; Redis unavailable")
+    else:
+        log.debug(
+            "Redis PING succeeded for %s in %.3fms",
+            redis_url,
+            status.get("latency_ms", 0.0),
+        )
     _ENV_BOOTSTRAPPED = True
 
 
@@ -292,6 +309,28 @@ def _discover_broker_url() -> str | None:
                 return ws_candidate
 
     return None
+
+
+def _ping_redis(url: str) -> Dict[str, Any]:
+    status: Dict[str, Any] = {"url": url}
+    try:
+        client = Redis.from_url(
+            url,
+            socket_timeout=2.0,
+            socket_connect_timeout=2.0,
+            retry_on_timeout=False,
+        )
+        start = time.perf_counter()
+        ok = bool(client.ping())
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+    except (RedisError, OSError) as exc:
+        status["ok"] = False
+        status["error"] = str(exc)
+        return status
+
+    status["ok"] = ok
+    status["latency_ms"] = round(elapsed_ms, 3)
+    return status
 
 
 def _parse_redis_url(url: str | None) -> Dict[str, Any]:
@@ -1528,34 +1567,61 @@ def _build_ui_meta_snapshot(state: "UIState" | None = None) -> Dict[str, Any]:
         except Exception:
             log.debug("Failed to snapshot HTTP server binding for UI meta", exc_info=True)
             http_server_snapshot = {}
+        try:
+            status_snapshot = dict(state.snapshot_status())
+        except Exception:
+            log.debug("Failed to snapshot status for UI meta", exc_info=True)
+            status_snapshot = {}
     else:
         run_state = _default_run_state()
         http_server_snapshot = {}
+        status_snapshot = {}
 
+    default_redis_url = "redis://localhost:6379/1"
+    redis_env = os.getenv("REDIS_URL")
     redis_candidates = (
-        os.getenv("REDIS_URL"),
+        redis_env if redis_env and redis_env != default_redis_url else None,
         os.getenv("MINT_STREAM_REDIS_URL"),
         os.getenv("MEMPOOL_STREAM_REDIS_URL"),
         os.getenv("AMM_WATCH_REDIS_URL"),
         _env_or_default("REDIS_URL"),
-        "redis://localhost:6379/1",
+        redis_env if redis_env else None,
+        default_redis_url,
     )
     redis_url = next((candidate for candidate in redis_candidates if candidate), None)
     redis_info = _parse_redis_url(redis_url)
     event_bus_url = os.getenv("EVENT_BUS_URL") or _discover_broker_url() or "ws://127.0.0.1:8779"
     broker_channel = os.getenv("BROKER_CHANNEL") or "solhunter-events-v3"
 
+    broker_status, broker_ok, broker_detail = _status_fields(status_snapshot.get("event_bus"))
+    event_bus_block: Dict[str, Any] = {"url_ws": event_bus_url, "channel": broker_channel}
+    if broker_status:
+        event_bus_block["status"] = broker_status
+    if broker_ok is not None:
+        event_bus_block["ok"] = broker_ok
+    if broker_detail:
+        event_bus_block["detail"] = broker_detail
+
     try:
         rl_health_url = resolve_rl_health_url(require_health_file=False)
     except Exception:
         rl_health_url = None
 
+    redis_block = dict(redis_info)
+    if redis_url:
+        redis_block.setdefault("url", redis_url)
+    if _REDIS_PING_STATUS:
+        for key, value in _REDIS_PING_STATUS.items():
+            if key == "url" and redis_block.get("url"):
+                continue
+            redis_block[key] = value
+
     payload: Dict[str, Any] = {
         "type": "UI_META",
         "v": UI_SCHEMA_VERSION,
         "generated_ts": time.time(),
-        "redis": redis_info,
-        "event_bus": {"url_ws": event_bus_url, "channel": broker_channel},
+        "redis": redis_block,
+        "event_bus": event_bus_block,
         "run_state": run_state,
     }
     if rl_health_url:
@@ -2401,6 +2467,41 @@ def _status_value_ok(value: Any) -> bool:
             return False
         return True
     return bool(value)
+
+
+def _status_fields(value: Any) -> tuple[str | None, bool | None, str | None]:
+    status: str | None = None
+    detail: str | None = None
+    ok_value: bool | None = None
+
+    if isinstance(value, Mapping):
+        raw_status = value.get("status") or value.get("state")
+        if isinstance(raw_status, str):
+            status = raw_status.strip().lower()
+        elif raw_status is not None:
+            status = str(raw_status).strip().lower()
+        if status is None:
+            if value.get("connected") is True:
+                status = "ok"
+            elif value.get("connected") is False:
+                status = "failed"
+            elif value.get("ok") is True:
+                status = "ok"
+            elif value.get("ok") is False:
+                status = "failed"
+        if value.get("detail"):
+            detail = str(value.get("detail"))
+    elif isinstance(value, str):
+        status = value.strip().lower()
+    elif isinstance(value, bool):
+        status = "ok" if value else "failed"
+
+    if value is not None:
+        ok_value = _status_value_ok(value)
+    if ok_value is not None and status is None:
+        status = "ok" if ok_value else "failed"
+
+    return status, ok_value, detail
 
 
 def _normalize_ws_url(value: str | None) -> str | None:
