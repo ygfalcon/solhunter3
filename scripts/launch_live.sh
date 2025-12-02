@@ -827,6 +827,7 @@ wait_for_socket_release() {
 import ipaddress
 import os
 import socket
+import sys
 import time
 from urllib.parse import urlparse
 
@@ -907,6 +908,7 @@ wait_for_ui_socket_release() {
 import ipaddress
 import os
 import socket
+import sys
 import time
 
 DEFAULT_TIMEOUT = 30.0
@@ -957,7 +959,18 @@ def _probe_host(hostname: str) -> str:
     return normalized
 
 
-host = os.environ.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
+def _family_for_host(hostname: str) -> socket.AddressFamily | None:
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address):
+        return socket.AF_INET6
+    return socket.AF_INET
+
+
+ui_host_raw = os.environ.get("UI_HOST")
+host = ui_host_raw or "127.0.0.1"
 port = _read_port(os.environ.get("UI_PORT", "5001"))
 timeout = _read_timeout(os.environ.get("UI_SOCKET_RELEASE_TIMEOUT"))
 
@@ -972,11 +985,42 @@ if not _is_local_host(host):
 
 
 def port_busy() -> bool:
-    try:
-        with socket.create_connection((_probe_host(host), port), timeout=0.25):
-            return True
-    except OSError:
-        return False
+    dual_stack = (ui_host_raw or "").strip() in {"", "0.0.0.0", "::"}
+
+    def _targets() -> list[tuple[str, socket.AddressFamily | None]]:
+        if dual_stack:
+            return [("::1", socket.AF_INET6), ("127.0.0.1", socket.AF_INET)]
+        target_host = _probe_host(host)
+        return [(target_host, _family_for_host(target_host))]
+
+    for target, family in _targets():
+        label = family.name if family is not None else "AF_UNSPEC"
+        try:
+            if family is None:
+                with socket.create_connection((target, port), timeout=0.25):
+                    print(
+                        f"wait_for_ui_socket_release: {label} connection to {target}:{port} succeeded",
+                        file=sys.stderr,
+                    )
+                    return True
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(0.25)
+                sock.connect((target, port))
+                print(
+                    f"wait_for_ui_socket_release: {label} connection to {target}:{port} succeeded",
+                    file=sys.stderr,
+                )
+                return True
+            finally:
+                sock.close()
+        except OSError as exc:
+            print(
+                f"wait_for_ui_socket_release: {label} connection to {target}:{port} failed: {exc}",
+                file=sys.stderr,
+            )
+
+    return False
 
 
 deadline = time.monotonic() + timeout

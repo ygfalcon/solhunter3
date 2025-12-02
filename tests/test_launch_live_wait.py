@@ -818,6 +818,45 @@ def test_wait_for_socket_release_skips_remote_hosts() -> None:
     assert "free example.com 443 remote" in completed.stdout
 
 
+def test_wait_for_ui_socket_release_detects_ipv6_binding() -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    wait_function = _extract_function(source, "wait_for_ui_socket_release")
+
+    server_sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_sock.bind(("::1", 0))
+        server_sock.listen(1)
+        _host, port, *_ = server_sock.getsockname()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHON_BIN": sys.executable,
+                "UI_HOST": "::",
+                "UI_PORT": str(port),
+                "UI_SOCKET_RELEASE_TIMEOUT": "0",
+            }
+        )
+
+        bash_script = "set -euo pipefail\n" + wait_function + "wait_for_ui_socket_release\n"
+
+        completed = subprocess.run(
+            ["bash", "-c", bash_script],
+            check=True,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert f"busy :: {port}" in completed.stdout
+        assert "AF_INET6" in completed.stderr
+    finally:
+        server_sock.close()
+
+
 def test_runtime_bus_target_defaults_wss_port() -> None:
     source = _LAUNCH_LIVE_SOURCE
     function_source = _extract_python_function(source, "_runtime_bus_target")
