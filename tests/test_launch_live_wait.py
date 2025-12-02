@@ -129,6 +129,23 @@ def _run_wait_for_ready(
     )
 
 
+def _start_status_server(status: int = 200):
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # type: ignore[override]
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format: str, *args):  # type: ignore[override]
+            return
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
 def test_live_launch_exports_solhunter_mode() -> None:
     """The live launch block must export SOLHUNTER_MODE alongside MODE."""
 
@@ -486,6 +503,54 @@ def test_wait_for_ready_exits_on_ui_ws_failure(tmp_path: Path) -> None:
     assert completed.returncode == 4
     assert "status=failed" in completed.stderr
     assert "detail=websocket handshake failed" in completed.stderr
+
+
+def test_wait_for_ready_runs_http_probe(tmp_path: Path) -> None:
+    server = _start_status_server(200)
+    try:
+        host, port = server.server_address
+        assert host == "127.0.0.1"
+        completed = _run_wait_for_ready(
+            tmp_path,
+            [
+                f"[ts] UI_READY url=http://{host}:{port}",
+                "[ts] UI_WS_READY status=ok detail=connected",
+                "[ts] Event bus: connected",
+                "[ts] GOLDEN_READY stage=liq",
+                "[ts] RUNTIME_READY",
+            ],
+            ready_timeout=6,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 0
+
+
+def test_wait_for_ready_fails_on_http_probe_error(tmp_path: Path) -> None:
+    server = _start_status_server(503)
+    try:
+        host, port = server.server_address
+        assert host == "127.0.0.1"
+        completed = _run_wait_for_ready(
+            tmp_path,
+            [
+                f"[ts] UI_READY url=http://{host}:{port}",
+                "[ts] UI_WS_READY status=ok detail=connected",
+                "[ts] Event bus: connected",
+                "[ts] GOLDEN_READY stage=liq",
+                "[ts] RUNTIME_READY",
+            ],
+            ready_timeout=6,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 4
+    assert "UI HTTP readiness probe failed" in completed.stderr
+    assert "http status 503" in completed.stderr
 
 
 def test_wait_for_ready_rejects_degraded_without_opt_in(tmp_path: Path) -> None:

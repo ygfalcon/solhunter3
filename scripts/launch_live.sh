@@ -2738,6 +2738,7 @@ wait_for_ready() {
   local log=$1
   local notify=$2
   local pid=${3:-}
+  local python_bin=${PYTHON_BIN:-python3}
   local waited=0
   local ui_seen=0
   local bus_seen=0
@@ -2751,6 +2752,7 @@ wait_for_ready() {
   local allow_ws_raw="${LAUNCH_LIVE_ALLOW_WS_DEGRADED:-${UI_WS_OPTIONAL:-}}"
   local ui_disabled=0
   local ui_port_disabled=0
+  local ui_http_probe_done=0
   if [[ -n ${UI_PORT+x} ]]; then
     if [[ -z ${UI_PORT//[[:space:]]/} ]]; then
       ui_port_disabled=1
@@ -2780,6 +2782,7 @@ wait_for_ready() {
   if [[ $ui_disabled -eq 1 || $ui_port_disabled -eq 1 ]]; then
     ui_seen=1
     ui_ws_seen=1
+    ui_http_probe_done=1
   fi
   if [[ -n ${allow_ws_raw:-} ]]; then
     case "${allow_ws_raw,,}" in
@@ -2900,6 +2903,61 @@ PY
     fi
     if [[ $ui_seen -eq 0 ]] && grep -q "UI_READY" "$log" 2>/dev/null; then
       ui_seen=1
+      if [[ $ui_http_probe_done -eq 0 ]]; then
+        local ui_ready_line=""
+        ui_ready_line="$(grep -m1 "UI_READY" "$log" 2>/dev/null || true)"
+        if [[ -n $ui_ready_line ]]; then
+          local probe_output=""
+          if ! probe_output=$(UI_READY_LINE="$ui_ready_line" "$python_bin" - <<'PY'
+import http.client
+import os
+import re
+import sys
+from urllib.parse import urlparse
+
+line = os.environ.get("UI_READY_LINE", "")
+match = re.search(r"url=([^ ]+)", line)
+if not match:
+    print("missing url", end="")
+    sys.exit(1)
+
+url = match.group(1)
+parsed = urlparse(url)
+if not parsed.scheme or not parsed.hostname or parsed.port is None:
+    print("invalid url", end="")
+    sys.exit(1)
+
+conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+path = parsed.path or "/"
+if parsed.query:
+    path = f"{path}?{parsed.query}"
+
+try:
+    conn = conn_cls(parsed.hostname, parsed.port, timeout=5)
+    conn.request("GET", path or "/")
+    resp = conn.getresponse()
+    status = resp.status
+    resp.read()
+    conn.close()
+except Exception as exc:  # pragma: no cover - network failure reporting
+    print(f"request error: {exc}", end="")
+    sys.exit(1)
+
+if status < 200 or status >= 300:
+    print(f"http status {status}", end="")
+    sys.exit(1)
+PY
+          ); then
+            local reason="UI HTTP readiness probe failed"
+            if [[ -n $probe_output ]]; then
+              reason+=": $probe_output"
+            fi
+            print_log_excerpt "$log" "$reason"
+            exit "$EXIT_HEALTH"
+          fi
+          ui_http_probe_done=1
+        fi
+      fi
     fi
     if [[ $ui_ws_seen -eq 0 ]]; then
       local ui_ws_line=""
