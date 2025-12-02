@@ -637,6 +637,34 @@ ensure_local_redis_if_needed(urls)
 PY
 }
 
+redact_url_for_log() {
+  local value=$1
+  if [[ -z ${value:-} ]]; then
+    return 0
+  fi
+  "$PYTHON_BIN" - "$value" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+value = sys.argv[1] if len(sys.argv) > 1 else ""
+if not value:
+    raise SystemExit(0)
+
+try:
+    parsed = urlparse(value)
+except Exception:
+    print(value)
+    raise SystemExit(0)
+
+if not parsed.netloc or "@" not in parsed.netloc:
+    print(value)
+    raise SystemExit(0)
+
+_, _, host_segment = parsed.netloc.rpartition("@")
+print(parsed._replace(netloc=f"****@{host_segment}").geturl())
+PY
+}
+
 redis_health() {
   local -a redis_urls=()
   mapfile -t redis_urls < <(
@@ -2713,6 +2741,8 @@ wait_for_ready() {
   local waited=0
   local ui_seen=0
   local bus_seen=0
+  local broker_smoke_done=0
+  local broker_smoke_failure=""
   local ui_ws_seen=0
   local golden_seen=0
   local golden_disabled_seen=0
@@ -2758,6 +2788,112 @@ wait_for_ready() {
         ;;
     esac
   fi
+
+  broker_smoke_test() {
+    if [[ -z ${BROKER_URL:-} ]]; then
+      return 0
+    fi
+    local lowered="${BROKER_URL,,}"
+    if [[ $lowered != redis://* && $lowered != rediss://* ]]; then
+      return 0
+    fi
+    local smoke_output=""
+    if ! smoke_output=$("$PYTHON_BIN" - <<'PY' 2>&1
+import asyncio
+import os
+import sys
+
+try:
+    import redis.asyncio as redis
+except Exception as exc:  # pragma: no cover - import guard
+    print(f"redis client import failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+url = os.environ.get("BROKER_URL") or ""
+channel = "__launch_live_broker_smoke__"
+
+
+async def _run() -> int:
+    try:
+        client = redis.from_url(
+            url,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+            retry_on_timeout=False,
+            health_check_interval=0,
+        )
+    except Exception as exc:  # pragma: no cover - defensive parse guard
+        print(f"Failed to parse BROKER_URL: {exc}", file=sys.stderr)
+        return 1
+
+    pubsub = client.pubsub()
+    try:
+        try:
+            pong = await client.ping()
+        except Exception as exc:
+            print(f"Redis PING failed: {exc}", file=sys.stderr)
+            return 1
+        if pong is not True:
+            print(f"Unexpected PING response: {pong!r}", file=sys.stderr)
+            return 1
+
+        try:
+            await pubsub.subscribe(channel)
+        except Exception as exc:
+            print(f"Pub/sub subscribe failed: {exc}", file=sys.stderr)
+            return 1
+
+        try:
+            publish_count = await client.publish(channel, "launch-live-smoke")
+        except Exception as exc:
+            print(f"Publish failed: {exc}", file=sys.stderr)
+            return 1
+        if publish_count < 1:
+            print(
+                "Publish returned zero subscribers; broker may not be listening",
+                file=sys.stderr,
+            )
+            return 1
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                message = await pubsub.get_message(
+                    timeout=0.5,
+                    ignore_subscribe_messages=True,
+                )
+            except Exception as exc:
+                print(f"Pub/sub receive failed: {exc}", file=sys.stderr)
+                return 1
+            if message:
+                return 0
+
+        print("No pub/sub message echoed from broker", file=sys.stderr)
+        return 1
+    finally:
+        try:
+            await pubsub.unsubscribe(channel)
+        except Exception:
+            pass
+        try:
+            await pubsub.close()
+        except Exception:
+            pass
+        try:
+            await client.close()
+        except Exception:
+            pass
+
+
+raise SystemExit(asyncio.run(_run()))
+PY
+    ); then
+      broker_smoke_failure=$smoke_output
+      return 1
+    fi
+    return 0
+  }
+
   while [[ $waited -lt $READY_TIMEOUT ]]; do
     if [[ -n $notify && -f $notify ]]; then
       runtime_seen=1
@@ -2821,6 +2957,15 @@ wait_for_ready() {
     fi
     if [[ $bus_seen -eq 0 ]] && grep -q "Event bus: connected" "$log" 2>/dev/null; then
       bus_seen=1
+      if [[ $broker_smoke_done -eq 0 ]]; then
+        if ! broker_smoke_test; then
+          print_log_excerpt \
+            "$log" \
+            "Redis broker smoke test failed for BROKER_URL=${BROKER_URL:-unset}. ${broker_smoke_failure:-Check broker reachability and pub/sub permissions.}"
+          exit "$EXIT_HEALTH"
+        fi
+        broker_smoke_done=1
+      fi
     fi
     if [[ $golden_seen -eq 0 ]]; then
       if grep -q "GOLDEN_READY" "$log" 2>/dev/null; then
@@ -3131,7 +3276,12 @@ if ! check_ui_health "$LIVE_LOG"; then
 fi
 micro_label=$([[ "$MICRO_FLAG" == "1" ]] && echo "on" || echo "off")
 canary_label=$([[ $CANARY_MODE -eq 1 ]] && echo " | Canary limits applied" || echo "")
-GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (${PREFLIGHT_RUNS}/${PREFLIGHT_RUNS}) | Soak PASSED | MODE=live | MICRO=${micro_label}${canary_label}"
+broker_audit_value="unset"
+if [[ -n ${BROKER_URL:-} ]]; then
+  broker_audit_value=$(redact_url_for_log "$BROKER_URL")
+  broker_audit_value=${broker_audit_value:-$BROKER_URL}
+fi
+GO_NO_GO="GO/NO-GO: Keys OK | Services OK | Preflight PASSED (${PREFLIGHT_RUNS}/${PREFLIGHT_RUNS}) | Soak PASSED | MODE=live | MICRO=${micro_label}${canary_label} | BROKER=${broker_audit_value}"
 log_info "$GO_NO_GO"
 
 wait "$LIVE_PID"
