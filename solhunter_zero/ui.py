@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
+import tempfile
 from typing import Any, Callable, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlparse, urlunparse
 from weakref import WeakSet
@@ -97,6 +98,46 @@ _QUEUE_DROP_WARNING_INTERVAL = float(os.getenv("UI_QUEUE_DROP_WARNING_INTERVAL",
 DEFAULT_UI_HTTP_READY_TIMEOUT = 15.0
 
 
+def _generate_self_signed_cert(base_path: Path) -> tuple[Path, Path]:
+    cert_path = base_path.with_suffix(".crt")
+    key_path = base_path.with_suffix(".key")
+
+    if cert_path.exists() and key_path.exists():
+        return cert_path, key_path
+
+    openssl_cmd = [
+        "openssl",
+        "req",
+        "-x509",
+        "-nodes",
+        "-newkey",
+        "rsa:2048",
+        "-keyout",
+        str(key_path),
+        "-out",
+        str(cert_path),
+        "-days",
+        "1",
+        "-subj",
+        "/CN=localhost",
+    ]
+
+    try:
+        subprocess.run(openssl_cmd, check=True, capture_output=True)
+    except FileNotFoundError as exc:  # pragma: no cover - depends on environment
+        raise RuntimeError(
+            "UI_ALLOW_SELF_SIGNED=1 requested automatic certificates but openssl is missing; "
+            "install openssl or provide UI_HTTP_CERT_FILE/UI_HTTP_KEY_FILE"
+        ) from exc
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - depends on environment
+        stderr = exc.stderr.decode(errors="ignore") if exc.stderr else str(exc)
+        raise RuntimeError(
+            f"Failed to generate self-signed UI certificate: {stderr.strip() or exc}"
+        ) from exc
+
+    return cert_path, key_path
+
+
 def _build_http_ssl_context() -> ssl.SSLContext | None:
     """Return an SSL context for the UI HTTP server when certificates are provided.
 
@@ -124,6 +165,8 @@ def _build_http_ssl_context() -> ssl.SSLContext | None:
         or "http"
     ).strip().lower()
 
+    allow_self_signed = parse_bool_env("UI_ALLOW_SELF_SIGNED", default=False)
+
     if cert_path or key_path:
         if not cert_path:
             raise RuntimeError(
@@ -137,8 +180,28 @@ def _build_http_ssl_context() -> ssl.SSLContext | None:
         return context
 
     if scheme == "https":
+        if allow_self_signed:
+            cert_base = Path(tempfile.gettempdir()) / "solhunter_ui_self_signed"
+            cert_path, key_path = _generate_self_signed_cert(cert_base)
+
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            try:
+                context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+            except Exception as exc:  # pragma: no cover - unlikely with fresh cert
+                raise RuntimeError(f"Failed to load UI TLS certificate: {exc}") from exc
+
+            log.warning(
+                "UI_HTTP_SCHEME=https set without certificate material; generated a "
+                "temporary self-signed certificate at %s because UI_ALLOW_SELF_SIGNED=1. "
+                "Use UI_HTTP_CERT_FILE/UI_HTTP_KEY_FILE or terminate TLS upstream for production.",
+                cert_path,
+            )
+            return context
+
         raise RuntimeError(
-            "UI_HTTP_SCHEME=https requires TLS termination or UI_HTTP_CERT_FILE/UI_HTTP_KEY_FILE"
+            "UI_HTTP_SCHEME=https requires TLS termination or UI_HTTP_CERT_FILE/UI_HTTP_KEY_FILE. "
+            "For non-production use only, set UI_ALLOW_SELF_SIGNED=1 to auto-generate a "
+            "temporary certificate."
         )
 
     return None
