@@ -100,6 +100,8 @@ def _run_wait_for_ready(
         notify_path.parent.mkdir(parents=True, exist_ok=True)
     bash_script = (
         "set -euo pipefail\n"
+        "log_info() { printf '%s\\n' \"$*\"; }\n"
+        "log_warn() { printf '%s\\n' \"$*\" >&2; }\n"
         + WAIT_FOR_READY_SNIPPET
         + "EXIT_HEALTH=4\n"
         + f"READY_TIMEOUT={ready_timeout}\n"
