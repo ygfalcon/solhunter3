@@ -1117,6 +1117,7 @@ PY
 acquire_runtime_lock() {
   stop_runtime_lock_refresher
   local output
+  local acquire_status=0
   output=$("$PYTHON_BIN" - <<'PY'
 import json
 import os
@@ -1131,10 +1132,9 @@ except Exception as exc:  # pragma: no cover - dependency issue
     print(f"Unable to import redis client: {exc}", file=sys.stderr)
     sys.exit(1)
 
+EXIT_SOCKET = 7
 redis_url = os.environ.get("REDIS_URL") or "redis://localhost:6379/1"
 channel = os.environ.get("BROKER_CHANNEL") or "solhunter-events-v3"
-client = redis.Redis.from_url(redis_url, socket_timeout=1.0)
-key = f"solhunter:runtime:lock:{channel}"
 token = str(uuid.uuid4())
 host = socket.gethostname()
 pid = os.getpid()
@@ -1151,12 +1151,23 @@ payload = {
     "token": token,
     "ts": time.time(),
 }
+error_context = f"url={redis_url} payload={json.dumps(payload, sort_keys=True)}"
 
 def _describe(data: dict[str, object]) -> str:
     pid = data.get("pid")
     host = data.get("host") or "unknown"
     return f"pid={pid} host={host}"
 
+try:
+    client = redis.Redis.from_url(redis_url, socket_timeout=1.0)
+except Exception as exc:
+    print(
+        f"Failed to initialize Redis client for runtime lock ({error_context}): {exc}",
+        file=sys.stderr,
+    )
+    sys.exit(EXIT_SOCKET)
+
+key = f"solhunter:runtime:lock:{channel}"
 existing = client.get(key)
 if existing:
     try:
@@ -1181,7 +1192,16 @@ if existing:
         client.delete(key)
         time.sleep(0.2)
 
-if not client.set(key, json.dumps(payload), nx=True, ex=ttl_seconds):
+try:
+    lock_set = client.set(key, json.dumps(payload), nx=True, ex=ttl_seconds)
+except Exception as exc:
+    print(
+        f"Failed to store runtime lock ({error_context}): {exc}",
+        file=sys.stderr,
+    )
+    sys.exit(EXIT_SOCKET)
+
+if not lock_set:
     existing = client.get(key)
     if existing:
         try:
@@ -1218,6 +1238,13 @@ if not client.set(key, json.dumps(payload), nx=True, ex=ttl_seconds):
 print(f"{key} {token}")
 PY
 )
+  acquire_status=$?
+  if (( acquire_status == EXIT_SOCKET )); then
+    exit $EXIT_SOCKET
+  elif (( acquire_status != 0 )); then
+    log_warn "Failed to acquire runtime lock"
+    exit $EXIT_HEALTH
+  fi
   RUNTIME_LOCK_KEY=$(echo "$output" | awk '{print $1}')
   RUNTIME_LOCK_TOKEN=$(echo "$output" | awk '{print $2}')
   if [[ -z ${RUNTIME_LOCK_KEY:-} || -z ${RUNTIME_LOCK_TOKEN:-} ]]; then
