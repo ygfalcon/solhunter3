@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import sys
 import time
@@ -71,6 +72,11 @@ class RecordingAgentManager:
 MINT = "MintAphex1111111111111111111111111111111"
 MINT_TWO = "MintAphex2222222222222222222222222222222"
 
+
+async def _prime_discovery(bus: EventBus, token: str = MINT) -> None:
+    await asyncio.sleep(0)
+    bus.publish("token_discovered", {"tokens": [token]})
+
 def test_agents_receive_bootstrapped_snapshot() -> None:
     async def _run() -> None:
         token_scanner_stub.TRENDING_METADATA.clear()
@@ -109,6 +115,8 @@ def test_agents_receive_bootstrapped_snapshot() -> None:
             event_bus=bus,
         )
 
+        primer = asyncio.create_task(_prime_discovery(bus))
+
         try:
             await service.start()
             assert fetch_calls == [(MINT,)]
@@ -143,6 +151,9 @@ def test_agents_receive_bootstrapped_snapshot() -> None:
 
             assert manager.calls == [MINT]
         finally:
+            primer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await primer
             await service.stop()
             token_scanner_stub.TRENDING_METADATA.clear()
 
@@ -247,12 +258,45 @@ def test_warm_start_depth_publishes_seed_tokens(
         service._depth_adapter.start = _noop_start  # type: ignore[assignment]
         service._depth_adapter.stop = _noop_stop  # type: ignore[assignment]
 
+        primer = asyncio.create_task(_prime_discovery(bus, MINT_TWO))
+
         try:
             await service.start()
             assert {snap.mint for snap in submissions} == {MINT, MINT_TWO}
             assert all(snap.source == "warm_start" for snap in submissions)
         finally:
+            primer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await primer
             await service.stop()
             token_scanner_stub.TRENDING_METADATA.clear()
+
+    asyncio.run(_run())
+
+
+def test_discovery_preflight_requires_activity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        monkeypatch.setenv("DISCOVERY_PREFLIGHT_TIMEOUT", "0.1")
+
+        async def _noop_enrichment(mints: Iterable[str]) -> dict[str, TokenSnapshot]:
+            return {}
+
+        manager = RecordingAgentManager()
+        portfolio = Portfolio(path=None)
+        bus = EventBus()
+
+        service = GoldenPipelineService(
+            agent_manager=manager,
+            portfolio=portfolio,
+            enrichment_fetcher=_noop_enrichment,
+            event_bus=bus,
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await service.start()
+
+        assert "Discovery preflight failed" in str(excinfo.value)
 
     asyncio.run(_run())

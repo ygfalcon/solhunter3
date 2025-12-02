@@ -892,10 +892,92 @@ class GoldenPipelineService:
                 "Warm-started depth snapshots for %s seed tokens", published
             )
 
+    async def _scan_discovery_cache(self) -> int:
+        kv = getattr(self.pipeline, "_kv", None)
+        if kv is None:
+            return 0
+        try:
+            entries = await kv.scan_prefix("discovery:")
+        except Exception:
+            log.debug("Discovery preflight cache scan failed", exc_info=True)
+            return 0
+        return len(entries)
+
+    @staticmethod
+    def _extract_discovery_tokens(payload: Any) -> list[str]:
+        tokens: list[str] = []
+        if isinstance(payload, Mapping):
+            for key in ("tokens", "mints", "mint", "token", "address"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    tokens.append(value)
+                elif isinstance(value, (list, tuple)):
+                    tokens.extend(str(v) for v in value if v)
+            nested = payload.get("entry")
+            if isinstance(nested, Mapping):
+                tokens.extend(
+                    t
+                    for t in GoldenPipelineService._extract_discovery_tokens(nested)
+                    if t
+                )
+        elif isinstance(payload, DiscoveryCandidate):
+            tokens.append(payload.mint)
+        return [tok for tok in tokens if tok]
+
+    async def _ensure_discovery_flow(self) -> None:
+        try:
+            timeout = float(os.getenv("DISCOVERY_PREFLIGHT_TIMEOUT", "8") or 8.0)
+        except Exception:
+            timeout = 8.0
+        timeout = max(0.5, timeout)
+
+        cached = await self._scan_discovery_cache()
+        if cached:
+            log.info(
+                "Discovery preflight satisfied by %d cached discovery key(s)", cached
+            )
+            return
+
+        observed: list[str] = []
+        ready = asyncio.Event()
+
+        async def _capture(payload: Any) -> None:
+            tokens = self._extract_discovery_tokens(payload)
+            if not tokens:
+                return
+            observed.extend(tokens)
+            ready.set()
+
+        unsub_tokens = self._event_bus.subscribe("token_discovered", _capture)
+        unsub_candidates = self._event_bus.subscribe(
+            STREAMS.discovery_candidates, _capture
+        )
+        try:
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                guidance = (
+                    "Discovery preflight failed: no discovery messages observed within "
+                    f"{timeout:.1f}s. Ensure the discovery publisher is running and that "
+                    "Redis discovery:* keys or the token_discovered/discovery_candidates "
+                    "topics are producing fresh data."
+                )
+                log.error(guidance)
+                raise RuntimeError(guidance) from exc
+        finally:
+            if callable(unsub_tokens):
+                unsub_tokens()
+            if callable(unsub_candidates):
+                unsub_candidates()
+        log.info(
+            "Discovery preflight observed %d discovery token(s)", len(observed)
+        )
+
     async def start(self) -> None:
         if self._running:
             return
         await self._ensure_bus_visible()
+        await self._ensure_discovery_flow()
         self._running = True
         self._log_bus_configuration()
         bootstrapped = await self._bootstrap_trending_metadata()
