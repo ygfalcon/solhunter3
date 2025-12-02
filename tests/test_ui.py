@@ -15,7 +15,17 @@ from solhunter_zero.runtime import runtime_wiring
 from solhunter_zero.runtime_defaults import DEFAULT_UI_PORT
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(autouse=True)
+def mock_redis_ping(monkeypatch):
+    monkeypatch.setattr(ui, "_REDIS_PING_STATUS", {})
+    monkeypatch.setattr(
+        ui,
+        "_ping_redis",
+        lambda url: {"ok": True, "latency_ms": 0.01, "url": url},
+    )
+
+
+@pytest.fixture()
 def flask_app() -> Flask:
     app = ui.create_app()
     return app
@@ -104,6 +114,28 @@ def test_ui_meta_reports_redis_not_broker(monkeypatch):
         ui._ui_meta_cache = previous_cache
 
 
+def test_ui_meta_surfaces_broker_status(monkeypatch):
+    previous_cache = ui._ui_meta_cache
+    previous_state = ui._get_active_ui_state()
+    monkeypatch.setattr(ui, "_ui_meta_cache", None)
+
+    state = ui.UIState()
+    state.status_provider = lambda: {"event_bus": {"connected": True}}
+
+    app = ui.create_app(state)
+    try:
+        client = app.test_client()
+        resp = client.get("/api/ui/meta")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        broker = payload.get("event_bus") or {}
+        assert broker.get("status") == "ok"
+        assert broker.get("ok") is True
+    finally:
+        ui._set_active_ui_state(previous_state)
+        ui._ui_meta_cache = previous_cache
+
+
 def test_bootstrap_ui_environment_preserves_redis_url(monkeypatch):
     monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
     monkeypatch.setattr(ui, "load_production_env", lambda: {})
@@ -116,6 +148,28 @@ def test_bootstrap_ui_environment_preserves_redis_url(monkeypatch):
         assert os.environ["REDIS_URL"] == "redis://cache.example:6380/2"
         assert os.environ["SOLHUNTER_MODE"] == "live"
         assert os.environ["BROKER_CHANNEL"] == "solhunter-events-v3"
+    finally:
+        ui._teardown_ui_environment()
+
+
+def test_bootstrap_ui_environment_logs_ping_failure(monkeypatch, caplog):
+    monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
+    monkeypatch.setattr(ui, "load_production_env", lambda: {})
+    monkeypatch.delenv("SOLHUNTER_MODE", raising=False)
+    monkeypatch.delenv("BROKER_CHANNEL", raising=False)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    monkeypatch.setattr(
+        ui, "_ping_redis", lambda url: {"ok": False, "error": "boom", "url": url}
+    )
+    caplog.set_level(logging.WARNING, logger="solhunter_zero.ui")
+
+    ui._bootstrap_ui_environment()
+
+    try:
+        assert ui._REDIS_PING_STATUS.get("ok") is False
+        assert any("Redis PING failed" in record.getMessage() for record in caplog.records)
+        assert any("degraded mode" in record.getMessage() for record in caplog.records)
     finally:
         ui._teardown_ui_environment()
 
