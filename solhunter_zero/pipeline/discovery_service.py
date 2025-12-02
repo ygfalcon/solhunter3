@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
@@ -11,6 +13,7 @@ from typing import Any, Dict, Iterable, Optional, cast
 from ..agents.discovery import DiscoveryAgent
 from ..token_scanner import TRENDING_METADATA
 from ..token_aliases import canonical_mint, validate_mint
+from .. import event_bus
 from .types import TokenCandidate
 
 log = logging.getLogger(__name__)
@@ -50,6 +53,11 @@ class DiscoveryService:
         startup_clones: Optional[int] = None,
         startup_clone_concurrency: Optional[int] = None,
         emit_batch_size: Optional[int] = None,
+        queue_put_timeout: Optional[float] = None,
+        queue_put_backoff: Optional[float] = None,
+        queue_put_backoff_max: Optional[float] = None,
+        congestion_shed_score: Optional[float] = None,
+        congestion_shed_attempts: Optional[int] = None,
     ) -> None:
         self.queue = queue
         self.interval = max(0.1, float(interval))
@@ -136,6 +144,75 @@ class DiscoveryService:
         if emit_batch_size is None or emit_batch_size <= 0:
             emit_batch_size = 1
         self._emit_batch_size = int(emit_batch_size)
+        raw_queue_timeout = os.getenv("DISCOVERY_QUEUE_PUT_TIMEOUT")
+        if raw_queue_timeout is not None:
+            try:
+                queue_put_timeout = float(raw_queue_timeout)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_QUEUE_PUT_TIMEOUT=%r; defaulting to 2.0s",
+                    raw_queue_timeout,
+                )
+                queue_put_timeout = None
+        if queue_put_timeout is None:
+            queue_put_timeout = 2.0
+        self._queue_put_timeout = max(0.0, float(queue_put_timeout))
+
+        raw_queue_backoff = os.getenv("DISCOVERY_QUEUE_PUT_BACKOFF")
+        if raw_queue_backoff is not None:
+            try:
+                queue_put_backoff = float(raw_queue_backoff)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_QUEUE_PUT_BACKOFF=%r; defaulting to 0.5s",
+                    raw_queue_backoff,
+                )
+                queue_put_backoff = None
+        if queue_put_backoff is None:
+            queue_put_backoff = 0.5
+        self._queue_put_backoff = max(0.0, float(queue_put_backoff))
+
+        raw_queue_backoff_max = os.getenv("DISCOVERY_QUEUE_PUT_BACKOFF_MAX")
+        if raw_queue_backoff_max is not None:
+            try:
+                queue_put_backoff_max = float(raw_queue_backoff_max)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_QUEUE_PUT_BACKOFF_MAX=%r; defaulting to 5.0s",
+                    raw_queue_backoff_max,
+                )
+                queue_put_backoff_max = None
+        if queue_put_backoff_max is None:
+            queue_put_backoff_max = 5.0
+        self._queue_put_backoff_max = max(0.0, float(queue_put_backoff_max))
+
+        raw_shed_score = os.getenv("DISCOVERY_CONGESTION_SHED_SCORE")
+        if raw_shed_score is not None:
+            try:
+                congestion_shed_score = float(raw_shed_score)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_CONGESTION_SHED_SCORE=%r; disabling shedding",
+                    raw_shed_score,
+                )
+                congestion_shed_score = None
+        if congestion_shed_score is not None and congestion_shed_score <= 0:
+            congestion_shed_score = None
+        self._shed_score_threshold = congestion_shed_score
+
+        raw_shed_attempts = os.getenv("DISCOVERY_CONGESTION_SHED_ATTEMPTS")
+        if raw_shed_attempts is not None:
+            try:
+                congestion_shed_attempts = int(raw_shed_attempts)
+            except ValueError:
+                log.warning(
+                    "Invalid DISCOVERY_CONGESTION_SHED_ATTEMPTS=%r; defaulting to 2",
+                    raw_shed_attempts,
+                )
+                congestion_shed_attempts = None
+        if congestion_shed_attempts is None or congestion_shed_attempts <= 0:
+            congestion_shed_attempts = 2
+        self._shed_after_attempts = congestion_shed_attempts
         self._agent = DiscoveryAgent(limit=limit)
         self._last_tokens: list[str] = []
         self._last_fetch_ts: float = 0.0
@@ -454,9 +531,10 @@ class DiscoveryService:
             batch = self._build_candidates(chunk, metadata_cache=metadata_cache)
             if not batch:
                 continue
-            await self.queue.put(batch)
-            total_enqueued += len(batch)
-            log.debug("DiscoveryService queued chunk of %d token(s)", len(batch))
+            enqueued = await self._put_with_backoff(batch)
+            if enqueued:
+                total_enqueued += enqueued
+                log.debug("DiscoveryService queued chunk of %d token(s)", enqueued)
         if total_enqueued:
             chunk_count = max(
                 1, (len(seq_to_emit) + self._emit_batch_size - 1) // self._emit_batch_size
@@ -736,3 +814,107 @@ class DiscoveryService:
                 chunk = []
         if chunk:
             yield chunk
+
+    def _candidate_score(self, candidate: TokenCandidate) -> float | None:
+        metadata = getattr(candidate, "metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        keys = ("discovery_score", "score", "mempool_score")
+        for key in keys:
+            if key not in metadata:
+                continue
+            try:
+                return float(metadata[key])
+            except Exception:
+                continue
+        return None
+
+    def _shed_low_score_candidates(
+        self, batch: list[TokenCandidate]
+    ) -> list[TokenCandidate]:
+        if self._shed_score_threshold is None:
+            return batch
+        kept: list[TokenCandidate] = []
+        dropped = 0
+        for candidate in batch:
+            score = self._candidate_score(candidate)
+            if score is None or score >= self._shed_score_threshold:
+                kept.append(candidate)
+            else:
+                dropped += 1
+        if dropped:
+            log.warning(
+                "DiscoveryService shedding %d low-score candidate(s) below %.2f during congestion",
+                dropped,
+                self._shed_score_threshold,
+            )
+        return kept
+
+    def _record_queue_blocked(self, blocked_seconds: float) -> None:
+        if blocked_seconds <= 0:
+            return
+        blocked_ms = blocked_seconds * 1000.0
+        try:
+            event_bus.publish(
+                "discovery_metrics", {"queue_blocked_ms": blocked_ms}
+            )
+        except Exception:
+            log.debug("Failed to publish discovery queue metric", exc_info=True)
+
+    async def _put_with_backoff(self, batch: list[TokenCandidate]) -> int:
+        if not batch:
+            return 0
+
+        timeout = self._queue_put_timeout
+        backoff = self._queue_put_backoff
+        backoff_max = self._queue_put_backoff_max
+        attempts = 0
+        start: float | None = None
+        payload = list(batch)
+
+        while True:
+            attempts += 1
+            try:
+                if timeout > 0:
+                    if start is None:
+                        start = time.time()
+                    await asyncio.wait_for(self.queue.put(payload), timeout=timeout)
+                else:
+                    await self.queue.put(payload)
+                if start is not None:
+                    self._record_queue_blocked(time.time() - start)
+                if attempts > 1 and start is not None:
+                    log.info(
+                        "DiscoveryService recovered from queue backpressure after %.2fs",
+                        time.time() - start,
+                    )
+                return len(payload)
+            except asyncio.TimeoutError:
+                now = time.time()
+                if start is None:
+                    start = now
+                blocked = now - start
+                self._record_queue_blocked(blocked)
+                log.warning(
+                    "DiscoveryService throttled by downstream queue; blocked %.2fs (attempt %d)",
+                    blocked,
+                    attempts,
+                )
+                if (
+                    self._shed_score_threshold is not None
+                    and attempts >= self._shed_after_attempts
+                ):
+                    reduced = self._shed_low_score_candidates(payload)
+                    if not reduced:
+                        log.warning(
+                            "DiscoveryService dropped congested batch after shedding attempts (threshold=%.2f)",
+                            self._shed_score_threshold,
+                        )
+                        return 0
+                    if len(reduced) < len(payload):
+                        payload = reduced
+                        start = None
+                        attempts = 0
+                        continue
+                if backoff > 0 and backoff_max > 0:
+                    await asyncio.sleep(min(backoff_max, backoff * attempts))
