@@ -1,13 +1,15 @@
 # solhunter_zero/startup_runner.py
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from rich.console import Console
 from rich.table import Table
@@ -39,6 +41,42 @@ def log_startup_info(
         lines.append(f"Active keypair: {active_keypair}")
     for line in lines:
         log_startup(line)
+
+
+def _poll_ui_readiness(
+    *, timeout: float = 12.0, interval: float = 0.5
+) -> Tuple[bool, str]:
+    """Poll UI HTTP/WS endpoints until they respond or ``timeout`` elapses."""
+
+    from solhunter_zero.production.connectivity import ConnectivityChecker
+
+    checker = ConnectivityChecker()
+    ui_targets = [t for t in checker.targets if t.get("name") in {"ui-http", "ui-ws"}]
+    if not ui_targets:
+        return True, "UI readiness skipped (no UI endpoints configured)"
+
+    checker.targets = ui_targets
+    deadline = time.monotonic() + timeout
+    last: Tuple[bool, str] = (False, "no ui readiness results")
+
+    while True:
+        try:
+            results = asyncio.run(checker.check_all())
+        except Exception as exc:  # pragma: no cover - defensive
+            return False, f"UI readiness probing failed: {exc}"
+
+        summaries: List[str] = []
+        healthy = True
+        for result in results:
+            status = "OK" if result.ok else f"FAIL ({result.error or result.status or 'unavailable'})"
+            summaries.append(f"{result.name}: {status}")
+            healthy = healthy and result.ok
+        last = (healthy, "; ".join(summaries) if summaries else "no ui targets")
+        if healthy or time.monotonic() >= deadline:
+            break
+        time.sleep(interval)
+
+    return last
 
 
 def _env_offline_enabled(env: dict[str, str]) -> bool:
@@ -142,7 +180,14 @@ def run(
     except KeyboardInterrupt:
         code = 130
 
+    ui_ready: tuple[bool, str] | None = None
     if code == 0:
+        ui_ready = _poll_ui_readiness()
+        status_label = "healthy" if ui_ready[0] else "unhealthy"
+        ui_msg = f"UI readiness {status_label}: {ui_ready[1]}"
+        print(ui_msg)
+        log_startup(ui_msg)
+
         msg = "SolHunter launch complete – system ready."
         print(msg)
         log_startup(msg)
