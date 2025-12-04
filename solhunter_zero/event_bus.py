@@ -371,7 +371,33 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
             if merged_attrs:
                 data["attributes"] = merged_attrs
         entries.append(data)
-    return entries
+    deduped: dict[str, dict[str, Any]] = {}
+
+    def _should_replace(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
+        existing_score = _coerce_float(existing.get("score"))
+        candidate_score = _coerce_float(candidate.get("score"))
+        if candidate_score is not None and (
+            existing_score is None or candidate_score > existing_score
+        ):
+            return True
+        if existing_score is not None and candidate_score is not None:
+            if candidate_score < existing_score:
+                return False
+        existing_ts = _coerce_float(existing.get("ts"))
+        candidate_ts = _coerce_float(candidate.get("ts"))
+        if candidate_ts is not None and (
+            existing_ts is None or candidate_ts > existing_ts
+        ):
+            return True
+        return False
+
+    for entry in entries:
+        key = str(entry.get("mint", "")).strip()
+        if not key:
+            continue
+        if key not in deduped or _should_replace(deduped[key], entry):
+            deduped[key] = entry
+    return list(deduped.values())
 
 _PB_MAP = {
     "action_executed": getattr(pb, "ActionExecuted", None),
