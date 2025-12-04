@@ -386,6 +386,16 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
                 merged_attrs.update(remaining)
             if merged_attrs:
                 data["attributes"] = merged_attrs
+
+        if "ts" not in data:
+            now = time.time()
+            data["ts"] = now
+            attrs = data.get("attributes")
+            merged_attrs: dict[str, Any] = {}
+            if isinstance(attrs, Mapping):
+                merged_attrs.update(attrs)
+            merged_attrs["ts_source"] = "fallback_now"
+            data["attributes"] = merged_attrs
         entries.append(data)
     deduped: dict[str, dict[str, Any]] = {}
 

@@ -1,6 +1,9 @@
 import logging
+import time
+
 import pytest
 
+from solhunter_zero import event_bus
 from solhunter_zero.event_bus import _normalize_discovery_entries
 
 
@@ -65,7 +68,10 @@ def test_normalize_discovery_entries_filters_invalid_mints(caplog):
     with caplog.at_level(logging.WARNING):
         entries = _normalize_discovery_entries(payload)
 
-    assert entries == [{"mint": VALID_MINT_A, "score": 2.0}]
+    assert len(entries) == 1
+    assert entries[0]["mint"] == VALID_MINT_A
+    assert entries[0]["score"] == 2.0
+    assert isinstance(entries[0]["ts"], float)
     assert any("invalid mint" in record.message for record in caplog.records)
 
 
@@ -81,6 +87,47 @@ def test_normalize_discovery_entries_filters_empty_like_values(caplog):
     with caplog.at_level(logging.WARNING):
         entries = _normalize_discovery_entries(payload)
 
-    assert entries == [{"mint": VALID_MINT_B}]
+    assert len(entries) == 1
+    assert entries[0]["mint"] == VALID_MINT_B
+    assert isinstance(entries[0]["ts"], float)
     assert any("empty mint" in record.message for record in caplog.records)
+
+
+def test_normalize_discovery_entries_injects_fallback_timestamp(monkeypatch):
+    fixed_now = 1234.5
+    monkeypatch.setattr(time, "time", lambda: fixed_now)
+
+    payload = {
+        "tokens": [
+            {"mint": VALID_MINT_A, "score": 1.0},
+            {"mint": VALID_MINT_B},
+        ]
+    }
+
+    entries = _normalize_discovery_entries(payload)
+
+    assert all(entry["ts"] == fixed_now for entry in entries)
+    assert all(entry.get("attributes", {}).get("ts_source") == "fallback_now" for entry in entries)
+
+
+def test_normalize_discovery_entries_preserves_attributes_with_fallback(monkeypatch):
+    fixed_now = 9876.5
+    monkeypatch.setattr(event_bus.time, "time", lambda: fixed_now)
+
+    payload = {
+        "entries": [
+            {
+                "mint": VALID_MINT_C,
+                "attributes": {"note": "from scanner"},
+            },
+        ]
+    }
+
+    entries = _normalize_discovery_entries(payload)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["ts"] == fixed_now
+    assert entry["attributes"]["note"] == "from scanner"
+    assert entry["attributes"]["ts_source"] == "fallback_now"
 
