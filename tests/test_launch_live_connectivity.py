@@ -281,6 +281,51 @@ def _create_python_wrapper(target_dir: Path) -> Path:
     return wrapper
 
 
+def _write_connectivity_stub_with_marker(target_dir: Path) -> None:
+    package_dir = target_dir / "solhunter_zero"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    stub_source = (
+        "from __future__ import annotations\n"
+        "import os\n"
+        "from pathlib import Path\n\n"
+        "class _Result:\n"
+        "    def __init__(self, name: str, target: str, ok: bool = True, error: str | None = None) -> None:\n"
+        "        self.name = name\n"
+        "        self.target = target\n"
+        "        self.ok = ok\n"
+        "        self.error = error\n"
+        "        self.status = None\n"
+        "        self.status_code = None\n"
+        "        self.latency_ms = 12.3\n\n"
+        "class ConnectivityChecker:\n"
+        "    def __init__(self) -> None:\n"
+        "        marker = os.environ.get(\"UI_MARKER\")\n"
+        "        if marker:\n"
+        "            Path(marker).write_text(f\"{os.getenv('UI_HOST')}:{os.getenv('UI_PORT')}\", encoding=\"utf-8\")\n"
+        "\n"
+        "    async def check_all(self):\n"
+        "        results = [\n"
+        "            _Result(\"redis\", \"redis://localhost/0\"),\n"
+        "            _Result(\"solana-rpc\", \"https://solana-rpc.local\"),\n"
+        "            _Result(\"solana-ws\", \"wss://solana-ws.local\"),\n"
+        "            _Result(\"helius-rest\", \"https://helius-rest.local\"),\n"
+        "            _Result(\"helius-das\", \"https://helius-das.local\"),\n"
+        "            _Result(\"jito-rpc\", \"https://jito-rpc.local\"),\n"
+        "            _Result(\"jito-ws\", \"wss://jito-ws.local\"),\n"
+        "            _Result(\"mempool-stream-ws\", \"wss://mempool-stream.local/ws\"),\n"
+        "            _Result(\"mempool-stream-redis\", \"redis://localhost/2\"),\n"
+        "            _Result(\"event-bus\", \"ws://bus.local/ws\"),\n"
+        "            _Result(\"ui-ws\", \"wss://ui.local/ws/events\"),\n"
+        "            _Result(\"ui-http\", \"https://ui.local/health\"),\n"
+        "        ]\n"
+        "        return results\n\n"
+        "    async def _probe_ws(self, name: str, target: str):\n"
+        "        return _Result(name, target, ok=False, error=\"unreachable\")\n"
+    )
+    (package_dir / "production.py").write_text(stub_source, encoding="utf-8")
+
+
 def test_run_connectivity_probes_skips_local_event_bus(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
@@ -633,6 +678,94 @@ def test_connectivity_probes_force_skip_when_ui_host_missing(tmp_path: Path) -> 
     assert "UI connectivity probes disabled for connectivity check (UI host/port not configured)" in completed.stdout
     assert "skip-after=__unset__" in completed.stdout
     assert skip_marker.read_text(encoding="utf-8") == "1"
+
+
+def test_run_connectivity_probes_reads_ui_binding_from_config(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_config_ui"
+    _write_connectivity_stub_with_marker(stub_root)
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("ui_host = \"0.0.0.0\"\nui_port = 6205\n", encoding="utf-8")
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+    quoted_config = shlex.quote(str(config_path))
+    marker_path = tmp_path / "ui_marker.txt"
+    quoted_marker = shlex.quote(str(marker_path))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export CONFIG_PATH={quoted_config}
+        export UI_MARKER={quoted_marker}
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert marker_path.read_text(encoding="utf-8") == "0.0.0.0:6205"
+
+
+def test_run_connectivity_probes_prefers_env_over_config(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    run_probes = _extract_function(source, "run_connectivity_probes")
+
+    stub_root = tmp_path / "stub_config_env"
+    _write_connectivity_stub_with_marker(stub_root)
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("ui_host = \"0.0.0.0\"\nui_port = 6206\n", encoding="utf-8")
+
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_stub_root = shlex.quote(str(stub_root))
+    quoted_config = shlex.quote(str(config_path))
+    marker_path = tmp_path / "ui_marker_env.txt"
+    quoted_marker = shlex.quote(str(marker_path))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        {run_probes}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export CONFIG_PATH={quoted_config}
+        export UI_MARKER={quoted_marker}
+        export UI_HOST=9.9.9.9
+        export UI_PORT=5151
+        export EVENT_BUS_URL=ws://127.0.0.1:8779
+        run_connectivity_probes
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert marker_path.read_text(encoding="utf-8") == "9.9.9.9:5151"
 
 
 def test_redis_health_falls_back_when_redis_cli_lacks_url_support(tmp_path: Path) -> None:

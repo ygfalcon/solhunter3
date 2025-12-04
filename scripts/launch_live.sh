@@ -778,8 +778,10 @@ run_connectivity_probes() {
   "$PYTHON_BIN" - <<'PY'
 import asyncio
 import ipaddress
+import json
 import os
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
 
 from solhunter_zero.production import ConnectivityChecker
@@ -849,6 +851,44 @@ def _env_flag(name: str) -> bool:
 
 
 async def _run() -> None:
+    def _seed_ui_binding_from_config() -> None:
+        config_path = os.environ.get("CONFIG_PATH")
+        if not config_path:
+            return
+
+        try:
+            text = Path(config_path).read_text(encoding="utf-8")
+        except OSError:
+            return
+
+        parsed: dict[str, object] | None = None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            try:
+                import tomllib  # type: ignore[attr-defined]
+
+                parsed = tomllib.loads(text)
+            except Exception:
+                return
+
+        if not isinstance(parsed, dict):
+            return
+
+        ui_host = parsed.get("ui_host")
+        ui_port = parsed.get("ui_port")
+
+        ui_cfg = parsed.get("ui")
+        if isinstance(ui_cfg, dict):
+            ui_host = ui_host or ui_cfg.get("host")
+            ui_port = ui_port or ui_cfg.get("port")
+
+        if ui_host and "UI_HOST" not in os.environ:
+            os.environ["UI_HOST"] = str(ui_host)
+        if ui_port and "UI_PORT" not in os.environ:
+            os.environ["UI_PORT"] = str(ui_port)
+
+    _seed_ui_binding_from_config()
     checker = ConnectivityChecker()
     results = await checker.check_all()
     lookup = {result.name: result for result in results}
