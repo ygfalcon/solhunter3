@@ -10,6 +10,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from urllib.parse import urlsplit
 
 from rich.console import Console
 from rich.table import Table
@@ -43,27 +44,49 @@ def log_startup_info(
         log_startup(line)
 
 
+def _extract_ui_targets() -> tuple[dict[str, str], str | None]:
+    """Return configured UI targets along with any discovery error."""
+
+    from solhunter_zero.production.connectivity import ConnectivityChecker
+
+    try:
+        checker = ConnectivityChecker()
+    except Exception as exc:  # pragma: no cover - defensive
+        return {}, f"UI target discovery failed: {exc}"
+
+    ui_targets = [t for t in checker.targets if t.get("name") in {"ui-http", "ui-ws"}]
+    urls = {t.get("name", "unknown"): str(t.get("url", "")) for t in ui_targets if t.get("name")}
+    return urls, None
+
+
 def _poll_ui_readiness(
     *, timeout: float = 12.0, interval: float = 0.5
-) -> Tuple[bool, str]:
+) -> Tuple[bool, str, dict[str, str], list[Any]]:
     """Poll UI HTTP/WS endpoints until they respond or ``timeout`` elapses."""
 
     from solhunter_zero.production.connectivity import ConnectivityChecker
 
-    checker = ConnectivityChecker()
+    try:
+        checker = ConnectivityChecker()
+    except Exception as exc:  # pragma: no cover - defensive
+        return False, f"UI readiness probing failed: {exc}", {}, []
+
     ui_targets = [t for t in checker.targets if t.get("name") in {"ui-http", "ui-ws"}]
+    target_urls = {t.get("name", "unknown"): str(t.get("url", "")) for t in ui_targets if t.get("name")}
     if not ui_targets:
-        return True, "UI readiness skipped (no UI endpoints configured)"
+        return True, "UI readiness skipped (no UI endpoints configured)", target_urls, []
 
     checker.targets = ui_targets
     deadline = time.monotonic() + timeout
-    last: Tuple[bool, str] = (False, "no ui readiness results")
+    last_ok: bool = False
+    last_summary = "no ui readiness results"
+    last_results: list[Any] = []
 
     while True:
         try:
             results = asyncio.run(checker.check_all())
         except Exception as exc:  # pragma: no cover - defensive
-            return False, f"UI readiness probing failed: {exc}"
+            return False, f"UI readiness probing failed: {exc}", target_urls, []
 
         summaries: List[str] = []
         healthy = True
@@ -71,17 +94,71 @@ def _poll_ui_readiness(
             status = "OK" if result.ok else f"FAIL ({result.error or result.status or 'unavailable'})"
             summaries.append(f"{result.name}: {status}")
             healthy = healthy and result.ok
-        last = (healthy, "; ".join(summaries) if summaries else "no ui targets")
+        last_ok = healthy
+        last_summary = "; ".join(summaries) if summaries else "no ui targets"
+        last_results = results
         if healthy or time.monotonic() >= deadline:
             break
         time.sleep(interval)
 
-    return last
+    return last_ok, last_summary, target_urls, last_results
 
 
 def _env_offline_enabled(env: dict[str, str]) -> bool:
     value = env.get("SOLHUNTER_OFFLINE", "")
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_port(url: str) -> str | None:
+    try:
+        parsed = urlsplit(url)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if parsed.port:
+        return str(parsed.port)
+    if parsed.scheme in {"https", "wss"}:
+        return "443"
+    if parsed.scheme in {"http", "ws"}:
+        return "80"
+    return None
+
+
+def _ui_summary_rows(
+    *,
+    targets: dict[str, str],
+    results: list[Any],
+    readiness_message: str | None,
+    readiness_ok: bool,
+) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    result_map = {getattr(r, "name", ""): r for r in results if getattr(r, "name", None)}
+    labels = {"ui-http": "UI HTTP", "ui-ws": "UI WS"}
+
+    for key, label in labels.items():
+        url = targets.get(key, "")
+        port = _extract_port(url) if url else None
+        result = result_map.get(key)
+
+        if result:
+            status = "OK" if getattr(result, "ok", False) else f"FAIL ({getattr(result, 'error', None) or getattr(result, 'status', None) or getattr(result, 'status_code', None) or 'unavailable'})"
+        elif url:
+            status = "skipped (not probed)" if not readiness_ok else "unknown"
+        else:
+            status = "skipped (not configured)"
+
+        details: list[str] = []
+        if url:
+            details.append(url)
+        if port:
+            details.append(f"port {port}")
+
+        suffix = f" – {'; '.join(details)}" if details else ""
+        rows.append((label, f"{status}{suffix}"))
+
+    if not rows and readiness_message:
+        rows.append(("UI readiness", readiness_message))
+
+    return rows
 
 
 def launch_only(
@@ -142,15 +219,7 @@ def run(
         except Exception:
             pass
 
-    summary_rows = ctx.get("summary_rows", [])
-    if summary_rows:
-        table = Table(title="Startup Summary")
-        table.add_column("Item", style="cyan", no_wrap=True)
-        table.add_column("Status", style="green")
-        for item, status in summary_rows:
-            table.add_row(item, status)
-            log_startup(f"{item}: {status}")
-        console.print(table)
+    summary_rows = list(ctx.get("summary_rows", []))
 
     # Initialize AgentManager before launching services
     from solhunter_zero.agent_manager import AgentManager
@@ -180,18 +249,32 @@ def run(
     except KeyboardInterrupt:
         code = 130
 
-    ui_ready: tuple[bool, str] | None = None
+    ui_ready: tuple[bool, str, dict[str, str], list[Any]] | None = None
+    ui_targets: dict[str, str] = {}
+    ui_results: list[Any] = []
+    ui_message: str | None = None
     if code == 0:
         ui_ready = _poll_ui_readiness()
+        ui_targets = ui_ready[2]
+        ui_results = ui_ready[3]
         status_label = "healthy" if ui_ready[0] else "unhealthy"
         ui_msg = f"UI readiness {status_label}: {ui_ready[1]}"
+        ui_message = ui_msg
         print(ui_msg)
         log_startup(ui_msg)
-
         msg = "SolHunter launch complete – system ready."
         print(msg)
         log_startup(msg)
     else:
+        ui_targets, ui_error = _extract_ui_targets()
+        if ui_error:
+            ui_message = ui_error
+            log_startup(ui_error)
+        status_label = "skipped (startup failed)"
+        ui_msg = f"UI readiness {status_label}"
+        ui_message = ui_message or ui_msg
+        print(ui_msg)
+        log_startup(ui_msg)
         msg = f"SolHunter startup failed with exit code {code}"
         print(msg)
         log_startup(msg)
@@ -231,6 +314,23 @@ def run(
     for line in (out + err).splitlines():
         if line:
             log_startup(line)
+
+    summary_rows.extend(
+        _ui_summary_rows(
+            targets=ui_targets,
+            results=ui_results,
+            readiness_message=ui_message,
+            readiness_ok=ui_ready[0] if ui_ready else False,
+        )
+    )
+    if summary_rows:
+        table = Table(title="Startup Summary")
+        table.add_column("Item", style="cyan", no_wrap=True)
+        table.add_column("Status", style="green")
+        for item, status in summary_rows:
+            table.add_row(item, status)
+            log_startup(f"{item}: {status}")
+        console.print(table)
 
     log_path = STARTUP_LOG
     print("Log summary:")
