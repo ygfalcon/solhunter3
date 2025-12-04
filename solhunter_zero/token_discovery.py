@@ -2137,6 +2137,7 @@ async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, 
     """Collect a small batch of ranked mempool candidates (with depth)."""
     scores: Dict[str, Dict[str, float]] = {}
     gen = None
+    error: Exception | None = None
     try:
         gen = stream_ranked_mempool_tokens_with_depth(rpc_url, threshold=threshold)
         async for item in gen:
@@ -2147,11 +2148,16 @@ async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, 
             if len(scores) >= SETTINGS.mempool_limit:
                 break
     except Exception as exc:
+        error = exc
         logger.debug("Mempool stream unavailable: %s", exc)
     finally:
         if gen is not None:
             with contextlib.suppress(Exception):
                 await gen.aclose()
+    if error and not scores:
+        raise DiscoveryConfigurationError(
+            "mempool", f"Mempool stream unavailable: {error}"
+        )
     return scores
 
 

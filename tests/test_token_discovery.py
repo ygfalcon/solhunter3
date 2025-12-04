@@ -1306,6 +1306,72 @@ async def test_discover_candidates_records_optional_source_failures(monkeypatch)
     assert any(err.source == "mempool" for err in result.config_errors)
 
 
+@pytest.mark.anyio("asyncio")
+async def test_discover_candidates_warns_on_empty_mempool_after_error(
+    monkeypatch, caplog
+):
+    td._BIRDEYE_CACHE.clear()
+    caplog.set_level(logging.WARNING)
+
+    _configure_env(
+        monkeypatch,
+        DISCOVERY_ENABLE_MEMPOOL="1",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+        DISCOVERY_ENABLE_ORCA="0",
+        DISCOVERY_ENABLE_SOLSCAN="0",
+        DISCOVERY_MIN_VOLUME_USD="0",
+        DISCOVERY_MIN_LIQUIDITY_USD="0",
+    )
+
+    async def fake_bird(*, limit=None):
+        _ = limit
+        return [
+            {
+                "address": "So11111111111111111111111111111111111111112",
+                "symbol": "SOL",
+                "name": "Solana",
+                "liquidity": 1000,
+                "volume": 1000,
+            }
+        ]
+
+    async def fake_trending(limit=None):
+        _ = limit
+        return []
+
+    class FailingMempoolGenerator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise RuntimeError("mempool stream failure")
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(td, "_fetch_birdeye_tokens", fake_bird)
+    monkeypatch.setattr(td, "fetch_trending_tokens_async", fake_trending)
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+    monkeypatch.setattr(
+        td, "stream_ranked_mempool_tokens_with_depth", lambda *_, **__: FailingMempoolGenerator()
+    )
+
+    result = td.discover_candidates("https://rpc", limit=2)
+
+    batches: list[list[dict]] = []
+    async for batch in result:
+        batches.append(batch)
+
+    assert batches, "expected discovery batches"
+    assert result.degraded is True
+    assert "mempool" in result.degraded_sources
+    assert any(err.source == "mempool" for err in result.config_errors)
+    assert "Mempool stream unavailable" in caplog.text
+
+
 def test_warm_cache_skips_without_birdeye_key(monkeypatch):
     # Ensure environment does not provide a BirdEye key and guard short-circuits.
     monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
