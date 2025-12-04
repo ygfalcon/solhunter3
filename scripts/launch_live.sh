@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Default to running UI connectivity probes unless the caller explicitly opts out.
+CONNECTIVITY_SKIP_UI_PROBES_USER_SET=0
+if [[ -n ${CONNECTIVITY_SKIP_UI_PROBES+x} ]]; then
+  CONNECTIVITY_SKIP_UI_PROBES_USER_SET=1
+else
+  unset CONNECTIVITY_SKIP_UI_PROBES
+fi
+
 # Environment overrides:
 #   LAUNCH_LIVE_SKIP_PIP    Skip dependency installation and reuse the existing
 #                           virtual environment (useful for pre-provisioned or
