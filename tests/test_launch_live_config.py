@@ -305,6 +305,57 @@ def test_launch_live_missing_keypair(tmp_path: Path) -> None:
     assert "/no/such/key.json" in proc.stderr
 
 
+def test_validate_env_reports_missing_rpc_and_redis(tmp_path: Path) -> None:
+    env_values = _build_complete_env(tmp_path)
+    env_values.pop("SOLANA_RPC_URL", None)
+    env_values.pop("REDIS_URL", None)
+
+    env_file = tmp_path / "env"
+    _write_env_file(env_file, env_values)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", VALIDATE_ENV_SNIPPET, str(env_file)],
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 1
+    stderr = completed.stderr
+    assert "RPC endpoints missing" in stderr
+    assert "SOLANA_RPC_URL (Solana RPC URL)" in stderr
+    assert "Provide SOLANA_RPC_URL and SOLANA_WS_URL" in stderr
+    assert "Redis cache missing" in stderr
+    assert "REDIS_URL (Redis endpoint)" in stderr
+
+
+def test_validate_env_reports_missing_helius_and_jito(tmp_path: Path) -> None:
+    env_values = _build_complete_env(tmp_path)
+    for key in [
+        "HELIUS_API_KEY",
+        "HELIUS_RPC_URL",
+        "JITO_RPC_URL",
+        "JITO_AUTH",
+    ]:
+        env_values.pop(key, None)
+
+    env_file = tmp_path / "env"
+    _write_env_file(env_file, env_values)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", VALIDATE_ENV_SNIPPET, str(env_file)],
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 1
+    stderr = completed.stderr
+    assert "Helius credentials missing" in stderr
+    assert "HELIUS_API_KEY (Helius API key)" in stderr
+    assert "Jito bundle endpoints missing" in stderr
+    assert "JITO_RPC_URL (Jito RPC URL)" in stderr
+    assert "Configure JITO_* URLs and auth tokens" in stderr
+
+
 def test_launch_live_skips_keypair_when_upcoming_mode_paper(tmp_path: Path) -> None:
     env = os.environ.copy()
     env.pop("KEYPAIR_PATH", None)
