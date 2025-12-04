@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import time
@@ -21,6 +22,9 @@ from typing import Callable, Tuple
 from .paths import ROOT
 
 CheckResult = Tuple[bool, str]
+
+
+_log = logging.getLogger(__name__)
 
 
 _RL_HEALTH_PATH = ROOT / "rl_daemon.health.json"
@@ -244,7 +248,29 @@ def check_rl_daemon_health(
     except Exception as exc:  # pragma: no cover - configuration error paths
         return False, str(exc)
 
-    ok, msg = http_ok(target)
+    attempts = 5
+    delay = 0.5
+    ok: bool
+    msg: str
+    for attempt in range(1, attempts + 1):
+        ok, msg = http_ok(target)
+        if ok:
+            break
+        if attempt == attempts:
+            break
+        _log.warning(
+            "RL health probe failed (attempt %s/%s) for %s: %s",
+            attempt,
+            attempts,
+            target,
+            msg,
+        )
+        time.sleep(delay)
+        delay = min(delay * 2, 5.0)
+
+    if not ok:
+        _log.error("RL health probe failed for %s: %s", target, msg)
+
     suffix = f" ({target})"
     return ok, msg + suffix
 
