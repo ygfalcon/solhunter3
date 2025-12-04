@@ -975,6 +975,7 @@ PY
 
 wait_for_socket_release() {
   "$PYTHON_BIN" - <<'PY'
+import contextlib
 import ipaddress
 import os
 import socket
@@ -982,6 +983,15 @@ import time
 from urllib.parse import urlparse
 
 DEFAULT_TIMEOUT = 30.0
+
+
+def _decode(value):
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(value).decode()
+        except Exception:
+            return None
+    return value
 
 
 def _read_timeout(raw: str | None) -> float:
@@ -992,6 +1002,37 @@ def _read_timeout(raw: str | None) -> float:
     except (TypeError, ValueError):
         return DEFAULT_TIMEOUT
     return max(value, 0.0)
+
+
+def _read_identity() -> tuple[bool, str | None]:
+    url = os.environ.get("REDIS_URL")
+    key = os.environ.get("BROKER_IDENTITY_KEY") or "solhunter:broker_channel"
+    channel = os.environ.get("BROKER_CHANNEL") or "solhunter-events-v3"
+    if not url or not key:
+        return True, None
+
+    try:
+        import redis  # type: ignore
+    except Exception as exc:  # pragma: no cover - import guard
+        return False, f"redis import failed: {exc}"
+
+    client = redis.Redis.from_url(url, socket_timeout=2)
+    try:
+        value = client.get(key)
+        if value is None:
+            client.set(key, channel, nx=True)
+            value = client.get(key)
+        decoded = _decode(value)
+        if decoded is None:
+            return False, f"identity-missing key={key}"
+        if decoded != channel:
+            return False, f"identity-mismatch expected={channel} actual={decoded}"
+        return True, None
+    except Exception as exc:  # pragma: no cover - redis guard
+        return False, str(exc)
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
 
 
 bus_url = os.environ.get("EVENT_BUS_URL", "ws://127.0.0.1:8779")
@@ -1039,7 +1080,11 @@ max_sleep = 5.0
 
 while True:
     if not port_busy():
-        print(f"free {host} {port}")
+        ok, reason = _read_identity()
+        if ok:
+            print(f"free {host} {port}")
+            break
+        print(f"busy {host} {port} {reason or 'redis-identity'}")
         break
 
     now = time.monotonic()
