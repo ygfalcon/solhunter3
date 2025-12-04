@@ -44,6 +44,8 @@ from contextlib import contextmanager
 from collections import defaultdict, deque
 from typing import Any, Awaitable, Callable, Dict, Generator, Iterable, List, Mapping, Set, Sequence, cast
 
+from .util.mints import is_valid_solana_mint
+
 try:
     import msgpack
 except Exception:  # pragma: no cover - optional dependency
@@ -344,8 +346,22 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
             data.setdefault("mint", str(entry))
         mint = data.get("mint")
         if not mint:
+            logger.warning("Dropping discovery entry with empty mint: %r", entry)
             continue
-        data["mint"] = str(mint)
+        mint_str = str(mint).strip()
+        if not mint_str:
+            logger.warning("Dropping discovery entry with empty mint: %r", entry)
+            continue
+        if not is_valid_solana_mint(mint_str):
+            source = data.get("source")
+            if source:
+                logger.warning(
+                    "Dropping discovery entry from %s with invalid mint %r", source, mint_str
+                )
+            else:
+                logger.warning("Dropping discovery entry with invalid mint %r", mint_str)
+            continue
+        data["mint"] = mint_str
         source = data.get("source")
         if isinstance(source, str):
             data["source"] = source.strip()
