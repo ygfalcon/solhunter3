@@ -164,12 +164,35 @@ def test_bootstrap_ui_environment_logs_ping_failure(monkeypatch, caplog):
     )
     caplog.set_level(logging.WARNING, logger="solhunter_zero.ui")
 
-    ui._bootstrap_ui_environment()
+    with pytest.raises(RuntimeError):
+        ui._bootstrap_ui_environment()
 
     try:
         assert ui._REDIS_PING_STATUS.get("ok") is False
         assert any("Redis PING failed" in record.getMessage() for record in caplog.records)
-        assert any("degraded mode" in record.getMessage() for record in caplog.records)
+    finally:
+        ui._teardown_ui_environment()
+
+
+def test_bootstrap_ui_environment_allows_offline_override(monkeypatch, caplog):
+    monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
+    monkeypatch.setattr(ui, "load_production_env", lambda: {})
+    monkeypatch.delenv("SOLHUNTER_MODE", raising=False)
+    monkeypatch.delenv("BROKER_CHANNEL", raising=False)
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setenv("UI_ALLOW_OFFLINE_REDIS", "1")
+
+    monkeypatch.setattr(
+        ui, "_ping_redis", lambda url: {"ok": False, "error": "boom", "url": url}
+    )
+    caplog.set_level(logging.WARNING, logger="solhunter_zero.ui")
+
+    ui._bootstrap_ui_environment()
+
+    try:
+        assert ui._REDIS_PING_STATUS.get("ok") is False
+        assert any("UI_ALLOW_OFFLINE_REDIS" in record.getMessage() for record in caplog.records)
+        assert ui._ENV_BOOTSTRAPPED is True
     finally:
         ui._teardown_ui_environment()
 

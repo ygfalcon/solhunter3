@@ -246,10 +246,22 @@ def _bootstrap_ui_environment() -> None:
     status = _ping_redis(redis_url)
     _REDIS_PING_STATUS.clear()
     _REDIS_PING_STATUS.update(status)
+
+    offline_allowed = parse_bool_env("UI_ALLOW_OFFLINE_REDIS", default=False)
     if status.get("ok") is not True:
         detail = status.get("error") or "unknown error"
         log.error("Redis PING failed for %s: %s", redis_url, detail)
-        log.warning("UI startup continuing in degraded mode; Redis unavailable")
+        if offline_allowed:
+            log.warning(
+                "UI startup continuing in degraded mode; Redis unavailable ("  # pragma: no cover - log only
+                "UI_ALLOW_OFFLINE_REDIS=1)"
+            )
+        else:
+            raise RuntimeError(
+                f"Redis unreachable at {redis_url} (ping failed: {detail}). "
+                "Set REDIS_URL or start Redis. For offline demos, export "
+                "UI_ALLOW_OFFLINE_REDIS=1 to bypass this check."
+            )
     else:
         log.debug(
             "Redis PING succeeded for %s in %.3fms",
