@@ -62,6 +62,18 @@ def _extract_connectivity_probe_block(source: str) -> str:
     return source[start:end]
 
 
+def _extract_connectivity_skip_reset(source: str) -> str:
+    start_marker = "# Default to running UI connectivity probes unless the caller explicitly opts out."
+    start = source.find(start_marker)
+    if start == -1:
+        raise ValueError("Failed to locate CONNECTIVITY_SKIP_UI_PROBES reset block in launch_live.sh")
+    end_marker = "# Environment overrides:"
+    end = source.find(end_marker, start)
+    if end == -1:
+        raise ValueError("Failed to locate CONNECTIVITY_SKIP_UI_PROBES reset block terminator in launch_live.sh")
+    return source[start:end]
+
+
 def test_validate_connectivity_soak_aborts_on_failures(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
@@ -139,7 +151,8 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
         "        return _Summary()\n"
     )
     (package_dir / "production.py").write_text(stub_source, encoding="utf-8")
-    python_bin = shlex.quote(sys.executable)
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
     preserved_value = "restore-me"
     quoted_report = shlex.quote(str(report_path))
     quoted_value = shlex.quote(preserved_value)
@@ -158,7 +171,7 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
         export SOAK_REPORT={quoted_report}
         export ARTIFACT_DIR={quoted_artifact_dir}
         export PYTHON_BIN={python_bin}
-        export PYTHONPATH={quoted_stub_root}
+        export STUB_ROOT={quoted_stub_root}
         export EXIT_CONNECTIVITY=99
         {soak_block}
         if [[ -n ${{CONNECTIVITY_SKIP_UI_PROBES+x}} ]]; then
@@ -535,6 +548,7 @@ def test_run_connectivity_probes_skips_missing_ui_with_flag(tmp_path: Path) -> N
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
     run_probes = _extract_function(source, "run_connectivity_probes")
+    reset_block = _extract_connectivity_skip_reset(source)
 
     stub_root = tmp_path / "stub_ui_skip"
     _write_connectivity_stub(stub_root)
@@ -542,16 +556,28 @@ def test_run_connectivity_probes_skips_missing_ui_with_flag(tmp_path: Path) -> N
     python_wrapper = _create_python_wrapper(tmp_path)
     python_bin = shlex.quote(str(python_wrapper))
     quoted_stub_root = shlex.quote(str(stub_root))
+    skip_first = tmp_path / "skip_first.txt"
+    skip_second = tmp_path / "skip_second.txt"
+    quoted_skip_first = shlex.quote(str(skip_first))
+    quoted_skip_second = shlex.quote(str(skip_second))
 
     bash_script = dedent(
         f"""
         set -euo pipefail
+        {reset_block}
         {run_probes}
         export PYTHON_BIN={python_bin}
         export STUB_ROOT={quoted_stub_root}
         export EVENT_BUS_URL=ws://127.0.0.1:8779
         export UI_RESULT_MODE=absent
+        export SKIP_MARKER={quoted_skip_first}
         export CONNECTIVITY_SKIP_UI_PROBES=1
+        run_connectivity_probes
+
+        # Subsequent runs should re-enable UI probes when the caller does not request skipping.
+        export SKIP_MARKER={quoted_skip_second}
+        unset CONNECTIVITY_SKIP_UI_PROBES
+        {reset_block}
         run_connectivity_probes
         """
     )
@@ -564,7 +590,7 @@ def test_run_connectivity_probes_skips_missing_ui_with_flag(tmp_path: Path) -> N
         check=False,
     )
 
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 1, completed.stderr
     assert (
         "UI WebSocket: SKIPPED → UI connectivity probes disabled (CONNECTIVITY_SKIP_UI_PROBES=1)"
         in completed.stdout
@@ -573,7 +599,9 @@ def test_run_connectivity_probes_skips_missing_ui_with_flag(tmp_path: Path) -> N
         "UI HTTP: SKIPPED → UI connectivity probes disabled (CONNECTIVITY_SKIP_UI_PROBES=1)"
         in completed.stdout
     )
-    assert "Missing UI connectivity targets" not in completed.stderr
+    assert skip_first.read_text(encoding="utf-8") == "1"
+    assert skip_second.read_text(encoding="utf-8") == "__unset__"
+    assert "Missing UI connectivity targets: UI WebSocket, UI HTTP" in completed.stderr
 
 
 def test_connectivity_probes_force_skip_when_ui_disabled(tmp_path: Path) -> None:
