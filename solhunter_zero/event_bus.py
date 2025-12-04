@@ -254,6 +254,14 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     root_context = payload if isinstance(payload, Mapping) else None
 
+    def _source_label(source: Mapping[str, Any]) -> str | None:
+        raw_source = source.get("source") if isinstance(source, Mapping) else None
+        if isinstance(raw_source, str):
+            cleaned = raw_source.strip()
+            if cleaned:
+                return cleaned
+        return None
+
     def _iter_entries() -> Iterable[tuple[Any, Mapping[str, Any] | None]]:
         if isinstance(payload, Mapping):
             tokens = payload.get("tokens")
@@ -274,7 +282,14 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
             return
         yield payload, None
 
-    def _merge(source: Mapping[str, Any], dest: dict[str, Any], extra: dict[str, Any]) -> None:
+    def _merge(
+        source: Mapping[str, Any],
+        dest: dict[str, Any],
+        extra: dict[str, Any],
+        *,
+        tag_source: str | None,
+    ) -> None:
+        source_label = tag_source or _source_label(source)
         for key, value in source.items():
             if key in {"topic", "tokens", "entries"}:
                 continue
@@ -312,6 +327,48 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
                     existing = dest.get("tags") or []
                     combined = list(dict.fromkeys(list(existing) + tags))
                     dest["tags"] = combined
+                    if source_label:
+                        raw_map = dest.get("tags_by_source")
+                        tags_map: dict[str, list[str]] = (
+                            dict(raw_map)
+                            if isinstance(raw_map, Mapping)
+                            else {}
+                        )
+                        existing_source_tags = _normalize_tags(
+                            tags_map.get(source_label)
+                        )
+                        merged_source_tags = list(
+                            dict.fromkeys(existing_source_tags + tags)
+                        )
+                        tags_map[source_label] = merged_source_tags
+                        dest["tags_by_source"] = tags_map
+                continue
+            if key == "tags_by_source" and isinstance(value, Mapping):
+                raw_map = dest.get("tags_by_source")
+                tags_map: dict[str, list[str]] = (
+                    dict(raw_map) if isinstance(raw_map, Mapping) else {}
+                )
+                for src, src_tags in value.items():
+                    if isinstance(src, str):
+                        src_label = src.strip()
+                    else:
+                        src_label = str(src).strip()
+                    if not src_label:
+                        continue
+                    normalized = _normalize_tags(src_tags)
+                    if not normalized:
+                        continue
+                    existing_source_tags = _normalize_tags(tags_map.get(src_label))
+                    merged_source_tags = list(
+                        dict.fromkeys(existing_source_tags + normalized)
+                    )
+                    tags_map[src_label] = merged_source_tags
+                    existing = dest.get("tags") or []
+                    dest["tags"] = list(
+                        dict.fromkeys(list(existing) + merged_source_tags)
+                    )
+                if tags_map:
+                    dest["tags_by_source"] = tags_map
                 continue
             if key == "interface":
                 if value is not None and "interface" not in dest:
@@ -334,11 +391,11 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
         data: dict[str, Any] = {}
         extra: dict[str, Any] = {}
         if root_context and root_context is not context:
-            _merge(root_context, data, extra)
+            _merge(root_context, data, extra, tag_source=_source_label(root_context))
         if isinstance(context, Mapping):
-            _merge(context, data, extra)
+            _merge(context, data, extra, tag_source=_source_label(context))
         if isinstance(entry, Mapping):
-            _merge(entry, data, extra)
+            _merge(entry, data, extra, tag_source=_source_label(entry))
         elif isinstance(entry, str):
             if entry.strip():
                 data.setdefault("mint", entry.strip())
@@ -371,6 +428,20 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
                 data["tags"] = tags
             else:
                 data.pop("tags", None)
+        tags_by_source = data.get("tags_by_source")
+        if isinstance(tags_by_source, Mapping):
+            cleaned_map: dict[str, list[str]] = {}
+            for src, src_tags in tags_by_source.items():
+                label = str(src).strip()
+                normalized = _normalize_tags(src_tags)
+                if label and normalized:
+                    cleaned_map[label] = normalized
+            if cleaned_map:
+                data["tags_by_source"] = cleaned_map
+            else:
+                data.pop("tags_by_source", None)
+        else:
+            data.pop("tags_by_source", None)
         discovery = data.get("discovery")
         if isinstance(discovery, Mapping):
             data["discovery"] = dict(discovery)
