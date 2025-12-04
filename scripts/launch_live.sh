@@ -854,6 +854,10 @@ async def _run() -> None:
     lookup = {result.name: result for result in results}
 
     raw_bus_url = os.environ.get("EVENT_BUS_URL")
+    bus_defaulted = False
+    if not raw_bus_url:
+        raw_bus_url = "ws://127.0.0.1:8779"
+        bus_defaulted = True
     bus_result = None
     bus_skip_message: str | None = None
     bus_exit_code = int(os.environ.get("EXIT_EVENT_BUS", "8") or "8")
@@ -869,10 +873,10 @@ async def _run() -> None:
         bus_host, bus_port, bus_display = _runtime_bus_target(raw_bus_url)
         if _is_local_host(bus_host):
             target = bus_display or f"ws://{bus_host}:{bus_port}"
-            bus_skip_message = (
-                "Event bus: SKIPPED → runtime-managed local endpoint "
-                f"{target} (post-launch readiness checks will verify availability)"
-            )
+            reason = "post-launch readiness checks will verify availability"
+            prefix = "Event bus: SKIPPED → runtime-managed local endpoint "
+            suffix = reason if not bus_defaulted else f"EVENT_BUS_URL not set; {reason}"
+            bus_skip_message = f"{prefix}{target} ({suffix})"
         else:
             try:
                 bus_result = await checker._probe_ws("event-bus", raw_bus_url)
@@ -880,13 +884,6 @@ async def _run() -> None:
                 print(f"ConnectivityChecker missing WebSocket probe support: {exc}", file=sys.stderr)
                 raise SystemExit(1)
             lookup["event-bus"] = bus_result
-    else:
-        print(
-            "Event bus target missing: set EVENT_BUS_URL or "
-            "CONNECTIVITY_SKIP_BUS=1 to bypass pre-flight connectivity checks.",
-            file=sys.stderr,
-        )
-        raise SystemExit(bus_exit_code)
 
     failures: list[str] = []
     for key, label in REQUIRED_TARGETS:
