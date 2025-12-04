@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import contextlib
 import logging
 import os
 import random
@@ -18,6 +19,10 @@ from urllib.parse import urlparse, urlsplit
 
 import aiohttp
 import websockets
+try:
+    import redis.asyncio as aioredis  # type: ignore
+except Exception:  # pragma: no cover - optional dependency guard
+    aioredis = None
 
 from solhunter_zero.http import get_session
 
@@ -79,6 +84,8 @@ class ConnectivityChecker:
         self.breaker_threshold = breaker_threshold
         self.breaker_cooldown = breaker_cooldown
         self.skip_ui_probes = self._env_flag("CONNECTIVITY_SKIP_UI_PROBES")
+        self.broker_channel = self.env.get("BROKER_CHANNEL") or "solhunter-events-v3"
+        self.broker_identity_key = self.env.get("BROKER_IDENTITY_KEY") or "solhunter:broker_channel"
         self._breaker_state: MutableMapping[str, float] = {}
         self._failure_counts: MutableMapping[str, int] = defaultdict(int)
         self._metrics: MutableMapping[str, Dict[str, Any]] = defaultdict(
@@ -732,20 +739,46 @@ class ConnectivityChecker:
         parsed = urlparse(url)
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or 6379
+
+        async def _assert_identity(conn) -> str | None:
+            if not self.broker_identity_key:
+                return None
+            try:
+                value = await conn.get(self.broker_identity_key)
+                if value is None:
+                    await conn.set(self.broker_identity_key, self.broker_channel, nx=True)
+                    value = await conn.get(self.broker_identity_key)
+                decoded = value.decode() if isinstance(value, (bytes, bytearray, memoryview)) else value
+            except Exception as exc:
+                return f"identity-read-failed: {exc}"
+            if decoded is None:
+                return "identity-missing"
+            if decoded != self.broker_channel:
+                return f"identity-mismatch expected={self.broker_channel} actual={decoded}"
+            return None
+
         async def attempt() -> ConnectivityResult:
             start = time.perf_counter()
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port),
-                timeout=self.redis_timeout,
-            )
+            if aioredis is None:
+                raise RuntimeError("redis package required for redis probes")
+            conn = aioredis.from_url(url, socket_timeout=self.redis_timeout)
             try:
-                writer.write(b"PING\r\n")
-                await writer.drain()
-                data = await asyncio.wait_for(reader.readline(), timeout=self.redis_timeout)
+                pong = await asyncio.wait_for(conn.ping(), timeout=self.redis_timeout)
+                identity_error = await _assert_identity(conn)
                 latency = (time.perf_counter() - start) * 1000
                 self._record_latency(name, latency)
-                ok = data.startswith(b"+PONG")
-                if ok:
+                if identity_error:
+                    self._record_error(name, "redis-identity")
+                    return ConnectivityResult(
+                        name=name,
+                        target=url,
+                        ok=False,
+                        latency_ms=latency,
+                        status="identity",  # type: ignore[arg-type]
+                        error=identity_error,
+                        attempts=1,
+                    )
+                if pong:
                     return ConnectivityResult(
                         name=name,
                         target=url,
@@ -761,13 +794,12 @@ class ConnectivityChecker:
                     ok=False,
                     latency_ms=latency,
                     status="error",
-                    error=f"Unexpected response: {data!r}",
+                    error="Unexpected redis response",
                     attempts=1,
                 )
             finally:
-                writer.close()
                 with contextlib.suppress(Exception):
-                    await writer.wait_closed()
+                    await conn.close()
 
         if not self._breaker_allows(name):
             return ConnectivityResult(name=name, target=url, ok=False, error="circuit-open")
