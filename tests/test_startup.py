@@ -1946,6 +1946,142 @@ def test_startup_interactive_offline_propagates_to_start_all(monkeypatch):
     assert captured["rest"] and captured["rest"][-1] == "--foreground"
 
 
+def _interactive_args():
+    import types
+
+    return types.SimpleNamespace(
+        offline=False,
+        non_interactive=False,
+        quiet=False,
+        skip_deps=False,
+        skip_setup=False,
+        skip_rpc_check=False,
+        skip_endpoint_check=False,
+        skip_preflight=False,
+    )
+
+
+def _stub_rich(monkeypatch):
+    import sys
+    import types
+
+    class DummyConsole:
+        def __init__(self, *_, **__):
+            pass
+
+        def print(self, *args, **kwargs):  # pragma: no cover - diagnostic stub
+            return None
+
+    class DummyTable:
+        def __init__(self, *_, **__):
+            pass
+
+        def add_column(self, *args, **kwargs):
+            return None
+
+        def add_row(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setitem(sys.modules, "rich", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "rich.console", types.SimpleNamespace(Console=DummyConsole))
+    monkeypatch.setitem(sys.modules, "rich.table", types.SimpleNamespace(Table=DummyTable))
+
+
+def _stub_agent_manager(monkeypatch):
+    import sys
+    import types
+
+    class DummyAgentManager:
+        @classmethod
+        def from_config(cls, cfg):
+            return object()
+
+    monkeypatch.setitem(sys.modules, "solhunter_zero.agent_manager", types.SimpleNamespace(AgentManager=DummyAgentManager))
+
+
+def _stub_scripts(monkeypatch):
+    import sys
+    import types
+
+    scripts_pkg = sys.modules.get("scripts", types.ModuleType("scripts"))
+    preflight_mod = types.SimpleNamespace(CHECKS=[])
+    start_all_mod = types.SimpleNamespace(main=lambda rest: 0)
+    healthcheck_mod = types.SimpleNamespace(main=lambda *a, **k: 0)
+
+    scripts_pkg.preflight = preflight_mod
+    scripts_pkg.start_all = start_all_mod
+    scripts_pkg.healthcheck = healthcheck_mod
+
+    monkeypatch.setitem(sys.modules, "scripts", scripts_pkg)
+    monkeypatch.setitem(sys.modules, "scripts.preflight", preflight_mod)
+    monkeypatch.setitem(sys.modules, "scripts.start_all", start_all_mod)
+    monkeypatch.setitem(sys.modules, "scripts.healthcheck", healthcheck_mod)
+
+
+def test_run_logs_ui_status_before_ready(monkeypatch):
+    import types
+
+    _stub_rich(monkeypatch)
+    _stub_agent_manager(monkeypatch)
+    _stub_scripts(monkeypatch)
+
+    import solhunter_zero.startup_runner as startup_runner
+
+    logs: list[str] = []
+
+    def fake_log(msg: str) -> None:
+        logs.append(msg)
+
+    monkeypatch.setattr(startup_runner, "log_startup", fake_log)
+    monkeypatch.setattr(startup_runner, "log_startup_info", lambda **_: None)
+    monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", Path("startup.log"))
+    monkeypatch.setattr(startup_runner, "_poll_ui_readiness", lambda: (True, "ui-ok"))
+
+    args = _interactive_args()
+    ctx = {"rest": [], "summary_rows": [], "config_path": Path("cfg"), "config": {}}
+
+    code = startup_runner.run(args, ctx, log_startup=fake_log)
+
+    assert code == 0
+    ui_index = next(i for i, msg in enumerate(logs) if msg.startswith("UI readiness"))
+    ready_index = logs.index("SolHunter launch complete – system ready.")
+    assert ui_index < ready_index
+
+
+def test_run_logs_ui_failure(monkeypatch):
+    import types
+
+    _stub_rich(monkeypatch)
+    _stub_agent_manager(monkeypatch)
+    _stub_scripts(monkeypatch)
+
+    import solhunter_zero.startup_runner as startup_runner
+
+    logs: list[str] = []
+
+    def fake_log(msg: str) -> None:
+        logs.append(msg)
+
+    monkeypatch.setattr(startup_runner, "log_startup", fake_log)
+    monkeypatch.setattr(startup_runner, "log_startup_info", lambda **_: None)
+    monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", Path("startup.log"))
+
+    def fake_poll():
+        return False, "ui-http: FAIL (timeout)"
+
+    monkeypatch.setattr(startup_runner, "_poll_ui_readiness", fake_poll)
+
+    args = _interactive_args()
+    ctx = {"rest": [], "summary_rows": [], "config_path": Path("cfg"), "config": {}}
+
+    code = startup_runner.run(args, ctx, log_startup=fake_log)
+
+    assert code == 0
+    assert any(msg.startswith("UI readiness unhealthy") for msg in logs)
+
+
 def test_launch_only_sets_env_when_offline(monkeypatch):
     from types import SimpleNamespace
     from solhunter_zero import startup_runner
