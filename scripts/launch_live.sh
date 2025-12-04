@@ -2034,6 +2034,7 @@ env_path = Path(sys.argv[1])
 if not env_path.exists():
     print(f"Environment file {env_path} missing", file=sys.stderr)
     raise SystemExit(1)
+
 pattern_strings = [
     r"REDACTED",
     r"YOUR[_-]",
@@ -2064,6 +2065,7 @@ high_risk_value_patterns = [
     re.compile(r"-----BEGIN [A-Z0-9 ]+-----"),
     re.compile(r"ssh-(rsa|ed25519|dss) [A-Za-z0-9+/]+=*(?: .*)?", re.IGNORECASE),
 ]
+
 values: dict[str, str] = {}
 for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
     line = raw_line.strip()
@@ -2088,19 +2090,49 @@ for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
         if pat.search(value):
             print(f"placeholder detected for {key}: {pat.pattern}", file=sys.stderr)
             raise SystemExit(1)
+
 required_reports: list[str] = []
+required_sections = [
+    (
+        "RPC endpoints",
+        [
+            ("SOLANA_RPC_URL", "Solana RPC URL"),
+            ("SOLANA_WS_URL", "Solana websocket URL"),
+        ],
+        "Provide SOLANA_RPC_URL and SOLANA_WS_URL for the target Solana cluster.",
+    ),
+    (
+        "Redis cache",
+        [("REDIS_URL", "Redis endpoint")],
+        "Set REDIS_URL to a reachable redis:// endpoint used for caching and the event bus.",
+    ),
+    (
+        "Helius credentials",
+        [
+            ("HELIUS_API_KEY", "Helius API key"),
+            ("HELIUS_API_KEYS", "Helius API key list"),
+            ("HELIUS_API_TOKEN", "Helius auth token"),
+            ("HELIUS_RPC_URL", "Helius RPC URL"),
+            ("HELIUS_WS_URL", "Helius websocket URL"),
+            ("HELIUS_PRICE_RPC_URL", "Helius price RPC URL"),
+            ("HELIUS_PRICE_REST_URL", "Helius price REST URL"),
+            ("HELIUS_PRICE_BASE_URL", "Helius price base URL"),
+        ],
+        "Populate the HELIUS_* values from your Helius project dashboard.",
+    ),
+    (
+        "Jito bundle endpoints",
+        [
+            ("JITO_RPC_URL", "Jito RPC URL"),
+            ("JITO_AUTH", "Jito bundle auth token"),
+            ("JITO_WS_URL", "Jito websocket URL"),
+            ("JITO_WS_AUTH", "Jito websocket auth token"),
+        ],
+        "Configure JITO_* URLs and auth tokens from your Jito provider.",
+    ),
+]
+
 required_exact = [
-    ("SOLANA_RPC_URL", "Solana RPC URL"),
-    ("SOLANA_WS_URL", "Solana websocket URL"),
-    ("REDIS_URL", "Redis endpoint"),
-    ("HELIUS_API_KEY", "Helius API key"),
-    ("HELIUS_API_KEYS", "Helius API key list"),
-    ("HELIUS_API_TOKEN", "Helius auth token"),
-    ("HELIUS_RPC_URL", "Helius RPC URL"),
-    ("HELIUS_WS_URL", "Helius websocket URL"),
-    ("HELIUS_PRICE_RPC_URL", "Helius price RPC URL"),
-    ("HELIUS_PRICE_REST_URL", "Helius price REST URL"),
-    ("HELIUS_PRICE_BASE_URL", "Helius price base URL"),
     ("BIRDEYE_API_KEY", "Birdeye API key"),
     ("SOLSCAN_API_KEY", "Solscan API key"),
     ("DEX_BASE_URL", "DEX base URL"),
@@ -2110,14 +2142,23 @@ required_exact = [
     ("PHOENIX_API_URL", "Phoenix API URL"),
     ("METEORA_API_URL", "Meteora API URL"),
     ("JUPITER_WS_URL", "Jupiter websocket URL"),
-    ("JITO_RPC_URL", "Jito RPC URL"),
-    ("JITO_AUTH", "Jito bundle auth token"),
-    ("JITO_WS_URL", "Jito websocket URL"),
-    ("JITO_WS_AUTH", "Jito websocket auth token"),
     ("NEWS_FEEDS", "news feed hooks"),
     ("TWITTER_FEEDS", "Twitter/X feed hooks"),
     ("DISCORD_FEEDS", "Discord feed hooks"),
 ]
+
+for section_name, required_pairs, hint in required_sections:
+    missing = [
+        f"{key} ({description})"
+        for key, description in required_pairs
+        if not values.get(key, "").strip()
+    ]
+    if missing:
+        report = f"{section_name} missing: {', '.join(missing)}"
+        if hint:
+            report += f". Hint: {hint}"
+        required_reports.append(report)
+
 for env_name, description in required_exact:
     candidate = values.get(env_name, "").strip()
     if not candidate:
@@ -2146,6 +2187,7 @@ if required_reports:
     for message in required_reports:
         print(f"  - {message}", file=sys.stderr)
     raise SystemExit(1)
+
 manifest = []
 for key, value in sorted(values.items()):
     lowered = key.lower()
