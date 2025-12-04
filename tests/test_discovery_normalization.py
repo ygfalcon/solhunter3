@@ -131,3 +131,27 @@ def test_normalize_discovery_entries_preserves_attributes_with_fallback(monkeypa
     assert entry["attributes"]["note"] == "from scanner"
     assert entry["attributes"]["ts_source"] == "fallback_now"
 
+
+def test_normalize_discovery_entries_retains_tags_by_source():
+    payload = {
+        "source": "scanner",
+        "tags": ["root", "shared"],
+        "entries": [
+            {
+                "mint": VALID_MINT_A,
+                "source": "child",
+                "tags": ["child", "shared"],
+                "tags_by_source": {"deep": ["nested"]},
+            }
+        ],
+    }
+
+    entries = _normalize_discovery_entries(payload)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert set(entry["tags"]) == {"root", "shared", "child", "nested"}
+    assert entry["tags_by_source"]["scanner"] == ["root", "shared"]
+    assert entry["tags_by_source"]["child"] == ["child", "shared"]
+    assert entry["tags_by_source"]["deep"] == ["nested"]
+
