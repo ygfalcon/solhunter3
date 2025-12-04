@@ -372,7 +372,7 @@ def test_run_connectivity_probes_requires_remote_event_bus(tmp_path: Path) -> No
     assert marker_path.read_text(encoding="utf-8") == "event-bus wss://bus.example.com/ws"
 
 
-def test_run_connectivity_probes_requires_event_bus_or_skip(tmp_path: Path) -> None:
+def test_run_connectivity_probes_defaults_event_bus_when_missing(tmp_path: Path) -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
     run_probes = _extract_function(source, "run_connectivity_probes")
@@ -402,10 +402,11 @@ def test_run_connectivity_probes_requires_event_bus_or_skip(tmp_path: Path) -> N
         check=False,
     )
 
-    assert completed.returncode == 8
+    assert completed.returncode == 0, completed.stderr
     assert (
-        "Event bus target missing: set EVENT_BUS_URL or CONNECTIVITY_SKIP_BUS=1 to bypass"
-        in completed.stderr
+        "Event bus: SKIPPED → runtime-managed local endpoint ws://127.0.0.1:8779 "
+        "(EVENT_BUS_URL not set; post-launch readiness checks will verify availability)"
+        in completed.stdout
     )
 
 
