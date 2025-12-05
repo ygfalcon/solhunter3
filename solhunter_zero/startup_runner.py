@@ -167,18 +167,46 @@ def _env_offline_enabled(env: dict[str, str]) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
-def _extract_port(url: str) -> str | None:
+def _format_scheme_hint(expected_schemes: tuple[str, ...] | None) -> str:
+    if not expected_schemes:
+        return "<scheme>://<host>:<port>"
+
+    unique = list(dict.fromkeys(expected_schemes))
+    parts = [f"{scheme}://<host>:<port>" for scheme in unique]
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} or {parts[1]}"
+    return ", ".join(parts)
+
+
+def _extract_port(url: str, *, expected_schemes: tuple[str, ...] | None = None) -> tuple[str | None, list[str]]:
+    warnings: list[str] = []
+    scheme_hint = _format_scheme_hint(expected_schemes)
     try:
         parsed = urlsplit(url)
     except Exception:  # pragma: no cover - defensive
-        return None
+        return None, [f"Invalid URL; use {scheme_hint}"]
+
+    if not parsed.scheme:
+        warnings.append(f"Missing scheme; use {scheme_hint}")
+    elif expected_schemes and parsed.scheme not in expected_schemes:
+        warnings.append(f"Unexpected scheme '{parsed.scheme}'; use {scheme_hint}")
+
     if parsed.port:
-        return str(parsed.port)
+        return str(parsed.port), warnings
+
     if parsed.scheme in {"https", "wss"}:
-        return "443"
+        port = "443"
+        warnings.append(f"No port specified; defaulting to {port}. Use {parsed.scheme}://{parsed.hostname or '<host>'}:<port>")
+        return port, warnings
     if parsed.scheme in {"http", "ws"}:
-        return "80"
-    return None
+        port = "80"
+        warnings.append(f"No port specified; defaulting to {port}. Use {parsed.scheme}://{parsed.hostname or '<host>'}:<port>")
+        return port, warnings
+
+    warnings.append(f"Missing port; use {scheme_hint}")
+    return None, warnings
 
 
 def _format_result_detail(result: Any) -> str:
@@ -215,7 +243,10 @@ def _ui_summary_rows(
 
     for key, label in labels.items():
         url = targets.get(key, "")
-        port = _extract_port(url) if url else None
+        port, port_warnings = _extract_port(
+            url,
+            expected_schemes=("http", "https") if key == "ui-http" else ("ws", "wss"),
+        ) if url else (None, [])
         result = result_map.get(key)
 
         if result:
@@ -232,7 +263,10 @@ def _ui_summary_rows(
         if port:
             details.append(f"port {port}")
 
-        suffix = f" – {'; '.join(details)}" if details else ""
+        warnings = [f"warning: {message}" for message in port_warnings]
+
+        suffix_parts = [*details, *warnings]
+        suffix = f" – {'; '.join(suffix_parts)}" if suffix_parts else ""
         rows.append((label, f"{status}{suffix}"))
 
     if readiness_message and (not readiness_ok or not rows):

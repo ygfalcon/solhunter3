@@ -2297,6 +2297,42 @@ def test_poll_ui_readiness_enforces_target_timeout(monkeypatch):
     assert results == []
 
 
+def test_ui_summary_rows_warn_for_missing_scheme(monkeypatch):
+    _stub_rich(monkeypatch)
+
+    from solhunter_zero import startup_runner
+
+    rows = startup_runner._ui_summary_rows(
+        targets={"ui-http": "localhost:5001"},
+        results=[],
+        readiness_message=None,
+        readiness_ok=True,
+    )
+
+    status = dict(rows)["UI HTTP"]
+    assert "warning" in status
+    assert "scheme" in status
+    assert "http://<host>:<port>" in status
+
+
+def test_ui_summary_rows_warn_for_missing_port(monkeypatch):
+    _stub_rich(monkeypatch)
+
+    from solhunter_zero import startup_runner
+
+    rows = startup_runner._ui_summary_rows(
+        targets={"ui-ws": "ws://example.com"},
+        results=[],
+        readiness_message=None,
+        readiness_ok=True,
+    )
+
+    status = dict(rows)["UI WS"]
+    assert "warning" in status
+    assert "No port specified" in status
+    assert "ws://example.com:<port>" in status
+
+
 def test_launch_only_sets_env_when_offline(monkeypatch):
     from types import SimpleNamespace
     from solhunter_zero import startup_runner
