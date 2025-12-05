@@ -762,6 +762,9 @@ def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
 
     def _raise_missing_key():
+        logging.getLogger("solhunter_zero.token_discovery").warning(
+            "BirdEye API key missing; BirdEye discovery disabled."
+        )
         raise td.DiscoveryConfigurationError(
             "birdeye",
             "BirdEye API key missing; BirdEye discovery disabled.",
@@ -779,6 +782,28 @@ def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch
 
     assert "BirdEye API key missing" in str(excinfo.value)
     assert "BirdEye API key missing" in caplog.text
+
+
+def test_discover_candidates_validates_missing_api_key_synchronously(monkeypatch):
+    monkeypatch.setattr(td, "DEFAULT_BIRDEYE_API_KEY", "")
+    monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
+    _configure_env(
+        monkeypatch,
+        BIRDEYE_API_KEY="",
+        DISCOVERY_ENABLE_MEMPOOL="0",
+        DISCOVERY_ENABLE_DEXSCREENER="0",
+        DISCOVERY_ENABLE_RAYDIUM="0",
+        DISCOVERY_ENABLE_METEORA="0",
+        DISCOVERY_ENABLE_DEXLAB="0",
+    )
+
+    with pytest.raises(td.DiscoveryConfigurationError) as excinfo:
+        td.discover_candidates("https://rpc")
+
+    assert excinfo.value.source == "birdeye"
+    assert "BirdEye API key missing" in str(excinfo.value)
+    remediation = excinfo.value.remediation or ""
+    assert "BIRDEYE_API_KEY" in remediation
 
 
 @pytest.mark.anyio("asyncio")
