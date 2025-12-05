@@ -1878,6 +1878,9 @@ _WS_CHANNELS: dict[str, _WebsocketState] = {
 
 _WS_CHANNEL_LOCK = threading.Lock()
 _SHUTDOWN_EVENT = threading.Event()
+_WS_WATCHDOG_STOP = threading.Event()
+_WS_WATCHDOG_THREAD: threading.Thread | None = None
+_WS_WATCHDOG_INTERVAL_DEFAULT = 2.0
 
 # Tracks the most recent auto-generated websocket configuration that
 # ``start_websockets`` injected into the environment (URLs, ports, etc.). This
@@ -1955,6 +1958,98 @@ def _clear_auto_env_values_for_channels(channels: Iterable[str]) -> None:
         if auto_value is not None and os.environ.get(key) == auto_value:
             os.environ.pop(key, None)
         _AUTO_WS_ENV_CHANNELS.pop(key, None)
+
+
+def _resolve_watchdog_interval() -> float:
+    raw_interval = os.getenv("UI_WS_WATCHDOG_INTERVAL")
+    if raw_interval in (None, ""):
+        return _WS_WATCHDOG_INTERVAL_DEFAULT
+    try:
+        interval = float(raw_interval)
+    except (TypeError, ValueError):
+        log.warning(
+            "Invalid UI_WS_WATCHDOG_INTERVAL value %r; using default %.1f seconds",
+            raw_interval,
+            _WS_WATCHDOG_INTERVAL_DEFAULT,
+        )
+        return _WS_WATCHDOG_INTERVAL_DEFAULT
+    if interval <= 0:
+        log.warning(
+            "UI_WS_WATCHDOG_INTERVAL value %r must be positive; using default %.1f seconds",
+            raw_interval,
+            _WS_WATCHDOG_INTERVAL_DEFAULT,
+        )
+        return _WS_WATCHDOG_INTERVAL_DEFAULT
+    return interval
+
+
+def _stop_ws_watchdog() -> None:
+    global _WS_WATCHDOG_THREAD
+    thread = _WS_WATCHDOG_THREAD
+    if thread is None:
+        return
+    _WS_WATCHDOG_STOP.set()
+    if thread is not threading.current_thread():
+        thread.join(timeout=2.0)
+    _WS_WATCHDOG_THREAD = None
+
+
+def _check_ws_broadcaster(state: _WebsocketState) -> str | None:
+    if state.thread is not None and not state.thread.is_alive():
+        return "thread exited"
+
+    if state.loop is not None and not state.loop.is_running():
+        return "event loop stopped"
+
+    task = state.task
+    if task is None:
+        return None
+    try:
+        if not task.done():
+            return None
+    except Exception as exc:  # pragma: no cover - unexpected runtime failure
+        return f"broadcast status check failed: {exc}"  # pragma: no cover - unexpected
+
+    try:
+        exc = task.exception()
+    except Exception as exc:  # pragma: no cover - unexpected runtime failure
+        return f"broadcast exception unavailable: {exc}"  # pragma: no cover - unexpected
+
+    if exc:
+        return f"broadcast task failed: {exc}"
+    return "broadcast task completed unexpectedly"
+
+
+def _handle_ws_failure(state: _WebsocketState, reason: str) -> None:
+    state.ready_status = "failed"
+    state.ready_detail = reason
+    log.error(
+        "UI websocket broadcaster for %s terminated: %s; stopping websockets", state.name, reason
+    )
+    _WS_WATCHDOG_STOP.set()
+    stop_websockets()
+    _SHUTDOWN_EVENT.set()
+
+
+def _start_ws_watchdog() -> None:
+    global _WS_WATCHDOG_THREAD
+    if _WS_WATCHDOG_THREAD is not None and _WS_WATCHDOG_THREAD.is_alive():
+        return
+
+    _WS_WATCHDOG_STOP.clear()
+    interval = _resolve_watchdog_interval()
+
+    def _watchdog_loop() -> None:
+        while not _WS_WATCHDOG_STOP.wait(interval):
+            for state in _WS_CHANNELS.values():
+                reason = _check_ws_broadcaster(state)
+                if reason is not None:
+                    _handle_ws_failure(state, reason)
+                    return
+
+    thread = threading.Thread(target=_watchdog_loop, name="ui-ws-watchdog", daemon=True)
+    thread.start()
+    _WS_WATCHDOG_THREAD = thread
 
 
 def get_ws_readiness_metadata() -> Dict[str, Any]:
@@ -3623,12 +3718,15 @@ def start_websockets() -> dict[str, threading.Thread]:
             _EVENT_WS_PORT,
             _LOG_WS_PORT,
         )
+        _start_ws_watchdog()
         return threads
 
 
 def stop_websockets() -> None:
     """Shut down all websocket channels."""
 
+    _WS_WATCHDOG_STOP.set()
+    _stop_ws_watchdog()
     with _WS_CHANNEL_LOCK:
         stopped_channels: list[str] = []
         for name, state in _WS_CHANNELS.items():
