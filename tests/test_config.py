@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from solhunter_zero.config import (
@@ -14,7 +15,6 @@ import subprocess
 import sys
 import json
 import pytest
-from pathlib import Path
 import types
 from solhunter_zero.jsonutil import dumps
 
@@ -345,6 +345,31 @@ def test_set_env_from_config_refreshes_token_discovery(monkeypatch):
     assert td.SETTINGS.min_liquidity == 6789.0
     assert td._BIRDEYE_CACHE.ttl == 12.0
     assert original_ttl != td._BIRDEYE_CACHE.ttl
+
+
+def test_discovery_thresholds_clamped(monkeypatch, caplog):
+    from solhunter_zero import token_discovery as td
+
+    monkeypatch.setenv("DISCOVERY_MIN_VOLUME_USD", "20000000")
+    monkeypatch.setenv("DISCOVERY_MIN_LIQUIDITY_USD", "20000000")
+    caplog.set_level(logging.INFO)
+
+    assert td.SETTINGS.min_volume == td._MAX_DISCOVERY_THRESHOLD_USD
+    assert td.SETTINGS.min_liquidity == td._MAX_DISCOVERY_THRESHOLD_USD
+    assert any("Clamping min_volume" in rec.message for rec in caplog.records)
+    assert any("Clamping min_liquidity" in rec.message for rec in caplog.records)
+
+
+def test_discovery_thresholds_nonfinite(monkeypatch, caplog):
+    from solhunter_zero import token_discovery as td
+
+    monkeypatch.setenv("DISCOVERY_MIN_VOLUME_USD", "nan")
+    monkeypatch.setenv("DISCOVERY_MIN_LIQUIDITY_USD", "inf")
+    caplog.set_level(logging.ERROR)
+
+    assert td.SETTINGS.min_volume == 50_000.0
+    assert td.SETTINGS.min_liquidity == 75_000.0
+    assert any("non-finite" in rec.message for rec in caplog.records)
 
 
 def test_get_broker_urls_falls_back_to_event_bus(monkeypatch):

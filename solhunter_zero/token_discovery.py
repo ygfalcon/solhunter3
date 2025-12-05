@@ -126,6 +126,7 @@ def _env_str(name: str, default: str = "", *, strip: bool = True) -> str:
 
 
 _MAX_MEMPOOL_LIMIT = 64
+_MAX_DISCOVERY_THRESHOLD_USD = 10_000_000.0
 
 
 class _DiscoverySettings:
@@ -133,15 +134,47 @@ class _DiscoverySettings:
 
     @property
     def min_volume(self) -> float:
-        return _env_float(
+        default_value = 50_000.0
+        value = _env_float(
             "DISCOVERY_MIN_VOLUME_USD", "50000", fast_default=0.0, minimum=0.0
         )
+        if not math.isfinite(value):
+            logger.error(
+                "DISCOVERY_MIN_VOLUME_USD=%r is non-finite; using default %.0f",
+                value,
+                default_value,
+            )
+            return default_value
+        if value > _MAX_DISCOVERY_THRESHOLD_USD:
+            logger.info(
+                "Clamping min_volume to %.0f (requested %.0f exceeds cap)",
+                _MAX_DISCOVERY_THRESHOLD_USD,
+                value,
+            )
+            return _MAX_DISCOVERY_THRESHOLD_USD
+        return value
 
     @property
     def min_liquidity(self) -> float:
-        return _env_float(
+        default_value = 75_000.0
+        value = _env_float(
             "DISCOVERY_MIN_LIQUIDITY_USD", "75000", fast_default=0.0, minimum=0.0
         )
+        if not math.isfinite(value):
+            logger.error(
+                "DISCOVERY_MIN_LIQUIDITY_USD=%r is non-finite; using default %.0f",
+                value,
+                default_value,
+            )
+            return default_value
+        if value > _MAX_DISCOVERY_THRESHOLD_USD:
+            logger.info(
+                "Clamping min_liquidity to %.0f (requested %.0f exceeds cap)",
+                _MAX_DISCOVERY_THRESHOLD_USD,
+                value,
+            )
+            return _MAX_DISCOVERY_THRESHOLD_USD
+        return value
 
     @property
     def max_tokens(self) -> int:
