@@ -2152,6 +2152,67 @@ def test_launch_only_sets_env_when_offline(monkeypatch):
     assert captured["env"].get("SOLHUNTER_OFFLINE") == "1"
 
 
+def test_agent_manager_failure_logs_traceback(monkeypatch, tmp_path):
+    import types
+    from solhunter_zero import logging_utils
+
+    _stub_rich(monkeypatch)
+    from solhunter_zero import startup_runner
+
+    log_path = tmp_path / "startup.log"
+
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", log_path)
+    monkeypatch.setattr(
+        startup_runner,
+        "log_startup",
+        lambda msg: logging_utils.log_startup(msg, path=log_path),
+    )
+    monkeypatch.setattr(startup_runner, "log_startup_info", lambda **kwargs: None)
+    monkeypatch.setattr(startup_runner, "_extract_ui_targets", lambda: ({}, None))
+    monkeypatch.setattr(
+        startup_runner, "_poll_ui_readiness", lambda **kwargs: (False, "skipped", {}, [])
+    )
+    monkeypatch.setattr(
+        startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None)
+    )
+
+    healthcheck_mod = types.ModuleType("scripts.healthcheck")
+    healthcheck_mod.main = lambda *a, **k: 0
+    monkeypatch.setitem(sys.modules, "scripts.healthcheck", healthcheck_mod)
+
+    agent_manager_mod = types.ModuleType("solhunter_zero.agent_manager")
+
+    class DummyAgentManager:
+        @classmethod
+        def from_config(cls, _cfg):
+            raise RuntimeError("boom")
+
+    agent_manager_mod.AgentManager = DummyAgentManager
+    monkeypatch.setitem(sys.modules, "solhunter_zero.agent_manager", agent_manager_mod)
+
+    args = types.SimpleNamespace(
+        offline=False,
+        non_interactive=False,
+        quiet=False,
+        skip_deps=False,
+        skip_setup=False,
+        skip_rpc_check=False,
+        skip_endpoint_check=False,
+        skip_preflight=False,
+    )
+    ctx = {"config_path": tmp_path / "cfg.toml", "config": {}, "summary_rows": []}
+    monkeypatch.setattr(startup_runner.preflight, "CHECKS", [])
+
+    result = startup_runner.run(args, ctx, log_startup=startup_runner.log_startup)
+
+    log_text = log_path.read_text()
+    assert result == 1
+    assert "AgentManager initialization failed: boom" in log_text
+    assert "Verify [agent_manager] and [agents] config sections" in log_text
+    assert "Traceback (most recent call last)" in log_text
+    assert "RuntimeError: boom" in log_text
+
+
 def test_disk_space_threshold_uses_config(monkeypatch):
     from scripts import startup
 

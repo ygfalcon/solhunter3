@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlsplit
@@ -224,30 +225,46 @@ def run(
     # Initialize AgentManager before launching services
     from solhunter_zero.agent_manager import AgentManager
 
+    agent_manager_error: Exception | None = None
+    agent_manager_tb: str | None = None
     try:
         if AgentManager.from_config(config) is None:
-            log_startup("AgentManager.from_config returned None")
-            print("AgentManager.from_config returned None")
-            return 1
+            agent_manager_error = RuntimeError(
+                "AgentManager.from_config returned None"
+            )
     except Exception as exc:
-        log_startup(f"AgentManager initialization failed: {exc}")
-        print(f"Failed to initialize AgentManager: {exc}")
-        return 1
+        agent_manager_error = exc
+        agent_manager_tb = traceback.format_exc()
+
+    if agent_manager_error:
+        guidance = (
+            f"AgentManager initialization failed: {agent_manager_error}. "
+            "Verify [agent_manager] and [agents] config sections are present and valid."
+        )
+        log_startup(guidance)
+        if agent_manager_tb:
+            log_startup(agent_manager_tb)
+        print(guidance)
+        summary_rows.append(("AgentManager", f"failed – {agent_manager_error}"))
+        code = 1
+    else:
+        code: int | None = None
 
     # Arguments to start_all
     rest = list(ctx.get("rest", []))
-    if args.non_interactive:
-        return launch_only(rest, offline=getattr(args, "offline", False), subprocess_module=subprocess_module)
+    if code is None:
+        if args.non_interactive:
+            return launch_only(rest, offline=getattr(args, "offline", False), subprocess_module=subprocess_module)
 
-    rest = [*rest, "--foreground"]
+        rest = [*rest, "--foreground"]
 
-    # Run the service supervisor inline so we can exit with its code
-    from scripts import start_all as start_all_module
+        # Run the service supervisor inline so we can exit with its code
+        from scripts import start_all as start_all_module
 
-    try:
-        code = start_all_module.main(rest)
-    except KeyboardInterrupt:
-        code = 130
+        try:
+            code = start_all_module.main(rest)
+        except KeyboardInterrupt:
+            code = 130
 
     ui_ready: tuple[bool, str, dict[str, str], list[Any]] | None = None
     ui_targets: dict[str, str] = {}
