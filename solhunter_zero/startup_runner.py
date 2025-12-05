@@ -23,6 +23,9 @@ __all__ = ["run", "launch_only"]
 console = Console()
 
 
+CONFIG_LOAD_EXIT_CODE = getattr(os, "EX_CONFIG", 78)
+
+
 def log_startup_info(
     *,
     config_path: Path | None = None,
@@ -57,6 +60,23 @@ def _extract_ui_targets() -> tuple[dict[str, str], str | None]:
     ui_targets = [t for t in checker.targets if t.get("name") in {"ui-http", "ui-ws"}]
     urls = {t.get("name", "unknown"): str(t.get("url", "")) for t in ui_targets if t.get("name")}
     return urls, None
+
+
+def _config_load_hint(config_path: Path, exc: Exception) -> str:
+    if isinstance(exc, FileNotFoundError) or not config_path.exists():
+        return f"{config_path} not found; run config bootstrap or pass --config"
+    return f"Invalid config at {config_path}; run config bootstrap or pass --config"
+
+
+def _load_config_with_hint(load_config, config_path: Path, *, log_startup_func) -> tuple[dict | None, int]:
+    try:
+        return load_config(config_path), 0
+    except Exception as exc:
+        hint = _config_load_hint(config_path, exc)
+        message = f"Failed to load config: {exc}. {hint}"
+        console.print(message)
+        log_startup_func(message)
+        return None, CONFIG_LOAD_EXIT_CODE
 
 
 def _poll_ui_readiness(
@@ -191,12 +211,16 @@ def run(
         config_path = Path(find_config_file() or "config.toml")
         ctx["config_path"] = config_path
         if config is None:
-            config = load_config(config_path)
+            config, cfg_code = _load_config_with_hint(load_config, config_path, log_startup_func=log_startup)
+            if cfg_code:
+                return cfg_code
             ctx["config"] = config
     elif config is None:
         from solhunter_zero.config import load_config
 
-        config = load_config(config_path)
+        config, cfg_code = _load_config_with_hint(load_config, config_path, log_startup_func=log_startup)
+        if cfg_code:
+            return cfg_code
         ctx["config"] = config
 
     # Log useful paths
