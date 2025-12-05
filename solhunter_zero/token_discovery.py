@@ -41,16 +41,50 @@ def _is_fast_mode() -> bool:
     return os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 
 
-def _env_float(name: str, default: str, *, fast_default: float | None = None) -> float:
+def _env_float(
+    name: str,
+    default: str,
+    *,
+    fast_default: float | None = None,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
     raw = os.getenv(name)
+    default_value = float(default)
     if raw is None or raw == "":
         if fast_default is not None and _is_fast_mode():
-            return float(fast_default)
-        raw = default
-    try:
-        value = float(raw)
-    except Exception:
-        value = float(default)
+            raw = fast_default
+            try:
+                value = float(raw)
+            except Exception:
+                value = default_value
+        else:
+            raw = default
+            value = default_value
+    else:
+        try:
+            value = float(raw)
+        except Exception:
+            value = default_value
+
+    if minimum is not None and value < minimum:
+        logger.warning(
+            "Environment variable %s=%s below minimum %.3f; using default %.3f",
+            name,
+            raw,
+            minimum,
+            default_value,
+        )
+        return max(default_value, minimum)
+    if maximum is not None and value > maximum:
+        logger.warning(
+            "Environment variable %s=%s above maximum %.3f; using default %.3f",
+            name,
+            raw,
+            maximum,
+            default_value,
+        )
+        return min(default_value, maximum)
     return value
 
 
@@ -96,11 +130,15 @@ class _DiscoverySettings:
 
     @property
     def min_volume(self) -> float:
-        return _env_float("DISCOVERY_MIN_VOLUME_USD", "50000", fast_default=0.0)
+        return _env_float(
+            "DISCOVERY_MIN_VOLUME_USD", "50000", fast_default=0.0, minimum=0.0
+        )
 
     @property
     def min_liquidity(self) -> float:
-        return _env_float("DISCOVERY_MIN_LIQUIDITY_USD", "75000", fast_default=0.0)
+        return _env_float(
+            "DISCOVERY_MIN_LIQUIDITY_USD", "75000", fast_default=0.0, minimum=0.0
+        )
 
     @property
     def max_tokens(self) -> int:
@@ -112,11 +150,11 @@ class _DiscoverySettings:
 
     @property
     def overfetch_factor(self) -> float:
-        return _env_float("DISCOVERY_OVERFETCH_FACTOR", "0.8")
+        return _env_float("DISCOVERY_OVERFETCH_FACTOR", "0.8", minimum=0.1, maximum=5.0)
 
     @property
     def cache_ttl(self) -> float:
-        return _env_float("DISCOVERY_CACHE_TTL", "45")
+        return _env_float("DISCOVERY_CACHE_TTL", "45", minimum=1.0)
 
     @property
     def max_offset(self) -> int:
@@ -132,7 +170,7 @@ class _DiscoverySettings:
 
     @property
     def warm_timeout(self) -> float:
-        return _env_float("DISCOVERY_WARM_TIMEOUT", "5")
+        return _env_float("DISCOVERY_WARM_TIMEOUT", "5", minimum=0.1)
 
     @property
     def birdeye_retries(self) -> int:
@@ -140,11 +178,11 @@ class _DiscoverySettings:
 
     @property
     def birdeye_backoff(self) -> float:
-        return _env_float("DISCOVERY_BIRDEYE_BACKOFF", "1.0")
+        return _env_float("DISCOVERY_BIRDEYE_BACKOFF", "1.0", minimum=0.0, maximum=60.0)
 
     @property
     def birdeye_backoff_max(self) -> float:
-        return _env_float("DISCOVERY_BIRDEYE_BACKOFF_MAX", "8.0")
+        return _env_float("DISCOVERY_BIRDEYE_BACKOFF_MAX", "8.0", minimum=0.0, maximum=120.0)
 
     @property
     def enable_dexscreener(self) -> bool:
@@ -160,11 +198,11 @@ class _DiscoverySettings:
 
     @property
     def dexscreener_timeout(self) -> float:
-        return _env_float("DEXSCREENER_TIMEOUT", "8.0")
+        return _env_float("DEXSCREENER_TIMEOUT", "8.0", minimum=0.1)
 
     @property
     def dexscreener_max_age(self) -> float:
-        return _env_float("DEXSCREENER_MAX_AGE_SECONDS", "3600")
+        return _env_float("DEXSCREENER_MAX_AGE_SECONDS", "3600", minimum=1.0)
 
     @property
     def enable_raydium(self) -> bool:
@@ -172,7 +210,7 @@ class _DiscoverySettings:
 
     @property
     def raydium_timeout(self) -> float:
-        return _env_float("RAYDIUM_TIMEOUT", "2.0")
+        return _env_float("RAYDIUM_TIMEOUT", "2.0", minimum=0.1)
 
     @property
     def enable_meteora(self) -> bool:
@@ -187,7 +225,7 @@ class _DiscoverySettings:
 
     @property
     def meteora_timeout(self) -> float:
-        return _env_float("METEORA_TIMEOUT", "8.0")
+        return _env_float("METEORA_TIMEOUT", "8.0", minimum=0.1)
 
     @property
     def enable_dexlab(self) -> bool:
@@ -199,7 +237,7 @@ class _DiscoverySettings:
 
     @property
     def dexlab_timeout(self) -> float:
-        return _env_float("DEXLAB_TIMEOUT", "8.0")
+        return _env_float("DEXLAB_TIMEOUT", "8.0", minimum=0.1)
 
     @property
     def enable_solscan(self) -> bool:
@@ -221,7 +259,7 @@ class _DiscoverySettings:
 
     @property
     def solscan_timeout(self) -> float:
-        return _env_float("DISCOVERY_SOLSCAN_TIMEOUT", "6.0")
+        return _env_float("DISCOVERY_SOLSCAN_TIMEOUT", "6.0", minimum=0.1)
 
     @property
     def solscan_enrich_limit(self) -> int:
@@ -233,15 +271,15 @@ class _DiscoverySettings:
 
     @property
     def orca_timeout(self) -> float:
-        return _env_float("ORCA_TIMEOUT", "2.0")
+        return _env_float("ORCA_TIMEOUT", "2.0", minimum=0.1)
 
     @property
     def orca_catalog_ttl(self) -> float:
-        return _env_float("ORCA_CATALOG_TTL", "600")
+        return _env_float("ORCA_CATALOG_TTL", "600", minimum=1.0)
 
     @property
     def stage_b_score_threshold(self) -> float:
-        return _env_float("DISCOVERY_STAGE_B_THRESHOLD", "0.65")
+        return _env_float("DISCOVERY_STAGE_B_THRESHOLD", "0.65", minimum=0.0, maximum=1.0)
 
     @property
     def stage_b_min_sources(self) -> int:
@@ -249,11 +287,11 @@ class _DiscoverySettings:
 
     @property
     def solscan_negative_ttl(self) -> float:
-        return _env_float("SOLSCAN_NEGATIVE_TTL", "1800")
+        return _env_float("SOLSCAN_NEGATIVE_TTL", "1800", minimum=1.0)
 
     @property
     def trending_min_liquidity(self) -> float:
-        return _env_float("TRENDING_MIN_LIQUIDITY_USD", "7500")
+        return _env_float("TRENDING_MIN_LIQUIDITY_USD", "7500", minimum=0.0)
 
 
 SETTINGS = _DiscoverySettings()
