@@ -12,6 +12,7 @@ import math
 import os
 import socket
 import ssl
+import signal
 import subprocess
 import sys
 import threading
@@ -1876,6 +1877,7 @@ _WS_CHANNELS: dict[str, _WebsocketState] = {
 }
 
 _WS_CHANNEL_LOCK = threading.Lock()
+_SHUTDOWN_EVENT = threading.Event()
 
 # Tracks the most recent auto-generated websocket configuration that
 # ``start_websockets`` injected into the environment (URLs, ports, etc.). This
@@ -2956,13 +2958,13 @@ def build_ui_manifest(req: Request | None = None) -> Dict[str, Any]:
         ui_port_value = os.getenv("UI_PORT") or os.getenv("PORT")
         manifest["ui_port"] = _parse_port(ui_port_value, DEFAULT_UI_PORT)
     return manifest
-def _shutdown_state(state: _WebsocketState) -> None:
+
+
+def _stop_ws_channel(state: _WebsocketState) -> None:
+    """Request the websocket loop for ``state`` to stop and wait for it."""
+
     loop = state.loop
     if loop is None:
-        state.ready.clear()
-        if state.ready_status != "failed":
-            state.ready_status = "stopped"
-            state.ready_detail = None
         return
 
     def _stop_loop() -> None:
@@ -2972,6 +2974,14 @@ def _shutdown_state(state: _WebsocketState) -> None:
     thread = state.thread
     if thread is not None:
         thread.join(timeout=2)
+
+
+def _shutdown_state(state: _WebsocketState) -> None:
+    _stop_ws_channel(state)
+    loop = state.loop
+    if loop is not None and loop.is_closed():
+        state.loop = None
+
     state.thread = None
     state.host = None
     state.ready.clear()
@@ -4891,6 +4901,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     state = UIState()
     _seed_state_from_snapshots(state, args.snapshot_dir)
 
+    _SHUTDOWN_EVENT.clear()
+
+    def _request_shutdown(signum: int, _frame: object | None = None) -> None:
+        log.info("Received signal %s; initiating shutdown", signum)
+        _SHUTDOWN_EVENT.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _request_shutdown)
+        except Exception:  # pragma: no cover - platform limitations
+            pass
+
     server = UIServer(state, host=args.host, port=args.port)
     ws_threads: dict[str, threading.Thread] | None = None
     try:
@@ -4924,14 +4946,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.snapshot_dir:
             print(f"Seeded UI state from {args.snapshot_dir}", flush=True)
         try:
-            while True:
-                time.sleep(1)
+            while not _SHUTDOWN_EVENT.is_set():
+                _SHUTDOWN_EVENT.wait(1.0)
         except KeyboardInterrupt:
             print("Stopping SolHunter UI server...", flush=True)
+            _SHUTDOWN_EVENT.set()
     finally:
         if ws_threads is not None:
             with contextlib.suppress(Exception):
                 stop_websockets()
+            for thread in ws_threads.values():
+                if thread is not None:
+                    thread.join(timeout=2)
         server.stop()
 
 
