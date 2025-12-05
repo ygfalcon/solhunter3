@@ -2130,6 +2130,83 @@ def test_run_summary_rows_include_ui(monkeypatch):
     assert any(msg.startswith("UI readiness unhealthy") for msg in logs)
 
 
+def test_poll_ui_readiness_retries_until_healthy(monkeypatch):
+    import types
+
+    _stub_rich(monkeypatch)
+
+    from solhunter_zero import startup_runner
+
+    attempts: list[int] = []
+
+    class DummyChecker:
+        def __init__(self):
+            self.targets = [
+                {"name": "ui-http", "url": "http://localhost:5001", "type": "http"}
+            ]
+
+        async def check_all(self):
+            attempts.append(1)
+            ready = len(attempts) >= 2
+            return [
+                types.SimpleNamespace(
+                    name="ui-http", ok=ready, error=None if ready else "booting", status=None, status_code=None
+                )
+            ]
+
+    monkeypatch.setattr(
+        "solhunter_zero.production.connectivity.ConnectivityChecker", DummyChecker
+    )
+    monkeypatch.setattr(startup_runner.time, "sleep", lambda *_: None)
+
+    ready, summary, targets, results = startup_runner._poll_ui_readiness(
+        timeout=1.0, interval=0.01, target_timeout=0.5
+    )
+
+    assert ready is True
+    assert len(attempts) == 2
+    assert "ui-http: OK" in summary
+    assert targets["ui-http"] == "http://localhost:5001"
+    assert results and getattr(results[-1], "ok", False)
+
+
+def test_poll_ui_readiness_enforces_target_timeout(monkeypatch):
+    import asyncio
+    import types
+
+    _stub_rich(monkeypatch)
+
+    from solhunter_zero import startup_runner
+
+    class SlowChecker:
+        def __init__(self):
+            self.targets = [
+                {"name": "ui-http", "url": "http://localhost:5001", "type": "http"}
+            ]
+
+        async def check_all(self):
+            await asyncio.sleep(0.05)
+            return [
+                types.SimpleNamespace(
+                    name="ui-http", ok=False, error="slow", status=None, status_code=None
+                )
+            ]
+
+    monkeypatch.setattr(
+        "solhunter_zero.production.connectivity.ConnectivityChecker", SlowChecker
+    )
+    monkeypatch.setattr(startup_runner.time, "sleep", lambda *_: None)
+
+    ready, summary, targets, results = startup_runner._poll_ui_readiness(
+        timeout=0.05, interval=0.01, target_timeout=0.01
+    )
+
+    assert ready is False
+    assert "timed out" in summary
+    assert targets["ui-http"] == "http://localhost:5001"
+    assert results == []
+
+
 def test_launch_only_sets_env_when_offline(monkeypatch):
     from types import SimpleNamespace
     from solhunter_zero import startup_runner
