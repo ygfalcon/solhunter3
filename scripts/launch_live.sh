@@ -1258,7 +1258,14 @@ acquire_runtime_lock() {
   stop_runtime_lock_refresher
   local output
   local acquire_status=0
-  output=$("$PYTHON_BIN" - <<'PY'
+  local max_attempts=${RUNTIME_LOCK_MAX_ATTEMPTS:-3}
+  local attempt=1
+  local backoff_seconds=${RUNTIME_LOCK_RETRY_INITIAL_BACKOFF:-1}
+  local backoff_cap=${RUNTIME_LOCK_RETRY_MAX_BACKOFF:-8}
+
+  while (( attempt <= max_attempts )); do
+    log_info "Attempting to acquire runtime lock (attempt ${attempt}/${max_attempts})"
+    output=$("$PYTHON_BIN" - <<'PY'
 import json
 import os
 import socket
@@ -1378,13 +1385,29 @@ if not lock_set:
 print(f"{key} {token}")
 PY
 )
-  acquire_status=$?
-  if (( acquire_status == EXIT_SOCKET )); then
-    exit $EXIT_SOCKET
-  elif (( acquire_status != 0 )); then
-    log_warn "Failed to acquire runtime lock"
-    exit $EXIT_HEALTH
-  fi
+    acquire_status=$?
+    if (( acquire_status == EXIT_SOCKET )); then
+      stop_runtime_lock_refresher
+      exit $EXIT_SOCKET
+    elif (( acquire_status == 0 )); then
+      break
+    fi
+
+    log_warn "Failed to acquire runtime lock (attempt ${attempt}/${max_attempts})"
+    if (( attempt >= max_attempts )); then
+      stop_runtime_lock_refresher
+      exit $EXIT_HEALTH
+    fi
+
+    local sleep_seconds=$backoff_seconds
+    log_info "Retrying runtime lock acquisition after ${sleep_seconds}s"
+    sleep "$sleep_seconds"
+    backoff_seconds=$(( backoff_seconds * 2 ))
+    if (( backoff_seconds > backoff_cap )); then
+      backoff_seconds=$backoff_cap
+    fi
+    ((attempt++))
+  done
   RUNTIME_LOCK_KEY=$(echo "$output" | awk '{print $1}')
   RUNTIME_LOCK_TOKEN=$(echo "$output" | awk '{print $2}')
   if [[ -z ${RUNTIME_LOCK_KEY:-} || -z ${RUNTIME_LOCK_TOKEN:-} ]]; then
