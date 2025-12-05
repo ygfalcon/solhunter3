@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import types
+import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from queue import Empty, Queue
 import tempfile
 from typing import Any, Callable, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlparse, urlunparse
+from urllib.error import URLError
 from weakref import WeakSet
 
 from redis import Redis
@@ -4527,6 +4529,10 @@ def create_app(state: UIState | None = None) -> Flask:
         }
         return jsonify(payload)
 
+    @app.get("/healthz")
+    def healthz() -> Any:
+        return health()
+
     @app.get("/health/runtime")
     def health_runtime_view() -> Any:
         payload = state.snapshot_health()
@@ -4740,6 +4746,19 @@ class UIServer:
                 raise result
 
             _register_ui_server(self)
+            serve_started = self._serve_forever_started.wait(timeout=ready_timeout)
+            if not serve_started:
+                self.stop()
+                raise RuntimeError(
+                    "UI server failed to start serving requests within the ready timeout"
+                )
+
+            try:
+                self._assert_http_health_ready(timeout=ready_timeout)
+            except Exception:
+                self.stop()
+                raise
+
             startup_succeeded = True
         finally:
             if not startup_succeeded:
@@ -4769,6 +4788,42 @@ class UIServer:
     @property
     def ready_timeout(self) -> float:
         return self._ready_timeout
+
+    def _assert_http_health_ready(self, timeout: float) -> None:
+        host = self.host or "127.0.0.1"
+        if ":" in host and not host.startswith("["):
+            host_for_url = f"[{host}]"
+        else:
+            host_for_url = host
+
+        url = f"{self.scheme}://{host_for_url}:{self.port}/healthz"
+
+        opener: urllib.request.OpenerDirector | None = None
+        if self.scheme == "https":
+            context = None
+            if parse_bool_env("UI_ALLOW_SELF_SIGNED", default=False):
+                context = ssl._create_unverified_context()
+            opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+
+        try:
+            if opener is None:
+                response = urllib.request.urlopen(url, timeout=timeout)
+            else:
+                response = opener.open(url, timeout=timeout)
+        except URLError as exc:
+            raise RuntimeError(f"UI health check failed for {url}: {exc.reason}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"UI health check failed for {url}: {exc}") from exc
+
+        with contextlib.closing(response):
+            status = getattr(response, "status", None)
+            if status is None:
+                status = response.getcode()
+
+            if status != 200:
+                raise RuntimeError(
+                    f"UI health check returned unexpected status {status} for {url}"
+                )
 
 
 def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
