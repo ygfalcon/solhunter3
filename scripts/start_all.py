@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -642,6 +643,31 @@ def _resolve_runtime_ready_url(args: argparse.Namespace) -> str | None:
     return urlunparse((scheme, netloc, path, "", "", ""))
 
 
+def _resolve_ui_endpoint_hint(log_path: Path, ui_host: str, ui_port: str | int) -> str:
+    """Return the last seen UI_READY URL or a best-effort fallback."""
+
+    try:
+        with log_path.open("rb") as handle:
+            try:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(-min(size, 64 * 1024), os.SEEK_END)
+            except OSError:
+                handle.seek(0)
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        tail = ""
+
+    for line in reversed(tail.splitlines()):
+        if "UI_READY" not in line:
+            continue
+        match = re.search(r"url=([^ ]+)", line)
+        if match:
+            return match.group(1)
+
+    return f"http://{ui_host}:{ui_port}"
+
+
 def _terminate_process(proc: subprocess.Popen[Any]) -> None:
     """Best-effort termination of a spawned subprocess."""
 
@@ -808,9 +834,11 @@ def launch_detached(args: argparse.Namespace, cfg_path: str) -> int:
                     time.sleep(interval)
             else:
                 _terminate_process(proc)
+                endpoint_hint = _resolve_ui_endpoint_hint(log_path, ui_host, ui_port)
                 raise RuntimeError(
                     "Runtime readiness check timed out after "
-                    f"{retries} attempts (~{retries * interval:.1f}s): {last_msg}"
+                    f"{retries} attempts (~{retries * interval:.1f}s): {last_msg}; "
+                    f"last_ui_endpoint={endpoint_hint}"
                 )
 
         return 0
