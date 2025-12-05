@@ -2348,6 +2348,49 @@ for requirement in required_key_sets:
             report += f" Hint: {requirement['hint']}"
         required_reports.append(report)
 
+# Hard requirements that must always be present and populated before launching.
+required_schema = [
+    {
+        "keys": ["SOLANA_RPC_URL"],
+        "description": "HTTPS RPC endpoint for the target Solana cluster",
+    },
+    {
+        "keys": ["SOLANA_WS_URL"],
+        "description": "Websocket RPC endpoint for the target Solana cluster",
+    },
+    {
+        "keys": ["KEYPAIR_PATH", "SOLANA_KEYPAIR"],
+        "description": "Path to the signer keypair JSON used for live trading",
+    },
+    {
+        "keys": [
+            "BROKER_URL",
+            "BROKER_URLS",
+            "BROKER_WS_URLS",
+            "BROKER_URLS_JSON",
+            "EVENT_BUS_URL",
+        ],
+        "description": "Broker or event bus endpoint used for publishing runtime events",
+    },
+    {
+        "keys": ["UI_HEALTH_URL"],
+        "description": "HTTP health endpoint for the UI service",
+    },
+    {
+        "keys": ["RL_HEALTH_URL"],
+        "description": "Health endpoint for the RL daemon",
+    },
+]
+
+for schema_entry in required_schema:
+    names = schema_entry["keys"]
+    if any(values.get(name, "").strip() for name in names):
+        continue
+    formatted_names = " or ".join(names)
+    required_reports.append(
+        f"{formatted_names} ({schema_entry['description']}) is required and must contain a real value."
+    )
+
 required_sections = [
     (
         "Helius credentials",
