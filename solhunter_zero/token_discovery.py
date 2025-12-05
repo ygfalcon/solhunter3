@@ -729,6 +729,17 @@ def _resolve_birdeye_api_key() -> str:
     )
 
 
+def _validate_discovery_configuration() -> None:
+    """Validate required discovery configuration synchronously.
+
+    This is intended to fail fast before async discovery tasks are scheduled so
+    operators receive actionable feedback immediately when required keys are
+    absent.
+    """
+
+    _resolve_birdeye_api_key()
+
+
 def _cache_get(key: str) -> List[TokenEntry] | None:
     with _CACHE_LOCK:
         try:
@@ -2439,6 +2450,8 @@ def discover_candidates(
     mempool_threshold: float | None = None,
 ) -> _DiscoveryResult:
     """Combine BirdEye numeric candidates with mempool signals and rank."""
+
+    _validate_discovery_configuration()
 
     if limit is None or limit <= 0:
         limit = SETTINGS.max_tokens
