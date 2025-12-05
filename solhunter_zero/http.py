@@ -22,6 +22,14 @@ USE_ORJSON = _json is not _json_std
 logger = logging.getLogger(__name__)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    try:
+        return float(raw) if raw not in {None, ""} else float(default)
+    except Exception:
+        return float(default)
+
+
 class HTTPError(Exception):
     """Raised when an HTTP request returns a non-success status code."""
 
@@ -345,6 +353,95 @@ def _controller_for(host: str) -> _HostController:
     return controller
 
 
+# ---------------------------------------------------------------------------
+# Shared discovery breaker (HTTP provider failures)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _SharedBreakerConfig:
+    threshold: int
+    window_sec: float
+    cooldown_sec: float
+
+
+class _SharedBreaker:
+    def __init__(self, config: _SharedBreakerConfig) -> None:
+        self.config = config
+        self._failures: list[float] = []
+        self._opened_until: float = 0.0
+        self._openings: int = 0
+        self._last_log: float = 0.0
+
+    def _prune(self) -> None:
+        now = time.monotonic()
+        cutoff = now - self.config.window_sec
+        if cutoff <= 0:
+            return
+        self._failures = [ts for ts in self._failures if ts >= cutoff]
+
+    def _notify_open(self, duration: float) -> None:
+        self._openings += 1
+        now = time.monotonic()
+        if now - self._last_log > 1.0:
+            logger.warning(
+                "Discovery HTTP circuit open for %.1fs after repeated failures",
+                duration,
+            )
+            self._last_log = now
+
+    @property
+    def is_open(self) -> bool:
+        self._prune()
+        now = time.monotonic()
+        if self._opened_until and now >= self._opened_until:
+            self._opened_until = 0.0
+            self._failures.clear()
+            return False
+        return bool(self._opened_until and now < self._opened_until)
+
+    def record_success(self) -> None:
+        self._failures.clear()
+        if self._opened_until and self._opened_until <= time.monotonic():
+            self._opened_until = 0.0
+
+    def record_failure(self) -> None:
+        self._prune()
+        now = time.monotonic()
+        self._failures.append(now)
+        if len(self._failures) >= self.config.threshold:
+            already_open = self.is_open
+            self._opened_until = max(self._opened_until, now + self.config.cooldown_sec)
+            if not already_open:
+                self._notify_open(self.config.cooldown_sec)
+
+    def snapshot(self) -> dict[str, float | int | bool]:
+        self._prune()
+        now = time.monotonic()
+        remaining = max(0.0, self._opened_until - now) if self._opened_until else 0.0
+        return {
+            "open": self.is_open,
+            "cooldown_remaining": remaining,
+            "failure_count": len(self._failures),
+            "openings": self._openings,
+            "threshold": self.config.threshold,
+            "window_sec": self.config.window_sec,
+            "cooldown_sec": self.config.cooldown_sec,
+        }
+
+
+def _shared_breaker_config() -> _SharedBreakerConfig:
+    return _SharedBreakerConfig(
+        threshold=max(1, int(os.getenv("DISCOVERY_HTTP_BREAKER_FAILS", "5") or 5)),
+        window_sec=max(1.0, _env_float("DISCOVERY_HTTP_BREAKER_WINDOW", 30.0)),
+        cooldown_sec=max(1.0, _env_float("DISCOVERY_HTTP_BREAKER_COOLDOWN", 60.0)),
+    )
+
+
+_SHARED_BREAKER = _SharedBreaker(_shared_breaker_config())
+
+
+
 @asynccontextmanager
 async def host_request(url: str) -> AsyncIterator[_HostConfig]:
     """Context manager guarding a request to *url*'s host."""
@@ -367,6 +464,28 @@ async def host_request(url: str) -> AsyncIterator[_HostConfig]:
             controller.record_success()
 
 
+@asynccontextmanager
+async def provider_request(url: str) -> AsyncIterator[_HostConfig]:
+    """Context manager that applies host guard rails and shared breaker."""
+
+    if _SHARED_BREAKER.is_open:
+        raise HostCircuitOpenError("shared discovery circuit open")
+    async with host_request(url) as cfg:
+        try:
+            yield cfg
+        except Exception:
+            _SHARED_BREAKER.record_failure()
+            raise
+        else:
+            _SHARED_BREAKER.record_success()
+
+
+def http_breaker_state() -> dict[str, float | int | bool]:
+    """Expose the shared HTTP breaker telemetry for monitoring/metrics."""
+
+    return _SHARED_BREAKER.snapshot()
+
+
 def host_retry_config(url: str) -> tuple[int, float]:
     """Return ``(max_attempts, backoff_seconds)`` for *url*."""
 
@@ -387,7 +506,7 @@ async def fetch_json(url: str, method: str = "GET", **kwargs: Any) -> Any:
     last_error: Exception | None = None
     while attempt < attempts:
         try:
-            async with host_request(url):
+            async with provider_request(url):
                 async with sess.request(method, url, **kwargs) as response:
                     if response.status >= 400:
                         text = await response.text()
@@ -416,6 +535,8 @@ __all__ = [
     "close_session",
     "fetch_json",
     "host_request",
+    "provider_request",
+    "http_breaker_state",
     "host_retry_config",
     "HostCircuitOpenError",
 ]
