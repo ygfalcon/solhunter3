@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 def resolve_discovery_limit(*, default: int = 60) -> int:
     """Return a validated discovery limit from the environment.
 
-    A resolved limit of zero disables active discovery.
+    A resolved limit of zero disables active discovery. Values are clamped to the
+    inclusive range [0, 500] to avoid accidental runaway or disabled discovery.
     """
 
     raw_value = os.getenv("DISCOVERY_LIMIT")
@@ -53,7 +54,7 @@ def resolve_discovery_limit(*, default: int = 60) -> int:
         return default
 
     try:
-        return int(text)
+        resolved = int(text)
     except (TypeError, ValueError):
         logger.warning(
             "Invalid DISCOVERY_LIMIT=%r; defaulting to %d",
@@ -61,6 +62,16 @@ def resolve_discovery_limit(*, default: int = 60) -> int:
             default,
         )
         return default
+
+    if resolved < 0:
+        logger.warning("Discovery limit %d below 0; clamping to 0", resolved)
+        return 0
+
+    if resolved > 500:
+        logger.warning("Discovery limit %d above 500; clamping to 500", resolved)
+        return 500
+
+    return resolved
 
 try:
     from ..token_scanner import enrich_tokens_async, scan_tokens_async
