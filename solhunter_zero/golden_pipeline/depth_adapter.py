@@ -168,7 +168,12 @@ class GoldenDepthAdapter:
             ttl_value = float(cache_ttl)
         except Exception:
             ttl_value = 10.0
-        self._cache_ttl = max(0.5, ttl_value)
+        self._cache_ttl = max(1.0, ttl_value)
+        if ttl_value < 1.0:
+            logger.warning(
+                "depth cache_ttl %.3fs too low; using minimum 1s to avoid provider hammering",
+                ttl_value,
+            )
         self._activity: MutableMapping[str, tuple[float, float]] = {}
         self._cache: MutableMapping[str, tuple[float, DepthSnapshot]] = {}
         self._cache_warned: MutableMapping[str, float] = {}

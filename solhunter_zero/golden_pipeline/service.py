@@ -49,6 +49,20 @@ def _parse_float(value: Any) -> float | None:
         return None
 
 
+_DEPTH_CACHE_TTL_MIN = 1.0
+
+
+def _normalize_depth_cache_ttl(candidate: float, source: str) -> float:
+    if candidate < _DEPTH_CACHE_TTL_MIN:
+        log.warning(
+            "%s depth_cache_ttl %.3fs too low; using minimum %.1fs",
+            source,
+            candidate,
+            _DEPTH_CACHE_TTL_MIN,
+        )
+    return max(_DEPTH_CACHE_TTL_MIN, candidate)
+
+
 def _resolve_depth_cache_ttl(config: Mapping[str, Any] | None) -> float:
     default = 10.0
     env_name = None
@@ -62,7 +76,7 @@ def _resolve_depth_cache_ttl(config: Mapping[str, Any] | None) -> float:
     if env_value is not None:
         parsed_env = _parse_float(env_value)
         if parsed_env is not None and parsed_env > 0:
-            return max(0.5, parsed_env)
+            return _normalize_depth_cache_ttl(parsed_env, f"Env {env_name}")
         log.warning(
             "Invalid %s=%r; falling back to default %.1f s",
             env_name,
@@ -85,7 +99,7 @@ def _resolve_depth_cache_ttl(config: Mapping[str, Any] | None) -> float:
                 candidate = depth_cfg.get("cache_ttl") or depth_cfg.get("depth_cache_ttl")
     parsed = _parse_float(candidate)
     if parsed is not None and parsed > 0:
-        return max(0.5, parsed)
+        return _normalize_depth_cache_ttl(parsed, "Config")
     if candidate is not None:
         log.warning(
             "Invalid depth_cache_ttl=%r in config; using default %.1f s",
