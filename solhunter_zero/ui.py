@@ -138,8 +138,8 @@ def _generate_self_signed_cert(base_path: Path) -> tuple[Path, Path]:
     return cert_path, key_path
 
 
-def _build_http_ssl_context() -> ssl.SSLContext | None:
-    """Return an SSL context for the UI HTTP server when certificates are provided.
+def _build_http_ssl_context() -> tuple[ssl.SSLContext | None, str, str | None]:
+    """Return an SSL context (if any), the resolved scheme, and TLS description.
 
     If :envvar:`UI_HTTP_SCHEME` (or :envvar:`UI_SCHEME`) is set to ``https`` but no
     certificate material is available, a :class:`RuntimeError` is raised with
@@ -165,6 +165,8 @@ def _build_http_ssl_context() -> ssl.SSLContext | None:
         or "http"
     ).strip().lower()
 
+    tls_details: str | None = None
+
     allow_self_signed = parse_bool_env("UI_ALLOW_SELF_SIGNED", default=False)
 
     if cert_path or key_path:
@@ -177,7 +179,8 @@ def _build_http_ssl_context() -> ssl.SSLContext | None:
             context.load_cert_chain(certfile=cert_path, keyfile=key_path or None)
         except Exception as exc:
             raise RuntimeError(f"Failed to load UI TLS certificate: {exc}") from exc
-        return context
+        tls_details = f"certificate {cert_path}"
+        return context, "https", tls_details
 
     if scheme == "https":
         if allow_self_signed:
@@ -190,13 +193,15 @@ def _build_http_ssl_context() -> ssl.SSLContext | None:
             except Exception as exc:  # pragma: no cover - unlikely with fresh cert
                 raise RuntimeError(f"Failed to load UI TLS certificate: {exc}") from exc
 
+            tls_details = f"self-signed certificate at {cert_path}"
+
             log.warning(
                 "UI_HTTP_SCHEME=https set without certificate material; generated a "
                 "temporary self-signed certificate at %s because UI_ALLOW_SELF_SIGNED=1. "
                 "Use UI_HTTP_CERT_FILE/UI_HTTP_KEY_FILE or terminate TLS upstream for production.",
                 cert_path,
             )
-            return context
+            return context, "https", tls_details
 
         raise RuntimeError(
             "UI_HTTP_SCHEME=https requires TLS termination or UI_HTTP_CERT_FILE/UI_HTTP_KEY_FILE. "
@@ -204,7 +209,7 @@ def _build_http_ssl_context() -> ssl.SSLContext | None:
             "temporary certificate."
         )
 
-    return None
+    return None, scheme, tls_details
 
 if Counter is not None:  # pragma: no branch - optional metrics
     _WS_QUEUE_DROP_TOTAL = Counter(
@@ -4494,6 +4499,8 @@ class UIServer:
         self._server: Optional[BaseWSGIServer] = None
         self._serve_forever_started = threading.Event()
         self._ready_timeout = DEFAULT_UI_HTTP_READY_TIMEOUT
+        self.scheme: str = "http"
+        self.tls_details: str | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -4508,7 +4515,9 @@ class UIServer:
             server: BaseWSGIServer | None = None
             reuse_enabled = False
             try:
-                ssl_context = _build_http_ssl_context()
+                ssl_context, scheme, tls_details = _build_http_ssl_context()
+                self.scheme = scheme
+                self.tls_details = tls_details
 
                 server = make_server(self.host, self.port, self.app)
 
@@ -4842,8 +4851,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"Failed to start UI websockets: {exc}", file=sys.stderr, flush=True)
             raise SystemExit(1) from exc
 
-        url = f"http://{args.host}:{args.port}"
-        print(f"Solsniper Zero UI listening on {url}", flush=True)
+        scheme = getattr(server, "scheme", "http")
+        url = f"{scheme}://{server.host}:{server.port}"
+        tls_hint = getattr(server, "tls_details", None)
+        if tls_hint:
+            print(
+                f"Solsniper Zero UI listening on {url} ({tls_hint})",
+                flush=True,
+            )
+        else:
+            print(f"Solsniper Zero UI listening on {url}", flush=True)
         if args.snapshot_dir:
             print(f"Seeded UI state from {args.snapshot_dir}", flush=True)
         try:
