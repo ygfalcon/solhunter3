@@ -495,25 +495,37 @@ _SCORING_DEFAULT = {
 }
 
 
-def _resolve_weights_path() -> Path:
+def _resolve_weights_path() -> tuple[Path, Path | None]:
     configured = os.getenv("DISCOVERY_SCORE_WEIGHTS")
-    if configured:
-        candidate = Path(configured).expanduser()
-        if candidate.exists():
-            return candidate
     default = Path(__file__).resolve().parents[1] / "configs" / "discovery_score_weights.yaml"
-    return default
+    if configured:
+        return Path(configured).expanduser(), default
+    return default, None
 
 
 def _load_scoring_weights() -> tuple[float, Dict[str, float]]:
     bias = float(_SCORING_DEFAULT["bias"])
     weights = dict(_SCORING_DEFAULT["weights"])
-    path = _resolve_weights_path()
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            payload = yaml.safe_load(fh) or {}
-    except Exception:
-        payload = {}
+    primary_path, fallback_path = _resolve_weights_path()
+
+    payload: Dict[str, Any] = {}
+    for path in (primary_path, fallback_path):
+        if path is None:
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                payload = yaml.safe_load(fh) or {}
+            break
+        except FileNotFoundError:
+            logger.warning(
+                "Discovery scoring weights file %s not found; using defaults", path
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to load discovery scoring weights from %s: %s; using defaults",
+                path,
+                exc,
+            )
     try:
         bias = float(payload.get("bias", bias))
     except Exception:
