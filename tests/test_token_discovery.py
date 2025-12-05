@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 import types
 
 import aiohttp
@@ -819,6 +820,44 @@ async def test_fetch_birdeye_tokens_success_parses_payload(monkeypatch):
     assert token["price"] == 1.5
     assert token["price_change"] == 12.5
     assert token["sources"] == ["birdeye"]
+
+
+def test_birdeye_cache_ttl_expiration(monkeypatch):
+    from solhunter_zero import token_discovery as td
+
+    td._cache_clear()
+    monkeypatch.setenv("DISCOVERY_CACHE_TTL", "0.01")
+
+    cache_key = td._current_cache_key(None)
+    td._cache_set(cache_key, [{"address": "Mint111", "sources": []}])
+    assert td._cache_get(cache_key) is not None
+
+    time.sleep(0.02)
+
+    assert td._cache_get(cache_key) is None
+
+
+def test_initialize_cache_state_clears_cache(monkeypatch):
+    from solhunter_zero import token_discovery as td
+
+    td._cache_clear()
+    cache_key = td._current_cache_key(None)
+    td._cache_set(cache_key, [{"address": "Mint222", "sources": []}])
+    assert td._cache_get(cache_key) is not None
+
+    cleared = False
+    original_clear = td._cache_clear
+
+    def _clear_marker():
+        nonlocal cleared
+        cleared = True
+        original_clear()
+
+    monkeypatch.setattr(td, "_cache_clear", _clear_marker)
+
+    td._initialize_cache_state()
+
+    assert cleared is True
 
 
 @pytest.mark.anyio("asyncio")
