@@ -2870,6 +2870,7 @@ wait_for_ready() {
   local log=$1
   local notify=$2
   local pid=${3:-}
+  local ui_pid=${4:-}
   local python_bin=${PYTHON_BIN:-python3}
   local waited=0
   local ui_seen=0
@@ -3187,6 +3188,14 @@ PY
     if [[ $ui_seen -eq 1 && $ui_ws_seen -eq 1 && $bus_seen -eq 1 && $golden_seen -eq 1 && $runtime_seen -eq 1 ]]; then
       return 0
     fi
+    if [[ -n $ui_pid && ( $ui_seen -eq 0 || $ui_ws_seen -eq 0 ) ]]; then
+      local ui_state=""
+      ui_state="$(ps -p "$ui_pid" -o stat= 2>/dev/null | tr -d '[:space:]' || true)"
+      if [[ $ui_state == Z* ]] || ! kill -0 "$ui_pid" >/dev/null 2>&1; then
+        print_log_excerpt "$log" "UI process $ui_pid exited before readiness markers"
+        return 1
+      fi
+    fi
     if [[ -n $pid ]] && ! kill -0 "$pid" >/dev/null 2>&1; then
       print_log_excerpt "$log" "Runtime process $pid exited early"
       return 1
@@ -3219,9 +3228,10 @@ PAPER_NOTIFY="$ARTIFACT_DIR/paper_ready"
 rm -f "$PAPER_NOTIFY"
 log_info "Launching runtime controller (mode=paper, log=$PAPER_LOG)"
 PAPER_PID=$(start_controller "paper" "$PAPER_LOG" "$PAPER_NOTIFY")
+PAPER_UI_PID=$PAPER_PID
 start_log_stream "$PAPER_LOG" "paper"
 log_info "Waiting for paper runtime readiness"
-if ! wait_for_ready "$PAPER_LOG" "$PAPER_NOTIFY" "$PAPER_PID"; then
+if ! wait_for_ready "$PAPER_LOG" "$PAPER_NOTIFY" "$PAPER_PID" "$PAPER_UI_PID"; then
   log_warn "Paper runtime failed to become ready"
   exit $EXIT_HEALTH
 fi
@@ -3451,9 +3461,10 @@ LIVE_NOTIFY="$ARTIFACT_DIR/live_ready"
 rm -f "$LIVE_NOTIFY"
 log_info "Launching runtime controller (mode=live, log=$LIVE_LOG)"
 LIVE_PID=$(start_controller "live" "$LIVE_LOG" "$LIVE_NOTIFY")
+LIVE_UI_PID=$LIVE_PID
 start_log_stream "$LIVE_LOG" "live"
 log_info "Waiting for live runtime readiness"
-if ! wait_for_ready "$LIVE_LOG" "$LIVE_NOTIFY" "$LIVE_PID"; then
+if ! wait_for_ready "$LIVE_LOG" "$LIVE_NOTIFY" "$LIVE_PID" "$LIVE_UI_PID"; then
   log_warn "Live runtime failed to become ready"
   exit $EXIT_HEALTH
 fi
