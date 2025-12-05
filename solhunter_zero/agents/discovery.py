@@ -521,6 +521,13 @@ class DiscoveryAgent:
 
         url = rpc_url or self.ws_url or self.rpc_url
         url = self._as_websocket_url(url) or self.ws_url or self.rpc_url
+        try:
+            url = self._validate_endpoint_url(url, kind="ws")
+        except ValueError as exc:
+            logger.error(
+                "Invalid websocket endpoint %r for mempool streaming: %s", url, exc
+            )
+            raise
         thresh = self.mempool_threshold if threshold is None else float(threshold)
         return stream_ranked_mempool_tokens_with_depth(url, threshold=thresh)
 
@@ -672,6 +679,37 @@ class DiscoveryAgent:
     @staticmethod
     def _as_websocket_url(url: Optional[str]) -> Optional[str]:
         return as_websocket_url(url)
+
+    @staticmethod
+    def _validate_endpoint_url(url: Optional[str], *, kind: str) -> str:
+        """Validate an RPC/WS endpoint, ensuring scheme, host, and port are sane."""
+
+        if not url or not isinstance(url, str) or not url.strip():
+            raise ValueError(f"{kind.upper()} endpoint is missing")
+
+        parsed = urllib.parse.urlparse(url.strip())
+        if not parsed.scheme:
+            raise ValueError(f"{kind.upper()} endpoint missing scheme")
+
+        allowed_schemes = {"rpc": {"http", "https"}, "ws": {"ws", "wss"}}
+        expected = allowed_schemes.get(kind, set())
+        if expected and parsed.scheme.lower() not in expected:
+            pretty = ", ".join(sorted(expected))
+            raise ValueError(
+                f"{kind.upper()} endpoint must use one of [{pretty}] schemes"
+            )
+
+        if not parsed.hostname:
+            raise ValueError(f"{kind.upper()} endpoint missing host")
+
+        try:
+            port = parsed.port
+        except ValueError:
+            raise ValueError(f"{kind.upper()} endpoint port is invalid") from None
+        if port is not None and (port <= 0 or port > 65535):
+            raise ValueError(f"{kind.upper()} endpoint port {port} out of range")
+
+        return url.strip()
 
     # ------------------------------------------------------------------
     # Core discovery API
@@ -1029,8 +1067,15 @@ class DiscoveryAgent:
 
         if method == "onchain":
             try:
+                rpc_url = self._validate_endpoint_url(self.rpc_url, kind="rpc")
+            except ValueError as exc:
+                logger.error(
+                    "Invalid RPC endpoint %r for on-chain discovery: %s", self.rpc_url, exc
+                )
+                return [], {}
+            try:
                 found = await scan_tokens_onchain(
-                    self.rpc_url,
+                    rpc_url,
                     return_metrics=True,
                     max_tokens=self.limit,
                 )
