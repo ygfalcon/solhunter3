@@ -2911,7 +2911,7 @@ cleanup() {
     terminate_runtime_pid "${LIVE_PID:-}" "live"
     terminate_runtime_pid "${PAPER_PID:-}" "paper"
   fi
-  if (( RUNTIME_LOCK_ATTEMPTED == 1 && RUNTIME_LOCK_ACQUIRED == 1 && RUNTIME_FS_LOCK_WRITTEN == 1 )); then
+  if (( RUNTIME_FS_LOCK_WRITTEN == 1 )); then
     if [[ -e $RUNTIME_FS_LOCK ]]; then
       local current_payload=""
       if [[ -r $RUNTIME_FS_LOCK ]]; then
@@ -2919,12 +2919,12 @@ cleanup() {
       fi
       current_payload=${current_payload//$'\r'/}
       current_payload=${current_payload//$'\n'/}
-      if [[ -z $RUNTIME_FS_LOCK_PAYLOAD ]]; then
-        log_info "Runtime filesystem lock $RUNTIME_FS_LOCK left in place (ownership unknown)"
-      elif [[ $current_payload != "$RUNTIME_FS_LOCK_PAYLOAD" ]]; then
-        log_info "Runtime filesystem lock $RUNTIME_FS_LOCK left in place (payload mismatch)"
-      elif rm -f "$RUNTIME_FS_LOCK"; then
-        log_info "Removed stale runtime filesystem lock ($RUNTIME_FS_LOCK)"
+      if rm -f "$RUNTIME_FS_LOCK"; then
+        if [[ -n $current_payload ]]; then
+          log_info "Removed runtime filesystem lock ($RUNTIME_FS_LOCK) with payload: $current_payload"
+        else
+          log_info "Removed runtime filesystem lock ($RUNTIME_FS_LOCK)"
+        fi
       else
         log_warn "Runtime filesystem lock $RUNTIME_FS_LOCK could not be removed automatically; remove it manually if the runtime is not running"
       fi
