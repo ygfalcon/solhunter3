@@ -2189,6 +2189,57 @@ def test_run_summary_rows_include_ui(monkeypatch):
     assert any(msg.startswith("UI readiness unhealthy") for msg in logs)
 
 
+def test_run_non_interactive_can_emit_summary(monkeypatch):
+    import types
+
+    _stub_rich(monkeypatch)
+    _stub_agent_manager(monkeypatch)
+    _stub_scripts(monkeypatch)
+
+    import solhunter_zero.startup_runner as startup_runner
+
+    logs: list[str] = []
+
+    def fake_log(msg: str) -> None:
+        logs.append(msg)
+
+    monkeypatch.setattr(startup_runner, "log_startup", fake_log)
+    monkeypatch.setattr(startup_runner, "log_startup_info", lambda **_: None)
+    monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", Path("startup.log"))
+    monkeypatch.setattr(startup_runner, "launch_only", lambda *a, **k: 0)
+
+    def fake_poll():
+        targets = {
+            "ui-http": "http://localhost:5001/",
+            "ui-ws": "ws://localhost:7001",
+        }
+        http_result = types.SimpleNamespace(
+            name="ui-http", ok=False, error="timeout", status=None, status_code=None
+        )
+        ws_result = types.SimpleNamespace(name="ui-ws", ok=True, error=None, status=None, status_code=None)
+        return False, "ui-http: FAIL (timeout); ui-ws: OK", targets, [http_result, ws_result]
+
+    monkeypatch.setattr(startup_runner, "_poll_ui_readiness", fake_poll)
+
+    args = _interactive_args()
+    args.non_interactive = True
+    args.emit_summary = True
+    ctx = {
+        "rest": [],
+        "summary_rows": [("Config", "loaded")],
+        "config_path": Path("cfg"),
+        "config": {},
+    }
+
+    code = startup_runner.run(args, ctx, log_startup=fake_log)
+
+    assert code == 0
+    assert any("UI HTTP" in msg and "port 5001" in msg for msg in logs)
+    assert any("UI WS" in msg and "port 7001" in msg for msg in logs)
+    assert any(msg.startswith("UI readiness unhealthy") for msg in logs)
+
+
 def test_poll_ui_readiness_retries_until_healthy(monkeypatch):
     import types
 

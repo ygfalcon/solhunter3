@@ -219,6 +219,35 @@ def _ui_summary_rows(
     return rows
 
 
+def _render_summary(
+    summary_rows: list[tuple[str, str]],
+    *,
+    targets: dict[str, str],
+    results: list[Any],
+    readiness_message: str | None,
+    readiness_ok: bool,
+    log_startup_func,
+) -> None:
+    summary_rows.extend(
+        _ui_summary_rows(
+            targets=targets,
+            results=results,
+            readiness_message=readiness_message,
+            readiness_ok=readiness_ok,
+        )
+    )
+    if not summary_rows:
+        return
+
+    table = Table(title="Startup Summary")
+    table.add_column("Item", style="cyan", no_wrap=True)
+    table.add_column("Status", style="green")
+    for item, status in summary_rows:
+        table.add_row(item, status)
+        log_startup_func(f"{item}: {status}")
+    console.print(table)
+
+
 def launch_only(
     rest: List[str], *, offline: bool | None = None, subprocess_module=subprocess
 ) -> int:
@@ -282,6 +311,7 @@ def run(
             pass
 
     summary_rows = list(ctx.get("summary_rows", []))
+    emit_summary = not getattr(args, "non_interactive", False) or getattr(args, "emit_summary", False)
 
     # Initialize AgentManager before launching services
     from solhunter_zero.agent_manager import AgentManager
@@ -314,18 +344,21 @@ def run(
     # Arguments to start_all
     rest = list(ctx.get("rest", []))
     if code is None:
-        if args.non_interactive:
+        if args.non_interactive and not emit_summary:
             return launch_only(rest, offline=getattr(args, "offline", False), subprocess_module=subprocess_module)
 
-        rest = [*rest, "--foreground"]
+        if args.non_interactive:
+            code = launch_only(rest, offline=getattr(args, "offline", False), subprocess_module=subprocess_module)
+        else:
+            rest = [*rest, "--foreground"]
 
-        # Run the service supervisor inline so we can exit with its code
-        from scripts import start_all as start_all_module
+            # Run the service supervisor inline so we can exit with its code
+            from scripts import start_all as start_all_module
 
-        try:
-            code = start_all_module.main(rest)
-        except KeyboardInterrupt:
-            code = 130
+            try:
+                code = start_all_module.main(rest)
+            except KeyboardInterrupt:
+                code = 130
 
     ui_ready: tuple[bool, str, dict[str, str], list[Any]] | None = None
     ui_targets: dict[str, str] = {}
@@ -393,22 +426,15 @@ def run(
         if line:
             log_startup(line)
 
-    summary_rows.extend(
-        _ui_summary_rows(
+    if emit_summary:
+        _render_summary(
+            summary_rows,
             targets=ui_targets,
             results=ui_results,
             readiness_message=ui_message,
             readiness_ok=ui_ready[0] if ui_ready else False,
+            log_startup_func=log_startup,
         )
-    )
-    if summary_rows:
-        table = Table(title="Startup Summary")
-        table.add_column("Item", style="cyan", no_wrap=True)
-        table.add_column("Status", style="green")
-        for item, status in summary_rows:
-            table.add_row(item, status)
-            log_startup(f"{item}: {status}")
-        console.print(table)
 
     log_path = STARTUP_LOG
     print("Log summary:")
