@@ -397,11 +397,33 @@ _TRENDING_MIN_LIQUIDITY = float(SETTINGS.trending_min_liquidity)
 
 
 def _birdeye_tokenlist_url() -> str:
-    value = _env_str(
-        "BIRDEYE_TOKENLIST_URL", "https://api.birdeye.so/defi/tokenlist"
-    )
+    default = "https://api.birdeye.so/defi/tokenlist"
+    raw = os.getenv("BIRDEYE_TOKENLIST_URL")
+    if raw is None:
+        return default
+
+    value = str(raw).strip()
     if not value:
-        return "https://api.birdeye.so/defi/tokenlist"
+        raise DiscoveryConfigurationError(
+            "birdeye",
+            "BIRDEYE_TOKENLIST_URL is set but empty.",
+            remediation=(
+                "Unset BIRDEYE_TOKENLIST_URL to use the default endpoint or "
+                "provide a valid HTTP(S) URL."
+            ),
+        )
+
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise DiscoveryConfigurationError(
+            "birdeye",
+            f"BIRDEYE_TOKENLIST_URL={raw!r} is not a valid HTTP(S) URL.",
+            remediation=(
+                "Unset BIRDEYE_TOKENLIST_URL to use the default endpoint or "
+                "provide a valid HTTP(S) URL."
+            ),
+        )
+
     return value
 
 

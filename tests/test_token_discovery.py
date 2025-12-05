@@ -85,6 +85,26 @@ def test_env_bool_logs_unknown_values(monkeypatch, caplog):
     assert any("not a valid boolean" in rec.message for rec in caplog.records)
 
 
+def test_birdeye_tokenlist_url_rejects_bad_scheme(monkeypatch):
+    monkeypatch.setenv("BIRDEYE_TOKENLIST_URL", "ftp://example.com/tokenlist")
+
+    with pytest.raises(td.DiscoveryConfigurationError) as excinfo:
+        td._birdeye_tokenlist_url()
+
+    assert "http" in (excinfo.value.remediation or "").lower()
+    assert "ftp://" in str(excinfo.value)
+
+
+def test_birdeye_tokenlist_url_rejects_empty_value(monkeypatch):
+    monkeypatch.setenv("BIRDEYE_TOKENLIST_URL", "   ")
+
+    with pytest.raises(td.DiscoveryConfigurationError) as excinfo:
+        td._birdeye_tokenlist_url()
+
+    assert "empty" in str(excinfo.value).lower()
+    assert "valid http" in (excinfo.value.remediation or "").lower()
+
+
 def test_mempool_limit_forced_off_when_disabled(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         _configure_env(
