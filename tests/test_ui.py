@@ -21,7 +21,7 @@ def mock_redis_ping(monkeypatch):
     monkeypatch.setattr(
         ui,
         "_ping_redis",
-        lambda url: {"ok": True, "latency_ms": 0.01, "url": url},
+        lambda url, *, timeout=None: {"ok": True, "latency_ms": 0.01, "url": url, "timeout": timeout},
     )
 
 
@@ -97,7 +97,7 @@ def test_bootstrap_ui_environment_prefers_redis_broker(monkeypatch):
 
     ping_calls: list[str] = []
 
-    def fake_ping(url: str) -> dict[str, object]:
+    def fake_ping(url: str, *, timeout: float | None = None) -> dict[str, object]:
         ping_calls.append(url)
         return {"ok": True, "latency_ms": 1.2, "url": url}
 
@@ -118,7 +118,7 @@ def test_bootstrap_ui_environment_fails_with_broker_guidance(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.setenv("BROKER_URL", "redis://broker.example:6379/1")
 
-    def failing_ping(url: str) -> dict[str, object]:
+    def failing_ping(url: str, *, timeout: float | None = None) -> dict[str, object]:
         return {"ok": False, "error": "connection refused", "url": url}
 
     monkeypatch.setattr(ui, "_ping_redis", failing_ping)
@@ -202,7 +202,7 @@ def test_bootstrap_ui_environment_logs_ping_failure(monkeypatch, caplog):
     monkeypatch.delenv("REDIS_URL", raising=False)
 
     monkeypatch.setattr(
-        ui, "_ping_redis", lambda url: {"ok": False, "error": "boom", "url": url}
+        ui, "_ping_redis", lambda url, *, timeout=None: {"ok": False, "error": "boom", "url": url}
     )
     caplog.set_level(logging.WARNING, logger="solhunter_zero.ui")
 
@@ -225,7 +225,7 @@ def test_bootstrap_ui_environment_allows_offline_override(monkeypatch, caplog):
     monkeypatch.setenv("UI_ALLOW_OFFLINE_REDIS", "1")
 
     monkeypatch.setattr(
-        ui, "_ping_redis", lambda url: {"ok": False, "error": "boom", "url": url}
+        ui, "_ping_redis", lambda url, *, timeout=None: {"ok": False, "error": "boom", "url": url}
     )
     caplog.set_level(logging.WARNING, logger="solhunter_zero.ui")
 

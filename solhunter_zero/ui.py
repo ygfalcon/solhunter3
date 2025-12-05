@@ -61,6 +61,8 @@ _ACTIVE_UI_STATE_LOCK = threading.Lock()
 _ENV_BOOTSTRAPPED = False
 _ACTIVE_HTTP_SERVERS: WeakSet["UIServer"] = WeakSet()
 _REDIS_PING_STATUS: Dict[str, Any] = {}
+DEFAULT_REDIS_PING_TIMEOUT = 2.0
+DEFAULT_UI_REDIS_STARTUP_TIMEOUT = 1.0
 
 
 def _update_state_http_binding(
@@ -454,13 +456,22 @@ def _discover_broker_url() -> str | None:
     return None
 
 
-def _ping_redis(url: str) -> Dict[str, Any]:
+def _ping_redis(url: str, *, timeout: float | None = None) -> Dict[str, Any]:
     status: Dict[str, Any] = {"url": url}
+
+    try:
+        effective_timeout = float(timeout) if timeout is not None else DEFAULT_REDIS_PING_TIMEOUT
+    except (TypeError, ValueError):
+        effective_timeout = DEFAULT_REDIS_PING_TIMEOUT
+
+    if not math.isfinite(effective_timeout) or effective_timeout <= 0:
+        effective_timeout = DEFAULT_REDIS_PING_TIMEOUT
+
     try:
         client = Redis.from_url(
             url,
-            socket_timeout=2.0,
-            socket_connect_timeout=2.0,
+            socket_timeout=effective_timeout,
+            socket_connect_timeout=effective_timeout,
             retry_on_timeout=False,
         )
         start = time.perf_counter()
@@ -4856,6 +4867,56 @@ class UIServer:
             except Exception:
                 self.stop()
                 raise
+
+            if not parse_bool_env("UI_ALLOW_OFFLINE_REDIS", default=False):
+                redis_url = os.getenv("REDIS_URL") or "redis://localhost:6379/1"
+                redis_timeout_raw = os.getenv("UI_REDIS_STARTUP_TIMEOUT")
+                if redis_timeout_raw in (None, ""):
+                    redis_timeout = DEFAULT_UI_REDIS_STARTUP_TIMEOUT
+                else:
+                    try:
+                        redis_timeout = float(redis_timeout_raw)
+                    except (TypeError, ValueError):
+                        log.warning(
+                            "Invalid UI_REDIS_STARTUP_TIMEOUT value %r; using default %.1f seconds",
+                            redis_timeout_raw,
+                            DEFAULT_UI_REDIS_STARTUP_TIMEOUT,
+                        )
+                        redis_timeout = DEFAULT_UI_REDIS_STARTUP_TIMEOUT
+                    else:
+                        if not math.isfinite(redis_timeout):
+                            log.warning(
+                                "Non-finite UI_REDIS_STARTUP_TIMEOUT %s; using default %.1f seconds",
+                                redis_timeout,
+                                DEFAULT_UI_REDIS_STARTUP_TIMEOUT,
+                            )
+                            redis_timeout = DEFAULT_UI_REDIS_STARTUP_TIMEOUT
+                        elif redis_timeout <= 0:
+                            log.warning(
+                                "Non-positive UI_REDIS_STARTUP_TIMEOUT %s; using default %.1f seconds",
+                                redis_timeout,
+                                DEFAULT_UI_REDIS_STARTUP_TIMEOUT,
+                            )
+                            redis_timeout = DEFAULT_UI_REDIS_STARTUP_TIMEOUT
+
+                redis_ping = _ping_redis(redis_url, timeout=redis_timeout)
+                _REDIS_PING_STATUS.clear()
+                _REDIS_PING_STATUS.update(redis_ping)
+
+                if redis_ping.get("ok") is not True:
+                    detail = redis_ping.get("error") or "unknown error"
+                    raise RuntimeError(
+                        "Redis startup ping failed for "
+                        f"{redis_ping.get('url') or redis_url} "
+                        f"(timeout {redis_timeout:.1f}s): {detail}. "
+                        "Ensure REDIS_URL points to a reachable cache/event bus or set "
+                        "UI_ALLOW_OFFLINE_REDIS=1 to bypass this check."
+                    )
+                log.debug(
+                    "UI startup Redis ping succeeded for %s in %.3fms",
+                    redis_ping.get("url", redis_url),
+                    redis_ping.get("latency_ms", 0.0),
+                )
 
             startup_succeeded = True
         finally:
