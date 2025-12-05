@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
 import tempfile
+import shutil
 from typing import Any, Callable, Deque, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlparse, urlunparse
 from urllib.error import URLError
@@ -213,6 +214,72 @@ def _build_http_ssl_context() -> tuple[ssl.SSLContext | None, str, str | None]:
         )
 
     return None, scheme, tls_details
+
+
+def _validate_https_cli_prereqs() -> None:
+    """Validate TLS configuration early during CLI parsing.
+
+    This exits the process with a clear message if HTTPS is requested without
+    suitable certificate material or the ability to generate a self-signed
+    certificate.
+    """
+
+    cert_path = (
+        os.getenv("UI_HTTP_CERT_FILE")
+        or os.getenv("UI_HTTP_CERT_PATH")
+        or os.getenv("UI_CERT_FILE")
+        or os.getenv("UI_CERT_PATH")
+    )
+    key_path = (
+        os.getenv("UI_HTTP_KEY_FILE")
+        or os.getenv("UI_HTTP_KEY_PATH")
+        or os.getenv("UI_KEY_FILE")
+        or os.getenv("UI_KEY_PATH")
+    )
+
+    scheme = (
+        os.getenv("UI_HTTP_SCHEME")
+        or os.getenv("UI_SCHEME")
+        or "http"
+    ).strip().lower()
+
+    allow_self_signed = parse_bool_env("UI_ALLOW_SELF_SIGNED", default=False)
+
+    def _fail(message: str) -> None:
+        print(f"Cannot start UI server: {message}", file=sys.stderr, flush=True)
+        raise SystemExit(1)
+
+    if scheme != "https":
+        return
+
+    if cert_path or key_path:
+        if not cert_path:
+            _fail(
+                "UI_HTTP_CERT_FILE (or UI_HTTP_CERT_PATH) must be set when configuring HTTPS"
+            )
+
+        cert = Path(cert_path)
+        key = Path(key_path) if key_path else None
+
+        if not cert.is_file() or not os.access(cert, os.R_OK):
+            _fail(f"UI_HTTP_CERT_FILE {cert_path} does not exist or is not readable")
+
+        if key is not None and (not key.is_file() or not os.access(key, os.R_OK)):
+            _fail(f"UI_HTTP_KEY_FILE {key_path} does not exist or is not readable")
+
+        return
+
+    if allow_self_signed:
+        if shutil.which("openssl") is None:
+            _fail(
+                "UI_ALLOW_SELF_SIGNED=1 requires openssl on PATH to generate a temporary certificate"
+            )
+        return
+
+    _fail(
+        "UI_HTTP_SCHEME=https requires TLS termination or UI_HTTP_CERT_FILE/UI_HTTP_KEY_FILE. "
+        "For non-production use only, set UI_ALLOW_SELF_SIGNED=1 to auto-generate a temporary certificate."
+    )
 
 if Counter is not None:  # pragma: no branch - optional metrics
     _WS_QUEUE_DROP_TOTAL = Counter(
@@ -4944,7 +5011,11 @@ def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional directory containing JSON payloads to seed the UI.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    _validate_https_cli_prereqs()
+
+    return args
 
 
 def _seed_state_from_snapshots(state: UIState, snapshot_dir: str | None) -> None:

@@ -20,6 +20,46 @@ import solhunter_zero.ui as ui
 from solhunter_zero.ui import UIState, UIServer
 
 
+def test_cli_https_requires_cert_or_self_signed(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("UI_HTTP_SCHEME", "https")
+    monkeypatch.delenv("UI_ALLOW_SELF_SIGNED", raising=False)
+    monkeypatch.delenv("UI_HTTP_CERT_FILE", raising=False)
+    monkeypatch.delenv("UI_HTTP_KEY_FILE", raising=False)
+
+    with pytest.raises(SystemExit):
+        ui._parse_cli_args([])
+
+    captured = capsys.readouterr()
+    assert "UI_HTTP_SCHEME=https requires TLS termination" in captured.err
+
+
+def test_cli_https_self_signed_requires_openssl(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("UI_HTTP_SCHEME", "https")
+    monkeypatch.setenv("UI_ALLOW_SELF_SIGNED", "1")
+    monkeypatch.setattr(ui.shutil, "which", lambda _cmd: None)
+
+    with pytest.raises(SystemExit):
+        ui._parse_cli_args([])
+
+    captured = capsys.readouterr()
+    assert "requires openssl" in captured.err
+
+
+def test_cli_https_validates_cert_readability(monkeypatch, capsys, tmp_path) -> None:
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+
+    monkeypatch.setenv("UI_HTTP_SCHEME", "https")
+    monkeypatch.setenv("UI_HTTP_CERT_FILE", str(cert_path))
+    monkeypatch.setenv("UI_HTTP_KEY_FILE", str(key_path))
+
+    with pytest.raises(SystemExit):
+        ui._parse_cli_args([])
+
+    captured = capsys.readouterr()
+    assert str(cert_path) in captured.err
+
+
 def test_ui_server_start_port_conflict_raises() -> None:
     state = UIState()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
