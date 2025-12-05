@@ -58,6 +58,32 @@ def _configure_env(monkeypatch, **values):
     td.refresh_runtime_values()
 
 
+def test_mempool_limit_forced_off_when_disabled(monkeypatch, caplog):
+    with caplog.at_level(logging.INFO):
+        _configure_env(
+            monkeypatch,
+            DISCOVERY_ENABLE_MEMPOOL="0",
+            DISCOVERY_MEMPOOL_LIMIT="25",
+        )
+        limit = td.SETTINGS.mempool_limit
+
+    assert limit == 0
+    assert any("overriding mempool_limit" in record.message for record in caplog.records)
+
+
+def test_mempool_limit_clamped_to_upper_bound(monkeypatch, caplog):
+    with caplog.at_level(logging.INFO):
+        _configure_env(
+            monkeypatch,
+            DISCOVERY_ENABLE_MEMPOOL="1",
+            DISCOVERY_MEMPOOL_LIMIT="500",
+        )
+        limit = td.SETTINGS.mempool_limit
+
+    assert limit == td._MAX_MEMPOOL_LIMIT
+    assert any("Clamping mempool_limit" in record.message for record in caplog.records)
+
+
 def test_merge_candidate_entry_tracks_source_categories(monkeypatch):
     monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
 

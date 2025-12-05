@@ -125,6 +125,9 @@ def _env_str(name: str, default: str = "", *, strip: bool = True) -> str:
     return str(raw)
 
 
+_MAX_MEMPOOL_LIMIT = 64
+
+
 class _DiscoverySettings:
     __slots__ = ()
 
@@ -162,7 +165,22 @@ class _DiscoverySettings:
 
     @property
     def mempool_limit(self) -> int:
-        return _env_int("DISCOVERY_MEMPOOL_LIMIT", "12", minimum=0)
+        requested = _env_int("DISCOVERY_MEMPOOL_LIMIT", "12", minimum=0)
+        if not self.enable_mempool:
+            if requested != 0:
+                logger.info(
+                    "DISCOVERY_ENABLE_MEMPOOL is disabled; overriding mempool_limit=%s to 0",
+                    requested,
+                )
+            return 0
+
+        if requested > _MAX_MEMPOOL_LIMIT:
+            logger.info(
+                "Clamping mempool_limit to %s (requested %s) to avoid runaway tasks",
+                _MAX_MEMPOOL_LIMIT,
+                requested,
+            )
+        return min(requested, _MAX_MEMPOOL_LIMIT)
 
     @property
     def enable_mempool(self) -> bool:
