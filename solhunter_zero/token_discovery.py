@@ -387,6 +387,12 @@ class _DiscoverySettings:
 SETTINGS = _DiscoverySettings()
 
 
+_MEMPOOL_TASKS: Dict[asyncio.Task[Any], int] = {}
+_MEMPOOL_TASK_LOCK = Lock()
+_LAST_MEMPOOL_LIMIT = SETTINGS.mempool_limit
+_LAST_MEMPOOL_ENABLED = SETTINGS.enable_mempool
+
+
 _TRENDING_MIN_LIQUIDITY = float(SETTINGS.trending_min_liquidity)
 
 
@@ -434,6 +440,33 @@ class DiscoveryConfigurationError(RuntimeError):
         if self.remediation:
             return f"{base} (source={self.source}, remediation={self.remediation})"
         return f"{base} (source={self.source})"
+
+
+def _register_mempool_task(task: asyncio.Task[Any], *, limit: int) -> None:
+    with _MEMPOOL_TASK_LOCK:
+        _MEMPOOL_TASKS[task] = max(0, int(limit))
+
+    def _cleanup(completed: asyncio.Task[Any]) -> None:
+        with _MEMPOOL_TASK_LOCK:
+            _MEMPOOL_TASKS.pop(completed, None)
+
+    task.add_done_callback(_cleanup)
+
+
+def _cancel_stale_mempool_tasks(enabled: bool, limit: int) -> None:
+    with _MEMPOOL_TASK_LOCK:
+        tracked = list(_MEMPOOL_TASKS.items())
+
+    if not enabled or limit <= 0:
+        targets = [task for task, _ in tracked]
+    else:
+        targets = [task for task, target_limit in tracked if target_limit > limit]
+
+    for task in targets:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            if task.done():
+                task.result()
 
 
 _BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=SETTINGS.cache_ttl)
@@ -502,7 +535,7 @@ def refresh_runtime_values() -> None:
     """Synchronise cached discovery state with the current environment."""
 
     global _SCORING_BIAS, _SCORING_WEIGHTS, _BIRDEYE_DISABLED_INFO, _ORCA_CATALOG_CACHE
-    global _TRENDING_MIN_LIQUIDITY
+    global _TRENDING_MIN_LIQUIDITY, _LAST_MEMPOOL_ENABLED, _LAST_MEMPOOL_LIMIT
 
     _SCORING_BIAS, _SCORING_WEIGHTS = _load_scoring_weights()
 
@@ -525,6 +558,14 @@ def refresh_runtime_values() -> None:
 
     _ORCA_CATALOG_CACHE = (0.0, {}, 0.0)
     _BIRDEYE_DISABLED_INFO = False
+
+    enabled = bool(SETTINGS.enable_mempool)
+    limit = int(SETTINGS.mempool_limit)
+    if not enabled or limit < _LAST_MEMPOOL_LIMIT or enabled != _LAST_MEMPOOL_ENABLED:
+        _cancel_stale_mempool_tasks(enabled, limit)
+
+    _LAST_MEMPOOL_ENABLED = enabled
+    _LAST_MEMPOOL_LIMIT = limit
 
 
 def get_scoring_context() -> Tuple[float, Dict[str, float]]:
@@ -2295,11 +2336,20 @@ async def _collect_mempool_signals(rpc_url: str, threshold: float) -> Dict[str, 
     try:
         gen = stream_ranked_mempool_tokens_with_depth(rpc_url, threshold=threshold)
         async for item in gen:
+            if not SETTINGS.enable_mempool:
+                logger.debug("Mempool discovery disabled mid-run; cancelling collection")
+                break
+
+            active_limit = max(0, int(SETTINGS.mempool_limit))
+            if active_limit <= 0:
+                logger.debug("Mempool limit reduced to zero; stopping collection")
+                break
+
             addr = item.get("address")
             if not addr:
                 continue
             scores[addr] = item
-            if len(scores) >= SETTINGS.mempool_limit:
+            if len(scores) >= active_limit:
                 break
     except Exception as exc:
         error = exc
@@ -2526,11 +2576,13 @@ def discover_candidates(
             trending_task = asyncio.create_task(
                 fetch_trending_tokens_async(limit=limit)
             )
+            mempool_limit = int(SETTINGS.mempool_limit)
+            _cancel_stale_mempool_tasks(SETTINGS.enable_mempool, mempool_limit)
             mempool_task = (
                 asyncio.create_task(
                     _collect_mempool_signals(rpc_url, mempool_threshold)
                 )
-                if SETTINGS.enable_mempool and rpc_url
+                if SETTINGS.enable_mempool and rpc_url and mempool_limit > 0
                 else None
             )
             if SETTINGS.enable_mempool and rpc_url:
@@ -2541,6 +2593,7 @@ def discover_candidates(
                 trending_task: "trending",
             }
             if mempool_task is not None:
+                _register_mempool_task(mempool_task, limit=mempool_limit)
                 task_map[mempool_task] = "mempool"
             if SETTINGS.enable_dexscreener and SETTINGS.dexscreener_url:
                 task_map[
