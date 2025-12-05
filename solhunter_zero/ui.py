@@ -4824,6 +4824,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     server = UIServer(state, host=args.host, port=args.port)
     ws_threads: dict[str, threading.Thread] | None = None
+    server_stopped = False
     try:
         try:
             server.start()
@@ -4842,6 +4843,38 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"Failed to start UI websockets: {exc}", file=sys.stderr, flush=True)
             raise SystemExit(1) from exc
 
+        manifest = build_ui_manifest()
+        ws_statuses, ws_details = summarize_ws_status(optional=False)
+        readiness_errors = []
+        for channel in ("rl", "events", "logs"):
+            available_key = f"{channel}_ws_available"
+            available = manifest.get(available_key)
+            if available is True:
+                continue
+            url = manifest.get(f"{channel}_ws")
+            status_key = f"{channel}_ws"
+            status = ws_statuses.get(status_key, "failed")
+            detail = ws_details.get(status_key)
+            url_text = url if url not in (None, "") else "unset"
+            parts = [
+                f"{channel} websocket unavailable (available={available}, status={status}, url={url_text})"
+            ]
+            if detail:
+                parts.append(f"detail={detail}")
+            readiness_errors.append("; ".join(parts))
+
+        if readiness_errors:
+            print(
+                "UI websocket readiness failed; shutting down HTTP server:",
+                file=sys.stderr,
+                flush=True,
+            )
+            for message in readiness_errors:
+                print(f"- {message}", file=sys.stderr, flush=True)
+            server.stop()
+            server_stopped = True
+            raise SystemExit(1)
+
         url = f"http://{args.host}:{args.port}"
         print(f"Solsniper Zero UI listening on {url}", flush=True)
         if args.snapshot_dir:
@@ -4855,7 +4888,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         if ws_threads is not None:
             with contextlib.suppress(Exception):
                 stop_websockets()
-        server.stop()
+        if not server_stopped:
+            server.stop()
 
 
 if __name__ == "__main__":  # pragma: no cover
