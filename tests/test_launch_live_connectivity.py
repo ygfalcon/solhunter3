@@ -194,6 +194,73 @@ def test_connectivity_skip_ui_probes_state_restored_after_soak(tmp_path: Path) -
     assert "restored=restore-me" in completed.stdout
 
 
+def test_connectivity_skip_ui_probes_cleared_after_soak_when_not_user_set(tmp_path: Path) -> None:
+    script_path = REPO_ROOT / "scripts" / "launch_live.sh"
+    source = script_path.read_text()
+    soak_block = _extract_connectivity_soak_block(source)
+
+    report_path = tmp_path / "connectivity_report.json"
+    artifact_dir = tmp_path / "artifacts"
+    stub_root = tmp_path / "stub"
+    package_dir = stub_root / "solhunter_zero"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    stub_source = (
+        "from __future__ import annotations\n"
+        "from pathlib import Path\n\n"
+        "class _Summary:\n"
+        "    def __init__(self) -> None:\n"
+        "        self.duration = 0.0\n"
+        "        self.reconnect_count = 0\n"
+        "        self.metrics = {}\n\n"
+        "class ConnectivityChecker:\n"
+        "    async def run_soak(self, duration: float, output_path):\n"
+        "        path = Path(output_path)\n"
+        "        path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "        path.write_text('{}', encoding='utf-8')\n"
+        "        return _Summary()\n"
+    )
+    (package_dir / "production.py").write_text(stub_source, encoding="utf-8")
+    python_wrapper = _create_python_wrapper(tmp_path)
+    python_bin = shlex.quote(str(python_wrapper))
+    quoted_report = shlex.quote(str(report_path))
+    quoted_artifact_dir = shlex.quote(str(artifact_dir))
+    quoted_stub_root = shlex.quote(str(stub_root))
+
+    bash_script = dedent(
+        f"""
+        set -euo pipefail
+        timestamp() {{ printf 'stub'; }}
+        log_info() {{ :; }}
+        log_warn() {{ :; }}
+        runtime_lock_ttl_check() {{ return 0; }}
+        export SOAK_DURATION=0
+        export SOAK_REPORT={quoted_report}
+        export ARTIFACT_DIR={quoted_artifact_dir}
+        export PYTHON_BIN={python_bin}
+        export STUB_ROOT={quoted_stub_root}
+        export EXIT_CONNECTIVITY=101
+        {soak_block}
+        if [[ -n ${{CONNECTIVITY_SKIP_UI_PROBES+x}} ]]; then
+            printf 'restored=%s\n' "$CONNECTIVITY_SKIP_UI_PROBES"
+        else
+            printf 'restored=__unset__\n'
+        fi
+        """
+    )
+
+    completed = subprocess.run(
+        ["bash", "-c", bash_script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "restored=__unset__" in completed.stdout
+
+
 def test_run_connectivity_probes_includes_jito_and_mempool_labels() -> None:
     script_path = REPO_ROOT / "scripts" / "launch_live.sh"
     source = script_path.read_text()
