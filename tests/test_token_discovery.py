@@ -706,7 +706,15 @@ def test_fetch_birdeye_tokens_missing_key_raises_configuration_error(monkeypatch
     td._BIRDEYE_CACHE.clear()
     _configure_env(monkeypatch, DISCOVERY_ENABLE_MEMPOOL="0")
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
-    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "")
+
+    def _raise_missing_key():
+        raise td.DiscoveryConfigurationError(
+            "birdeye",
+            "BirdEye API key missing; BirdEye discovery disabled.",
+            remediation="Set the BIRDEYE_API_KEY environment variable.",
+        )
+
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", _raise_missing_key)
 
     async def run():
         return await td._fetch_birdeye_tokens(limit=5)
@@ -1169,7 +1177,15 @@ async def test_discover_candidates_merges_new_sources(monkeypatch):
 async def test_discover_candidates_falls_back_when_birdeye_disabled(monkeypatch, caplog):
     td._BIRDEYE_CACHE.clear()
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
-    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "")
+
+    def _raise_missing_key():
+        raise td.DiscoveryConfigurationError(
+            "birdeye",
+            "BirdEye API key missing; BirdEye discovery disabled.",
+            remediation="Set the BIRDEYE_API_KEY environment variable.",
+        )
+
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", _raise_missing_key)
     _configure_env(
         monkeypatch,
         DISCOVERY_ENABLE_MEMPOOL="0",
@@ -1375,7 +1391,15 @@ async def test_discover_candidates_warns_on_empty_mempool_after_error(
 def test_warm_cache_skips_without_birdeye_key(monkeypatch):
     # Ensure environment does not provide a BirdEye key and guard short-circuits.
     monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
-    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "")
+
+    def _raise_missing_key():
+        raise td.DiscoveryConfigurationError(
+            "birdeye",
+            "BirdEye API key missing; BirdEye discovery disabled.",
+            remediation="Set the BIRDEYE_API_KEY environment variable.",
+        )
+
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", _raise_missing_key)
 
     thread_called = {"created": False, "started": False}
 
