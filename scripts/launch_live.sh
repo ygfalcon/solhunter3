@@ -2062,6 +2062,17 @@ if [[ $PREFLIGHT_RUNS != "1" && $PREFLIGHT_RUNS != "2" ]]; then
   exit $EXIT_PREFLIGHT
 fi
 
+if [[ $PREFLIGHT_RUNS -eq 1 ]]; then
+  log_info "Preflight constrained to a single micro permutation; enforcing micro=$MICRO_FLAG"
+fi
+
+if [[ $CANARY_MODE -eq 1 || ${LAUNCH_LIVE_STAGED_ROLLOUT:-0} -eq 1 ]]; then
+  if [[ $PREFLIGHT_RUNS -ne 2 ]]; then
+    echo "--preflight 2 is required for canary or staged rollouts to exercise both micro states" >&2
+    exit $EXIT_PREFLIGHT
+  fi
+fi
+
 if [[ ! -f $ENV_FILE ]]; then
   echo "Environment file $ENV_FILE not found" >&2
   exit $EXIT_KEYS
