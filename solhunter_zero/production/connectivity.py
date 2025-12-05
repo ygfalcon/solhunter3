@@ -93,6 +93,70 @@ class ConnectivityChecker:
         )
         self.targets = self._build_targets()
 
+    def _ui_asset_paths(self) -> tuple[list[Path], list[Path]]:
+        raw = self.env.get("CONNECTIVITY_UI_ASSET_PATHS") or self.env.get("UI_ASSET_PATHS")
+        explicit: list[Path] = []
+        if raw:
+            explicit = [Path(part.strip()) for part in raw.split(",") if part.strip()]
+
+        fallbacks: list[Path] = []
+        for key in ("UI_ASSET_ROOT", "UI_BUILD_DIR", "UI_DIST_DIR"):
+            value = self.env.get(key)
+            if value:
+                fallbacks.append(Path(value))
+        fallbacks.extend(
+            [
+                Path("artifacts/ui"),
+                Path("artifacts/prelaunch/ui"),
+                Path("build/ui"),
+            ]
+        )
+        seen: set[Path] = set()
+        return (
+            [path for path in explicit if not (path in seen or seen.add(path))],
+            [path for path in fallbacks if not (path in seen or seen.add(path))],
+        )
+
+    @staticmethod
+    def _asset_path_ready(path: Path) -> bool:
+        try:
+            if path.is_file():
+                return path.exists()
+            if path.is_dir():
+                return any(path.iterdir())
+        except OSError:
+            return False
+        return False
+
+    def _validate_ui_assets(self) -> tuple[bool, str | None]:
+        explicit, fallbacks = self._ui_asset_paths()
+
+        def _format_paths(paths: Iterable[Path]) -> str:
+            return ", ".join(str(path) for path in paths)
+
+        def _build_guidance(candidates: Iterable[Path]) -> str:
+            hint = (
+                "Build the UI bundle (for example, run 'npm run build' in the UI project) or "
+                "set CONNECTIVITY_UI_ASSET_PATHS to point at the compiled assets directory."
+            )
+            return f"UI assets missing: {_format_paths(candidates)}. {hint}"
+
+        if explicit:
+            missing = [path for path in explicit if not self._asset_path_ready(path)]
+            if missing:
+                message = _build_guidance(missing)
+                logger.error(message)
+                return False, message
+            return True, None
+
+        for candidate in fallbacks:
+            if self._asset_path_ready(candidate):
+                return True, None
+
+        message = _build_guidance(fallbacks or [Path("<no-ui-assets-configured>")])
+        logger.error(message)
+        return False, message
+
     def _refresh_environment(self, *, override: bool) -> None:
         for key, value in os.environ.items():
             if not (key.startswith("UI_") or key.startswith("CONNECTIVITY_")):
@@ -549,6 +613,19 @@ class ConnectivityChecker:
                     session = await get_session()
                 assert session is not None
                 if name == "ui-http":
+                    assets_ok, assets_error = self._validate_ui_assets()
+                    if not assets_ok:
+                        self._record_error(name, "ui-assets-missing")
+                        return ConnectivityResult(
+                            name=name,
+                            target=url,
+                            ok=False,
+                            latency_ms=None,
+                            status="error",
+                            status_code=None,
+                            error=assets_error,
+                            attempts=0,
+                        )
                     async with aiohttp.ClientSession() as session_local:
                         session = session_local
                         close_session = False

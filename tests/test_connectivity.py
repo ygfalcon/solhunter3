@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import types
 from pathlib import Path
 
@@ -183,8 +184,16 @@ def _make_ui_app():
     return app
 
 
+def _write_dummy_assets(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    bundle = root / "assets"
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "app.js").write_text("console.log('ok')", encoding="utf-8")
+    return root
+
+
 @pytest.mark.anyio("asyncio")
-async def test_probe_ui_http_success():
+async def test_probe_ui_http_success(tmp_path: Path):
     app = _make_ui_app()
     runner = web.AppRunner(app)
     await runner.setup()
@@ -192,9 +201,30 @@ async def test_probe_ui_http_success():
     await site.start()
     try:
         port = site._server.sockets[0].getsockname()[1]
-        checker = ConnectivityChecker(env={})
+        assets = _write_dummy_assets(tmp_path / "ui-assets")
+        checker = ConnectivityChecker(env={"CONNECTIVITY_UI_ASSET_PATHS": str(assets)})
         result = await checker._probe_http("ui-http", f"http://127.0.0.1:{port}/health")
         assert result.ok
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_probe_ui_http_fails_when_assets_missing(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    app = _make_ui_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    caplog.set_level(logging.ERROR)
+    try:
+        port = site._server.sockets[0].getsockname()[1]
+        missing = tmp_path / "ui-assets-missing"
+        checker = ConnectivityChecker(env={"CONNECTIVITY_UI_ASSET_PATHS": str(missing)})
+        result = await checker._probe_http("ui-http", f"http://127.0.0.1:{port}/health")
+        assert not result.ok
+        assert "UI assets missing" in (result.error or "")
+        assert str(missing) in caplog.text
     finally:
         await runner.cleanup()
 
@@ -232,7 +262,7 @@ async def test_connectivity_soak_refreshes_ui_override(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
-async def test_probe_ui_http_detects_event_bus_down():
+async def test_probe_ui_http_detects_event_bus_down(tmp_path: Path):
     app = _make_ui_app()
     app["payload"] = {"ok": False, "status": {"event_bus": False, "trading_loop": True}}
     runner = web.AppRunner(app)
@@ -241,7 +271,8 @@ async def test_probe_ui_http_detects_event_bus_down():
     await site.start()
     try:
         port = site._server.sockets[0].getsockname()[1]
-        checker = ConnectivityChecker(env={})
+        assets = _write_dummy_assets(tmp_path / "ui-assets")
+        checker = ConnectivityChecker(env={"CONNECTIVITY_UI_ASSET_PATHS": str(assets)})
         result = await checker._probe_http("ui-http", f"http://127.0.0.1:{port}/health")
         assert not result.ok
         assert result.error and "event bus" in result.error
