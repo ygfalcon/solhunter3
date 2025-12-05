@@ -85,6 +85,23 @@ def test_env_bool_logs_unknown_values(monkeypatch, caplog):
     assert any("not a valid boolean" in rec.message for rec in caplog.records)
 
 
+def test_fast_mode_clamps_drop_thresholds(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING):
+        _configure_env(
+            monkeypatch,
+            FAST_PIPELINE_MODE="1",
+            DISCOVERY_MIN_VOLUME_USD="",
+            DISCOVERY_MIN_LIQUIDITY_USD="",
+        )
+        min_volume = td.SETTINGS.min_volume
+        min_liquidity = td.SETTINGS.min_liquidity
+
+    assert min_volume == td._FAST_MIN_DROP_THRESHOLD_USD
+    assert min_liquidity == td._FAST_MIN_DROP_THRESHOLD_USD
+    assert any("min_volume" in rec.message and "FAST_PIPELINE_MODE" in rec.message for rec in caplog.records)
+    assert any("min_liquidity" in rec.message and "FAST_PIPELINE_MODE" in rec.message for rec in caplog.records)
+
+
 def test_mempool_limit_forced_off_when_disabled(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         _configure_env(
@@ -109,6 +126,25 @@ def test_mempool_limit_clamped_to_upper_bound(monkeypatch, caplog):
 
     assert limit == td._MAX_MEMPOOL_LIMIT
     assert any("Clamping mempool_limit" in record.message for record in caplog.records)
+
+
+def test_fast_mode_caps_max_tokens_and_mempool_budget(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING):
+        _configure_env(
+            monkeypatch,
+            FAST_PIPELINE_MODE="1",
+            DISCOVERY_ENABLE_MEMPOOL="1",
+            DISCOVERY_MEMPOOL_LIMIT="5000",
+            DISCOVERY_MAX_TOKENS="6000",
+        )
+        max_tokens = td.SETTINGS.max_tokens
+        mempool_limit = td.SETTINGS.mempool_limit
+
+    assert max_tokens == td._FAST_MAX_TOKENS
+    expected_limit = max(1, td._FAST_TASK_BUDGET // max_tokens)
+    assert mempool_limit == expected_limit
+    assert any("max_tokens" in rec.message for rec in caplog.records)
+    assert any("task budget" in rec.message for rec in caplog.records)
 
 
 def test_merge_candidate_entry_tracks_source_categories(monkeypatch):

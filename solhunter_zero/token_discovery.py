@@ -166,6 +166,10 @@ def _env_str(name: str, default: str = "", *, strip: bool = True) -> str:
 
 _MAX_MEMPOOL_LIMIT = 64
 _MAX_DISCOVERY_THRESHOLD_USD = 10_000_000.0
+_FAST_MIN_DROP_THRESHOLD_USD = 1.0
+_FAST_MAX_TOKENS = 500
+_FAST_MEMPOOL_LIMIT = 32
+_FAST_TASK_BUDGET = 2048
 
 
 class _DiscoverySettings:
@@ -177,6 +181,12 @@ class _DiscoverySettings:
         value = _env_float(
             "DISCOVERY_MIN_VOLUME_USD", "50000", fast_default=0.0, minimum=0.0
         )
+        if _is_fast_mode() and value <= 0.0:
+            logger.warning(
+                "FAST_PIPELINE_MODE overriding min_volume to %.0f to avoid zero threshold",
+                _FAST_MIN_DROP_THRESHOLD_USD,
+            )
+            return _FAST_MIN_DROP_THRESHOLD_USD
         if not math.isfinite(value):
             logger.error(
                 "DISCOVERY_MIN_VOLUME_USD=%r is non-finite; using default %.0f",
@@ -199,6 +209,12 @@ class _DiscoverySettings:
         value = _env_float(
             "DISCOVERY_MIN_LIQUIDITY_USD", "75000", fast_default=0.0, minimum=0.0
         )
+        if _is_fast_mode() and value <= 0.0:
+            logger.warning(
+                "FAST_PIPELINE_MODE overriding min_liquidity to %.0f to avoid zero threshold",
+                _FAST_MIN_DROP_THRESHOLD_USD,
+            )
+            return _FAST_MIN_DROP_THRESHOLD_USD
         if not math.isfinite(value):
             logger.error(
                 "DISCOVERY_MIN_LIQUIDITY_USD=%r is non-finite; using default %.0f",
@@ -217,7 +233,15 @@ class _DiscoverySettings:
 
     @property
     def max_tokens(self) -> int:
-        return _env_int("DISCOVERY_MAX_TOKENS", "50", minimum=1)
+        requested = _env_int("DISCOVERY_MAX_TOKENS", "50", minimum=1)
+        if _is_fast_mode() and requested > _FAST_MAX_TOKENS:
+            logger.warning(
+                "FAST_PIPELINE_MODE clamping max_tokens to %s (requested %s)",
+                _FAST_MAX_TOKENS,
+                requested,
+            )
+            return _FAST_MAX_TOKENS
+        return requested
 
     @property
     def page_limit(self) -> int:
@@ -238,6 +262,7 @@ class _DiscoverySettings:
     @property
     def mempool_limit(self) -> int:
         requested = _env_int("DISCOVERY_MEMPOOL_LIMIT", "12", minimum=0)
+        fast_mode = _is_fast_mode()
         if not self.enable_mempool:
             if requested != 0:
                 logger.info(
@@ -246,13 +271,31 @@ class _DiscoverySettings:
                 )
             return 0
 
-        if requested > _MAX_MEMPOOL_LIMIT:
-            logger.info(
+        cap = _MAX_MEMPOOL_LIMIT
+        if fast_mode:
+            cap = min(cap, _FAST_MEMPOOL_LIMIT)
+        if requested > cap:
+            logger.warning(
                 "Clamping mempool_limit to %s (requested %s) to avoid runaway tasks",
-                _MAX_MEMPOOL_LIMIT,
+                cap,
                 requested,
             )
-        return min(requested, _MAX_MEMPOOL_LIMIT)
+        limit = min(requested, cap)
+
+        if fast_mode and limit > 0:
+            max_tokens = self.max_tokens
+            budget = _FAST_TASK_BUDGET
+            max_limit = max(1, budget // max(1, max_tokens))
+            if limit > max_limit:
+                logger.warning(
+                    "Clamping mempool_limit to %s to honour fast-mode task budget (requested %s, max_tokens=%s)",
+                    max_limit,
+                    requested,
+                    max_tokens,
+                )
+                limit = max_limit
+
+        return limit
 
     @property
     def enable_mempool(self) -> bool:
