@@ -88,9 +88,21 @@ except ImportError as exc:  # pragma: no cover - optional dependency guard
         enrich: bool = True,
         api_key: str | None = None,
     ) -> List[str]:
-        del rpc_url, api_key
+        mode = "stub-enriched" if enrich else "stub-raw"
+        rpc_hint = _rpc_identity(rpc_url)
+        api_hint = "provided" if api_key else "none"
+        logger.info(
+            "Using fallback discovery (%s; rpc=%s; api_key=%s)",
+            mode,
+            rpc_hint or "<default>",
+            api_hint,
+        )
+
         seeds = list(_STATIC_FALLBACK)
-        return seeds[: max(0, limit)]
+        limited = seeds[: max(0, limit)]
+        if enrich:
+            return await enrich_tokens_async(limited, rpc_url=rpc_url or DEFAULT_SOLANA_RPC)
+        return limited
 
     async def enrich_tokens_async(
         mints: Iterable[str],
