@@ -224,52 +224,123 @@ def check_execution_queue(
     return False, f"depth={depth_val}>max={max_depth}"
 
 
-def http_ok(url: str) -> CheckResult:
+def http_ok(url: str, *, timeout: float = 1.0) -> CheckResult:
     """Return ``(True, msg)`` if an HTTP GET request succeeds.
 
     The ``msg`` contains the HTTP status code on success or the exception text
-    on failure.
+    on failure.  The request timeout defaults to one second but can be
+    overridden via ``timeout``.
     """
 
     try:
-        with urllib.request.urlopen(url, timeout=1.0) as resp:  # noqa: S310
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
             return 200 <= resp.status < 400, f"http {resp.status}"
     except Exception as exc:  # pragma: no cover - network failure paths
         return False, str(exc)
 
 
-def check_rl_daemon_health(
-    url: str | None = None, *, require_health_file: bool = False
+def _parse_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except Exception as exc:  # pragma: no cover - configuration error
+        raise RuntimeError(f"invalid {name}={raw!r}") from exc
+
+
+def _parse_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except Exception as exc:  # pragma: no cover - configuration error
+        raise RuntimeError(f"invalid {name}={raw!r}") from exc
+
+
+def _probe_with_retry(
+    func: Callable[[], CheckResult],
+    *,
+    attempts: int,
+    initial_delay: float,
+    backoff: float,
+    max_delay: float,
+    context: str | None = None,
 ) -> CheckResult:
-    """Probe the RL daemon health endpoint and report ``(ok, message)``."""
+    last_ok, last_msg = False, "no attempts"
+    delay = initial_delay
+    for attempt in range(1, attempts + 1):
+        ok, msg = func()
+        last_ok, last_msg = ok, msg
+        if ok:
+            return ok, msg
+        if attempt == attempts:
+            break
+        _log.warning(
+            "RL health probe failed%s (attempt %s/%s): %s",
+            f" for {context}" if context else "",
+            attempt,
+            attempts,
+            msg,
+        )
+        time.sleep(delay)
+        delay = min(delay * backoff, max_delay)
+
+    return last_ok, last_msg
+
+
+def check_rl_daemon_health(
+    url: str | None = None,
+    *,
+    require_health_file: bool = False,
+    attempts: int = 5,
+    initial_delay: float = 0.5,
+    backoff: float = 2.0,
+    max_delay: float = 5.0,
+    timeout: float = 1.0,
+) -> CheckResult:
+    """Probe the RL daemon health endpoint and report ``(ok, message)``.
+
+    The retry behavior can be tuned via keyword arguments or environment
+    variables:
+
+    ``RL_HEALTH_RETRIES``
+        Override ``attempts``.
+    ``RL_HEALTH_INTERVAL``
+        Override ``initial_delay``.
+    ``RL_HEALTH_BACKOFF``
+        Exponential backoff multiplier (``backoff``).
+    ``RL_HEALTH_MAX_DELAY``
+        Ceiling applied to the computed delay between attempts.
+    ``RL_HEALTH_TIMEOUT``
+        Timeout (seconds) passed to the HTTP probe.
+    """
 
     try:
         target = url or resolve_rl_health_url(require_health_file=require_health_file)
     except Exception as exc:  # pragma: no cover - configuration error paths
         return False, str(exc)
 
-    attempts = 5
-    delay = 0.5
-    ok: bool
-    msg: str
-    for attempt in range(1, attempts + 1):
-        ok, msg = http_ok(target)
-        if ok:
-            break
-        if attempt == attempts:
-            break
-        _log.warning(
-            "RL health probe failed (attempt %s/%s) for %s: %s",
-            attempt,
-            attempts,
-            target,
-            msg,
-        )
-        time.sleep(delay)
-        delay = min(delay * 2, 5.0)
+    attempts = _parse_int_env("RL_HEALTH_RETRIES", attempts)
+    initial_delay = _parse_float_env("RL_HEALTH_INTERVAL", initial_delay)
+    backoff = _parse_float_env("RL_HEALTH_BACKOFF", backoff)
+    max_delay = _parse_float_env("RL_HEALTH_MAX_DELAY", max_delay)
+    timeout = _parse_float_env("RL_HEALTH_TIMEOUT", timeout)
+
+    ok, msg = _probe_with_retry(
+        lambda: http_ok(target, timeout=timeout),
+        attempts=attempts,
+        initial_delay=initial_delay,
+        backoff=backoff,
+        max_delay=max_delay,
+        context=target,
+    )
 
     if not ok:
-        _log.error("RL health probe failed for %s: %s", target, msg)
+        _log.error(
+            "RL health probe failed for %s after %s attempts: %s", target, attempts, msg
+        )
 
     suffix = f" ({target})"
     return ok, msg + suffix
