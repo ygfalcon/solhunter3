@@ -2349,6 +2349,62 @@ def test_agent_manager_failure_logs_traceback(monkeypatch, tmp_path):
     assert "RuntimeError: boom" in log_text
 
 
+def test_ui_target_discovery_error_logged_and_summarized(monkeypatch, tmp_path):
+    import types
+    from solhunter_zero import logging_utils
+
+    _stub_rich(monkeypatch)
+    from solhunter_zero import startup_runner
+
+    log_path = tmp_path / "startup.log"
+
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", log_path)
+    monkeypatch.setattr(
+        startup_runner,
+        "log_startup",
+        lambda msg: logging_utils.log_startup(msg, path=log_path),
+    )
+    monkeypatch.setattr(startup_runner, "log_startup_info", lambda **kwargs: None)
+
+    class FailingChecker:
+        def __init__(self):
+            raise RuntimeError("connectivity init failed")
+
+    monkeypatch.setattr(
+        "solhunter_zero.production.connectivity.ConnectivityChecker",
+        FailingChecker,
+    )
+
+    start_all_mod = types.ModuleType("scripts.start_all")
+    start_all_mod.main = lambda *a, **k: 3
+    monkeypatch.setitem(sys.modules, "scripts.start_all", start_all_mod)
+
+    healthcheck_mod = types.ModuleType("scripts.healthcheck")
+    healthcheck_mod.main = lambda *a, **k: 0
+    monkeypatch.setitem(sys.modules, "scripts.healthcheck", healthcheck_mod)
+
+    agent_manager_mod = types.ModuleType("solhunter_zero.agent_manager")
+
+    class DummyAgentManager:
+        @classmethod
+        def from_config(cls, _cfg):
+            return cls()
+
+    agent_manager_mod.AgentManager = DummyAgentManager
+    monkeypatch.setitem(sys.modules, "solhunter_zero.agent_manager", agent_manager_mod)
+
+    args = _interactive_args()
+    ctx = {"config_path": tmp_path / "cfg.toml", "config": {}, "summary_rows": []}
+    monkeypatch.setattr(startup_runner.preflight, "CHECKS", [])
+
+    result = startup_runner.run(args, ctx, log_startup=startup_runner.log_startup)
+
+    log_text = log_path.read_text()
+    assert result == 3
+    assert "UI target discovery failed: connectivity init failed" in log_text
+    assert "UI readiness: UI target discovery failed: connectivity init failed" in log_text
+
+
 def test_disk_space_threshold_uses_config(monkeypatch):
     from scripts import startup
 

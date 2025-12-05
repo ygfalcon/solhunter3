@@ -213,7 +213,7 @@ def _ui_summary_rows(
         suffix = f" – {'; '.join(details)}" if details else ""
         rows.append((label, f"{status}{suffix}"))
 
-    if not rows and readiness_message:
+    if readiness_message and (not readiness_ok or not rows):
         rows.append(("UI readiness", readiness_message))
 
     return rows
