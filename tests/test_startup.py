@@ -2130,6 +2130,56 @@ def test_run_summary_rows_include_ui(monkeypatch):
     assert any(msg.startswith("UI readiness unhealthy") for msg in logs)
 
 
+def test_run_logs_birdeye_env_failure(monkeypatch):
+    import builtins
+    import sys
+    import types
+
+    _stub_rich(monkeypatch)
+    _stub_agent_manager(monkeypatch)
+    _stub_scripts(monkeypatch)
+
+    import solhunter_zero.startup_runner as startup_runner
+
+    logs: list[str] = []
+
+    def fake_log(msg: str) -> None:
+        logs.append(msg)
+
+    monkeypatch.setattr(startup_runner, "log_startup", fake_log)
+    monkeypatch.setattr(startup_runner, "log_startup_info", lambda **_: None)
+    monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", Path("startup.log"))
+    monkeypatch.setattr(startup_runner, "_poll_ui_readiness", lambda: (True, "ui-ok", {}, []))
+
+    orig_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "solhunter_zero.scanner_common" or (
+            name == "solhunter_zero" and fromlist and "scanner_common" in fromlist
+        ):
+            raise ImportError("boom")
+        return orig_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.delitem(sys.modules, "solhunter_zero.scanner_common", raising=False)
+    monkeypatch.delenv("BIRDEYE_API_KEY", raising=False)
+
+    args = _interactive_args()
+    ctx = {
+        "rest": [],
+        "summary_rows": [],
+        "config_path": Path("cfg"),
+        "config": {"birdeye_api_key": "abc"},
+    }
+
+    code = startup_runner.run(args, ctx, log_startup=fake_log)
+
+    assert code == 0
+    assert any("BirdEye env propagation failed: ImportError('boom')" in msg for msg in logs)
+    assert any(msg.startswith("BirdEye: warning") for msg in logs)
+
+
 def test_launch_only_sets_env_when_offline(monkeypatch):
     from types import SimpleNamespace
     from solhunter_zero import startup_runner

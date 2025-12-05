@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlsplit
@@ -207,6 +208,8 @@ def run(
         active_keypair=ctx.get("active_keypair"),
     )
 
+    summary_rows = list(ctx.get("summary_rows", []))
+
     # Bubble BirdEye key into env so token discovery has it
     birdeye = (config or {}).get("birdeye_api_key")
     if birdeye and not os.getenv("BIRDEYE_API_KEY"):
@@ -216,10 +219,11 @@ def run(
 
             scanner_common.BIRDEYE_API_KEY = os.environ["BIRDEYE_API_KEY"]
             scanner_common.HEADERS["X-API-KEY"] = scanner_common.BIRDEYE_API_KEY
-        except Exception:
-            pass
-
-    summary_rows = list(ctx.get("summary_rows", []))
+        except Exception as exc:
+            warning = f"BirdEye env propagation failed: {exc!r}"
+            log_startup(warning)
+            log_startup(traceback.format_exc().rstrip())
+            summary_rows.append(("BirdEye", f"warning – {warning}"))
 
     # Initialize AgentManager before launching services
     from solhunter_zero.agent_manager import AgentManager
