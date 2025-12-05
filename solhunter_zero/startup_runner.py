@@ -128,7 +128,7 @@ def _poll_ui_readiness(
                 errors: List[str] = []
                 healthy = True
                 for result in results:
-                    detail = result.error or result.status or result.status_code or "unavailable"
+                    detail = _format_result_detail(result)
                     status = "OK" if result.ok else f"FAIL ({detail})"
                     summaries.append(f"{result.name}: {status}")
                     if not result.ok and detail:
@@ -181,6 +181,27 @@ def _extract_port(url: str) -> str | None:
     return None
 
 
+def _format_result_detail(result: Any) -> str:
+    status_code = getattr(result, "status_code", None)
+    status_text = getattr(result, "status", None)
+    error_text = getattr(result, "error", None)
+
+    if error_text:
+        if status_code is not None and str(status_code) not in str(error_text):
+            return f"{status_code} {error_text}"
+        return str(error_text)
+
+    if status_code is not None:
+        if status_text and str(status_code) not in str(status_text):
+            return f"{status_code} {status_text}"
+        return str(status_code)
+
+    if status_text:
+        return str(status_text)
+
+    return "unavailable"
+
+
 def _ui_summary_rows(
     *,
     targets: dict[str, str],
@@ -198,7 +219,8 @@ def _ui_summary_rows(
         result = result_map.get(key)
 
         if result:
-            status = "OK" if getattr(result, "ok", False) else f"FAIL ({getattr(result, 'error', None) or getattr(result, 'status', None) or getattr(result, 'status_code', None) or 'unavailable'})"
+            detail = _format_result_detail(result)
+            status = "OK" if getattr(result, "ok", False) else f"FAIL ({detail})"
         elif url:
             status = "skipped (not probed)" if not readiness_ok else "unknown"
         else:

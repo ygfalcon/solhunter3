@@ -2166,10 +2166,19 @@ def test_run_summary_rows_include_ui(monkeypatch):
             "ui-ws": "ws://localhost:7001",
         }
         http_result = types.SimpleNamespace(
-            name="ui-http", ok=False, error="timeout", status=None, status_code=None
+            name="ui-http",
+            ok=False,
+            error="service unavailable",
+            status=None,
+            status_code=503,
         )
         ws_result = types.SimpleNamespace(name="ui-ws", ok=True, error=None, status=None, status_code=None)
-        return False, "ui-http: FAIL (timeout); ui-ws: OK", targets, [http_result, ws_result]
+        return (
+            False,
+            "ui-http: FAIL (503 service unavailable); ui-ws: OK",
+            targets,
+            [http_result, ws_result],
+        )
 
     monkeypatch.setattr(startup_runner, "_poll_ui_readiness", fake_poll)
 
@@ -2184,9 +2193,31 @@ def test_run_summary_rows_include_ui(monkeypatch):
     code = startup_runner.run(args, ctx, log_startup=fake_log)
 
     assert code == 0
+    assert any("UI HTTP" in msg and "503 service unavailable" in msg for msg in logs)
     assert any("UI HTTP" in msg and "port 5001" in msg for msg in logs)
     assert any("UI WS" in msg and "port 7001" in msg for msg in logs)
     assert any(msg.startswith("UI readiness unhealthy") for msg in logs)
+
+
+def test_ui_summary_rows_include_status_codes(monkeypatch):
+    import types
+
+    _stub_rich(monkeypatch)
+
+    import solhunter_zero.startup_runner as startup_runner
+
+    targets = {"ui-http": "http://example.com:8080"}
+    results = [
+        types.SimpleNamespace(
+            name="ui-http", ok=False, error="service unavailable", status_code=503, status=None
+        )
+    ]
+
+    rows = startup_runner._ui_summary_rows(
+        targets=targets, results=results, readiness_message="", readiness_ok=False
+    )
+
+    assert ("UI HTTP", "FAIL (503 service unavailable) – http://example.com:8080; port 8080") in rows
 
 
 def test_poll_ui_readiness_retries_until_healthy(monkeypatch):
