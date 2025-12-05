@@ -216,6 +216,64 @@ else:  # pragma: no cover - metrics optional
     _WS_QUEUE_DROP_TOTAL = None
 
 
+def _extract_broker_urls() -> list[str]:
+    urls: list[str] = []
+
+    single = os.getenv("BROKER_URL")
+    if single:
+        urls.append(single.strip())
+
+    plural = os.getenv("BROKER_URLS")
+    if plural:
+        urls.extend(part.strip() for part in plural.replace(";", ",").split(",") if part.strip())
+
+    plural_json = os.getenv("BROKER_URLS_JSON")
+    if plural_json:
+        try:
+            parsed = json.loads(plural_json)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, (list, tuple, set)):
+            for entry in parsed:
+                if entry is None:
+                    continue
+                text = str(entry).strip()
+                if text:
+                    urls.append(text)
+
+    return [url for url in urls if url]
+
+
+def _resolve_redis_url_for_ui(default_url: str) -> tuple[str, str]:
+    redis_env = os.getenv("REDIS_URL")
+    broker_urls = _extract_broker_urls()
+    broker_redis = next(
+        (url for url in broker_urls if url.startswith(("redis://", "rediss://"))),
+        None,
+    )
+
+    redis_candidates = (
+        redis_env if redis_env else None,
+        broker_redis,
+        os.getenv("MINT_STREAM_REDIS_URL"),
+        os.getenv("MEMPOOL_STREAM_REDIS_URL"),
+        os.getenv("AMM_WATCH_REDIS_URL"),
+        _env_or_default("REDIS_URL"),
+        default_url,
+    )
+
+    redis_url = next((candidate for candidate in redis_candidates if candidate), default_url)
+
+    if redis_env and redis_env == redis_url:
+        source = "REDIS_URL"
+    elif broker_redis and broker_redis == redis_url:
+        source = "BROKER_URL(S)"
+    else:
+        source = "REDIS_URL"
+
+    return redis_url, source
+
+
 def _bootstrap_ui_environment() -> None:
     """Ensure the live trading environment defaults are loaded once."""
 
@@ -224,10 +282,13 @@ def _bootstrap_ui_environment() -> None:
         return
 
     load_production_env()
+    default_redis_url = "redis://localhost:6379/1"
+    redis_url, redis_source = _resolve_redis_url_for_ui(default_redis_url)
+
     for name, default in (
         ("SOLHUNTER_MODE", "live"),
         ("BROKER_CHANNEL", "solhunter-events-v3"),
-        ("REDIS_URL", "redis://localhost:6379/1"),
+        ("REDIS_URL", redis_url or default_redis_url),
     ):
         current = os.environ.get(name)
         if current is None or not str(current).strip():
@@ -242,8 +303,7 @@ def _bootstrap_ui_environment() -> None:
             default,
         )
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/1")
-    status = _ping_redis(redis_url)
+    status = _ping_redis(os.environ.get("REDIS_URL", redis_url or default_redis_url))
     _REDIS_PING_STATUS.clear()
     _REDIS_PING_STATUS.update(status)
 
@@ -259,8 +319,8 @@ def _bootstrap_ui_environment() -> None:
         else:
             raise RuntimeError(
                 f"Redis unreachable at {redis_url} (ping failed: {detail}). "
-                "Set REDIS_URL or start Redis. For offline demos, export "
-                "UI_ALLOW_OFFLINE_REDIS=1 to bypass this check."
+                f"Update {redis_source} to point at a reachable Redis broker/cache or start the service. "
+                "For offline demos, export UI_ALLOW_OFFLINE_REDIS=1 to bypass this check."
             )
     else:
         log.debug(

@@ -88,6 +88,48 @@ def test_bootstrap_ui_environment_defaults_live(monkeypatch):
         ui._teardown_ui_environment()
 
 
+def test_bootstrap_ui_environment_prefers_redis_broker(monkeypatch):
+    monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
+    monkeypatch.setattr(ui, "load_production_env", lambda: {})
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("BROKER_URLS", raising=False)
+    monkeypatch.setenv("BROKER_URL", "redis://broker.example:6381/2")
+
+    ping_calls: list[str] = []
+
+    def fake_ping(url: str) -> dict[str, object]:
+        ping_calls.append(url)
+        return {"ok": True, "latency_ms": 1.2, "url": url}
+
+    monkeypatch.setattr(ui, "_ping_redis", fake_ping)
+
+    ui._bootstrap_ui_environment()
+    try:
+        assert os.environ["REDIS_URL"] == "redis://broker.example:6381/2"
+        assert ping_calls == ["redis://broker.example:6381/2"]
+        assert ui._REDIS_PING_STATUS["url"] == "redis://broker.example:6381/2"
+    finally:
+        ui._teardown_ui_environment()
+
+
+def test_bootstrap_ui_environment_fails_with_broker_guidance(monkeypatch):
+    monkeypatch.setattr(ui, "_ENV_BOOTSTRAPPED", False)
+    monkeypatch.setattr(ui, "load_production_env", lambda: {})
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setenv("BROKER_URL", "redis://broker.example:6379/1")
+
+    def failing_ping(url: str) -> dict[str, object]:
+        return {"ok": False, "error": "connection refused", "url": url}
+
+    monkeypatch.setattr(ui, "_ping_redis", failing_ping)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ui._bootstrap_ui_environment()
+
+    assert "BROKER_URL" in str(excinfo.value)
+    ui._teardown_ui_environment()
+
+
 def test_ui_meta_reports_redis_not_broker(monkeypatch):
     previous_cache = ui._ui_meta_cache
     previous_state = ui._get_active_ui_state()
