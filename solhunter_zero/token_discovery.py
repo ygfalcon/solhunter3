@@ -535,13 +535,28 @@ async def _get_orca_catalog_lock() -> asyncio.Lock:
 
 
 def _resolve_birdeye_api_key() -> str:
-    """Return the configured BirdEye API key (env var or default)."""
+    """Return the configured BirdEye API key or raise a configuration error."""
 
     api_key = (os.getenv("BIRDEYE_API_KEY") or "").strip()
     if not api_key:
         default_key = (DEFAULT_BIRDEYE_API_KEY or "").strip()
         api_key = default_key
-    return api_key
+
+    if api_key:
+        return api_key
+
+    global _BIRDEYE_DISABLED_INFO
+    if not _BIRDEYE_DISABLED_INFO:
+        logger.warning(
+            "BirdEye API key missing; BirdEye discovery disabled. Remaining discovery sources continue to operate."
+        )
+        _BIRDEYE_DISABLED_INFO = True
+
+    raise DiscoveryConfigurationError(
+        "birdeye",
+        "BirdEye API key missing; BirdEye discovery disabled.",
+        remediation="Set the BIRDEYE_API_KEY environment variable.",
+    )
 
 
 def _cache_get(key: str) -> List[TokenEntry] | None:
@@ -1380,19 +1395,6 @@ async def _fetch_birdeye_tokens(*, limit: int | None = None) -> List[TokenEntry]
     Numeric filters only; no name/suffix heuristics.
     """
     api_key = _resolve_birdeye_api_key()
-    global _BIRDEYE_DISABLED_INFO
-    if not api_key:
-        if not _BIRDEYE_DISABLED_INFO:
-            logger.warning(
-                "BirdEye API key missing; BirdEye discovery disabled. Remaining discovery sources continue to operate."
-            )
-            _BIRDEYE_DISABLED_INFO = True
-        logger.debug("BirdEye API key missing; skipping BirdEye discovery")
-        raise DiscoveryConfigurationError(
-            "birdeye",
-            "BirdEye API key missing; BirdEye discovery disabled.",
-            remediation="Set the BIRDEYE_API_KEY environment variable.",
-        )
 
     cache_key = _current_cache_key(limit)
     cached = _cache_get(cache_key)
@@ -2841,7 +2843,11 @@ def discover_candidates(
 
 def warm_cache(rpc_url: str, *, limit: int | None = None) -> None:
     """Prime the discovery cache synchronously (best-effort)."""
-    api_key = _resolve_birdeye_api_key()
+    try:
+        api_key = _resolve_birdeye_api_key()
+    except DiscoveryConfigurationError as exc:
+        logger.warning("Discovery warm cache skipped: %s", exc)
+        api_key = ""
     if not (rpc_url or api_key):
         return
 
