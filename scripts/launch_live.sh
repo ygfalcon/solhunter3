@@ -1164,13 +1164,17 @@ def _is_local_host(hostname: str) -> bool:
     return address.is_loopback
 
 
-def _probe_host(hostname: str) -> str:
+def _probe_host(hostname: str) -> list[str]:
     normalized = (hostname or "").strip()
-    if not normalized or normalized == "0.0.0.0":
-        return "127.0.0.1"
-    if normalized == "::":
-        return "::1"
-    return normalized
+    loopbacks = ["127.0.0.1", "::1"]
+    if not normalized or normalized.lower() == "localhost":
+        return loopbacks
+    if normalized == "0.0.0.0" or normalized == "::":
+        return loopbacks
+    if normalized in loopbacks:
+        # Always probe both loopback families to catch misconfigurations.
+        return loopbacks
+    return [normalized]
 
 
 host = os.environ.get("UI_HOST", "127.0.0.1") or "127.0.0.1"
@@ -1204,12 +1208,25 @@ if not _is_local_host(host):
     raise SystemExit(0)
 
 
-def port_busy() -> bool:
-    try:
-        with socket.create_connection((_probe_host(host), port), timeout=0.25):
-            return True
-    except OSError:
-        return False
+def port_busy() -> tuple[bool, str | None]:
+    resolution_errors: list[str] = []
+    for target in _probe_host(host):
+        try:
+            with socket.create_connection((target, port), timeout=0.25):
+                return True, None
+        except socket.gaierror as exc:
+            resolution_errors.append(f"{target} ({exc})")
+        except OSError:
+            continue
+
+    if resolution_errors:
+        hint = (
+            "resolution failed; verify UI_HOST or /etc/hosts allows resolving loopback "
+            + "; ".join(resolution_errors)
+        )
+        return True, hint
+
+    return False, None
 
 
 deadline = time.monotonic() + timeout
@@ -1217,8 +1234,13 @@ sleep_interval = 1.0
 max_sleep = 5.0
 
 while True:
-    if not port_busy():
+    busy, busy_reason = port_busy()
+    if not busy:
         print(f"free {host} {port}")
+        break
+
+    if busy_reason:
+        print(f"busy {host} {port} {busy_reason}")
         break
 
     now = time.monotonic()
