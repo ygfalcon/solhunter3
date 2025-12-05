@@ -179,6 +179,9 @@ def _build_complete_env(tmp_path: Path) -> dict[str, str]:
         "SOLANA_WS_URL": "wss://solana.ws",
         "REDIS_URL": "redis://localhost:6379/0",
         "KEYPAIR_PATH": str(keypair_path),
+        "SOLHUNTER_MODE": "paper",
+        "MODE": "paper",
+        "UPCOMING_CONTROLLER_MODE": "paper",
         "EVENT_BUS_URL": "redis://localhost:6379/1",
         "HELIUS_API_KEY": "helius-api-key",
         "HELIUS_API_KEYS": "helius-api-keys",
@@ -204,6 +207,8 @@ def _build_complete_env(tmp_path: Path) -> dict[str, str]:
         "NEWS_FEEDS": "https://news.feed",
         "TWITTER_FEEDS": "https://twitter.feed",
         "DISCORD_FEEDS": "https://discord.feed",
+        "UI_HEALTH_URL": "https://ui.health",
+        "RL_HEALTH_URL": "https://rl.health",
     }
 
 
