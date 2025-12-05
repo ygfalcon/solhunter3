@@ -1,6 +1,8 @@
 import contextlib
 import importlib
 import os
+from pathlib import Path
+import sys
 import types
 
 
@@ -105,4 +107,65 @@ def test_main_passes_cli_ui_overrides_to_connectivity(monkeypatch, tmp_path):
     assert connectivity_envs == [
         {"host": "8.8.8.8", "port": "8888"},
         {"host": "8.8.8.8", "port": "8888"},
+    ]
+
+
+def test_failure_path_runs_light_probe(monkeypatch, tmp_path):
+    sys.modules.setdefault(
+        "yaml", types.SimpleNamespace(safe_load=lambda *a, **k: {}, safe_dump=lambda *a, **k: "")
+    )
+    
+    class DummyRedis:
+        @staticmethod
+        def from_url(_url):
+            return None
+
+    sys.modules.setdefault(
+        "redis",
+        types.SimpleNamespace(Redis=DummyRedis, exceptions=types.SimpleNamespace(RedisError=Exception)),
+    )
+    sys.modules.setdefault("redis.exceptions", types.SimpleNamespace(RedisError=Exception))
+
+    start_all = importlib.import_module("scripts.start_all")
+
+    monkeypatch.chdir(tmp_path)
+
+    @contextlib.contextmanager
+    def dummy_lock(_path):
+        yield
+
+    monkeypatch.setattr(start_all, "_acquire_runtime_lock", dummy_lock)
+    monkeypatch.setattr(start_all, "kill_lingering_processes", lambda: None)
+    monkeypatch.setattr(
+        start_all,
+        "ensure_environment",
+        lambda cfg: {"config_path": str(tmp_path / "cfg.toml"), "config": {}},
+    )
+    monkeypatch.setattr(start_all, "ensure_live_keypair", lambda cfg: {})
+    monkeypatch.setattr(start_all, "_load_production_environment", lambda: {})
+    monkeypatch.setattr(start_all, "apply_production_defaults", lambda cfg: {})
+    monkeypatch.setattr(start_all, "_validate_keys", lambda: "ok")
+    monkeypatch.setattr(start_all, "_write_manifest", lambda *_: Path("/tmp/manifest.json"))
+    monkeypatch.setattr(start_all, "verify_live_account", lambda: {"skipped": True})
+    monkeypatch.setattr(start_all, "rl_health_gate", lambda: None)
+    monkeypatch.setattr(start_all, "_connectivity_check", lambda: [])
+    monkeypatch.setattr(start_all, "_connectivity_soak", lambda: {"disabled": True})
+
+    def fail_launch_detached(*_args, **_kwargs):
+        raise RuntimeError("runtime failed")
+
+    monkeypatch.setattr(start_all, "launch_detached", fail_launch_detached)
+    probe_calls: list[dict[str, object]] = []
+
+    def record_probe(url: str, *, timeout: float = 1.0):
+        probe_calls.append({"url": url, "timeout": timeout})
+        return False, "probe failed"
+
+    monkeypatch.setattr(start_all, "http_ok", record_probe)
+
+    exit_code = start_all.main(["--skip-clean"])
+
+    assert exit_code == 1
+    assert probe_calls == [
+        {"url": "http://127.0.0.1:5001/health", "timeout": 0.75},
     ]

@@ -643,6 +643,28 @@ def _resolve_runtime_ready_url(args: argparse.Namespace) -> str | None:
     return urlunparse((scheme, netloc, path, "", "", ""))
 
 
+def _probe_runtime_ready_on_failure(args: argparse.Namespace) -> None:
+    """Best-effort probe to differentiate runtime failure from UI outages."""
+
+    ready_url = _resolve_runtime_ready_url(args)
+    if ready_url is None:
+        log.info("Skipping failure probe: runtime ready URL unavailable")
+        return
+
+    default_timeout = 0.75
+    try:
+        timeout = _parse_float_env("START_ALL_FAILURE_PROBE_TIMEOUT", default_timeout)
+    except Exception:
+        log.warning(
+            "Invalid START_ALL_FAILURE_PROBE_TIMEOUT; falling back to %.2fs", default_timeout
+        )
+        timeout = default_timeout
+
+    ok, msg = http_ok(ready_url, timeout=timeout)
+    status = "reachable" if ok else "unreachable"
+    log.info("Failure probe: runtime %s at %s (%s)", status, ready_url, msg)
+
+
 def _resolve_ui_endpoint_hint(log_path: Path, ui_host: str, ui_port: str | int) -> str:
     """Return the last seen UI_READY URL or a best-effort fallback."""
 
@@ -1283,6 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
             exit_code = 1
             log.critical("Startup pipeline aborted: %s", exc)
             log.debug("Detailed traceback:\n%s", "".join(traceback.format_exception(exc)))
+            _probe_runtime_ready_on_failure(args)
         finally:
             summarize_stages(stage_results)
 
