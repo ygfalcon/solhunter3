@@ -250,6 +250,15 @@ def _struct_to_python(message: Any) -> Dict[str, Any]:
     return message
 
 
+def _record_conflict(conflicts: dict[str, list[Any]], key: str, old: Any, new: Any) -> None:
+    if old == new:
+        return
+    values = conflicts.setdefault(key, [])
+    for value in (old, new):
+        if value not in values:
+            values.append(value)
+
+
 def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     root_context = payload if isinstance(payload, Mapping) else None
@@ -288,38 +297,76 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
         extra: dict[str, Any],
         *,
         tag_source: str | None,
+        allow_override: bool,
+        conflicts: dict[str, list[Any]],
     ) -> None:
         source_label = tag_source or _source_label(source)
         for key, value in source.items():
             if key in {"topic", "tokens", "entries"}:
                 continue
             if key in {"mint", "token", "address"}:
-                if not dest.get("mint") and isinstance(value, str) and value.strip():
-                    dest["mint"] = value.strip()
+                if isinstance(value, str) and value.strip():
+                    new_value = value.strip()
+                    existing_mint = dest.get("mint")
+                    if not existing_mint:
+                        dest["mint"] = new_value
+                    elif allow_override and existing_mint != new_value:
+                        _record_conflict(conflicts, "mint", existing_mint, new_value)
+                        dest["mint"] = new_value
                 continue
             if key == "source":
                 if isinstance(value, str) and value.strip():
-                    dest.setdefault("source", value.strip())
+                    new_value = value.strip()
+                    existing_source = dest.get("source")
+                    if existing_source is None:
+                        dest["source"] = new_value
+                    elif allow_override and existing_source != new_value:
+                        _record_conflict(conflicts, "source", existing_source, new_value)
+                        dest["source"] = new_value
                 continue
             if key == "score":
-                if "score" not in dest:
-                    number = _coerce_float(value)
-                    if number is not None:
-                        dest["score"] = number
+                number = _coerce_float(value)
+                if number is None:
+                    existing_extra_score = extra.get("score")
+                    if allow_override and existing_extra_score is not None:
+                        _record_conflict(conflicts, "score", existing_extra_score, value)
+                        extra["score"] = value
                     else:
                         extra.setdefault("score", value)
+                else:
+                    existing_score = dest.get("score")
+                    if existing_score is None:
+                        dest["score"] = number
+                    elif allow_override and existing_score != number:
+                        _record_conflict(conflicts, "score", existing_score, number)
+                        dest["score"] = number
                 continue
             if key == "tx":
-                if value is not None and "tx" not in dest:
-                    dest["tx"] = str(value)
+                if value is not None:
+                    new_value = str(value)
+                    existing_tx = dest.get("tx")
+                    if existing_tx is None:
+                        dest["tx"] = new_value
+                    elif allow_override and existing_tx != new_value:
+                        _record_conflict(conflicts, "tx", existing_tx, new_value)
+                        dest["tx"] = new_value
                 continue
             if key in {"ts", "timestamp", "discovered_at"}:
-                if "ts" not in dest:
-                    number = _coerce_float(value)
-                    if number is not None:
-                        dest["ts"] = number
+                number = _coerce_float(value)
+                if number is None:
+                    existing_extra_ts = extra.get("ts")
+                    if allow_override and existing_extra_ts is not None:
+                        _record_conflict(conflicts, "ts", existing_extra_ts, value)
+                        extra["ts"] = value
                     else:
                         extra.setdefault("ts", value)
+                else:
+                    existing_ts = dest.get("ts")
+                    if existing_ts is None:
+                        dest["ts"] = number
+                    elif allow_override and existing_ts != number:
+                        _record_conflict(conflicts, "ts", existing_ts, number)
+                        dest["ts"] = number
                 continue
             if key == "tags":
                 tags = _normalize_tags(value)
@@ -371,8 +418,16 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
                     dest["tags_by_source"] = tags_map
                 continue
             if key == "interface":
-                if value is not None and "interface" not in dest:
-                    dest["interface"] = str(value)
+                if value is not None:
+                    new_value = str(value)
+                    existing_interface = dest.get("interface")
+                    if existing_interface is None:
+                        dest["interface"] = new_value
+                    elif allow_override and existing_interface != new_value:
+                        _record_conflict(
+                            conflicts, "interface", existing_interface, new_value
+                        )
+                        dest["interface"] = new_value
                 continue
             if key == "discovery" and isinstance(value, Mapping):
                 existing = dest.get("discovery")
@@ -385,17 +440,43 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
                 if isinstance(attrs, dict):
                     attrs.update(value)
                 continue
-            extra.setdefault(key, value)
+            if key in extra and allow_override and extra[key] != value:
+                _record_conflict(conflicts, key, extra[key], value)
+                extra[key] = value
+            else:
+                extra.setdefault(key, value)
 
     for entry, context in _iter_entries():
         data: dict[str, Any] = {}
         extra: dict[str, Any] = {}
+        conflicts: dict[str, list[Any]] = {}
         if root_context and root_context is not context:
-            _merge(root_context, data, extra, tag_source=_source_label(root_context))
+            _merge(
+                root_context,
+                data,
+                extra,
+                tag_source=_source_label(root_context),
+                allow_override=False,
+                conflicts=conflicts,
+            )
         if isinstance(context, Mapping):
-            _merge(context, data, extra, tag_source=_source_label(context))
+            _merge(
+                context,
+                data,
+                extra,
+                tag_source=_source_label(context),
+                allow_override=True,
+                conflicts=conflicts,
+            )
         if isinstance(entry, Mapping):
-            _merge(entry, data, extra, tag_source=_source_label(entry))
+            _merge(
+                entry,
+                data,
+                extra,
+                tag_source=_source_label(entry),
+                allow_override=True,
+                conflicts=conflicts,
+            )
         elif isinstance(entry, str):
             if entry.strip():
                 data.setdefault("mint", entry.strip())
@@ -447,16 +528,26 @@ def _normalize_discovery_entries(payload: Any) -> list[dict[str, Any]]:
             data["discovery"] = dict(discovery)
         else:
             data.pop("discovery", None)
-        if extra:
-            attrs = extra.get("attributes")
-            remaining = {k: v for k, v in extra.items() if k != "attributes"}
-            merged_attrs: dict[str, Any] = {}
-            if isinstance(attrs, Mapping):
-                merged_attrs.update(attrs)
-            if remaining:
-                merged_attrs.update(remaining)
-            if merged_attrs:
-                data["attributes"] = merged_attrs
+        attrs = extra.get("attributes")
+        remaining = {k: v for k, v in extra.items() if k != "attributes"}
+        merged_attrs: dict[str, Any] = {}
+        if isinstance(attrs, Mapping):
+            merged_attrs.update(attrs)
+        if remaining:
+            merged_attrs.update(remaining)
+        if conflicts:
+            existing_conflicts = merged_attrs.get("conflicts")
+            merged_conflicts: dict[str, list[Any]] = (
+                dict(existing_conflicts) if isinstance(existing_conflicts, Mapping) else {}
+            )
+            for conflict_key, conflict_values in conflicts.items():
+                existing_values = merged_conflicts.get(conflict_key, [])
+                combined = list(dict.fromkeys(list(existing_values) + conflict_values))
+                merged_conflicts[conflict_key] = combined
+            if merged_conflicts:
+                merged_attrs["conflicts"] = merged_conflicts
+        if merged_attrs:
+            data["attributes"] = merged_attrs
 
         if "ts" not in data:
             now = time.time()

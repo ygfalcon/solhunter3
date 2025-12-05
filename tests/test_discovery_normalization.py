@@ -155,3 +155,58 @@ def test_normalize_discovery_entries_retains_tags_by_source():
     assert entry["tags_by_source"]["child"] == ["child", "shared"]
     assert entry["tags_by_source"]["deep"] == ["nested"]
 
+
+def test_normalize_discovery_entries_prefers_entry_level_and_tracks_conflicts():
+    payload = {
+        "source": "root_source",
+        "score": 1.1,
+        "tx": "root_tx",
+        "entries": [
+            {
+                "mint": VALID_MINT_A,
+                "source": "entry_source",
+                "score": 2.2,
+                "tx": "entry_tx",
+                "region": "entry",
+            }
+        ],
+    }
+
+    entries = _normalize_discovery_entries(payload)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["source"] == "entry_source"
+    assert entry["score"] == 2.2
+    assert entry["tx"] == "entry_tx"
+    conflicts = entry.get("attributes", {}).get("conflicts", {})
+    assert conflicts["source"] == ["root_source", "entry_source"]
+    assert conflicts["score"] == [1.1, 2.2]
+    assert conflicts["tx"] == ["root_tx", "entry_tx"]
+
+
+def test_normalize_discovery_entries_overrides_context_attributes():
+    payload = {
+        "ts": 100,
+        "interface": "context_iface",
+        "entries": [
+            {
+                "mint": VALID_MINT_B,
+                "ts": 200,
+                "interface": "entry_iface",
+                "alias": "preferred",
+            }
+        ],
+    }
+
+    entries = _normalize_discovery_entries(payload)
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["ts"] == 200
+    assert entry["interface"] == "entry_iface"
+    assert entry["attributes"].get("alias") == "preferred"
+    conflicts = entry.get("attributes", {}).get("conflicts", {})
+    assert conflicts["ts"] == [100, 200]
+    assert conflicts["interface"] == ["context_iface", "entry_iface"]
+
