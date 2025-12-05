@@ -93,6 +93,8 @@ def _run_wait_for_ready(
     ready_timeout: int = 2,
     ui_ready_timeout: int | None = None,
     log_excerpt_lines: int | None = None,
+    runtime_pid: int | None = None,
+    ui_pid: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     log_path = tmp_path / "runtime.log"
     log_path.write_text("\n".join(log_lines) + "\n")
@@ -115,6 +117,10 @@ def _run_wait_for_ready(
         + ("" if log_excerpt_lines is None else f"READY_LOG_EXCERPT_LINES={log_excerpt_lines}\n")
         + f"wait_for_ready '{log_path}' "
         + ("''" if notify_path is None else shlex.quote(str(notify_path)))
+        + " "
+        + (str(runtime_pid) if runtime_pid is not None else "''")
+        + " "
+        + (str(ui_pid) if ui_pid is not None else "''")
         + "\n"
     )
     env_vars = os.environ.copy()
@@ -413,16 +419,22 @@ def test_print_log_excerpt_surfaces_controller_stderr_when_log_missing(tmp_path:
     ],
 )
 def test_wait_for_ready_accepts_disabled(tmp_path: Path, golden_line: str) -> None:
-    completed = _run_wait_for_ready(
-        tmp_path,
-        [
-            "[ts] UI_READY url=http://localhost:1234",  # UI ready marker
-            "[ts] UI_WS_READY status=ok rl_ws=ws://localhost:2345 events_ws=ws://localhost:3456 logs_ws=ws://localhost:4567",
-            "[ts] Event bus: connected",  # Event bus connected marker
-            golden_line,
-            "[ts] RUNTIME_READY",  # Runtime ready marker
-        ],
-    )
+    server = _start_status_server(200)
+    try:
+        host, port = server.server_address
+        completed = _run_wait_for_ready(
+            tmp_path,
+            [
+                f"[ts] UI_READY url=http://{host}:{port}",  # UI ready marker
+                "[ts] UI_WS_READY status=ok rl_ws=ws://localhost:2345 events_ws=ws://localhost:3456 logs_ws=ws://localhost:4567",
+                "[ts] Event bus: connected",  # Event bus connected marker
+                golden_line,
+                "[ts] RUNTIME_READY",  # Runtime ready marker
+            ],
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
 
     assert completed.returncode == 0
 
@@ -450,19 +462,48 @@ def test_wait_for_ready_times_out_when_ui_missing(tmp_path: Path) -> None:
     assert "bootstrap starting" not in completed.stderr
 
 
+def test_wait_for_ready_fails_when_ui_process_exits(tmp_path: Path) -> None:
+    ui_process = subprocess.Popen(["sleep", "0.05"])
+    try:
+        completed = _run_wait_for_ready(
+            tmp_path,
+            [
+                "[ts] bootstrap starting",
+                "[ts] Event bus: connected",
+            ],
+            ui_ready_timeout=5,
+            ready_timeout=6,
+            log_excerpt_lines=2,
+            ui_pid=ui_process.pid,
+        )
+    finally:
+        ui_process.wait()
+
+    assert completed.returncode == 1
+    assert "UI process" in completed.stderr
+    assert "bootstrap starting" in completed.stderr
+    assert "Timed out" not in completed.stderr
+
+
 def test_wait_for_ready_succeeds_before_ui_timeout(tmp_path: Path) -> None:
-    completed = _run_wait_for_ready(
-        tmp_path,
-        [
-            "[ts] UI_READY url=http://localhost:1234",
-            "[ts] UI_WS_READY status=ok detail=connected",
-            "[ts] Event bus: connected",
-            "[ts] GOLDEN_READY stage=liq",
-            "[ts] RUNTIME_READY",
-        ],
-        ready_timeout=10,
-        ui_ready_timeout=2,
-    )
+    server = _start_status_server(200)
+    try:
+        host, port = server.server_address
+        completed = _run_wait_for_ready(
+            tmp_path,
+            [
+                f"[ts] UI_READY url=http://{host}:{port}",
+                "[ts] UI_WS_READY status=ok detail=connected",
+                "[ts] Event bus: connected",
+                "[ts] GOLDEN_READY stage=liq",
+                "[ts] RUNTIME_READY",
+            ],
+            ready_timeout=10,
+            ui_ready_timeout=2,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
 
     assert completed.returncode == 0
     assert "Timed out" not in completed.stderr
@@ -489,16 +530,22 @@ def test_wait_for_ready_uses_notify_file_when_ui_disabled(tmp_path: Path) -> Non
 
 
 def test_wait_for_ready_exits_on_ui_ws_failure(tmp_path: Path) -> None:
-    completed = _run_wait_for_ready(
-        tmp_path,
-        [
-            "[ts] UI_READY url=http://localhost:1234",
-            "[ts] UI_WS_READY status=failed detail=websocket handshake failed",
-            "[ts] Event bus: connected",
-            "[ts] GOLDEN_READY stage=liq",
-            "[ts] RUNTIME_READY",
-        ],
-    )
+    server = _start_status_server(200)
+    try:
+        host, port = server.server_address
+        completed = _run_wait_for_ready(
+            tmp_path,
+            [
+                f"[ts] UI_READY url=http://{host}:{port}",
+                "[ts] UI_WS_READY status=failed detail=websocket handshake failed",
+                "[ts] Event bus: connected",
+                "[ts] GOLDEN_READY stage=liq",
+                "[ts] RUNTIME_READY",
+            ],
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
 
     assert completed.returncode == 4
     assert "status=failed" in completed.stderr
@@ -554,33 +601,45 @@ def test_wait_for_ready_fails_on_http_probe_error(tmp_path: Path) -> None:
 
 
 def test_wait_for_ready_rejects_degraded_without_opt_in(tmp_path: Path) -> None:
-    completed = _run_wait_for_ready(
-        tmp_path,
-        [
-            "[ts] UI_READY url=http://localhost:1234",
-            "[ts] UI_WS_READY status=degraded detail=ws optional but not enabled",
-            "[ts] Event bus: connected",
-            "[ts] GOLDEN_READY stage=liq",
-            "[ts] RUNTIME_READY",
-        ],
-    )
+    server = _start_status_server(200)
+    try:
+        host, port = server.server_address
+        completed = _run_wait_for_ready(
+            tmp_path,
+            [
+                f"[ts] UI_READY url=http://{host}:{port}",
+                "[ts] UI_WS_READY status=degraded detail=ws optional but not enabled",
+                "[ts] Event bus: connected",
+                "[ts] GOLDEN_READY stage=liq",
+                "[ts] RUNTIME_READY",
+            ],
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
 
     assert completed.returncode == 4
     assert "status=degraded" in completed.stderr
 
 
 def test_wait_for_ready_allows_degraded_when_optional(tmp_path: Path) -> None:
-    completed = _run_wait_for_ready(
-        tmp_path,
-        [
-            "[ts] UI_READY url=http://localhost:1234",
-            "[ts] UI_WS_READY status=degraded detail=ws optional",
-            "[ts] Event bus: connected",
-            "[ts] GOLDEN_READY stage=liq",
-            "[ts] RUNTIME_READY",
-        ],
-        env={"UI_WS_OPTIONAL": "1"},
-    )
+    server = _start_status_server(200)
+    try:
+        host, port = server.server_address
+        completed = _run_wait_for_ready(
+            tmp_path,
+            [
+                f"[ts] UI_READY url=http://{host}:{port}",
+                "[ts] UI_WS_READY status=degraded detail=ws optional",
+                "[ts] Event bus: connected",
+                "[ts] GOLDEN_READY stage=liq",
+                "[ts] RUNTIME_READY",
+            ],
+            env={"UI_WS_OPTIONAL": "1"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
 
     assert completed.returncode == 0
 
