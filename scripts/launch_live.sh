@@ -2167,20 +2167,80 @@ for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
             raise SystemExit(1)
 
 required_reports: list[str] = []
-required_sections = [
-    (
-        "RPC endpoints",
-        [
-            ("SOLANA_RPC_URL", "Solana RPC URL"),
-            ("SOLANA_WS_URL", "Solana websocket URL"),
+# Foundational keys required to launch in live mode. Each entry lists one or
+# more acceptable keys; at least one key in each entry must be populated.
+required_key_sets = [
+    {
+        "name": "RPC URLs",
+        "keys": [
+            {
+                "names": ["SOLANA_RPC_URL"],
+                "description": "HTTPS RPC endpoint for the target Solana cluster (e.g., https://...)",
+            },
+            {
+                "names": ["SOLANA_WS_URL"],
+                "description": "Websocket RPC endpoint for the same cluster (e.g., wss://...)",
+            },
         ],
-        "Provide SOLANA_RPC_URL and SOLANA_WS_URL for the target Solana cluster.",
-    ),
-    (
-        "Redis cache",
-        [("REDIS_URL", "Redis endpoint")],
-        "Set REDIS_URL to a reachable redis:// endpoint used for caching and the event bus.",
-    ),
+        "hint": "Set SOLANA_RPC_URL and SOLANA_WS_URL using the HTTPS and websocket endpoints from your Solana RPC provider.",
+    },
+    {
+        "name": "Redis and event bus",
+        "keys": [
+            {
+                "names": ["REDIS_URL"],
+                "description": "Redis connection string used for cache and event bus state (redis://host:port/db)",
+            },
+            {
+                "names": [
+                    "EVENT_BUS_URL",
+                    "BROKER_URL",
+                    "BROKER_URLS",
+                    "BROKER_WS_URLS",
+                    "BROKER_URLS_JSON",
+                ],
+                "description": "Event bus or broker endpoint (wss://..., http(s)://..., or comma-separated list)",
+            },
+        ],
+        "hint": "Add REDIS_URL and one of EVENT_BUS_URL, BROKER_URL/BROKER_URLS, BROKER_WS_URLS, or BROKER_URLS_JSON pointing to your message bus endpoints.",
+    },
+    {
+        "name": "Keypair configuration",
+        "keys": [
+            {
+                "names": ["KEYPAIR_PATH", "SOLANA_KEYPAIR"],
+                "description": "Path to the signer keypair JSON used for live trading",
+            }
+        ],
+        "hint": "Set KEYPAIR_PATH (or SOLANA_KEYPAIR) to a readable keypair file for the authority that will sign transactions.",
+    },
+    {
+        "name": "Workflow toggles",
+        "keys": [
+            {
+                "names": ["SOLHUNTER_MODE", "MODE", "UPCOMING_CONTROLLER_MODE"],
+                "description": "Trading mode indicator (paper or live)",
+            }
+        ],
+        "hint": "Set SOLHUNTER_MODE (or MODE/UPCOMING_CONTROLLER_MODE) to 'live' for production or 'paper' for dry runs so downstream services know which workflow to execute.",
+    },
+]
+
+for requirement in required_key_sets:
+    missing = []
+    for key_spec in requirement["keys"]:
+        names = key_spec["names"]
+        description = key_spec["description"]
+        if not any(values.get(name, "").strip() for name in names):
+            formatted_names = " or ".join(names)
+            missing.append(f"{formatted_names} ({description})")
+    if missing:
+        report = f"{requirement['name']} missing: {', '.join(missing)}."
+        if requirement.get("hint"):
+            report += f" Hint: {requirement['hint']}"
+        required_reports.append(report)
+
+required_sections = [
     (
         "Helius credentials",
         [
@@ -2238,24 +2298,6 @@ for env_name, description in required_exact:
     candidate = values.get(env_name, "").strip()
     if not candidate:
         required_reports.append(f"{env_name} ({description})")
-
-keypair_candidates = ("KEYPAIR_PATH", "SOLANA_KEYPAIR")
-if not any(values.get(name, "").strip() for name in keypair_candidates):
-    required_reports.append(
-        "keypair pointer missing; set KEYPAIR_PATH or SOLANA_KEYPAIR to a readable keypair JSON"
-    )
-
-broker_candidates = (
-    "EVENT_BUS_URL",
-    "BROKER_URL",
-    "BROKER_URLS",
-    "BROKER_WS_URLS",
-    "BROKER_URLS_JSON",
-)
-if not any(values.get(name, "").strip() for name in broker_candidates):
-    required_reports.append(
-        "broker/event bus endpoint missing; set EVENT_BUS_URL or provide BROKER_URL/BROKER_URLS/BROKER_WS_URLS"
-    )
 
 if required_reports:
     print("Environment file is missing required entries:", file=sys.stderr)
