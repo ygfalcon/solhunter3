@@ -2018,6 +2018,65 @@ def _stub_scripts(monkeypatch):
     monkeypatch.setitem(sys.modules, "scripts.healthcheck", healthcheck_mod)
 
 
+@pytest.mark.parametrize(
+    "config_path_factory, exc_factory, create_file, expected_fragment",
+    [
+        (
+            lambda tmp_path: tmp_path / "missing.toml",
+            lambda path: FileNotFoundError(path),
+            False,
+            "not found; run config bootstrap or pass --config",
+        ),
+        (
+            lambda tmp_path: tmp_path / "bad.toml",
+            lambda path: ValueError("bad config"),
+            True,
+            "Invalid config",
+        ),
+    ],
+)
+def test_run_handles_config_load_errors(
+    monkeypatch, tmp_path, config_path_factory, exc_factory, create_file, expected_fragment
+):
+    import types
+
+    _stub_rich(monkeypatch)
+    _stub_scripts(monkeypatch)
+
+    import solhunter_zero.startup_runner as startup_runner
+
+    logs: list[str] = []
+    printed: list[str] = []
+
+    def fake_log(msg: str) -> None:
+        logs.append(msg)
+
+    monkeypatch.setattr(
+        startup_runner,
+        "console",
+        types.SimpleNamespace(print=lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args))),
+    )
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", Path("startup.log"))
+
+    cfg_path = config_path_factory(tmp_path)
+    if create_file:
+        cfg_path.write_text("invalid")
+
+    monkeypatch.setattr("solhunter_zero.config.find_config_file", lambda: str(cfg_path))
+    monkeypatch.setattr("solhunter_zero.config.load_config", lambda path: (_ for _ in ()).throw(exc_factory(path)))
+
+    args = _interactive_args()
+    ctx = {"rest": [], "summary_rows": []}
+
+    code = startup_runner.run(args, ctx, log_startup=fake_log)
+
+    assert code == startup_runner.CONFIG_LOAD_EXIT_CODE
+    messages = logs + printed
+    assert any("run config bootstrap" in msg for msg in messages)
+    assert any(expected_fragment in msg for msg in messages)
+    assert str(cfg_path) in "".join(messages)
+
+
 def test_run_logs_ui_status_before_ready(monkeypatch):
     import types
 
