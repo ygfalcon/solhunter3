@@ -124,6 +124,7 @@ _CACHE: dict[str, object] = {
     "method": "",
     "rpc_identity": "",
     "details": {},
+    "metadata": {},
 }
 
 _CACHE_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
@@ -432,6 +433,10 @@ class DiscoveryAgent:
                     retries = default_retries
         self.max_attempts = retries
         self.mempool_threshold = float(os.getenv("MEMPOOL_SCORE_THRESHOLD", "0") or 0.0)
+        enrich_env = os.getenv("DISCOVERY_ENRICH_RESULTS")
+        self.enrich_results = bool(
+            enrich_env and enrich_env.strip().lower() in {"1", "true", "yes", "on"}
+        )
         env_method = resolve_discovery_method(os.getenv("DISCOVERY_METHOD"))
         self.default_method = env_method or DEFAULT_DISCOVERY_METHOD
         self.last_details: Dict[str, Dict[str, Any]] = {}
@@ -520,6 +525,17 @@ class DiscoveryAgent:
         value = os.getenv("FAST_PIPELINE_MODE", "")
         return value.strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _resolve_mempool_enabled(flag: Optional[bool]) -> bool:
+        if flag is None:
+            mempool_flag = os.getenv("DISCOVERY_ENABLE_MEMPOOL")
+            enabled = True
+            if mempool_flag is not None:
+                enabled = mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            enabled = bool(flag)
+        return enabled
+
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
@@ -548,7 +564,15 @@ class DiscoveryAgent:
     # ------------------------------------------------------------------
     async def _cache_snapshot(
         self,
-    ) -> tuple[List[str], Dict[str, Dict[str, Any]], float, int, str, str]:
+    ) -> tuple[
+        List[str],
+        Dict[str, Dict[str, Any]],
+        float,
+        int,
+        str,
+        str,
+        Dict[str, Any],
+    ]:
         async with _get_cache_lock():
             tokens_raw = _CACHE.get("tokens")
             details_raw = _CACHE.get("details")
@@ -556,10 +580,21 @@ class DiscoveryAgent:
             cache_limit = int(_CACHE.get("limit", 0))
             cache_method = str(_CACHE.get("method") or "").lower()
             cache_identity = str(_CACHE.get("rpc_identity") or "")
+            cache_metadata = self._normalise_cache_metadata(
+                _CACHE.get("metadata"), cache_limit, cache_method, cache_identity
+            )
 
         tokens = list(tokens_raw) if isinstance(tokens_raw, list) else []
         details = self._normalise_cache_details(details_raw)
-        return tokens, details, cache_ts, cache_limit, cache_method, cache_identity
+        return (
+            tokens,
+            details,
+            cache_ts,
+            cache_limit,
+            cache_method,
+            cache_identity,
+            cache_metadata,
+        )
 
     @staticmethod
     def _normalise_cache_details(payload: Any) -> Dict[str, Dict[str, Any]]:
@@ -578,6 +613,53 @@ class DiscoveryAgent:
             entry.pop("cache_stale", None)
             normalised[canonical] = entry
         return normalised
+
+    @staticmethod
+    def _normalise_cache_metadata(
+        payload: Any, cache_limit: int, cache_method: str, cache_identity: str
+    ) -> Dict[str, Any]:
+        metadata = dict(payload) if isinstance(payload, dict) else {}
+        metadata.setdefault("limit", cache_limit)
+        metadata.setdefault("method", cache_method)
+        metadata.setdefault("rpc_identity", cache_identity)
+        return metadata
+
+    def _build_cache_metadata(
+        self,
+        *,
+        method: str,
+        mempool_enabled: bool,
+        token_file: Optional[str],
+    ) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {
+            "method": method,
+            "limit": self.limit,
+            "rpc_identity": _rpc_identity(self.rpc_url),
+            "enrich": bool(getattr(self, "enrich_results", False)),
+        }
+        if method in {"websocket", "mempool"}:
+            metadata.update(
+                mempool_enabled=bool(mempool_enabled),
+                mempool_threshold=float(self.mempool_threshold),
+            )
+        if method == "websocket":
+            metadata["ws_url"] = self.ws_url or ""
+        if method == "mempool":
+            metadata["mempool_max_wait"] = float(self.mempool_max_wait)
+        if method == "file":
+            metadata["token_file"] = token_file or ""
+        return metadata
+
+    @staticmethod
+    def _cache_metadata_matches(
+        cached: Mapping[str, Any], current: Mapping[str, Any]
+    ) -> bool:
+        if not cached:
+            return False
+        for key, value in current.items():
+            if cached.get(key) != value:
+                return False
+        return True
 
     def _prepare_cache_details(
         self, details: Dict[str, Dict[str, Any]] | None
@@ -759,7 +841,7 @@ class DiscoveryAgent:
                 )
         else:
             active_method = requested_method
-        current_rpc_identity = _rpc_identity(self.rpc_url)
+        mempool_enabled = self._resolve_mempool_enabled(mempool_enabled)
         (
             cached_tokens,
             cached_details_payload,
@@ -767,19 +849,45 @@ class DiscoveryAgent:
             cache_limit,
             cached_method,
             cached_identity,
+            cached_metadata,
         ) = await self._cache_snapshot()
+        current_cache_metadata = self._build_cache_metadata(
+            method=active_method,
+            mempool_enabled=mempool_enabled,
+            token_file=token_file,
+        )
+        current_rpc_identity = current_cache_metadata.get("rpc_identity", "")
+        cache_metadata_matches = self._cache_metadata_matches(
+            cached_metadata, current_cache_metadata
+        )
+        if cached_tokens and not cache_metadata_matches:
+            logger.debug(
+                "DiscoveryAgent cache invalidated due to metadata change (cached=%s, current=%s)",
+                cached_metadata,
+                current_cache_metadata,
+            )
+            async with _get_cache_lock():
+                _CACHE["tokens"] = []
+                _CACHE["details"] = {}
+                _CACHE["ts"] = 0.0
+                _CACHE["limit"] = 0
+                _CACHE["method"] = ""
+                _CACHE["rpc_identity"] = ""
+                _CACHE["metadata"] = {}
+            cached_tokens = []
+            cached_details_payload = {}
+            cache_ts = 0.0
+            cache_limit = 0
+            cached_method = ""
+            cached_identity = ""
+            cached_metadata = {}
         identity_matches = bool(
-            (not cached_identity and not current_rpc_identity)
-            or cached_identity == current_rpc_identity
+            (not cached_identity and not current_cache_metadata.get("rpc_identity"))
+            or cached_identity == current_cache_metadata.get("rpc_identity")
         )
         cache_age = now - cache_ts if cache_ts > 0.0 else float("inf")
         cache_stale = ttl <= 0 or cache_age >= ttl
-        cache_method_matches = (
-            not method_override
-            or cached_method == active_method
-            or not cached_method
-        )
-        consider_cache = bool(cached_tokens) and cache_method_matches and identity_matches
+        consider_cache = bool(cached_tokens) and cache_metadata_matches
         if offline and not method_override:
             offline_source = "fallback"
             fallback_reason = ""
@@ -876,15 +984,6 @@ class DiscoveryAgent:
         details: Dict[str, Dict[str, Any]] = {}
         tokens: List[str] = []
 
-        if mempool_enabled is None:
-            mempool_flag = os.getenv("DISCOVERY_ENABLE_MEMPOOL")
-            mempool_enabled = True
-            if mempool_flag is not None:
-                mempool_enabled = (
-                    mempool_flag.strip().lower() in {"1", "true", "yes", "on"}
-                )
-        else:
-            mempool_enabled = bool(mempool_enabled)
         fallback_used = False
         fallback_reason = ""
 
@@ -969,6 +1068,7 @@ class DiscoveryAgent:
                 _CACHE["method"] = active_method
                 _CACHE["rpc_identity"] = current_rpc_identity
                 _CACHE["details"] = self._prepare_cache_details(details)
+                _CACHE["metadata"] = dict(current_cache_metadata)
         elif fallback_used:
             async with _get_cache_lock():
                 # Mark the cache as expired so the next call performs live discovery.
@@ -978,6 +1078,7 @@ class DiscoveryAgent:
                 _CACHE["limit"] = 0
                 _CACHE["method"] = ""
                 _CACHE["rpc_identity"] = ""
+                _CACHE["metadata"] = {}
 
         return tokens
 
@@ -1117,7 +1218,7 @@ class DiscoveryAgent:
         raw_tokens = await scan_tokens_async(
             rpc_url=None,
             limit=self.limit,
-            enrich=False,
+            enrich=self.enrich_results,
             api_key=self.birdeye_api_key,
         )
         tokens: List[str]
@@ -1286,6 +1387,7 @@ class DiscoveryAgent:
                 _cache_limit,
                 _cache_method,
                 _cache_identity,
+                _cache_metadata,
             ) = await self._cache_snapshot()
             cache_age = time.time() - cache_ts if cache_ts > 0.0 else float("inf")
             cache_stale = self.cache_ttl <= 0 or cache_age >= self.cache_ttl
@@ -1295,7 +1397,7 @@ class DiscoveryAgent:
                 tokens=fallback_tokens,
             )
         elif not fallback_tokens:
-            cached_tokens, _, _, _, _, _ = await self._cache_snapshot()
+            cached_tokens, _, _, _, _, _, _ = await self._cache_snapshot()
             if cached_tokens:
                 fallback_tokens = self._static_fallback_tokens()
                 if fallback_tokens:
@@ -1346,17 +1448,24 @@ class DiscoveryAgent:
             )
             return []
 
-        cached_identity = str(_CACHE.get("rpc_identity") or "")
-        current_identity = _rpc_identity(self.rpc_url)
-        identity_matches = bool(
-            (not cached_identity and not current_identity)
-            or cached_identity == current_identity
+        cached_metadata = self._normalise_cache_metadata(
+            _CACHE.get("metadata"),
+            int(_CACHE.get("limit", 0)),
+            str(_CACHE.get("method") or "").lower(),
+            str(_CACHE.get("rpc_identity") or ""),
         )
-        if not identity_matches:
+        current_metadata = self._build_cache_metadata(
+            method=cached_metadata.get("method")
+            or self.default_method
+            or DEFAULT_DISCOVERY_METHOD,
+            mempool_enabled=self._resolve_mempool_enabled(None),
+            token_file=None,
+        )
+        if not self._cache_metadata_matches(cached_metadata, current_metadata):
             logger.debug(
-                "DiscoveryAgent cached tokens ignored due to RPC mismatch (cached=%s, current=%s)",
-                cached_identity,
-                current_identity,
+                "DiscoveryAgent cached tokens ignored due to metadata mismatch (cached=%s, current=%s)",
+                cached_metadata,
+                current_metadata,
             )
             return []
 
