@@ -41,6 +41,13 @@ def _is_fast_mode() -> bool:
     return os.getenv("FAST_PIPELINE_MODE", "").lower() in {"1", "true", "yes", "on"}
 
 
+def _discovery_env_strict() -> bool:
+    raw = os.getenv("DISCOVERY_ENV_STRICT")
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _env_float(
     name: str,
     default: str,
@@ -49,7 +56,8 @@ def _env_float(
     minimum: float | None = None,
     maximum: float | None = None,
 ) -> float:
-    raw = os.getenv(name)
+    env_raw = os.getenv(name)
+    raw = env_raw
     default_value = float(default)
     if raw is None or raw == "":
         if fast_default is not None and _is_fast_mode():
@@ -65,6 +73,14 @@ def _env_float(
         try:
             value = float(raw)
         except Exception:
+            message = (
+                f"Environment variable {name}={env_raw!r} is not a valid float; "
+                f"using default {default_value:.3f}"
+            )
+            if env_raw not in (None, ""):
+                if _discovery_env_strict():
+                    raise ValueError(message)
+                logger.warning(message)
             value = default_value
 
     if minimum is not None and value < minimum:
@@ -95,13 +111,23 @@ def _env_int(
     minimum: int | None = None,
     maximum: int | None = None,
 ) -> int:
-    raw = os.getenv(name)
+    env_raw = os.getenv(name)
+    raw = env_raw
     if raw is None or raw == "":
         raw = default
     try:
         value = int(raw)
     except Exception:
-        value = int(default)
+        default_value = int(default)
+        message = (
+            f"Environment variable {name}={env_raw!r} is not a valid integer; "
+            f"using default {default_value}"
+        )
+        if env_raw not in (None, ""):
+            if _discovery_env_strict():
+                raise ValueError(message)
+            logger.warning(message)
+        value = default_value
     if minimum is not None:
         value = max(minimum, value)
     if maximum is not None:
@@ -110,10 +136,23 @@ def _env_int(
 
 
 def _env_bool(name: str, default: str = "0") -> bool:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        raw = default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    env_raw = os.getenv(name)
+    default_value = str(default).strip().lower() in {"1", "true", "yes", "on"}
+    if env_raw is None or env_raw == "":
+        return default_value
+    normalized = str(env_raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    message = (
+        f"Environment variable {name}={env_raw!r} is not a valid boolean; "
+        f"using default {default_value}"
+    )
+    if _discovery_env_strict():
+        raise ValueError(message)
+    logger.warning(message)
+    return default_value
 
 
 def _env_str(name: str, default: str = "", *, strip: bool = True) -> str:
