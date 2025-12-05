@@ -61,7 +61,7 @@ def _extract_ui_targets() -> tuple[dict[str, str], str | None]:
 
 
 def _poll_ui_readiness(
-    *, timeout: float = 12.0, interval: float = 0.5
+    *, timeout: float = 12.0, interval: float = 0.5, target_timeout: float | None = None
 ) -> Tuple[bool, str, dict[str, str], list[Any]]:
     """Poll UI HTTP/WS endpoints until they respond or ``timeout`` elapses."""
 
@@ -79,28 +79,65 @@ def _poll_ui_readiness(
 
     checker.targets = ui_targets
     deadline = time.monotonic() + timeout
+    per_target_timeout = target_timeout or timeout
     last_ok: bool = False
     last_summary = "no ui readiness results"
     last_results: list[Any] = []
 
-    while True:
-        try:
-            results = asyncio.run(checker.check_all())
-        except Exception as exc:  # pragma: no cover - defensive
-            return False, f"UI readiness probing failed: {exc}", target_urls, []
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                break
 
-        summaries: List[str] = []
-        healthy = True
-        for result in results:
-            status = "OK" if result.ok else f"FAIL ({result.error or result.status or 'unavailable'})"
-            summaries.append(f"{result.name}: {status}")
-            healthy = healthy and result.ok
-        last_ok = healthy
-        last_summary = "; ".join(summaries) if summaries else "no ui targets"
-        last_results = results
-        if healthy or time.monotonic() >= deadline:
-            break
-        time.sleep(interval)
+            probe_timeout = min(per_target_timeout, remaining)
+            try:
+                results = loop.run_until_complete(
+                    asyncio.wait_for(checker.check_all(), timeout=probe_timeout)
+                )
+            except asyncio.TimeoutError:
+                last_ok = False
+                last_summary = f"UI readiness probe timed out after {probe_timeout:.2f}s"
+                last_results = []
+            except Exception as exc:  # pragma: no cover - defensive
+                return False, f"UI readiness probing failed: {exc}", target_urls, []
+            else:
+                summaries: List[str] = []
+                errors: List[str] = []
+                healthy = True
+                for result in results:
+                    detail = result.error or result.status or result.status_code or "unavailable"
+                    status = "OK" if result.ok else f"FAIL ({detail})"
+                    summaries.append(f"{result.name}: {status}")
+                    if not result.ok and detail:
+                        errors.append(f"{result.name}: {detail}")
+                    healthy = healthy and result.ok
+                last_ok = healthy
+                last_summary = "; ".join(summaries) if summaries else "no ui targets"
+                if errors:
+                    last_summary = f"{last_summary} – errors: {', '.join(errors)}"
+                last_results = results
+
+            if last_ok or time.monotonic() >= deadline:
+                break
+
+            sleep_time = min(interval, max(0.0, deadline - time.monotonic()))
+            if sleep_time <= 0:
+                break
+            time.sleep(sleep_time)
+    finally:
+        try:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
     return last_ok, last_summary, target_urls, last_results
 
