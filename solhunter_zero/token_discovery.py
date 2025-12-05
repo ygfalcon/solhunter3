@@ -23,7 +23,7 @@ import yaml
 from aiohttp import ClientTimeout
 import aiohttp
 
-from .http import HostCircuitOpenError, host_request, host_retry_config
+from .http import HostCircuitOpenError, host_retry_config, provider_request, http_breaker_state
 from .http import get_session as _shared_http_session
 from . import onchain_metrics
 from .scanner_common import DEFAULT_BIRDEYE_API_KEY
@@ -1473,7 +1473,7 @@ async def _http_get_json(
 
     for attempt in range(max(1, attempts)):
         try:
-            async with host_request(url):
+            async with provider_request(url):
                 async with owned_session.get(
                     url,
                     params=params,
@@ -2595,6 +2595,18 @@ def discover_candidates(
                     def _wrap_optional_error(exc: Exception) -> DiscoveryConfigurationError:
                         if isinstance(exc, DiscoveryConfigurationError):
                             return exc
+                        if isinstance(exc, HostCircuitOpenError):
+                            state = http_breaker_state()
+                            remaining = state.get("cooldown_remaining", 0.0)
+                            message = (
+                                f"Discovery HTTP circuit open; {friendly_name} paused for "
+                                f"{remaining:.1f}s"
+                            )
+                            return DiscoveryConfigurationError(
+                                "http_breaker",
+                                message,
+                                remediation="Inspect upstream HTTP providers and retry after cooldown.",
+                            )
                         message = f"{friendly_name} discovery unavailable: {exc}"
                         return DiscoveryConfigurationError(source_id, message)
 
