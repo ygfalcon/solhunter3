@@ -85,6 +85,20 @@ def test_env_bool_logs_unknown_values(monkeypatch, caplog):
     assert any("not a valid boolean" in rec.message for rec in caplog.records)
 
 
+def test_scoring_weights_logs_parse_failure(monkeypatch, tmp_path, caplog):
+    malformed = tmp_path / "weights.yaml"
+    malformed.write_text("bias: [not valid", encoding="utf-8")
+    monkeypatch.setenv("DISCOVERY_SCORE_WEIGHTS", str(malformed))
+
+    with caplog.at_level(logging.WARNING):
+        td.refresh_runtime_values()
+
+    assert any(
+        "scoring weights" in rec.message.lower() and str(malformed) in rec.message
+        for rec in caplog.records
+    )
+
+
 def test_mempool_limit_forced_off_when_disabled(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         _configure_env(
