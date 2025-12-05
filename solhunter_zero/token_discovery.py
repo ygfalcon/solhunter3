@@ -347,6 +347,7 @@ class DiscoveryConfigurationError(RuntimeError):
 
 
 _BIRDEYE_CACHE: TTLCache[str, List[TokenEntry]] = TTLCache(maxsize=1, ttl=SETTINGS.cache_ttl)
+_BIRDEYE_CACHE_TIMESTAMPS: Dict[str, float] = {}
 _CACHE_LOCK = Lock()
 _BIRDEYE_DISABLED_INFO = False
 
@@ -599,11 +600,22 @@ def _resolve_birdeye_api_key() -> str:
 
 def _cache_get(key: str) -> List[TokenEntry] | None:
     with _CACHE_LOCK:
+        try:
+            ttl = float(SETTINGS.cache_ttl)
+        except Exception:
+            ttl = 0.0
+        ts = _BIRDEYE_CACHE_TIMESTAMPS.get(key)
+        if ts is not None:
+            if ttl <= 0 or (time.monotonic() - ts) >= ttl:
+                _BIRDEYE_CACHE.pop(key, None)
+                _BIRDEYE_CACHE_TIMESTAMPS.pop(key, None)
+                return None
         return _BIRDEYE_CACHE.get(key)
 
 
 def _cache_set(key: str, value: List[TokenEntry]) -> None:
     with _CACHE_LOCK:
+        _BIRDEYE_CACHE_TIMESTAMPS[key] = time.monotonic()
         _BIRDEYE_CACHE.set(key, value)
 
 
@@ -733,6 +745,18 @@ async def _load_orca_catalog(
 def _cache_clear() -> None:
     with _CACHE_LOCK:
         _BIRDEYE_CACHE.clear()
+        _BIRDEYE_CACHE_TIMESTAMPS.clear()
+
+
+def _initialize_cache_state() -> None:
+    """Clear caches and register hooks to avoid stale process state."""
+
+    _cache_clear()
+    with contextlib.suppress(Exception):
+        os.register_at_fork(after_in_child=_cache_clear)
+
+
+_initialize_cache_state()
 
 
 def _normalize_limit(limit: int | None) -> int:
