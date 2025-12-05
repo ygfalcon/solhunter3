@@ -3471,7 +3471,11 @@ PAPER_LOG="$LOG_DIR/paper_runtime.log"
 PAPER_NOTIFY="$ARTIFACT_DIR/paper_ready"
 rm -f "$PAPER_NOTIFY"
 log_info "Launching runtime controller (mode=paper, log=$PAPER_LOG)"
-PAPER_PID=$(start_controller "paper" "$PAPER_LOG" "$PAPER_NOTIFY")
+if ! PAPER_PID=$(start_controller "paper" "$PAPER_LOG" "$PAPER_NOTIFY"); then
+  print_captured_start_controller_stderr "$PAPER_LOG" || true
+  log_warn "Paper runtime controller failed to launch"
+  exit "$EXIT_HEALTH"
+fi
 PAPER_UI_PID=$PAPER_PID
 start_log_stream "$PAPER_LOG" "paper"
 log_info "Waiting for paper runtime readiness"
@@ -3711,7 +3715,11 @@ LIVE_LOG="$LOG_DIR/live_runtime.log"
 LIVE_NOTIFY="$ARTIFACT_DIR/live_ready"
 rm -f "$LIVE_NOTIFY"
 log_info "Launching runtime controller (mode=live, log=$LIVE_LOG)"
-LIVE_PID=$(start_controller "live" "$LIVE_LOG" "$LIVE_NOTIFY")
+if ! LIVE_PID=$(start_controller "live" "$LIVE_LOG" "$LIVE_NOTIFY"); then
+  print_captured_start_controller_stderr "$LIVE_LOG" || true
+  log_warn "Live runtime controller failed to launch"
+  exit "$EXIT_HEALTH"
+fi
 LIVE_UI_PID=$LIVE_PID
 start_log_stream "$LIVE_LOG" "live"
 log_info "Waiting for live runtime readiness"
