@@ -58,6 +58,33 @@ def _configure_env(monkeypatch, **values):
     td.refresh_runtime_values()
 
 
+def test_env_float_logs_warning_on_parse_error(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING):
+        _configure_env(monkeypatch, DISCOVERY_MIN_VOLUME_USD="not-a-number")
+        value = td.SETTINGS.min_volume
+
+    assert value == 50_000.0
+    assert any("not a valid float" in rec.message for rec in caplog.records)
+    assert any("not-a-number" in rec.message and "50000" in rec.message for rec in caplog.records)
+
+
+def test_env_parse_error_respects_strict_mode(monkeypatch):
+    monkeypatch.setenv("DISCOVERY_ENV_STRICT", "1")
+    monkeypatch.setenv("DISCOVERY_MIN_LIQUIDITY_USD", "oops")
+
+    with pytest.raises(ValueError):
+        _ = td.SETTINGS.min_liquidity
+
+
+def test_env_bool_logs_unknown_values(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING):
+        _configure_env(monkeypatch, DISCOVERY_ENABLE_MEMPOOL="perhaps")
+        enabled = td.SETTINGS.enable_mempool
+
+    assert enabled is True
+    assert any("not a valid boolean" in rec.message for rec in caplog.records)
+
+
 def test_mempool_limit_forced_off_when_disabled(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         _configure_env(
