@@ -2095,6 +2095,103 @@ if [[ -n $CANARY_RISK ]]; then
   require_positive_number "--risk" "$CANARY_RISK"
 fi
 
+if [[ -n $CANARY_BUDGET && -n $CANARY_RISK ]]; then
+  python3 - "$CANARY_BUDGET" "$CANARY_RISK" "$ENV_FILE" <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = re.sub(r"^export\s+", "", key).strip()
+        values.setdefault(key, value.strip().strip('"').strip("'"))
+    return values
+
+
+def coerce_float(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+budget = float(sys.argv[1])
+risk = float(sys.argv[2])
+env_path = Path(sys.argv[3])
+order_size = budget * risk
+env_values = parse_env_file(env_path)
+
+min_size = next(
+    (
+        os.getenv(key) or env_values.get(key)
+        for key in ("MIN_ORDER_SIZE_USD", "MIN_TRADE_SIZE_USD")
+        if os.getenv(key) is not None or env_values.get(key) is not None
+    ),
+    None,
+)
+max_size = next(
+    (
+        os.getenv(key) or env_values.get(key)
+        for key in ("MAX_ORDER_SIZE_USD", "MAX_TRADE_SIZE_USD")
+        if os.getenv(key) is not None or env_values.get(key) is not None
+    ),
+    None,
+)
+
+errors: list[str] = []
+
+if risk > 1:
+    errors.append(
+        f"--risk {risk} exceeds 1.0; set --risk to a fraction of --budget so each trade stays under the bankroll cap."
+    )
+
+minimum = coerce_float(min_size)
+if min_size is not None and minimum is None:
+    errors.append(
+        "MIN_ORDER_SIZE_USD must be numeric; update the value in the environment file to a positive dollar amount."
+    )
+elif minimum is not None and minimum <= 0:
+    errors.append(
+        "MIN_ORDER_SIZE_USD must be greater than zero; set it to the smallest allowable trade notional."
+    )
+if minimum is not None and order_size < minimum:
+    errors.append(
+        f"--budget {budget} * --risk {risk} produces ${order_size:.2f}, below MIN_ORDER_SIZE_USD {minimum}. "
+        "Increase --budget/--risk or lower the minimum size in the environment file."
+    )
+
+maximum = coerce_float(max_size)
+if max_size is not None and maximum is None:
+    errors.append(
+        "MAX_ORDER_SIZE_USD must be numeric; update the value in the environment file to a positive dollar amount."
+    )
+elif maximum is not None and maximum <= 0:
+    errors.append(
+        "MAX_ORDER_SIZE_USD must be greater than zero; set it to the maximum allowable trade notional."
+    )
+if maximum is not None and order_size > maximum:
+    errors.append(
+        f"--budget {budget} * --risk {risk} produces ${order_size:.2f}, above MAX_ORDER_SIZE_USD {maximum}. "
+        "Decrease --budget/--risk or raise the cap in the environment file."
+    )
+
+if errors:
+    print("\n".join(errors))
+    raise SystemExit(1)
+PY
+fi
+
 if ! [[ $SOAK_DURATION =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   echo "--soak must be numeric" >&2
   exit 1
