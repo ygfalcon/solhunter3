@@ -161,8 +161,55 @@ def _ui_summary_rows(
     return rows
 
 
+def _healthcheck_selection(args: Any) -> tuple[list[tuple[str, Any]], set[str]]:
+    selected = list(preflight.CHECKS)
+    critical = {name for name, _ in selected}
+    non_critical = {"Homebrew", "Rustup", "Rust", "Xcode CLT", "GPU"}
+    critical -= non_critical
+    if getattr(args, "skip_deps", False):
+        selected = [c for c in selected if c[0] != "Dependencies"]
+        critical.discard("Dependencies")
+    if getattr(args, "skip_setup", False):
+        selected = [c for c in selected if c[0] not in {"Config", "Keypair"}]
+        critical.difference_update({"Config", "Keypair"})
+    if getattr(args, "skip_rpc_check", False) or getattr(args, "offline", False):
+        selected = [c for c in selected if c[0] != "Network"]
+        critical.discard("Network")
+    if getattr(args, "skip_preflight", False):
+        selected = []
+        critical = set()
+    return selected, critical
+
+
+def _execute_healthcheck(selected: list[tuple[str, Any]], critical: set[str]) -> tuple[int, str, str]:
+    from scripts import healthcheck
+
+    hc_out = io.StringIO()
+    hc_err = io.StringIO()
+    with contextlib.redirect_stdout(hc_out), contextlib.redirect_stderr(hc_err):
+        try:
+            hc_code = healthcheck.main(selected, critical=critical)
+        except SystemExit as exc:  # defensive
+            hc_code = exc.code if isinstance(exc.code, int) else 1
+
+    return hc_code, hc_out.getvalue(), hc_err.getvalue()
+
+
+def _log_healthcheck_output(out: str, err: str) -> None:
+    sys.stdout.write(out)
+    sys.stderr.write(err)
+    for line in (out + err).splitlines():
+        if line:
+            log_startup(line)
+
+
 def launch_only(
-    rest: List[str], *, offline: bool | None = None, subprocess_module=subprocess
+    rest: List[str],
+    *,
+    offline: bool | None = None,
+    subprocess_module=subprocess,
+    post_launch_checks: bool = False,
+    args: Any | None = None,
 ) -> int:
     """Launch start_all.py directly."""
     env = os.environ.copy()
@@ -170,7 +217,54 @@ def launch_only(
     if offline_enabled or "--offline" in rest:
         env["SOLHUNTER_OFFLINE"] = "1"
     proc = subprocess_module.run([sys.executable, "scripts/start_all.py", *rest], env=env)
-    return proc.returncode
+
+    code = proc.returncode
+    if not post_launch_checks:
+        return code
+
+    ui_ready: tuple[bool, str, dict[str, str], list[Any]] | None = None
+    ui_targets: dict[str, str] = {}
+    ui_results: list[Any] = []
+    ui_message: str | None = None
+    if code == 0:
+        ui_ready = _poll_ui_readiness()
+        ui_targets = ui_ready[2]
+        ui_results = ui_ready[3]
+        status_label = "healthy" if ui_ready[0] else "unhealthy"
+        ui_message = f"UI readiness {status_label}: {ui_ready[1]}"
+        print(ui_message)
+        log_startup(ui_message)
+    else:
+        ui_targets, ui_error = _extract_ui_targets()
+        if ui_error:
+            ui_message = ui_error
+            log_startup(ui_error)
+        fallback_msg = f"UI readiness skipped (start_all exit {code})"
+        ui_message = ui_message or fallback_msg
+        print(fallback_msg)
+        log_startup(fallback_msg)
+
+    selected, critical = _healthcheck_selection(args or object())
+    hc_code, hc_out, hc_err = _execute_healthcheck(selected, critical)
+    _log_healthcheck_output(hc_out, hc_err)
+
+    summary_rows = _ui_summary_rows(
+        targets=ui_targets,
+        results=ui_results,
+        readiness_message=ui_message,
+        readiness_ok=ui_ready[0] if ui_ready else False,
+    )
+    if summary_rows:
+        table = Table(title="Startup Summary")
+        table.add_column("Item", style="cyan", no_wrap=True)
+        table.add_column("Status", style="green")
+        for item, status in summary_rows:
+            table.add_row(item, status)
+            log_startup(f"{item}: {status}")
+        console.print(table)
+
+    readiness_code = 0 if (ui_ready is None or ui_ready[0]) else 1
+    return code or readiness_code or hc_code
 
 
 def run(
@@ -280,40 +374,10 @@ def run(
         log_startup(msg)
 
     # Healthcheck summary (post-launch)
-    from scripts import healthcheck
+    selected, critical = _healthcheck_selection(args)
 
-    selected = list(preflight.CHECKS)
-    critical = {name for name, _ in selected}
-    non_critical = {"Homebrew", "Rustup", "Rust", "Xcode CLT", "GPU"}
-    critical -= non_critical
-    if args.skip_deps:
-        selected = [c for c in selected if c[0] != "Dependencies"]
-        critical.discard("Dependencies")
-    if args.skip_setup:
-        selected = [c for c in selected if c[0] not in {"Config", "Keypair"}]
-        critical.difference_update({"Config", "Keypair"})
-    if args.skip_rpc_check or args.offline:
-        selected = [c for c in selected if c[0] != "Network"]
-        critical.discard("Network")
-    if args.skip_preflight:
-        selected = []
-        critical = set()
-
-    hc_out = io.StringIO()
-    hc_err = io.StringIO()
-    with contextlib.redirect_stdout(hc_out), contextlib.redirect_stderr(hc_err):
-        try:
-            hc_code = healthcheck.main(selected, critical=critical)
-        except SystemExit as exc:  # defensive
-            hc_code = exc.code if isinstance(exc.code, int) else 1
-
-    out = hc_out.getvalue()
-    err = hc_err.getvalue()
-    sys.stdout.write(out)
-    sys.stderr.write(err)
-    for line in (out + err).splitlines():
-        if line:
-            log_startup(line)
+    hc_code, out, err = _execute_healthcheck(selected, critical)
+    _log_healthcheck_output(out, err)
 
     summary_rows.extend(
         _ui_summary_rows(

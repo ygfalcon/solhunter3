@@ -76,6 +76,11 @@ def parse_args(argv: List[str] | None = None) -> Tuple[argparse.Namespace, List[
         action="store_true",
         help="Skip prompts and launch start_all.py directly",
     )
+    parser.add_argument(
+        "--post-launch-checks",
+        action="store_true",
+        help="Run UI readiness and health checks after non-interactive launch",
+    )
     parser.add_argument("--quiet", action="store_true", help="Reduce startup output noise")
     parser.add_argument("--config", help="Path to configuration file")
     parser.add_argument("--keypair", help="Path to Solana keypair file")

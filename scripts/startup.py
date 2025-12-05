@@ -62,7 +62,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
         logging.basicConfig(level=logging.WARNING)
     if args.non_interactive:
-        return startup_runner.launch_only(rest, offline=getattr(args, "offline", False))
+        return startup_runner.launch_only(
+            rest,
+            offline=getattr(args, "offline", False),
+            post_launch_checks=getattr(args, "post_launch_checks", False),
+            args=args,
+        )
     ctx = startup_checks.perform_checks(
         args,
         rest,

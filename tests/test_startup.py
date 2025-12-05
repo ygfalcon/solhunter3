@@ -1872,10 +1872,12 @@ def test_startup_non_interactive_offline_sets_env(monkeypatch):
 
     captured = {}
 
-    def fake_launch_only(rest, *, offline=None, subprocess_module=None):
+    def fake_launch_only(rest, *, offline=None, subprocess_module=None, post_launch_checks=False, args=None):
         captured["rest"] = list(rest)
         captured["offline"] = offline
         captured["env"] = os.environ.get("SOLHUNTER_OFFLINE")
+        captured["post_launch_checks"] = post_launch_checks
+        captured["args"] = args
         return 0
 
     monkeypatch.setattr(startup_mod.startup_cli, "parse_args", fake_parse_args)
@@ -1886,6 +1888,46 @@ def test_startup_non_interactive_offline_sets_env(monkeypatch):
     assert code == 0
     assert captured["offline"] is True
     assert captured["env"] == "1"
+    assert captured["post_launch_checks"] is False
+    assert captured["args"].offline is True
+
+
+def test_startup_non_interactive_with_post_checks(monkeypatch):
+    import types
+    from scripts import startup as startup_mod
+
+    monkeypatch.delenv("SOLHUNTER_OFFLINE", raising=False)
+    _stub_rich(monkeypatch)
+    monkeypatch.setattr(startup_mod.startup_cli, "render_banner", lambda: None)
+    monkeypatch.setattr("solhunter_zero.logging_utils.log_startup", lambda *a, **k: None)
+    monkeypatch.setattr("solhunter_zero.logging_utils.rotate_preflight_log", lambda *a, **k: None)
+
+    def fake_parse_args(_):
+        return (
+            types.SimpleNamespace(
+                offline=False,
+                non_interactive=True,
+                quiet=False,
+                post_launch_checks=True,
+            ),
+            [],
+        )
+
+    captured = {}
+
+    def fake_launch_only(rest, *, offline=None, subprocess_module=None, post_launch_checks=False, args=None):
+        captured["post_launch_checks"] = post_launch_checks
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(startup_mod.startup_cli, "parse_args", fake_parse_args)
+    monkeypatch.setattr("solhunter_zero.startup_runner.launch_only", fake_launch_only)
+
+    code = startup_mod._main_impl(["--non-interactive", "--post-launch-checks"])
+
+    assert code == 0
+    assert captured["post_launch_checks"] is True
+    assert captured["args"].post_launch_checks is True
 
 
 def test_startup_interactive_offline_propagates_to_start_all(monkeypatch):
@@ -2150,6 +2192,80 @@ def test_launch_only_sets_env_when_offline(monkeypatch):
 
     assert code == 0
     assert captured["env"].get("SOLHUNTER_OFFLINE") == "1"
+
+
+def test_launch_only_post_checks_propagate_readiness(monkeypatch):
+    import types
+    from solhunter_zero import startup_runner
+
+    _stub_rich(monkeypatch)
+    monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
+    monkeypatch.setattr(startup_runner, "log_startup", lambda *_: None)
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", Path("startup.log"))
+    monkeypatch.setattr("scripts.preflight.CHECKS", [])
+
+    def fake_poll():
+        return False, "ui-http: FAIL (timeout)", {"ui-http": "http://localhost:5001"}, []
+
+    healthcheck_called = {}
+
+    def fake_healthcheck_main(selected, critical=None):
+        healthcheck_called["called"] = True
+        return 0
+
+    monkeypatch.setattr(startup_runner, "_poll_ui_readiness", fake_poll)
+    monkeypatch.setattr("scripts.healthcheck.main", fake_healthcheck_main)
+
+    class DummySubprocess:
+        def run(self, cmd, env):
+            return types.SimpleNamespace(returncode=0)
+
+    args = types.SimpleNamespace(skip_deps=False, skip_setup=False, skip_rpc_check=False, skip_preflight=False, offline=False)
+
+    code = startup_runner.launch_only(
+        ["--foo"],
+        subprocess_module=DummySubprocess(),
+        post_launch_checks=True,
+        args=args,
+    )
+
+    assert healthcheck_called.get("called") is True
+    assert code == 1
+
+
+def test_launch_only_post_checks_include_healthcheck_exit(monkeypatch):
+    import types
+    from solhunter_zero import startup_runner
+
+    _stub_rich(monkeypatch)
+    monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
+    monkeypatch.setattr(startup_runner, "log_startup", lambda *_: None)
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", Path("startup.log"))
+    monkeypatch.setattr("scripts.preflight.CHECKS", [])
+
+    def fake_poll():
+        return True, "ui-http: OK", {"ui-http": "http://localhost:5001"}, []
+
+    def fake_healthcheck_main(selected, critical=None):
+        return 3
+
+    monkeypatch.setattr(startup_runner, "_poll_ui_readiness", fake_poll)
+    monkeypatch.setattr("scripts.healthcheck.main", fake_healthcheck_main)
+
+    class DummySubprocess:
+        def run(self, cmd, env):
+            return types.SimpleNamespace(returncode=0)
+
+    args = types.SimpleNamespace(skip_deps=False, skip_setup=False, skip_rpc_check=False, skip_preflight=False, offline=False)
+
+    code = startup_runner.launch_only(
+        ["--foo"],
+        subprocess_module=DummySubprocess(),
+        post_launch_checks=True,
+        args=args,
+    )
+
+    assert code == 3
 
 
 def test_disk_space_threshold_uses_config(monkeypatch):
