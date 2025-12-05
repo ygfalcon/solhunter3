@@ -898,6 +898,30 @@ def test_birdeye_cache_ttl_expiration(monkeypatch):
     assert td._cache_get(cache_key) is None
 
 
+@pytest.mark.anyio("asyncio")
+async def test_birdeye_cache_concurrent_manual_access(monkeypatch):
+    from solhunter_zero import token_discovery as td
+
+    td._cache_clear()
+
+    cache_key = td._current_cache_key(None)
+
+    async def writer() -> None:
+        for idx in range(25):
+            td._cache_set(cache_key, [{"address": f"Mint{idx}", "sources": []}])
+            await asyncio.sleep(0)
+
+    async def reader() -> None:
+        for _ in range(25):
+            _ = td._cache_get(cache_key)
+            await asyncio.sleep(0)
+
+    await asyncio.gather(writer(), reader())
+
+    with td._CACHE_LOCK:
+        assert set(td._BIRDEYE_CACHE.keys()) == set(td._BIRDEYE_CACHE_TIMESTAMPS.keys())
+
+
 def test_initialize_cache_state_clears_cache(monkeypatch):
     from solhunter_zero import token_discovery as td
 
@@ -922,9 +946,76 @@ def test_initialize_cache_state_clears_cache(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_birdeye_cache_concurrent_warm_and_cold_fetch(monkeypatch):
+    from solhunter_zero import token_discovery as td
+
+    td._cache_clear()
+    monkeypatch.setenv("DISCOVERY_MIN_VOLUME_USD", "0")
+    monkeypatch.setenv("DISCOVERY_MIN_LIQUIDITY_USD", "0")
+    td.refresh_runtime_values()
+    monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "good-key")
+    monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)
+
+    payload = {
+        "data": {
+            "tokens": [
+                {
+                    "address": "ColdMint1111111111111111111111111111111111",
+                    "symbol": "COLD",
+                    "name": "Cold Token",
+                    "v24hUSD": 0.0,
+                    "liquidity": 0.0,
+                    "price": 0.0,
+                    "v24hChangePercent": 0.0,
+                }
+            ]
+        }
+    }
+
+    response = _DummyResponse(200, json_data=payload)
+    session = _DummySession([response])
+
+    async def fake_get_session(*, timeout=None):
+        _ = timeout
+        return session
+
+    monkeypatch.setattr(td, "get_session", fake_get_session)
+
+    cache_key = td._current_cache_key(None)
+    cached_entry = {"address": "WarmMint11111111111111111111111111111111", "sources": []}
+    td._cache_set(cache_key, [cached_entry])
+
+    ready = asyncio.Event()
+    original_cache_get = td._cache_get
+
+    def instrumented_cache_get(key: str):
+        result = original_cache_get(key)
+        ready.set()
+        return result
+
+    monkeypatch.setattr(td, "_cache_get", instrumented_cache_get)
+
+    async def warm_call():
+        return await td._fetch_birdeye_tokens(limit=1)
+
+    async def cold_call():
+        await ready.wait()
+        td._cache_clear()
+        return await td._fetch_birdeye_tokens(limit=1)
+
+    warm_result, cold_result = await asyncio.gather(warm_call(), cold_call())
+
+    assert warm_result
+    assert cold_result
+    assert {entry["address"] for entry in warm_result + cold_result}
+
+    with td._CACHE_LOCK:
+        assert set(td._BIRDEYE_CACHE.keys()) == set(td._BIRDEYE_CACHE_TIMESTAMPS.keys())
+
+
+@pytest.mark.anyio("asyncio")
 async def test_fetch_birdeye_tokens_cache_invalidation_on_limit_change(monkeypatch):
     td._cache_clear()
-    td._BIRDEYE_CACHE.clear()
     monkeypatch.setattr(td, "_BIRDEYE_DISABLED_INFO", False)
     monkeypatch.setattr(td, "_resolve_birdeye_api_key", lambda: "good-key")
     monkeypatch.setattr(td, "is_valid_solana_mint", lambda _addr: True)

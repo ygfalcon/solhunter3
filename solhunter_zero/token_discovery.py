@@ -544,11 +544,7 @@ def refresh_runtime_values() -> None:
     except Exception:
         _TRENDING_MIN_LIQUIDITY = 0.0
 
-    try:
-        _BIRDEYE_CACHE.ttl = float(SETTINGS.cache_ttl)
-    except Exception:
-        pass
-    _cache_clear()
+    _reset_birdeye_cache(ttl=SETTINGS.cache_ttl)
 
     try:
         _SOLSCAN_NEGATIVE_CACHE.ttl = float(SETTINGS.solscan_negative_ttl)
@@ -874,7 +870,16 @@ async def _load_orca_catalog(
 
 
 def _cache_clear() -> None:
+    _reset_birdeye_cache()
+
+
+def _reset_birdeye_cache(*, ttl: float | None = None) -> None:
     with _CACHE_LOCK:
+        if ttl is not None:
+            try:
+                _BIRDEYE_CACHE.ttl = float(ttl)
+            except Exception:
+                pass
         _BIRDEYE_CACHE.clear()
         _BIRDEYE_CACHE_TIMESTAMPS.clear()
 
