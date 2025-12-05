@@ -20,6 +20,16 @@ import solhunter_zero.ui as ui
 from solhunter_zero.ui import UIState, UIServer
 
 
+@pytest.fixture(autouse=True)
+def mock_redis_ping(monkeypatch):
+    monkeypatch.setattr(ui, "_REDIS_PING_STATUS", {})
+    monkeypatch.setattr(
+        ui,
+        "_ping_redis",
+        lambda url, *, timeout=None: {"ok": True, "latency_ms": 0.01, "url": url, "timeout": timeout},
+    )
+
+
 def test_ui_server_start_port_conflict_raises() -> None:
     state = UIState()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -56,6 +66,24 @@ def test_ui_server_start_success_sets_server_and_thread() -> None:
         assert state.http_port == server.port
     finally:
         server.stop()
+
+
+def test_ui_server_start_fails_on_redis_ping(monkeypatch) -> None:
+    state = UIState()
+    server = UIServer(state, host="127.0.0.1", port=0)
+
+    def failing_ping(url: str, *, timeout: float | None = None) -> dict[str, object]:
+        return {"ok": False, "error": "connection refused", "url": url, "timeout": timeout}
+
+    monkeypatch.setattr(ui, "_ping_redis", failing_ping)
+    monkeypatch.setenv("UI_REDIS_STARTUP_TIMEOUT", "0.5")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server.start()
+
+    message = str(excinfo.value)
+    assert "Redis startup ping failed" in message
+    assert "0.5" in message
 
 
 def test_ui_server_https_requires_cert(monkeypatch) -> None:
