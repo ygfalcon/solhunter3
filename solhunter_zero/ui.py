@@ -554,6 +554,19 @@ def _resolve_app_version() -> Optional[str]:
 
 
 @functools.lru_cache(maxsize=1)
+def _should_attempt_git_lookup() -> bool:
+    """Return True when it makes sense to shell out to git for commit info."""
+
+    git_dir = Path(__file__).resolve().parents[1] / ".git"
+
+    # Packaged builds may omit .git entirely; avoid subprocess churn when it's missing.
+    if not git_dir.exists():
+        return False
+
+    return True
+
+
+@functools.lru_cache(maxsize=1)
 def _resolve_build_git() -> Optional[str]:
     for key in ("BUILD_GIT", "GIT_COMMIT", "HEROKU_SLUG_COMMIT", "SOURCE_COMMIT"):
         candidate = os.getenv(key)
@@ -561,9 +574,13 @@ def _resolve_build_git() -> Optional[str]:
             text = candidate.strip()
             if text:
                 return text
-    git_dir = Path(__file__).resolve().parents[1] / ".git"
-    if not git_dir.exists():
+
+    # If BUILD_GIT is unset and we're running from a packaged artifact without
+    # repository metadata, skip the git subprocess to avoid repeated startup
+    # overhead.
+    if not _should_attempt_git_lookup():
         return None
+
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
