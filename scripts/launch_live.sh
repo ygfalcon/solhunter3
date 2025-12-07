@@ -155,6 +155,30 @@ export RUNTIME_RUN_ID="${RUNTIME_RUN_ID:-$DEFAULT_RUN_ID}"
 # Keep in sync with DEFAULT_RUNTIME_WORKFLOW in
 # solhunter_zero/runtime/runtime_wiring.py
 DEFAULT_RUNTIME_WORKFLOW="golden-multi-stage-golden-stream"
+check_default_workflow() {
+  local python_default
+  if ! python_default=$(python3 - <<'PY'
+import sys
+
+try:
+    from solhunter_zero.runtime import runtime_wiring
+except Exception as exc:  # pragma: no cover - shell-time check
+    sys.stderr.write(f"Failed to import runtime_wiring: {exc}\n")
+    sys.exit(1)
+
+print(runtime_wiring.DEFAULT_RUNTIME_WORKFLOW)
+PY
+  ); then
+    log_warn "Failed to verify DEFAULT_RUNTIME_WORKFLOW via Python import"
+    exit $EXIT_PREFLIGHT
+  fi
+
+  if [[ "$python_default" != "$DEFAULT_RUNTIME_WORKFLOW" ]]; then
+    log_warn "Shell DEFAULT_RUNTIME_WORKFLOW ('$DEFAULT_RUNTIME_WORKFLOW') diverges from Python default ('$python_default')."
+    log_warn "Update scripts/launch_live.sh DEFAULT_RUNTIME_WORKFLOW to match solhunter_zero.runtime.runtime_wiring.DEFAULT_RUNTIME_WORKFLOW."
+    exit $EXIT_PREFLIGHT
+  fi
+}
 if [[ -z ${RUNTIME_WORKFLOW:-} ]]; then
   export RUNTIME_WORKFLOW="$DEFAULT_RUNTIME_WORKFLOW"
   log_info "RUNTIME_WORKFLOW defaulted to $RUNTIME_WORKFLOW"
@@ -195,6 +219,8 @@ export RUNTIME_LOCK_REFRESH_INTERVAL="${RUNTIME_LOCK_REFRESH_INTERVAL:-20}"
 # fresh clone), so python invocations need the project root on PYTHONPATH so
 # that modules like ``solhunter_zero`` can be imported successfully.
 ensure_repo_pythonpath
+
+check_default_workflow
 
 ensure_virtualenv() {
   if [[ ! -x $PYTHON_BIN ]]; then
