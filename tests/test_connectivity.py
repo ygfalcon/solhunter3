@@ -262,6 +262,68 @@ async def test_connectivity_soak_refreshes_ui_override(monkeypatch):
 
 
 @pytest.mark.anyio("asyncio")
+async def test_connectivity_soak_restarts_and_verifies_reconnections(monkeypatch):
+    checker = ConnectivityChecker(env={"UI_HOST": "127.0.0.1", "UI_PORT": "6001"})
+
+    async def ok_http(name: str, url: str) -> ConnectivityResult:
+        return ConnectivityResult(name=name, target=url, ok=True)
+
+    async def ok_ws(name: str, url: str) -> ConnectivityResult:
+        return ConnectivityResult(name=name, target=url, ok=True)
+
+    async def ok_redis(name: str, url: str) -> ConnectivityResult:
+        return ConnectivityResult(name=name, target=url, ok=True)
+
+    monkeypatch.setattr(checker, "_probe_http", ok_http)
+    monkeypatch.setattr(checker, "_probe_ws", ok_ws)
+    monkeypatch.setattr(checker, "_probe_redis", ok_redis)
+
+    restart_calls: list[str] = []
+
+    async def restart_services() -> dict[str, bool]:
+        restart_calls.append("redis")
+        await asyncio.sleep(0)
+        return {
+            "panels_reconnected": True,
+            "stale_indicators_cleared": True,
+            "alerts_fired": True,
+        }
+
+    summary = await checker.run_soak(
+        duration=0.05, interval=0.01, restart_backing_services=[restart_services]
+    )
+
+    assert restart_calls == ["redis"]
+    assert summary.reconnect_count == 0
+
+
+@pytest.mark.anyio("asyncio")
+async def test_connectivity_soak_fails_without_reconnection_signals(monkeypatch):
+    checker = ConnectivityChecker(env={"UI_HOST": "127.0.0.1", "UI_PORT": "6002"})
+
+    async def ok_http(name: str, url: str) -> ConnectivityResult:
+        return ConnectivityResult(name=name, target=url, ok=True)
+
+    async def ok_ws(name: str, url: str) -> ConnectivityResult:
+        return ConnectivityResult(name=name, target=url, ok=True)
+
+    async def ok_redis(name: str, url: str) -> ConnectivityResult:
+        return ConnectivityResult(name=name, target=url, ok=True)
+
+    monkeypatch.setattr(checker, "_probe_http", ok_http)
+    monkeypatch.setattr(checker, "_probe_ws", ok_ws)
+    monkeypatch.setattr(checker, "_probe_redis", ok_redis)
+
+    async def restart_services() -> dict[str, bool]:
+        return {"panels_reconnected": False, "stale_indicators_cleared": True}
+
+    with pytest.raises(RuntimeError, match="reconnection checks failed"):
+        await checker.run_soak(
+            duration=0.02, interval=0.01, restart_backing_services=[restart_services]
+        )
+
+
+@pytest.mark.anyio("asyncio")
 async def test_probe_ui_http_detects_event_bus_down(tmp_path: Path):
     app = _make_ui_app()
     app["payload"] = {"ok": False, "status": {"event_bus": False, "trading_loop": True}}

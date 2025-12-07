@@ -14,7 +14,7 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, MutableMapping
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, MutableMapping
 from urllib.parse import urlparse, urlsplit
 
 import aiohttp
@@ -919,10 +919,29 @@ class ConnectivityChecker:
         duration: float = 180.0,
         interval: float = 2.0,
         output_path: Path | None = None,
+        restart_backing_services: Iterable[Callable[[], Awaitable[Mapping[str, object]]]] | None = None,
     ) -> ConnectivitySoakSummary:
         start = time.monotonic()
         reconnects = 0
         end_time = start + duration
+        reconnection_failures: list[str] = []
+
+        async def _restart_and_validate(callback: Callable[[], Awaitable[Mapping[str, object]]]) -> None:
+            label = getattr(callback, "__name__", "restart")
+            try:
+                signals = await callback()
+            except Exception as exc:  # pragma: no cover - defensive
+                reconnection_failures.append(f"{label}: raised {exc}")
+                return
+
+            missing = self._verify_reconnection_signals(signals)
+            if missing:
+                reconnection_failures.append(f"{label}: {', '.join(missing)}")
+
+        restart_tasks: list[asyncio.Task[None]] = []
+        for callback in restart_backing_services or []:
+            restart_tasks.append(asyncio.create_task(_restart_and_validate(callback)))
+
         while time.monotonic() < end_time:
             self._refresh_targets_from_env()
             for target in list(self.targets):
@@ -943,6 +962,14 @@ class ConnectivityChecker:
                 if not result.ok:
                     logger.warning("Soak probe failed for %s: %s", name, result.error)
             await asyncio.sleep(interval)
+
+        if restart_tasks:
+            await asyncio.gather(*restart_tasks)
+        if reconnection_failures:
+            raise RuntimeError(
+                "Connectivity soak reconnection checks failed: "
+                + "; ".join(reconnection_failures)
+            )
         finished = time.monotonic()
         summary = self._render_summary(start, finished, reconnects)
         if output_path:
@@ -961,6 +988,20 @@ class ConnectivityChecker:
             )
             logger.info("Connectivity soak report saved to %s", output_path)
         return summary
+
+    @staticmethod
+    def _verify_reconnection_signals(signals: Mapping[str, object]) -> list[str]:
+        required = {
+            "panels_reconnected": "UI panels failed to reconnect",
+            "stale_indicators_cleared": "Stale indicators never cleared",
+            "alerts_fired": "Expected alerts did not fire",
+        }
+        failures: list[str] = []
+        for key, message in required.items():
+            value = signals.get(key)
+            if value is not True:
+                failures.append(message)
+        return failures
 
     def _render_summary(
         self,
