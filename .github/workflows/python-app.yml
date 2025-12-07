@@ -39,6 +39,9 @@ jobs:
           pytest tests/test_full_system_integration.py \
                  tests/test_investor_demo_cli.py \
                  tests/test_wallet_cli.py
+      - name: Discovery integration harness
+        run: |
+          pytest tests/test_scanner_onchain_integration.py::test_replay_cursor_checkpoint_and_fallback_dedup
       - name: Golden schema smoke
         run: |
           pytest \
