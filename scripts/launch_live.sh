@@ -171,6 +171,10 @@ mkdir -p "$ARTIFACT_DIR" "$LOG_DIR"
 log_info "Runtime artifacts will be written to $ARTIFACT_DIR (logs in $LOG_DIR)"
 
 RUNTIME_CACHE_DIR="$RUNTIME_ARTIFACT_ROOT/.cache"
+if ! mkdir -p "$RUNTIME_CACHE_DIR"; then
+  log_error "Failed to create runtime cache directory at $RUNTIME_CACHE_DIR"
+  exit $EXIT_HEALTH
+fi
 RUNTIME_FS_LOCK="$RUNTIME_CACHE_DIR/runtime.lock"
 RUNTIME_LOCK_ATTEMPTED=0
 RUNTIME_LOCK_ACQUIRED=0
@@ -1424,22 +1428,22 @@ PY
   if [[ -n ${RUNTIME_FS_LOCK:-} ]]; then
     local fs_lock_dir=""
     fs_lock_dir=$(dirname -- "$RUNTIME_FS_LOCK")
-    if mkdir -p "$fs_lock_dir"; then
-      local fs_lock_host="unknown"
-      if ! fs_lock_host=$(hostname 2>/dev/null); then
-        fs_lock_host="unknown"
-      fi
-      local fs_lock_pid="${BASHPID:-$$}"
-      local fs_lock_payload="pid=${fs_lock_pid} host=${fs_lock_host} token=${RUNTIME_LOCK_TOKEN}"
-      if printf '%s\n' "$fs_lock_payload" >"$RUNTIME_FS_LOCK"; then
-        RUNTIME_FS_LOCK_WRITTEN=1
-        RUNTIME_FS_LOCK_PAYLOAD="$fs_lock_payload"
-        log_info "Recorded runtime filesystem lock at $RUNTIME_FS_LOCK"
-      else
-        log_warn "Failed to write runtime filesystem lock at $RUNTIME_FS_LOCK"
-      fi
+    if ! mkdir -p "$fs_lock_dir"; then
+      log_error "Failed to prepare runtime filesystem lock directory $fs_lock_dir"
+      exit $EXIT_HEALTH
+    fi
+    local fs_lock_host="unknown"
+    if ! fs_lock_host=$(hostname 2>/dev/null); then
+      fs_lock_host="unknown"
+    fi
+    local fs_lock_pid="${BASHPID:-$$}"
+    local fs_lock_payload="pid=${fs_lock_pid} host=${fs_lock_host} token=${RUNTIME_LOCK_TOKEN}"
+    if printf '%s\n' "$fs_lock_payload" >"$RUNTIME_FS_LOCK"; then
+      RUNTIME_FS_LOCK_WRITTEN=1
+      RUNTIME_FS_LOCK_PAYLOAD="$fs_lock_payload"
+      log_info "Recorded runtime filesystem lock at $RUNTIME_FS_LOCK"
     else
-      log_warn "Failed to prepare runtime filesystem lock directory $fs_lock_dir"
+      log_warn "Failed to write runtime filesystem lock at $RUNTIME_FS_LOCK"
     fi
   fi
   start_runtime_lock_refresher
