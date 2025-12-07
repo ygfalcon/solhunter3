@@ -3467,6 +3467,125 @@ PY
   return 1
 }
 
+post_launch_bus_probe() {
+  local bus_url=${EVENT_BUS_URL:-ws://127.0.0.1:8779}
+  local result status detail
+
+  if ! result=$("$PYTHON_BIN" - <<'PY'
+import asyncio
+import ipaddress
+import os
+import sys
+import time
+from urllib.parse import urlparse
+
+try:
+    import websockets
+except Exception as exc:  # pragma: no cover - defensive
+    print(f"fail url={os.getenv('EVENT_BUS_URL') or 'ws://127.0.0.1:8779'} error=websockets-import:{exc}")
+    raise SystemExit(1)
+
+
+DEFAULT_TIMEOUT = 30.0
+
+
+def _read_timeout(raw: str | None) -> float:
+    if not raw:
+        return DEFAULT_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT
+    return max(value, 0.0)
+
+
+def _is_local_host(hostname: str) -> bool:
+    normalized = (hostname or "").strip().lower()
+    if not normalized or normalized == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_loopback
+
+
+async def _probe_ws(url: str, timeout: float) -> tuple[bool, str]:
+    start = time.perf_counter()
+    deadline = start + timeout
+    attempt = 0
+    last_error = ""
+
+    while True:
+        attempt += 1
+        try:
+            async with websockets.connect(
+                url,
+                ping_interval=20,
+                ping_timeout=timeout,
+                close_timeout=timeout,
+            ) as ws:
+                await asyncio.wait_for(ws.ping(), timeout=timeout)
+                elapsed = (time.perf_counter() - start) * 1000
+                return True, f"url={url} elapsed_ms={elapsed:.1f} attempts={attempt}"
+        except Exception as exc:  # pragma: no cover - best effort logging
+            last_error = str(exc)
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                elapsed = (time.perf_counter() - start) * 1000
+                return False, (
+                    f"url={url} elapsed_ms={elapsed:.1f} attempts={attempt} "
+                    f"error={last_error}"
+                )
+            await asyncio.sleep(min(1.0 + attempt * 0.25, max(0.5, remaining)))
+
+
+async def main() -> int:
+    url = os.getenv("EVENT_BUS_URL") or "ws://127.0.0.1:8779"
+    parsed = urlparse(url)
+    host = parsed.hostname or "127.0.0.1"
+    if not _is_local_host(host):
+        print(f"skip url={url} reason=remote-host")
+        return 0
+
+    timeout = _read_timeout(os.getenv("EVENT_BUS_RELEASE_TIMEOUT"))
+    ok, detail = await _probe_ws(url, timeout)
+    status = "ok" if ok else "fail"
+    print(f"{status} {detail}")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":  # pragma: no cover - helper script
+    raise SystemExit(asyncio.run(main()))
+PY
+  ); then
+    log_warn "Event bus websocket probe failed to run"
+    log_warn "Hint: ensure websockets dependency is installed and PYTHON_BIN=$PYTHON_BIN is correct"
+    exit $EXIT_EVENT_BUS
+  fi
+
+  status=${result%% *}
+  detail=${result#"$status"}
+  detail=${detail# }
+
+  case "$status" in
+    ok)
+      log_info "Event bus websocket reachable ($detail)"
+      ;;
+    skip)
+      log_info "Event bus websocket probe skipped ($detail)"
+      ;;
+    fail)
+      log_warn "Event bus websocket probe failed ($detail)"
+      log_warn "Hint: ensure the local gateway/runtime is running and EVENT_BUS_URL=${bus_url} is reachable"
+      exit $EXIT_EVENT_BUS
+      ;;
+    *)
+      log_warn "Unexpected event bus probe status: ${result}"
+      ;;
+  esac
+}
+
 PAPER_LOG="$LOG_DIR/paper_runtime.log"
 PAPER_NOTIFY="$ARTIFACT_DIR/paper_ready"
 rm -f "$PAPER_NOTIFY"
@@ -3485,6 +3604,7 @@ if ! wait_for_ready "$PAPER_LOG" "$PAPER_NOTIFY" "$PAPER_PID" "$PAPER_UI_PID"; t
 fi
 
 log_info "Paper runtime ready (PID=$PAPER_PID)"
+post_launch_bus_probe
 print_ui_location "$PAPER_LOG" "$ART_DIR"
 if ! check_ui_health "$PAPER_LOG"; then
   log_warn "Paper runtime UI health check failed"
@@ -3729,6 +3849,7 @@ if ! wait_for_ready "$LIVE_LOG" "$LIVE_NOTIFY" "$LIVE_PID" "$LIVE_UI_PID"; then
 fi
 
 log_info "Live runtime ready (PID=$LIVE_PID)"
+post_launch_bus_probe
 print_ui_location "$LIVE_LOG" "$ART_DIR"
 if ! check_ui_health "$LIVE_LOG"; then
   log_warn "Live runtime UI health check failed"
