@@ -25,6 +25,7 @@ console = Console()
 
 
 CONFIG_LOAD_EXIT_CODE = getattr(os, "EX_CONFIG", 78)
+MISSING_UI_TARGETS_EXIT_CODE = getattr(os, "EX_UNAVAILABLE", 69)
 
 
 def log_startup_info(
@@ -95,7 +96,8 @@ def _poll_ui_readiness(
     ui_targets = [t for t in checker.targets if t.get("name") in {"ui-http", "ui-ws"}]
     target_urls = {t.get("name", "unknown"): str(t.get("url", "")) for t in ui_targets if t.get("name")}
     if not ui_targets:
-        return True, "UI readiness skipped (no UI endpoints configured)", target_urls, []
+        guidance = _missing_ui_targets_guidance(skip_ui_probes=checker.skip_ui_probes)
+        return False, guidance, target_urls, []
 
     checker.targets = ui_targets
     deadline = time.monotonic() + timeout
@@ -165,6 +167,28 @@ def _poll_ui_readiness(
 def _env_offline_enabled(env: dict[str, str]) -> bool:
     value = env.get("SOLHUNTER_OFFLINE", "")
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _env_flag(key: str) -> bool:
+    raw = os.environ.get(key)
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _missing_ui_targets_guidance(*, skip_ui_probes: bool) -> str:
+    examples = (
+        "UI_HOST=127.0.0.1 UI_PORT=5001", 
+        "UI_HEALTH_URL=http://127.0.0.1:5001/health", 
+        "UI_EVENTS_WS_URL=ws://127.0.0.1:7001/ws/events",
+    )
+    sample = "; ".join(examples)
+    override_hint = "Set CONNECTIVITY_SKIP_UI_PROBES=1 to bypass if you truly cannot expose the UI."
+    return (
+        "UI connectivity targets not configured. "
+        "Set UI_HOST/UI_PORT (or matching config keys) plus UI_HEALTH_URL and UI_EVENTS_WS_URL/UI_WS_URL, "
+        f"for example: {sample}. {override_hint}"
+    )
 
 
 def _format_scheme_hint(expected_schemes: tuple[str, ...] | None) -> str:
@@ -387,6 +411,8 @@ def run(
     ui_targets: dict[str, str] = {}
     ui_results: list[Any] = []
     ui_message: str | None = None
+    ui_targets_missing = False
+    skip_ui_probes = _env_flag("CONNECTIVITY_SKIP_UI_PROBES")
     if code == 0:
         ui_ready = _poll_ui_readiness()
         ui_targets = ui_ready[2]
@@ -396,6 +422,7 @@ def run(
         ui_message = ui_msg
         print(ui_msg)
         log_startup(ui_msg)
+        ui_targets_missing = not ui_targets
         msg = "SolHunter launch complete – system ready."
         print(msg)
         log_startup(msg)
@@ -412,6 +439,15 @@ def run(
         msg = f"SolHunter startup failed with exit code {code}"
         print(msg)
         log_startup(msg)
+
+    if ui_targets_missing:
+        guidance = _missing_ui_targets_guidance(skip_ui_probes=skip_ui_probes)
+        if ui_message != guidance:
+            print(guidance)
+            log_startup(guidance)
+        ui_message = guidance
+        if not skip_ui_probes:
+            code = MISSING_UI_TARGETS_EXIT_CODE
 
     # Healthcheck summary (post-launch)
     from scripts import healthcheck

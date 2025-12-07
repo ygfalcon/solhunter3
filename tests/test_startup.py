@@ -2095,7 +2095,11 @@ def test_run_logs_ui_status_before_ready(monkeypatch):
     monkeypatch.setattr(startup_runner, "log_startup_info", lambda **_: None)
     monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
     monkeypatch.setattr(startup_runner, "STARTUP_LOG", Path("startup.log"))
-    monkeypatch.setattr(startup_runner, "_poll_ui_readiness", lambda: (True, "ui-ok", {}, []))
+    monkeypatch.setattr(
+        startup_runner,
+        "_poll_ui_readiness",
+        lambda: (True, "ui-ok", {"ui-http": "http://localhost:5001"}, []),
+    )
 
     args = _interactive_args()
     ctx = {"rest": [], "summary_rows": [], "config_path": Path("cfg"), "config": {}}
@@ -2128,7 +2132,7 @@ def test_run_logs_ui_failure(monkeypatch):
     monkeypatch.setattr(startup_runner, "STARTUP_LOG", Path("startup.log"))
 
     def fake_poll():
-        return False, "ui-http: FAIL (timeout)", {}, []
+        return False, "ui-http: FAIL (timeout)", {"ui-http": "http://localhost"}, []
 
     monkeypatch.setattr(startup_runner, "_poll_ui_readiness", fake_poll)
 
@@ -2139,6 +2143,59 @@ def test_run_logs_ui_failure(monkeypatch):
 
     assert code == 0
     assert any(msg.startswith("UI readiness unhealthy") for msg in logs)
+
+
+def test_run_fails_when_ui_targets_missing(monkeypatch, tmp_path):
+    import types
+
+    _stub_rich(monkeypatch)
+    _stub_agent_manager(monkeypatch)
+    _stub_scripts(monkeypatch)
+
+    import solhunter_zero.startup_runner as startup_runner
+
+    logs: list[str] = []
+
+    monkeypatch.setattr(startup_runner, "log_startup", lambda msg: logs.append(msg))
+    monkeypatch.setattr(startup_runner, "log_startup_info", lambda **_: None)
+    monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", tmp_path / "startup.log")
+    monkeypatch.setattr(startup_runner, "_poll_ui_readiness", lambda: (False, "skipped", {}, []))
+
+    args = _interactive_args()
+    ctx = {"rest": [], "summary_rows": [], "config_path": Path("cfg"), "config": {}}
+
+    code = startup_runner.run(args, ctx, log_startup=startup_runner.log_startup)
+
+    assert code == startup_runner.MISSING_UI_TARGETS_EXIT_CODE
+    assert any("CONNECTIVITY_SKIP_UI_PROBES" in msg for msg in logs)
+
+
+def test_run_allows_missing_ui_targets_when_skipped(monkeypatch, tmp_path):
+    import types
+
+    _stub_rich(monkeypatch)
+    _stub_agent_manager(monkeypatch)
+    _stub_scripts(monkeypatch)
+
+    import solhunter_zero.startup_runner as startup_runner
+
+    logs: list[str] = []
+
+    monkeypatch.setattr(startup_runner, "log_startup", lambda msg: logs.append(msg))
+    monkeypatch.setattr(startup_runner, "log_startup_info", lambda **_: None)
+    monkeypatch.setattr(startup_runner, "console", types.SimpleNamespace(print=lambda *a, **k: None))
+    monkeypatch.setattr(startup_runner, "STARTUP_LOG", tmp_path / "startup.log")
+    monkeypatch.setattr(startup_runner, "_poll_ui_readiness", lambda: (False, "skipped", {}, []))
+    monkeypatch.setenv("CONNECTIVITY_SKIP_UI_PROBES", "1")
+
+    args = _interactive_args()
+    ctx = {"rest": [], "summary_rows": [], "config_path": Path("cfg"), "config": {}}
+
+    code = startup_runner.run(args, ctx, log_startup=startup_runner.log_startup)
+
+    assert code == 0
+    assert any("CONNECTIVITY_SKIP_UI_PROBES" in msg for msg in logs)
 
 
 def test_run_summary_rows_include_ui(monkeypatch):
