@@ -464,6 +464,22 @@ async def _persist_discovery_cursor(cursor: Optional[str]) -> None:
         await _state_delete("discovery:cursor")
 
 
+async def _filter_seen_candidates(mints: Iterable[str]) -> list[str]:
+    """Drop already-seen discovery candidates while updating recent state."""
+
+    filtered: list[str] = []
+    for mint in mints:
+        try:
+            fresh = await _discovery_mark_seen(mint)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Discovery dedupe failed for %s: %s", mint, exc)
+            filtered.append(mint)
+            continue
+        if fresh:
+            filtered.append(mint)
+    return filtered
+
+
 async def _load_breaker_until() -> float:
     now = time.time()
     if _DISCOVERY_HEALTH.breaker_open_until and _DISCOVERY_HEALTH.breaker_open_until > now:
@@ -1594,6 +1610,9 @@ async def scan_tokens_onchain(
                     token_candidates,
                     max_tokens=max_tokens,
                 )
+
+    if _das_enabled():
+        uniq_mints = await _filter_seen_candidates(uniq_mints)
 
     if max_tokens is not None and max_tokens > 0 and len(uniq_mints) > max_tokens:
         uniq_mints = uniq_mints[:max_tokens]

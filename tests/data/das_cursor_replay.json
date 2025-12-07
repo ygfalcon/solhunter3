@@ -1,0 +1,37 @@
+{
+  "cursor": "2",
+  "seen_mints": [
+    "7YkX5s7Kfdr8N1sC9y1yvE4s46HpPazTA7kGEXUXrXfL",
+    "5Y6XQJvZRbGd1U1ur2jcWcN6iYGkc3AuNEqXWiwxC6xz"
+  ],
+  "gpa_result": {
+    "result": [
+      {
+        "pubkey": "7YkX5s7Kfdr8N1sC9y1yvE4s46HpPazTA7kGEXUXrXfL",
+        "account": {
+          "data": {
+            "parsed": {
+              "info": {
+                "mint": "7YkX5s7Kfdr8N1sC9y1yvE4s46HpPazTA7kGEXUXrXfL",
+                "name": "replayed"
+              }
+            }
+          }
+        }
+      },
+      {
+        "pubkey": "9xzVnKqD9L6s7YQDhCjTiMQuuLHfXEGuVYBnNvKcJste",
+        "account": {
+          "data": {
+            "parsed": {
+              "info": {
+                "mint": "9xzVnKqD9L6s7YQDhCjTiMQuuLHfXEGuVYBnNvKcJste",
+                "name": "fresh"
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
