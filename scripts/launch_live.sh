@@ -143,6 +143,7 @@ EXIT_DEPS=5
 EXIT_SCHEMA=6
 EXIT_SOCKET=7
 EXIT_EVENT_BUS=8
+EXIT_UI=9
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VENV_DIR="$ROOT_DIR/.venv"
@@ -318,6 +319,16 @@ run_schema_smoke_tests() {
     log_warn "Golden schema smoke tests failed"
     echo "Golden schema validation failed; agent suggestions will not appear until schemas are fixed" >&2
     exit $EXIT_SCHEMA
+  fi
+}
+
+run_ui_control_smoke_tests() {
+  log_info "Running UI login/control smoke tests"
+  if ! "$PYTHON_BIN" -m pytest -q \
+    tests/golden_pipeline/test_ui_smoke_synth.py::test_ui_controls_and_alert_wiring; then
+    log_warn "UI login/control smoke tests failed"
+    echo "UI control checks failed; launch_live requires the UI to respond to alerts and budget controls" >&2
+    exit $EXIT_UI
   fi
 }
 
@@ -2999,6 +3010,7 @@ ORIG_MODE=${MODE-}
 export SOLHUNTER_MODE="${SOLHUNTER_MODE:-paper}"
 export MODE="${MODE:-paper}"
 run_schema_smoke_tests
+run_ui_control_smoke_tests
 if [[ -n ${ORIG_SOLHUNTER_MODE:-} ]]; then
   export SOLHUNTER_MODE="$ORIG_SOLHUNTER_MODE"
 else
