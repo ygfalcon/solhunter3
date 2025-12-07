@@ -13,6 +13,20 @@ else
   unset CONNECTIVITY_SKIP_UI_PROBES
 fi
 
+CONNECTIVITY_SKIP_UI_PROBES_RESTORED=0
+restore_connectivity_skip_ui_probes() {
+  if (( CONNECTIVITY_SKIP_UI_PROBES_RESTORED == 1 )); then
+    return
+  fi
+  CONNECTIVITY_SKIP_UI_PROBES_RESTORED=1
+  if (( CONNECTIVITY_SKIP_UI_PROBES_INITIAL_WAS_SET == 1 )); then
+    export CONNECTIVITY_SKIP_UI_PROBES="$CONNECTIVITY_SKIP_UI_PROBES_INITIAL_VALUE"
+  else
+    unset CONNECTIVITY_SKIP_UI_PROBES
+  fi
+}
+trap 'restore_connectivity_skip_ui_probes' EXIT
+
 # Environment overrides:
 #   LAUNCH_LIVE_SKIP_PIP    Skip dependency installation and reuse the existing
 #                           virtual environment (useful for pre-provisioned or
@@ -143,6 +157,7 @@ EXIT_DEPS=5
 EXIT_SCHEMA=6
 EXIT_SOCKET=7
 EXIT_EVENT_BUS=8
+EXIT_RL_STATUS=9
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VENV_DIR="$ROOT_DIR/.venv"
@@ -167,8 +182,13 @@ fi
 ART_DIR="$RUNTIME_ARTIFACT_ROOT/$RUNTIME_RUN_ID"
 ARTIFACT_DIR="$ART_DIR"
 LOG_DIR="$ARTIFACT_DIR/logs"
-mkdir -p "$ARTIFACT_DIR" "$LOG_DIR"
-log_info "Runtime artifacts will be written to $ARTIFACT_DIR (logs in $LOG_DIR)"
+if ! mkdir -p "$ARTIFACT_DIR" "$LOG_DIR"; then
+  log_warn "Failed to prepare artifact directories at $ARTIFACT_DIR (logs: $LOG_DIR); check permissions and disk space"
+  exit $EXIT_PREFLIGHT
+fi
+resolved_artifact_dir=$(cd "$ARTIFACT_DIR" && pwd)
+resolved_log_dir=$(cd "$LOG_DIR" && pwd)
+log_info "Runtime artifacts will be written to $resolved_artifact_dir (logs in $resolved_log_dir)"
 
 RUNTIME_CACHE_DIR="$RUNTIME_ARTIFACT_ROOT/.cache"
 RUNTIME_FS_LOCK="$RUNTIME_CACHE_DIR/runtime.lock"
@@ -203,6 +223,58 @@ ensure_virtualenv() {
   fi
   # shellcheck disable=SC1090
   source "$VENV_DIR/bin/activate"
+  local version_check=""
+  local version_status=0
+  set +e
+  version_check=$(PIP_BIN="$PIP_BIN" "$PYTHON_BIN" - <<'PY' 2>&1
+import os
+import subprocess
+import sys
+
+MIN_PY = (3, 11, 0)
+MIN_PIP = (23, 0, 0)
+
+def _parse_version(raw: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for segment in raw.split("."):
+        numeric = "".join(ch for ch in segment if ch.isdigit())
+        if numeric:
+            parts.append(int(numeric))
+    return tuple(parts)
+
+if sys.version_info < MIN_PY:
+    print(
+        f"Python {sys.version.split()[0]} is unsupported; install Python {'.'.join(map(str, MIN_PY))}+ "
+        "per docs/setup.md"
+    )
+    sys.exit(1)
+
+pip_bin = os.environ.get("PIP_BIN")
+if not pip_bin:
+    print("PIP_BIN is not set; cannot validate pip version")
+    sys.exit(1)
+
+try:
+    pip_output = subprocess.check_output([pip_bin, "--version"], text=True)
+    pip_version = pip_output.split()[1]
+except Exception as exc:  # pragma: no cover - bootstrap guard
+    print(f"Failed to run {pip_bin} --version: {exc}")
+    sys.exit(1)
+
+if _parse_version(pip_version) < MIN_PIP:
+    print(
+        f"pip {pip_version} is unsupported; upgrade to {'.'.join(map(str, MIN_PIP))}+ before launching"
+    )
+    sys.exit(1)
+PY
+  )
+  version_status=$?
+  set -e
+  if (( version_status != 0 )); then
+    log_warn "$version_check"
+    log_warn "Environment validation failed; ensure Python and pip meet the minimum supported versions before retrying"
+    exit $EXIT_DEPS
+  fi
   DEPS_LOG="$LOG_DIR/deps_install.log"
   if [[ -n ${LAUNCH_LIVE_SKIP_PIP:-} ]]; then
     log_info "LAUNCH_LIVE_SKIP_PIP is set; skipping Python dependency installation"
@@ -1552,10 +1624,10 @@ runtime_lock_ttl_check() {
   local output status=0
   output=$(RUNTIME_LOCK_KEY="$RUNTIME_LOCK_KEY" \
     RUNTIME_LOCK_TOKEN="$RUNTIME_LOCK_TOKEN" \
-    "$PYTHON_BIN" - <<'PY') || status=$?
-import json
-import os
-import sys
+    "$PYTHON_BIN" - <<'PY'
+ import json
+ import os
+ import sys
 
 try:
     import redis  # type: ignore
@@ -1593,8 +1665,9 @@ if ttl <= refresh_interval:
     print(f"{ttl}")
     sys.exit(1)
 
-print(f"{ttl}")
+  print(f"{ttl}")
 PY
+  ) || status=$?
   if (( status != 0 )); then
     log_warn "Runtime lock TTL check failed during $context: $output"
   else
@@ -2845,6 +2918,23 @@ PY
   exit $EXIT_HEALTH
 fi
 
+rl_health_ok=$(printf '%s' "$rl_health_payload" | "$PYTHON_BIN" - <<'PY'
+import json
+import sys
+
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+
+print("true" if data.get("ok") is True else "false")
+PY
+)
+if [[ ${rl_health_ok:-false} != "true" ]]; then
+  log_warn "RL daemon health payload missing ok=true marker; aborting launch"
+  exit $EXIT_RL_STATUS
+fi
+
 rl_health_url=$(printf '%s' "$rl_health_payload" | "$PYTHON_BIN" - <<'PY'
 import json
 import sys
@@ -2928,6 +3018,8 @@ cleanup() {
     return
   fi
   CLEANUP_DONE=1
+  log_info "Running shutdown handlers (exit status=${exit_status})"
+  restore_connectivity_skip_ui_probes
   stop_runtime_lock_refresher
   release_runtime_lock
   if [[ -n ${RUNTIME_LOCK_KEY+x} ]]; then
