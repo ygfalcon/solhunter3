@@ -8,3 +8,13 @@ services:
       - ./keypairs:/app/keypairs
     env_file:
       - .env
+  mock-ui:
+    build:
+      context: .
+      dockerfile: docker/mock-ui.Dockerfile
+    ports:
+      - "5001:5001"
+    environment:
+      - MOCK_UI_PORT=5001
+      - MOCK_UI_PUBLIC_HOST=127.0.0.1
+      - CONNECTIVITY_UI_ASSET_PATHS=/app/scripts/mock_ui_assets
