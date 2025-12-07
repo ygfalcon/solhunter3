@@ -1,8 +1,11 @@
 import asyncio
 import hashlib
 import json
+import os
 import re
+import time
 from html.parser import HTMLParser
+from pathlib import Path
 
 import pytest
 
@@ -303,3 +306,54 @@ def test_golden_snapshot_nested_payload(runtime, bus):
     assert px_detail.get("spread_bps") == pytest.approx(spread_bps, rel=1e-9)
     liq_detail = entry.get("liq_detail") or {}
     assert liq_detail.get("liquidity_usd") == pytest.approx(liquidity_total, rel=1e-9)
+
+
+def test_ui_controls_and_alert_wiring(runtime):
+    os.environ["UI_ALLOW_OFFLINE_REDIS"] = "1"
+    runtime.status.update({"event_bus": True, "trading_loop": True})
+    now_ts = time.time()
+    for channel in runtime.websocket_state.values():
+        channel["connected"] = True
+        channel["last_heartbeat"] = now_ts
+
+    runtime.ui_state.run_state_provider = lambda: {
+        "mode": "paper",
+        "workflow": "ui-smoke",
+        "budget_remaining": 12_500.0,
+        "budget_reserved": 250.0,
+        "runtime_paused": True,
+        "risk_current": 0.25,
+    }
+
+    from solhunter_zero.ui import UI_SCHEMA_VERSION, create_app
+
+    app = create_app(runtime.ui_state)
+    client = app.test_client()
+
+    login_resp = client.get("/?format=json")
+    assert login_resp.status_code == 200
+    login_payload = login_resp.get_json()
+    assert login_payload["message"] == "SolHunter Live Console"
+    assert login_payload["ui_schema_version"] == UI_SCHEMA_VERSION
+    manifest = login_payload.get("manifest", {})
+    for channel_key in ("events_ws", "rl_ws", "logs_ws"):
+        assert channel_key in manifest, f"missing {channel_key} in manifest"
+    assert manifest.get("events_ws", "").startswith("ws"), manifest.get("events_ws")
+
+    state_resp = client.get("/api/run/state")
+    assert state_resp.status_code == 200
+    run_state = state_resp.get_json() or {}
+    assert run_state.get("budget_remaining") == pytest.approx(12_500.0, rel=1e-9)
+    assert run_state.get("budget_reserved") == pytest.approx(250.0, rel=1e-9)
+    assert run_state.get("runtime_paused") is True
+    assert run_state.get("risk_current") == pytest.approx(0.25, rel=1e-9)
+
+    html_path = Path(__file__).resolve().parents[2] / "solhunter_zero" / "templates" / "ui.html"
+    html = html_path.read_text(encoding="utf-8")
+    assert "class=\"banner" in html
+    assert "data-control=\"pause\"" in html
+    assert "data-role=\"budget\"" in html
+
+    ws_snapshot = runtime.status_snapshot().get("websockets", {})
+    assert ws_snapshot.get("events", {}).get("connected") is True
+    assert ws_snapshot.get("logs", {}).get("connected") is True
