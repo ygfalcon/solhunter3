@@ -74,6 +74,8 @@ class ConnectivityChecker:
         breaker_threshold: int = 3,
         breaker_cooldown: float = 30.0,
     ) -> None:
+        self._config_env = dict(env or {})
+        self._ambient_env = dict(os.environ)
         self.env = dict(env or os.environ)
         self._refresh_environment(override=False)
         self.http_timeout = http_timeout or float(self.env.get("CONNECTIVITY_HTTP_TIMEOUT", "6"))
@@ -84,6 +86,8 @@ class ConnectivityChecker:
         self.breaker_threshold = breaker_threshold
         self.breaker_cooldown = breaker_cooldown
         self.skip_ui_probes = self._env_flag("CONNECTIVITY_SKIP_UI_PROBES")
+        self.assume_remote_ui = self._env_flag("CONNECTIVITY_ASSUME_REMOTE_UI")
+        self.assume_local_ui = self._env_flag("CONNECTIVITY_ASSUME_LOCAL_UI")
         self.broker_channel = self.env.get("BROKER_CHANNEL") or "solhunter-events-v3"
         self.broker_identity_key = self.env.get("BROKER_IDENTITY_KEY") or "solhunter:broker_channel"
         self._breaker_state: MutableMapping[str, float] = {}
@@ -279,6 +283,63 @@ class ConnectivityChecker:
     # Target configuration
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_local_host(host: str | None) -> bool:
+        if not host:
+            return False
+        value = host.strip().lower()
+        return value in {"localhost", "::1", "::"} or value.startswith("127.")
+
+    def _warn_ui_binding_mismatch(
+        self,
+        *,
+        host: str,
+        port: str | None,
+        host_source: str,
+        port_source: str,
+    ) -> None:
+        configured_host = (self._config_env.get("UI_HOST") or "").strip() or None
+        ambient_host = (self._ambient_env.get("UI_HOST") or "").strip() or None
+        configured_port = (self._config_env.get("UI_PORT") or "").strip() or None
+        ambient_port = (self._ambient_env.get("UI_PORT") or "").strip() or None
+
+        def _differs(value: str | None, current: str | None) -> bool:
+            return bool(value) and str(value).strip() != str(current).strip()
+
+        mismatches = []
+        if _differs(configured_host, host):
+            mismatches.append(f"config UI_HOST={configured_host}")
+        if _differs(ambient_host, host):
+            mismatches.append(f"environment UI_HOST={ambient_host}")
+        if _differs(configured_port, port):
+            mismatches.append(f"config UI_PORT={configured_port}")
+        if _differs(ambient_port, port):
+            mismatches.append(f"environment UI_PORT={ambient_port}")
+
+        if mismatches:
+            logger.warning(
+                "UI target normalized to %s:%s (host source=%s, port source=%s); mismatched with %s",
+                host,
+                port or "<default>",
+                host_source,
+                port_source,
+                "; ".join(mismatches),
+            )
+
+        remote_hint_hosts = [configured_host, ambient_host]
+        remote_hint = self.assume_remote_ui or any(
+            host and not self._is_local_host(host) for host in remote_hint_hosts
+        )
+        if self.assume_local_ui:
+            remote_hint = False
+        if remote_hint and self._is_local_host(host):
+            logger.warning(
+                "UI target resolved to localhost (%s:%s) while remote UI access is expected; "
+                "set CONNECTIVITY_ASSUME_LOCAL_UI=1 to suppress or configure UI_HOST/UI_PORT explicitly",
+                host,
+                port or "<default>",
+            )
+
     def _build_targets(self) -> list[dict[str, Any]]:
         env = self.env
         rpc = env.get("SOLANA_RPC_URL") or env.get("HELIUS_RPC_URL")
@@ -380,20 +441,27 @@ class ConnectivityChecker:
                 scheme = (scheme or "http").strip().lower()
                 if scheme not in {"http", "https"}:
                     scheme = "http"
+                host_source = "UI_HOST"
                 host = env.get("UI_HOST")
                 if not host and parsed_base is not None:
+                    host_source = "UI_HTTP_URL"
                     host = parsed_base.hostname
                 if not host:
+                    host_source = "default"
                     host = "127.0.0.1"
                 host = host or "127.0.0.1"
                 if host in {"0.0.0.0", "::"}:
+                    host_source = f"{host_source} (normalized)"
                     host = "127.0.0.1"
                 port = None
+                port_source = "UI_PORT"
                 if parsed_base is not None and parsed_base.port:
+                    port_source = "UI_HTTP_URL"
                     port = str(parsed_base.port)
                 if not port:
                     port = env.get("UI_PORT") or env.get("PORT")
                 if not port:
+                    port_source = "default"
                     port = "5001"
                 if ":" in host and not host.startswith("["):
                     host_component = f"[{host}]"
@@ -403,6 +471,12 @@ class ConnectivityChecker:
                 if port:
                     base_url = f"{base_url}:{port}"
                 ui_http = f"{base_url}{path}"
+                self._warn_ui_binding_mismatch(
+                    host=host,
+                    port=str(port) if port is not None else None,
+                    host_source=host_source,
+                    port_source=port_source,
+                )
         if self.skip_ui_probes:
             logger.info("UI connectivity targets disabled via CONNECTIVITY_SKIP_UI_PROBES")
         if ui_ws:
