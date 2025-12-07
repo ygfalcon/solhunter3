@@ -48,6 +48,23 @@ The UI will display **Event Bus: connected**, **Trading Loop: running**, and the
 lag metrics as soon as the pipeline warms up.  Golden snapshots begin with the
 seed tokens and expand as discovery finds new candidates.
 
+## Mock UI for connectivity checks
+
+Run the mocked UI locally to exercise the HTTP health endpoint and WebSocket
+subscriptions without external infrastructure:
+
+```bash
+python scripts/mock_ui.py
+```
+
+The server logs `UI_READY` / `UI_WS_READY` markers, exposes
+`http://127.0.0.1:5001/health`, and serves WebSocket channels at
+`ws://127.0.0.1:5001/ws/{events|rl|logs}` with `hello` frames followed by panel
+snapshots.  If you prefer containers, `docker-compose up mock-ui` builds a
+lightweight image with the mock server and bundles static assets under
+`CONNECTIVITY_UI_ASSET_PATHS` so `launch_live` connectivity probes can run in CI
+without a full UI build.
+
 ## Investor Demo
 
 For an instant teaser covering all strategies, double-click `demo.command` (or
