@@ -1,10 +1,13 @@
 import asyncio
 from collections import Counter
+from types import SimpleNamespace
 
 import pytest
 
 from solhunter_zero.golden_pipeline.discovery import DiscoveryStage
+from solhunter_zero.golden_pipeline.service import AgentManagerAgent
 from solhunter_zero.golden_pipeline.types import DiscoveryCandidate
+from solhunter_zero.golden_pipeline.types import GoldenSnapshot
 
 from tests.golden_pipeline.conftest import BASE58_MINTS
 
@@ -81,3 +84,84 @@ async def test_discovery_candidates_emit_concurrently():
 
     assert results == [True, True]
     assert max_concurrency >= 2
+
+
+class _RecordingAgent(AgentManagerAgent):
+    """AgentManagerAgent variant that records gate reports for assertions."""
+
+    def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(*args, **kwargs)
+        self.reports: list[tuple[str, dict]] = []
+
+    def _apply_entry_gates(self, snapshot, raw_action, action):  # type: ignore[override]
+        report = super()._apply_entry_gates(snapshot, raw_action, action)
+        self.reports.append((snapshot.hash, report))
+        return report
+
+
+class _StubManager:
+    def __init__(self, actions):
+        self.actions = actions
+
+    async def evaluate_with_swarm(self, mint, portfolio):  # pragma: no cover - test stub
+        return SimpleNamespace(actions=self.actions)
+
+
+class _StubPortfolio:
+    pass
+
+
+def _snapshot(hash_id: str, spread_bps: float, depth_usd: float, *, buyers: int) -> GoldenSnapshot:
+    return GoldenSnapshot(
+        mint=BASE58_MINTS["alpha"],
+        asof=1_700_000_000.0,
+        meta={"decimals": 6},
+        px={"mid_usd": 1.0, "spread_bps": spread_bps},
+        liq={"depth_pct": {"1": depth_usd}},
+        ohlcv5m={"zret": 3.0, "zvol": 3.1, "buyers": buyers},
+        hash=hash_id,
+    )
+
+
+@pytest.mark.anyio
+async def test_micro_mode_depth_and_spread_gates_suggestions() -> None:
+    """Micro-mode gates suppress or allow suggestions based on orderbook quality."""
+
+    actions = [
+        {
+            "side": "buy",
+            "price": 1.01,
+            "pattern": "first_pullback",
+            "notional_usd": 5_000.0,
+            "fees_bps": 4.0,
+        }
+    ]
+    agent = _RecordingAgent(
+        _StubManager(actions),
+        _StubPortfolio(),
+        max_micro_spread_bps=30.0,
+        min_depth_usd=25_000.0,
+    )
+
+    agent._last_buyers[_snapshot("seed", 0.0, 0.0, buyers=1).mint] = 1
+
+    wide_spread = _snapshot("wide", 120.0, 50_000.0, buyers=2)
+    shallow_depth = _snapshot("shallow", 10.0, 10_000.0, buyers=3)
+    micro_ready = _snapshot("ready", 12.0, 40_000.0, buyers=4)
+
+    assert await agent.generate(wide_spread) == []
+    assert await agent.generate(shallow_depth) == []
+
+    suggestions = await agent.generate(micro_ready)
+    assert len(suggestions) == 1
+    gating = suggestions[0].gating
+    ruthless = gating.get("ruthless_filter", {})
+    assert ruthless.get("passed") is True
+    assert ruthless.get("spread_bps") == 12.0
+    assert ruthless.get("depth_1pct_usd") == 40_000.0
+
+    reports = {hash_id: report for hash_id, report in agent.reports}
+    assert reports["wide"]["ruthless_filter"]["passed"] is False
+    assert reports["wide"]["ruthless_filter"]["spread_bps"] == 120.0
+    assert reports["shallow"]["ruthless_filter"]["passed"] is False
+    assert reports["shallow"]["ruthless_filter"]["depth_1pct_usd"] == 10_000.0
